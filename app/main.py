@@ -1,0 +1,134 @@
+"""FastAPI 入口。
+
+挂载：
+  - /health
+  - /auth/jwt/login, /auth/register, /auth/forgot-password, /users/me ...（fastapi-users）
+  - /retrieval, /libraries/*, /me/*, /admin/* ...（业务路由）
+  - /console/  管理后台 SPA（StaticFiles）
+"""
+from __future__ import annotations
+
+import logging
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from fastapi import FastAPI, WebSocket
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from starlette.types import Scope
+
+
+class NoCacheStaticFiles(StaticFiles):
+    """零构建 SPA：给静态文件加 no-cache 头，避免浏览器缓存旧 JS。
+
+    admin-ui 是直接编辑即生效的源码（无打包/无 hash 文件名），默认 StaticFiles
+    的条件缓存会让浏览器一直用旧版本。这里强制每次都重新校验。
+    """
+
+    async def get_response(self, path: str, scope: Scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
+
+from app.api.admin_audit import router as admin_audit_router
+from app.api.admin_jobs import router as admin_jobs_router
+from app.api.admin_libraries import router as admin_libraries_router
+from app.api.admin_permissions import router as admin_permissions_router
+from app.api.admin_users import router as admin_users_router
+from app.api.api_keys import router as api_keys_router
+from app.api.documents import router as documents_router
+from app.api.health import router as health_router
+from app.api.me import router as me_router
+from app.api.retrieval import router as retrieval_router
+from app.auth.routes import build_auth_router
+from app.casbin.enforcer import get_enforcer
+from app.config import settings
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):  # noqa: ARG001
+    """FastAPI lifespan：startup → yield → shutdown。"""
+    # ── startup ──────────────────────────────────────────────
+    # 预热 Casbin enforcer，确保 policy 已加载入内存
+    get_enforcer()
+    log.info("API started on %s:%s", settings.api_host, settings.api_port)
+    yield
+    # ── shutdown ─────────────────────────────────────────────
+    # 优雅关闭跨库补全的 asyncpg 连接池
+    from app.services import source_enrichment
+    await source_enrichment.close_all_pools()
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(
+        title="Vector Knowledge Base",
+        version="0.1.0",
+        description="Multi-tenant vector DB with Dify-compatible retrieval API.",
+        debug=settings.app_debug,
+        lifespan=lifespan,
+    )
+
+    app.include_router(health_router, tags=["health"])
+    app.include_router(build_auth_router())
+    app.include_router(api_keys_router)
+    app.include_router(me_router)
+    app.include_router(documents_router)
+    app.include_router(retrieval_router)
+    app.include_router(admin_users_router)
+    app.include_router(admin_libraries_router)
+    app.include_router(admin_permissions_router)
+    app.include_router(admin_audit_router)
+    app.include_router(admin_jobs_router)
+
+    # 浏览器/插件会自动探测热重载 WebSocket，静默关闭避免刷屏日志
+    @app.websocket("/ws/live")
+    async def _ws_live_stub(ws: WebSocket) -> None:
+        await ws.accept()          # 先完成握手（HTTP 101），否则仍返回 403
+        await ws.close(code=1001)  # 1001 Going Away，立即关闭
+
+    # 管理后台 SPA：挂到 /console/，避免与 /admin/* API 命名空间冲突。
+    # 优先用 Soybean 构建产物（frontend/dist）；未构建时回退到零构建的 admin-ui。
+    root = Path(__file__).resolve().parent.parent
+    ui_dist = root / "frontend" / "dist"
+    ui_dir = ui_dist if ui_dist.is_dir() else (root / "admin-ui")
+    if ui_dir.is_dir():
+        app.mount("/console", NoCacheStaticFiles(directory=str(ui_dir), html=True), name="console")
+
+        @app.get("/", include_in_schema=False)
+        async def _root_redirect() -> RedirectResponse:
+            return RedirectResponse(url="/console/")
+
+    return app
+
+
+app = create_app()
+
+
+def run() -> None:
+    """以 settings 里（.env 来源）的 host / port 启动 uvicorn。
+
+    用法：
+        python -m app.main        # 读 .env，等同于 uvicorn app.main:app --host $API_HOST --port $API_PORT
+    """
+    import uvicorn  # 局部 import 避免单元测试 import app.main 时强依赖 uvicorn
+
+    uvicorn.run(
+        "app.main:app",
+        host=settings.api_host,
+        port=settings.api_port,
+        reload=settings.app_debug,
+        log_level="debug" if settings.app_debug else "info",
+    )
+
+
+if __name__ == "__main__":
+    run()

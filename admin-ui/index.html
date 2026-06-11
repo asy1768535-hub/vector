@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>向量知识库 · 管理后台</title>
+    <link rel="stylesheet" href="https://unpkg.com/element-plus@2.7.6/dist/index.css" />
+    <link rel="stylesheet" href="https://unpkg.com/element-plus@2.7.6/theme-chalk/dark/css-vars.css" />
+    <link rel="stylesheet" href="./style.css" />
+    <!-- Iconify 网页组件：<iconify-icon icon="mdi:xxx"> 任意图标，零构建 -->
+    <script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
+    <script type="importmap">
+    {
+      "imports": {
+        "vue": "https://unpkg.com/vue@3.4.27/dist/vue.esm-browser.prod.js",
+        "vue-router": "https://unpkg.com/vue-router@4.5.1/dist/vue-router.esm-browser.prod.js",
+        "element-plus": "https://unpkg.com/element-plus@2.7.6/dist/index.full.min.mjs",
+        "element-plus/locale/zh-cn": "https://unpkg.com/element-plus@2.7.6/dist/locale/zh-cn.mjs"
+      }
+    }
+    </script>
+    <style>
+        #fatal-error {
+            display: none;
+            position: fixed; top: 0; left: 0; right: 0;
+            background: #fef0f0; color: #c45656;
+            border-bottom: 1px solid #fbc4c4;
+            padding: 12px 20px; font-family: monospace;
+            white-space: pre-wrap; z-index: 9999;
+        }
+        #boot-fallback {
+            padding: 40px; text-align: center; color: #909399;
+            font-family: sans-serif;
+        }
+    </style>
+</head>
+<body>
+    <div id="fatal-error"></div>
+    <div id="app">
+        <div id="boot-fallback">
+            正在加载管理后台…
+            <br><br>
+            <small>如果 5 秒后仍未跳转，请按 F12 打开控制台查看错误。</small>
+        </div>
+    </div>
+    <script>
+        // 一些浏览器/UI 库会抛出的无害噪音，不当作致命错误展示
+        function isBenign(msg) {
+            msg = String(msg || '');
+            // Element Plus 表格/下拉在 resize 时常见，纯属浏览器告警，不影响功能
+            return msg.indexOf('ResizeObserver') !== -1;
+        }
+        // 把真正的 JS 错误显示到页面上，避免白屏看不见原因
+        window.addEventListener('error', (e) => {
+            const msg = e.message || (e.error && e.error.message) || '';
+            if (isBenign(msg)) return;  // 忽略无害告警
+            const box = document.getElementById('fatal-error');
+            box.style.display = 'block';
+            box.textContent = '[script error] ' + msg +
+                              '\n  at ' + (e.filename || '?') + ':' + (e.lineno || '?');
+        });
+        window.addEventListener('unhandledrejection', (e) => {
+            const reason = e.reason || {};
+            if (isBenign(reason.message || reason)) return;
+            const box = document.getElementById('fatal-error');
+            box.style.display = 'block';
+            box.textContent = '[promise rejection] ' +
+                              (reason.stack || reason.message || String(e.reason));
+        });
+    </script>
+    <script type="module" src="./src/app.js"></script>
+</body>
+</html>
