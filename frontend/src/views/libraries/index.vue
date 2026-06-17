@@ -123,14 +123,9 @@ onMounted(load);
         </NFormItem>
         <NFormItem label="名称" required><NInput v-model:value="createModal.form.name" /></NFormItem>
         <NFormItem label="描述"><NInput v-model:value="createModal.form.description" type="textarea" :rows="2" /></NFormItem>
-        <NFormItem label="向量模型"><NInput v-model:value="createModal.form.embedding_model" placeholder="留空=全局默认" /></NFormItem>
-        <NFormItem label="向量维度"><NInputNumber v-model:value="createModal.form.embedding_dim" :min="64" :max="8192" placeholder="留空=全局" style="width: 100%" /></NFormItem>
-        <NFormItem label="距离度量">
-          <NRadioGroup v-model:value="createModal.form.vector_distance">
-            <NRadio value="cosine">cosine</NRadio><NRadio value="euclid">euclid</NRadio><NRadio value="dot">dot</NRadio>
-          </NRadioGroup>
-        </NFormItem>
-        <NFormItem label="模型接口地址"><NInput v-model:value="createModal.form.embedding_base_url" placeholder="留空=全局 .env" /></NFormItem>
+        <NFormItem label="向量模型"><NInput v-model:value="createModal.form.embedding_model" placeholder="默认：bge-m3" /></NFormItem>
+        <NFormItem label="向量维度"><NInputNumber v-model:value="createModal.form.embedding_dim" :min="64" :max="8192" placeholder="默认：1024" style="width: 100%" /></NFormItem>
+        <NFormItem label="模型接口地址"><NInput v-model:value="createModal.form.embedding_base_url" placeholder="默认：http://10.0.10.2:8111/v1/embeddings" /></NFormItem>
         <NFormItem label="分片大小"><NInputNumber v-model:value="createModal.form.chunk_size" :min="200" :max="8000" style="width: 100%" /></NFormItem>
         <NFormItem label="分片重叠"><NInputNumber v-model:value="createModal.form.chunk_overlap" :min="0" :max="2000" style="width: 100%" /></NFormItem>
       </NForm>
@@ -144,18 +139,13 @@ onMounted(load);
 
     <NModal v-model:show="editModal.show" preset="card" :title="'编辑库 / ' + editModal.slug" style="width: 560px">
       <NAlert type="warning" :bordered="false" style="margin-bottom: 12px">
-        改向量维度/距离度量后需点表格「重建」。改向量模型/接口只影响之后摄入的文档。
+        改向量维度后需点表格「重建」。改向量模型/接口只影响之后摄入的文档。
       </NAlert>
       <NForm label-placement="left" :label-width="100">
         <NFormItem label="名称"><NInput v-model:value="editModal.form.name" /></NFormItem>
         <NFormItem label="描述"><NInput v-model:value="editModal.form.description" type="textarea" :rows="2" /></NFormItem>
         <NFormItem label="向量模型"><NInput v-model:value="editModal.form.embedding_model" /></NFormItem>
         <NFormItem label="向量维度"><NInputNumber v-model:value="editModal.form.embedding_dim" :min="64" :max="8192" style="width: 100%" /></NFormItem>
-        <NFormItem label="距离度量">
-          <NRadioGroup v-model:value="editModal.form.vector_distance">
-            <NRadio value="cosine">cosine</NRadio><NRadio value="euclid">euclid</NRadio><NRadio value="dot">dot</NRadio>
-          </NRadioGroup>
-        </NFormItem>
         <NFormItem label="模型接口地址"><NInput v-model:value="editModal.form.embedding_base_url" /></NFormItem>
         <NFormItem label="分片大小"><NInputNumber v-model:value="editModal.form.chunk_size" :min="200" :max="8000" style="width: 100%" /></NFormItem>
         <NFormItem label="分片重叠"><NInputNumber v-model:value="editModal.form.chunk_overlap" :min="0" :max="2000" style="width: 100%" /></NFormItem>

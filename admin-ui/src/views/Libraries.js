@@ -96,11 +96,11 @@ export default {
                 return;
             }
             // 改动了 dim / distance ? 强提示要重建
-            const structural = diff.embedding_dim !== undefined || diff.vector_distance !== undefined;
+            const structural = diff.embedding_dim !== undefined;
             if (structural) {
                 try {
                     await ElMessageBox.confirm(
-                        '改了 embedding_dim 或 vector_distance ⚠️\n'
+                        '改了 embedding_dim ⚠️\n'
                         + 'Qdrant collection 结构已固定，保存后之后的新 embed 会维度不匹配。\n'
                         + '保存后请立刻点「重建 collection」按钮，否则后续摄入会失败。\n\n'
                         + '继续保存吗？',
@@ -218,21 +218,14 @@ export default {
                     <el-input v-model="create.form.description" type="textarea" :rows="2" />
                 </el-form-item>
                 <el-form-item label="向量模型">
-                    <el-input v-model="create.form.embedding_model" placeholder="留空 = 用全局 EMBEDDING_MODEL" />
+                    <el-input v-model="create.form.embedding_model" placeholder="默认：bge-m3" />
                 </el-form-item>
                 <el-form-item label="向量维度">
-                    <el-input-number v-model="create.form.embedding_dim" :min="64" :max="8192" placeholder="留空 = 全局" />
-                </el-form-item>
-                <el-form-item label="距离度量">
-                    <el-radio-group v-model="create.form.vector_distance">
-                        <el-radio value="cosine">cosine</el-radio>
-                        <el-radio value="euclid">euclid</el-radio>
-                        <el-radio value="dot">dot</el-radio>
-                    </el-radio-group>
+                    <el-input-number v-model="create.form.embedding_dim" :min="64" :max="8192" placeholder="默认：1024" />
                 </el-form-item>
                 <el-form-item label="模型接口地址">
                     <el-input v-model="create.form.embedding_base_url"
-                              placeholder="留空 = 用全局 .env 的 EMBEDDING_BASE_URL" />
+                              placeholder="默认：http://10.0.10.2:8111/v1/embeddings" />
                 </el-form-item>
                 <el-form-item label="分片大小">
                     <el-input-number v-model="create.form.chunk_size" :min="200" :max="8000" />
@@ -257,7 +250,7 @@ export default {
         <!-- 编辑对话框 -->
         <el-dialog v-model="edit.open" :title="'编辑库 / ' + edit.slug" width="560px">
             <el-alert type="warning" :closable="false" style="margin-bottom:12px">
-                改 <b>向量维度 (embedding_dim)</b> / <b>距离度量 (vector_distance)</b> 会让 Qdrant 现有 collection 维度对不上，
+                改 <b>向量维度 (embedding_dim)</b> 会让 Qdrant 现有 collection 维度对不上，
                 保存后请立刻点表格里「重建」按钮重置整个库。
                 改 <b>向量模型 (embedding_model)</b> / <b>模型接口地址 (embedding_base_url)</b> 只影响之后新摄入的文档；
                 已存在 chunk 不会自动重新 embed。
@@ -275,16 +268,9 @@ export default {
                 <el-form-item label="向量维度">
                     <el-input-number v-model="edit.form.embedding_dim" :min="64" :max="8192" />
                 </el-form-item>
-                <el-form-item label="距离度量">
-                    <el-radio-group v-model="edit.form.vector_distance">
-                        <el-radio value="cosine">cosine</el-radio>
-                        <el-radio value="euclid">euclid</el-radio>
-                        <el-radio value="dot">dot</el-radio>
-                    </el-radio-group>
-                </el-form-item>
                 <el-form-item label="模型接口地址">
                     <el-input v-model="edit.form.embedding_base_url"
-                              placeholder="留空 = 用全局 .env 的 EMBEDDING_BASE_URL" />
+                              placeholder="默认：http://10.0.10.2:8111/v1/embeddings" />
                 </el-form-item>
                 <el-form-item label="分片大小">
                     <el-input-number v-model="edit.form.chunk_size" :min="200" :max="8000" />
