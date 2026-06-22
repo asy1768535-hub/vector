@@ -53,11 +53,30 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+_DEFAULT_JWT_SECRET = "please-change-me-in-env"
+
+
+def assert_startup_security() -> None:
+    """JWT 加固：仍用默认密钥 → 拒绝启动（避免误部署后令牌可被伪造）。
+
+    debug 模式（APP_DEBUG=true）降级为告警，方便本地开发不配 .env 也能起。
+    生产（默认 app_debug=False）直接抛 RuntimeError 中止启动。
+    """
+    if settings.jwt_secret == _DEFAULT_JWT_SECRET:
+        msg = ("JWT_SECRET 仍是默认值，存在令牌伪造风险；请在 .env 配置强随机密钥"
+               "（如 `python -c \"import secrets;print(secrets.token_urlsafe(48))\"`）。")
+        if settings.app_debug:
+            log.warning("[安全] %s（debug 模式放行）", msg)
+        else:
+            raise RuntimeError(f"[安全] 拒绝启动：{msg}")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # noqa: ARG001
     """FastAPI lifespan：startup → yield → shutdown。"""
     # ── startup ──────────────────────────────────────────────
+    # 安全前置校验：默认密钥等危险配置在启动时就拦下
+    assert_startup_security()
     # 预热 Casbin enforcer，确保 policy 已加载入内存
     get_enforcer()
     # 启动自检：embedding 服务 / Qdrant 配置错配时大声报（非 fatal，不阻断启动）

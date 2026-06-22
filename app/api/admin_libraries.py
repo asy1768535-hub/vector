@@ -267,20 +267,22 @@ async def rebuild_collection(
             f"qdrant rebuild failed: {exc}",
         ) from exc
 
-    # 3. 重置所有文档与 job 状态
+    # 3. 重置所有活动文档 → pending，并为每篇恰好新建一条 pending job（#5）。
+    #    不再把历史 job 全刷 pending：那样一文档多条历史 job 会被重复执行，
+    #    且没有历史 job 的文档反而不会被重建。保留历史 job 作为审计/失败记录。
     from sqlalchemy import update as sa_update
     await db.execute(
         sa_update(Document)
         .where(Document.library_id == lib.id, Document.deleted_at.is_(None))
         .values(status="pending", last_error=None)
     )
-    # 旧 job 全部标 pending 让 worker 重抢；同时清掉 worker_id/claim 时间
-    await db.execute(
-        sa_update(EmbeddingJob)
-        .where(EmbeddingJob.library_id == lib.id)
-        .values(status="pending", worker_id=None, claimed_at=None,
-                finished_at=None, attempt_count=0, last_error=None)
-    )
+    active_doc_ids = (await db.execute(
+        select(Document.id).where(
+            Document.library_id == lib.id, Document.deleted_at.is_(None)
+        )
+    )).scalars().all()
+    for doc_id in active_doc_ids:
+        db.add(EmbeddingJob(library_id=lib.id, document_id=doc_id, status="pending"))
 
     await audit_log.record(
         db, actor.id, "library.rebuild_collection",

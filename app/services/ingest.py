@@ -1,6 +1,11 @@
 """摄入服务：text → chunks → 写库 → 入队。
 
-幂等：相同 (library_id, content_hash) 已存在的文档直接返回；不会重复 embed。
+文档身份（#4 规则）：
+  - 带 external_id：身份 = (library_id, external_id)，**只**按它解析，不做内容去重；
+    不同 external_id 即使内容相同也是不同文档。
+  - 不带 external_id：身份 = (library_id, content_hash)，按内容去重。
+由 documents 表两个「活动行」部分唯一索引在 DB 层兜底（见迁移 0008）；并发插入撞索引
+时捕获 IntegrityError、回滚、重查胜出记录返回。
 """
 from __future__ import annotations
 
@@ -10,6 +15,7 @@ import uuid
 from typing import Any
 
 from sqlalchemy import delete as sa_delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.chunk import Chunk
@@ -23,6 +29,36 @@ log = logging.getLogger(__name__)
 
 def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+async def _find_active(
+    db: AsyncSession, library_id: uuid.UUID, external_id: str | None, content_hash: str
+) -> Document | None:
+    """按身份规则查活动（未删）文档：external_id 优先，否则 content_hash。
+
+    用 limit(1) 而非 scalar_one_or_none：即便唯一索引尚未建/历史有重复也不会 500（#14）。
+    """
+    stmt = select(Document).where(
+        Document.library_id == library_id,
+        Document.deleted_at.is_(None),
+    )
+    if external_id is not None:
+        stmt = stmt.where(Document.external_id == external_id)
+    else:
+        stmt = stmt.where(Document.external_id.is_(None), Document.content_hash == content_hash)
+    stmt = stmt.order_by(Document.created_at.desc()).limit(1)
+    return (await db.execute(stmt)).scalars().first()
+
+
+async def _latest_job_and_count(db: AsyncSession, document_id: uuid.UUID) -> tuple[EmbeddingJob | None, int]:
+    job = (await db.execute(
+        select(EmbeddingJob).where(EmbeddingJob.document_id == document_id)
+        .order_by(EmbeddingJob.created_at.desc()).limit(1)
+    )).scalars().first()
+    cnt = (await db.execute(
+        select(func.count()).select_from(Chunk).where(Chunk.document_id == document_id)
+    )).scalar_one()
+    return job, int(cnt)
 
 
 async def ingest_text(
@@ -44,27 +80,12 @@ async def ingest_text(
     """
     chash = _content_hash(text)
 
-    # 幂等检查
-    existing_row = await db.execute(
-        select(Document).where(
-            Document.library_id == library.id,
-            Document.content_hash == chash,
-            Document.deleted_at.is_(None),
-        )
-    )
-    existing = existing_row.scalar_one_or_none()
+    # 身份解析（external_id 优先，否则 content_hash）→ 命中已有活动文档直接返回（不重复 embed）
+    existing = await _find_active(db, library.id, external_id, chash)
     if existing is not None:
-        log.info("ingest dedup hit: lib=%s hash=%s doc_id=%s", library.slug, chash[:8], existing.id)
-        # 找该文档最新的 job 一并返回（若 ready 就找最近一条；都没有则不返回 job）
-        job_row = await db.execute(
-            select(EmbeddingJob).where(EmbeddingJob.document_id == existing.id)
-            .order_by(EmbeddingJob.created_at.desc()).limit(1)
-        )
-        job = job_row.scalar_one_or_none()
-        chunk_count_row = await db.execute(
-            select(Chunk.id).where(Chunk.document_id == existing.id)
-        )
-        chunk_count = len(chunk_count_row.scalars().all())
+        log.info("ingest dedup hit: lib=%s ext=%s hash=%s doc_id=%s",
+                 library.slug, external_id, chash[:8], existing.id)
+        job, chunk_count = await _latest_job_and_count(db, existing.id)
         return existing, job, chunk_count, True
 
     # 切分（上游已组好块则直接用）
@@ -87,7 +108,18 @@ async def ingest_text(
         created_by=created_by,
     )
     db.add(doc)
-    await db.flush()  # 拿到 doc.id
+    try:
+        await db.flush()  # 拿到 doc.id；此处可能撞活动行唯一索引（并发同身份插入）
+    except IntegrityError:
+        # 并发：另一个请求刚用相同身份建好了 → 回滚本次插入，重查胜出记录返回（#4）
+        await db.rollback()
+        winner = await _find_active(db, library.id, external_id, chash)
+        if winner is None:
+            raise  # 不是身份冲突（其它约束）→ 抛出
+        log.info("ingest race resolved: lib=%s ext=%s hash=%s winner=%s",
+                 library.slug, external_id, chash[:8], winner.id)
+        job, chunk_count = await _latest_job_and_count(db, winner.id)
+        return winner, job, chunk_count, True
 
     chunk_objs: list[Chunk] = []
     for seq, txt in enumerate(chunks_text):

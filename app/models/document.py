@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Index, String, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -14,9 +14,21 @@ from app.db import Base
 
 class Document(Base):
     __tablename__ = "documents"
+    # #14/#15：文档身份的「活动行」部分唯一索引（只约束未删行）。
+    #   - 带 external_id：库内 (library_id, external_id) 唯一 → external_id 即身份。
+    #   - 不带 external_id：库内 (library_id, content_hash) 唯一 → 内容去重。
+    # 两个索引互斥（按 external_id 是否为空划分），同时充当对应查询的加速索引。
     __table_args__ = (
-        Index("ix_documents_library_hash", "library_id", "content_hash"),
-        Index("ix_documents_library_external", "library_id", "external_id"),
+        Index(
+            "uq_documents_library_external_active", "library_id", "external_id",
+            unique=True,
+            postgresql_where=text("external_id IS NOT NULL AND deleted_at IS NULL"),
+        ),
+        Index(
+            "uq_documents_library_hash_active", "library_id", "content_hash",
+            unique=True,
+            postgresql_where=text("external_id IS NULL AND deleted_at IS NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
