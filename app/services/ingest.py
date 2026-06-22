@@ -14,7 +14,7 @@ import logging
 import uuid
 from typing import Any
 
-from sqlalchemy import delete as sa_delete, func, select
+from sqlalchemy import delete as sa_delete, func, select, update as sa_update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -48,6 +48,39 @@ async def _find_active(
         stmt = stmt.where(Document.external_id.is_(None), Document.content_hash == content_hash)
     stmt = stmt.order_by(Document.created_at.desc()).limit(1)
     return (await db.execute(stmt)).scalars().first()
+
+
+async def _supersede_active_jobs(db: AsyncSession, document_id: uuid.UUID) -> None:
+    """把某文档所有 pending/processing job 标 superseded（#6 §5.1）——它们对应旧 revision。"""
+    await db.execute(
+        sa_update(EmbeddingJob)
+        .where(
+            EmbeddingJob.document_id == document_id,
+            EmbeddingJob.status.in_(("pending", "processing")),
+        )
+        .values(status="superseded", finished_at=func.now())
+    )
+
+
+async def _new_generation(
+    db: AsyncSession, library: Library, document: Document, *, rebuild_operation_id: uuid.UUID | None = None
+) -> EmbeddingJob:
+    """为已存在文档开新代际（#6 §4 写路径）：current_revision+=1 → supersede 旧 job → 建带新 revision 的 job。
+
+    调用方须已按锁序持有 library 锁 + document 行锁（见设计 §5.2）。
+    """
+    document.current_revision = (document.current_revision or 0) + 1
+    await _supersede_active_jobs(db, document.id)
+    job = EmbeddingJob(
+        library_id=library.id,
+        document_id=document.id,
+        status="pending",
+        document_revision=document.current_revision,
+        rebuild_operation_id=rebuild_operation_id,
+    )
+    db.add(job)
+    await db.flush()
+    return job
 
 
 async def _latest_job_and_count(db: AsyncSession, document_id: uuid.UUID) -> tuple[EmbeddingJob | None, int]:
@@ -104,6 +137,7 @@ async def ingest_text(
         title=title,
         doc_metadata=metadata,
         content_hash=chash,
+        current_revision=1,          # #6：新文档索引版本从 1 起（DB 默认已移除，须显式赋值）
         status="pending",
         created_by=created_by,
     )
@@ -140,13 +174,16 @@ async def ingest_text(
         )
     db.add_all(chunk_objs)
 
-    job = EmbeddingJob(library_id=library.id, document_id=doc.id, status="pending")
+    job = EmbeddingJob(
+        library_id=library.id, document_id=doc.id, status="pending",
+        document_revision=doc.current_revision,   # =1
+    )
     db.add(job)
 
     await db.flush()
     log.info(
-        "ingest queued: lib=%s doc_id=%s chunks=%s job_id=%s",
-        library.slug, doc.id, len(chunk_objs), job.id,
+        "ingest queued: lib=%s doc_id=%s rev=%s chunks=%s job_id=%s",
+        library.slug, doc.id, doc.current_revision, len(chunk_objs), job.id,
     )
     return doc, job, len(chunk_objs), False
 
@@ -171,7 +208,9 @@ async def reingest_document(
     force=True 时跳过 no-op 判定（总是重切+重 embed）—— 用于显式 PUT 更新，
     因为 splitter 未持久化、无法检测"仅切分方式变化"，显式更新一律重做最稳。
     no-op 判定（仅 force=False 时）只看正文/title/metadata，给 external_id upsert 做幂等。
-    Qdrant 旧 points 的清理由调用方负责（需要 await HTTP）。
+
+    #6：changed 时走 _new_generation（current_revision+=1 + supersede 旧 job）。旧 Qdrant points
+    **不再**由调用方同步删除（决策 1）——靠检索按 current_revision 过滤即不可见，物理清理走批次 B outbox。
     """
     new_hash = _content_hash(new_text)
     unchanged = (
@@ -195,7 +234,7 @@ async def reingest_document(
     if not chunks_text:
         raise ValueError("text produced zero chunks after splitting")
 
-    # 删旧 chunk（旧 Qdrant points 由调用方按 document_id 清）
+    # 删旧 chunk（旧 Qdrant points 不在此同步清，靠 revision 过滤 + 批次 B outbox）
     await db.execute(sa_delete(Chunk).where(Chunk.document_id == document.id))
 
     document.content_hash = new_hash
@@ -215,9 +254,8 @@ async def reingest_document(
             if (title or document.external_id) else None,
         ))
 
-    job = EmbeddingJob(library_id=library.id, document_id=document.id, status="pending")
-    db.add(job)
-    await db.flush()
-    log.info("reingest queued: lib=%s doc_id=%s chunks=%s job_id=%s",
-             library.slug, document.id, len(chunks_text), job.id)
+    # 开新代际：current_revision+=1 + supersede 旧 job + 建带新 revision 的 job
+    job = await _new_generation(db, library, document)
+    log.info("reingest queued: lib=%s doc_id=%s rev=%s chunks=%s job_id=%s",
+             library.slug, document.id, document.current_revision, len(chunks_text), job.id)
     return job, len(chunks_text), True

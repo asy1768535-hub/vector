@@ -33,6 +33,9 @@ async def retrieval(
         raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden")
     if not user.is_superuser and not has_permission(str(user.id), lib.slug, "read"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden")
+    # 重建中/失败的库不返回半成品（#6 §9）
+    if lib.index_state in ("rebuilding", "failed"):
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "library index rebuilding")
     try:
         return await run_retrieval(
             collection=lib.qdrant_collection,
@@ -41,6 +44,8 @@ async def retrieval(
             request=request,
             source_config=lib.source_config,
             rerank_enabled=lib.rerank_enabled,
+            db=db,
+            library=lib,
         )
     except FilterError as exc:
         # #8：metadata_condition 含不支持的运算符/取值 → 422，绝不静默放行

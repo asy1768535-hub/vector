@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -15,6 +15,10 @@ from app.db import Base
 
 class Library(Base):
     __tablename__ = "sys_libraries"
+    __table_args__ = (
+        CheckConstraint("lifecycle_mode IN ('managed','external')", name="ck_lib_lifecycle_mode"),
+        CheckConstraint("index_state IN ('ready','rebuilding','failed')", name="ck_lib_index_state"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     slug: Mapped[str] = mapped_column(String(80), unique=True, nullable=False, index=True)
@@ -40,6 +44,18 @@ class Library(Base):
     # 表格召回更稳但 chunk 数/成本上升；散文为主的库默认扁平更优（实测）。
     docx_table_aware: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     qdrant_collection: Mapped[str] = mapped_column(String(128), nullable=False)
+
+    # 生命周期归属（#6/#7 设计 §4.5）：managed=本系统管理(参与 revision/tombstone 过滤)；
+    # external=外部系统/源库补全管理(绕过生命周期回查、且本系统禁止写/rebuild→409)。
+    lifecycle_mode: Mapped[str] = mapped_column(String(16), nullable=False, server_default="managed")
+    # 索引状态：ready=正常；rebuilding=重建中(写/检索 503)；failed=重建失败(检索 503)。
+    index_state: Mapped[str] = mapped_column(String(16), nullable=False, server_default="ready")
+    # 当前进行中的 rebuild operation（rebuilding 时非空；ready 时 NULL）。循环 FK 用 use_alter。
+    active_rebuild_operation_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("rebuild_operations.id", use_alter=True, name="fk_lib_active_rebuild_op"),
+        nullable=True,
+    )
 
     # 源数据补全配置（JSONB）：当 Qdrant payload 只存外键、正文在别的业务库时，
     # 检索后按外键回查源库大表把正文拼回。null = 不补全（走 payload.text）。

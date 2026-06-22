@@ -134,8 +134,12 @@ CHECK (current_revision >= 1)
 
 ```text
 document_revision    INTEGER NOT NULL
-rebuild_operation_id UUID NULL              -- 非空=本 job 由某次 rebuild operation 创建（见 §4.6 / §5.1）
+rebuild_operation_id UUID NULL REFERENCES rebuild_operations(id) ON DELETE RESTRICT
+                                            -- 非空=本 job 由某次 rebuild operation 创建（见 §4.6 / §5.1）
 ```
+
+`ON DELETE RESTRICT`：禁止删除仍被 job 引用的 operation——否则删 operation 会让带
+`rebuild_operation_id` 的旧 job 「变回」普通 job（`IS NULL` 语义错乱），在库 `ready` 时被误执行。
 
 `rebuild_operation_id`：
 - 普通摄入/更新创建的 job 为 `NULL`。
@@ -154,7 +158,7 @@ superseded
 `superseded` 表示 job 对应的 revision 已不是文档当前 revision（或在重建期间不属于当前 operation），
 任务正常终止，不属于失败，不应重试。
 
-建议增加活动任务部分唯一索引：
+活动任务部分唯一索引：
 
 ```text
 UNIQUE (document_id, document_revision)
@@ -162,6 +166,16 @@ WHERE status IN ('pending', 'processing')
 ```
 
 它用于防止同一文档 revision 被并发创建多个活动 job。历史 `done/failed/superseded` 记录保留。
+
+operation 文档快照唯一约束（finalize 靠计数，必须防重复 job）：
+
+```text
+UNIQUE (rebuild_operation_id, document_id)
+WHERE rebuild_operation_id IS NOT NULL
+```
+
+保证一个 rebuild operation 内每篇文档至多一条 job——否则重复 job 会让
+`done 数 == expected_job_count` **提前成立**、把库误判完成切回 `ready`。
 
 ### 4.3 Qdrant payload
 
@@ -252,15 +266,24 @@ cleanup job 必须可重复执行。Qdrant 已无目标 point 或 collection 不
 
 ```text
 lifecycle_mode            VARCHAR(16) NOT NULL DEFAULT 'managed'  -- managed | external
+                          CHECK (lifecycle_mode IN ('managed','external'))
 index_state               VARCHAR(16) NOT NULL DEFAULT 'ready'    -- ready | rebuilding | failed
-active_rebuild_operation_id UUID NULL                              -- 当前进行中的 rebuild operation（见 §4.6）
+                          CHECK (index_state IN ('ready','rebuilding','failed'))
+active_rebuild_operation_id UUID NULL REFERENCES rebuild_operations(id)  -- 当前进行中的 operation（§4.6）
 ```
+
+> 循环外键（`sys_libraries.active_rebuild_operation_id` ↔ `rebuild_operations.library_id`）的迁移
+> 创建顺序见 §11.1：先建表（不带回指 FK）→ 再 `ALTER TABLE ADD CONSTRAINT` 补 FK。
 
 - `lifecycle_mode` 决定该库是否参与 §3.2 / §7.2 的 PG 生命周期可见性过滤：
   - `managed`：参与过滤，享受删除 / revision 一致性保证（绝大多数内部库）。
   - `external`：**只绕过文档 revision/tombstone 回查**，由外部系统 / 源库补全管理；通常与
     `source_config`（跨库正文补全）同时使用。必须由超管**显式**设置，避免误把内部库标成 external。
     **注意：`external` 不绕过知识库权限校验（Casbin），鉴权与 managed 库完全一致。**
+  - **`external` 库禁止本系统改其生命周期**：上传 / 更新 / 删除 / rebuild **一律返回 409**
+    （collection 由外部系统管理，本系统不得增删改其向量或 collection）。
+    **rebuild 尤其绝不能对 external 库 `delete_collection`**（否则会误删 `case_chunks_000` 等外部 collection）。
+    Casbin 鉴权仍照常执行（先鉴权、再因 external 拒绝）。
 - `index_state` 见 §9：重建期间置 `rebuilding`，查询返回 503；仅当本次 operation 的全部当前
   revision job 都 done 后才回 `ready`。
 - `active_rebuild_operation_id`：`rebuilding` 时指向当前 operation（§4.6）；资格条件（§5.1）据此
@@ -271,29 +294,42 @@ active_rebuild_operation_id UUID NULL                              -- 当前进�
 
 ### 4.6 rebuild_operations（持久化重建记录）
 
-重建是持久化、可重试的 operation，不是一次性请求：
+重建是持久化、可重试、**分三阶段**的 operation（prepare / qdrant / activate，见 §9），不是一次性请求：
 
 ```text
 rebuild_operations
 ------------------
-id              UUID PRIMARY KEY
-library_id      UUID NOT NULL
-collection_name VARCHAR(128) NOT NULL          -- 本次重建写入的物理 collection 名
-status          VARCHAR(16) NOT NULL DEFAULT 'running'   -- running | done | failed
-target_revisions JSONB NOT NULL                -- {document_id: target_revision} 快照，重试复用、不重复递增
-created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
-finished_at     TIMESTAMPTZ NULL
-last_error      TEXT NULL
+id                 UUID PRIMARY KEY
+library_id         UUID NOT NULL REFERENCES sys_libraries(id)
+collection_name    VARCHAR(128) NOT NULL          -- 本次重建写入的物理 collection 名
+status             VARCHAR(16) NOT NULL DEFAULT 'preparing'
+                   CHECK (status IN ('preparing','running','done','failed'))
+expected_job_count INTEGER NOT NULL DEFAULT 0     -- activate 时建的 job 数；finalize 据此判完成
+created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+finished_at        TIMESTAMPTZ NULL
+last_error         TEXT NULL
 ```
 
-- 开始重建：建一条 `running` 记录，把各活动文档的目标 revision 快照进 `target_revisions`，
-  并将 `sys_libraries.active_rebuild_operation_id` 指向它、`index_state='rebuilding'`。
-- 该 operation 创建的每条 embedding job 都带 `rebuild_operation_id = 本 operation.id`。
-- **重试**同一 operation 复用 `target_revisions`，**不再递增 revision**；只有显式发起一次**全新**
-  重建才允许再次递增（§9）。
-- 全部 job done → operation `done`、`index_state='ready'`、`active_rebuild_operation_id=NULL`。
-- 任一 job 终态 failed 或 collection 操作失败 → operation `failed`、`index_state='failed'`，
-  检索该库返回 503，不暴露半成品。
+约束：
+- **每个库至多一个进行中 operation**：`UNIQUE (library_id) WHERE status IN ('preparing','running')`。
+- `status` CHECK 如上。
+
+为什么**不**用 `target_revisions JSONB`：几万文档会形成超大单行、更新昂贵。改为
+**以 jobs 本身作为 revision 快照**——该 operation 创建的每条 job 都带
+`rebuild_operation_id` 与其 `document_revision`；operation 只存 `expected_job_count` 供
+finalize 判定（done 的本-operation job 数 == `expected_job_count` 即完成）。
+
+生命周期（详见 §9 三阶段）：
+- prepare 事务：建 `preparing` 记录 + 设 `index_state='rebuilding'` + `active_rebuild_operation_id` +
+  各活动文档 `current_revision += 1` + 旧 job superseded（**不**碰 Qdrant）。
+- 事务外：删/建 Qdrant collection。
+- activate 事务：为每篇活动文档建一条带 `rebuild_operation_id` 的 job、写 `expected_job_count`、
+  operation→`running`。资格条件（§5.1）要求 `operation.status=='running'` 才放行这些 job。
+- **重试**同一 operation：复用已递增的 `current_revision`（jobs 已是目标 revision），**不再递增**；
+  只有显式发起**全新**重建才递增。
+- finalize（§9）：done 的本-operation job 数达 `expected_job_count` → operation `done`、
+  `index_state='ready'`、`active_rebuild_operation_id=NULL`；任一 job 终态 failed 或 collection
+  操作失败 → operation `failed`、`index_state='failed'`，检索该库返回 503，不暴露半成品。
 
 ---
 
@@ -330,6 +366,7 @@ AND (
     OR (
         library.index_state == 'rebuilding'
         AND job.rebuild_operation_id == library.active_rebuild_operation_id
+        AND operation.status == 'running'          -- 该 operation 已 activate（见 §9 三阶段）
     )
 )
 ```
@@ -340,7 +377,8 @@ AND (
   否则某次失败 rebuild operation 的遗留 job 被管理员重试后，会在库已回到 `ready` 时被再次执行，
   把过期的重建结果写回。
 - **`rebuilding` 期间，普通 embedding job 一律不得执行**——只有「本次 rebuild operation
-  创建的 job」（`job.rebuild_operation_id == library.active_rebuild_operation_id`）可执行。
+  创建的、且该 operation 已 `running`」的 job 可执行（`rebuild_operation_id == active_rebuild_operation_id`
+  **且** `operation.status == 'running'`）。`preparing` 阶段尚未建 job，亦不放行。
 - 普通上传 / 更新 / 删除在 `rebuilding` 期间**拒绝或延后**（见 §9，503 + `Retry-After`），不得产生可执行的普通 job。
 - 仅当本次 rebuild operation 的**全部 job 完成**后，库才转 `ready`，普通 job 方可恢复执行。
 - `index_state == 'failed'`：**所有 job 都不可执行**（两个分支都不满足），统一 `superseded`。
@@ -350,17 +388,36 @@ claim 用 `FOR UPDATE SKIP LOCKED` 领取 `status=pending AND attempt_count<max_
 按 §5.2 固定锁顺序重读 library 与 document，对照本资格条件，不满足即 superseded——不能信任
 claim 阶段的旧对象。
 
-### 5.2 固定锁顺序（防死锁）
+### 5.2 固定锁顺序 + 锁模式（防死锁、避免串行化）
 
-所有需要同时持有库锁与文档锁的路径（Worker 最终写入、更新、删除、重建）必须遵守**同一锁顺序**：
+所有需要同时持有多把行锁的路径必须遵守**同一全局锁顺序**（不是每条路径都取全部三把，但凡取多把必按此序）：
 
 ```text
-library row  ->  document row
+library row  ->  rebuild_operation row  ->  document row
 ```
 
-即先 `SELECT ... FROM sys_libraries WHERE id=:lib FOR UPDATE`，再
-`SELECT ... FROM documents WHERE id=:doc FOR UPDATE`。统一顺序避免交叉持锁死锁。
-资格条件中的 `index_state` / `active_rebuild_operation_id` 在持库锁后读取，保证与重建状态一致。
+- 普通写 / Worker 最终写入：`library`(`FOR KEY SHARE`) → `document`(`FOR UPDATE`)（不锁 operation）。
+- rebuild prepare/activate：`library`(`FOR UPDATE`) → 建/改 `rebuild_operation` → `document`(`FOR UPDATE`)。
+- finalize / reconcile：`library`(`FOR UPDATE`) → `rebuild_operation`(`FOR UPDATE`)（按此序，**不可**先锁 operation 再等 library）。
+- **reconcile 先无锁扫描** `running` operation 的 id，再对每个按 `library → rebuild_operation` 顺序重新加锁，避免持 operation 锁等 library 锁。
+
+**锁模式按路径区分**（顺序不变，模式不同）：
+
+| 路径 | library 行 | document 行 | 理由 |
+|---|---|---|---|
+| 普通上传 / 更新 / 删除 / Worker 最终写入 | `FOR KEY SHARE` | `FOR UPDATE` | 多 Worker 互不阻塞（共享锁），仍能与 rebuild 互斥 |
+| rebuild、库状态切换 | `FOR UPDATE` | （逐文档 `FOR UPDATE`） | 独占库，等待在途 Worker 退出、挡住新写 |
+
+> **关键**：Worker / 普通写若对 library 取 `FOR UPDATE`，会把同一库的所有文档**串行化**
+> （一次只处理一篇）。改用 `FOR KEY SHARE`：共享锁之间不冲突（Worker 并发），但与 rebuild 的
+> `FOR UPDATE` 冲突——rebuild 开始时会等待所有在途 `FOR KEY SHARE` 释放，并阻塞新的写入，
+> 形成干净的「重建屏障」。`index_state` / `active_rebuild_operation_id` / `operation.status`
+> 在持库锁后读取，保证与重建状态一致。
+
+> **实现注意（SQLAlchemy 渲染坑，已验证）**：`FOR KEY SHARE` 必须用
+> `with_for_update(read=True, key_share=True)`。**`with_for_update(key_share=True)` 渲染的是
+> `FOR NO KEY UPDATE`（自冲突，仍会串行化 Worker）**，并非 `FOR KEY SHARE`；rebuild 用
+> `with_for_update()`（=`FOR UPDATE`）。该坑由真实 PG 锁互斥集成测试发现并修正。
 
 ### 5.3 embedding 前资格检查
 
@@ -369,23 +426,23 @@ library row  ->  document row
 
 ### 5.4 最终写入检查与行锁
 
-Embedding 完成后、写 Qdrant 前，按 §5.2 固定锁顺序加锁（先库后文档）：
+Embedding 完成后、写 Qdrant 前，按 §5.2 锁顺序与模式加锁（先库后文档）：
 
 ```sql
-SELECT ... FROM sys_libraries WHERE id = :library_id FOR UPDATE;
-SELECT ... FROM documents     WHERE id = :document_id FOR UPDATE;
+SELECT ... FROM sys_libraries WHERE id = :library_id FOR KEY SHARE;   -- 共享锁：与其它 Worker 并发
+SELECT ... FROM documents     WHERE id = :document_id FOR UPDATE;      -- 独占该文档
 ```
 
 持锁后按 §5.1 **完整**资格条件再次检查（`deleted_at`、revision、`index_state`、
-`rebuild_operation_id`）。只有全部满足时才允许：
+`rebuild_operation_id`、`operation.status`）。只有全部满足时才允许：
 
 1. 写 Qdrant points。
 2. 将 job 更新为 done。
 3. 将 document 更新为 ready。
 4. 提交 PostgreSQL 事务并释放锁。
 
-在 Qdrant HTTP 请求期间短暂持有库行锁 + 文档行锁；牺牲同库/同文档更新的短暂等待，换取明确的
-更新/upsert 顺序，不锁其它库/文档。
+库行用 `FOR KEY SHARE`，**同库多 Worker 可并发**；只与 rebuild 的 `FOR UPDATE` 互斥。文档行用
+`FOR UPDATE` 串行化同一文档的并发更新。Qdrant HTTP 请求期间只短暂持这两把锁，不锁其它库/文档。
 
 锁内只允许一次有明确超时的 Qdrant upsert；网络重试必须释放事务后重新进入完整资格校验，
 禁止在持锁事务内做长时间指数退避。
@@ -411,7 +468,9 @@ SELECT ... FROM documents     WHERE id = :document_id FOR UPDATE;
 
 更新必须在一个 PostgreSQL 事务中完成（遵守 §5.2 固定锁顺序：先库后文档）：
 
-1. `SELECT sys_libraries FOR UPDATE`；若 `index_state != 'ready'`（重建中）→ 拒绝/延后，返回 503（建议带 `Retry-After`）。
+1. `SELECT sys_libraries FOR KEY SHARE`（与 Worker 并发、与 rebuild 互斥）；
+   若 `lifecycle_mode=='external'` → **409**（外部库本系统不可写，§4.5）；
+   若 `index_state != 'ready'` → 拒绝/延后，返回 503（建议带 `Retry-After`）。
 2. `SELECT document FOR UPDATE`。
 3. 判断是否 no-op；no-op 直接返回，不递增 revision。
 4. 记录 `old_revision`。
@@ -452,7 +511,9 @@ AND (
 
 删除接口在一个 PostgreSQL 事务中（遵守 §5.2 固定锁顺序：先库后文档）：
 
-1. `SELECT sys_libraries FOR UPDATE`；若 `index_state != 'ready'`（重建中）→ 拒绝/延后，返回 503（建议带 `Retry-After`）。
+1. `SELECT sys_libraries FOR KEY SHARE`（与 Worker 并发、与 rebuild 互斥）；
+   若 `lifecycle_mode=='external'` → **409**（外部库本系统不可写，§4.5）；
+   若 `index_state != 'ready'` → 拒绝/延后，返回 503（建议带 `Retry-After`）。
 2. `SELECT document FOR UPDATE`。
 3. 若已删除，保持幂等；对外可返回 204。
 4. 设置 `deleted_at`、status = deleted。
@@ -478,9 +539,11 @@ delete-document:{document_id}
 流程（managed 库）：
 
 1. Qdrant 适度 overfetch。
-2. 提取候选 `document_id` 与 `document_revision`。
-3. 一次 SQL 批量查询活动 documents 的 `id/current_revision`。
-4. 丢弃已删除、**不存在（含 payload 缺 document_id）**、库不匹配或 revision 不匹配的候选。
+2. 提取候选的 payload `document_id` 与 `document_revision`。
+3. 一次 SQL 批量回查 documents，至少取 `id, library_id, current_revision`
+   （批次 B 再加 `deleted_at`）。
+4. 丢弃以下候选：**不存在 / payload 缺 document_id**、`library_id` 不匹配当前库、
+   `payload.document_revision (?? 1) != current_revision`（批次 B 再加：`deleted_at IS NOT NULL`）。
 5. 对剩余候选执行 source enrichment 和 rerank。
 6. 数量不足时返回较少结果，绝不为了凑满 Top-K 返回无效候选。
 
@@ -571,29 +634,66 @@ delay = min(base_seconds * 2^(attempt_count-1), max_seconds) + jitter
 index_state = ready | rebuilding | failed
 ```
 
-流程（按 §5.2 固定锁顺序：先库后文档）：
+**前置**：若 `lifecycle_mode='external'` → **409，绝不进入下列任何阶段**（§4.5，不得 `delete_collection`
+外部 collection）。先 Casbin 鉴权、再因 external 拒绝。
 
-1. 持库行锁，建 `rebuild_operations` 记录（`running`，§4.6），并设
-   `index_state='rebuilding'`、`active_rebuild_operation_id=新 operation.id`。
-2. 锁定活动 documents，逐个 `current_revision += 1`，目标 revision 快照进
-   `operation.target_revisions`。
-3. 将旧 pending/processing jobs 标 `superseded`。
-4. 删除并重新创建 collection。
-5. 每篇活动文档按新 revision 创建恰好一条 job，**带 `rebuild_operation_id = 本 operation.id`**；
-   仍保持 `rebuilding`，查询返回 503。
-6. **重建期间普通写被拒绝/延后**：普通上传/更新/删除（产生 `rebuild_operation_id=NULL` 的 job）
-   在 `index_state='rebuilding'` 时不得创建可执行 job——API 返回 503（建议带 `Retry-After`）或排队，
-   待 `ready` 后处理。
-7. Worker 用 §5.1 **统一资格条件**消费：`rebuilding` 期间只有
-   `job.rebuild_operation_id == library.active_rebuild_operation_id` 的 job 可执行，普通 job superseded。
-8. 仅当本次 operation 全部 job `done` 且文档都 `ready` 时：operation→`done`，
-   `index_state='ready'`，`active_rebuild_operation_id=NULL`，恢复普通写。
-9. 任一 job 终态 `failed` 或 collection 操作失败：operation→`failed`、`index_state='failed'`，
-   检索该库返回 503，不暴露部分索引。
+**重建分三阶段，绝不在数据库事务里调用 Qdrant**（DDL/HTTP 数秒级，持事务+锁会拖垮并发）：
 
-重试与递增：管理员**重试同一 operation** 复用 `target_revisions`，**不再递增 revision**；
-只有显式发起一次**全新**重建才允许再次递增。rebuild operation 是批次 A 的**必要**数据结构（§4.6），
-不是可选增强。
+#### 阶段 1 · prepare（一个短事务）
+1. `SELECT sys_libraries ... FOR UPDATE`（独占库；等待在途 `FOR KEY SHARE` 的 Worker 退出、挡住新写）。
+2. 建 `rebuild_operations` 记录（`status='preparing'`，§4.6）；设 `index_state='rebuilding'`、
+   `active_rebuild_operation_id=新 operation.id`。
+3. 逐个锁定活动 documents（`FOR UPDATE`），`current_revision += 1`。
+4. 旧 pending/processing jobs → `superseded`。
+5. **提交事务**（此时无 job 可执行：operation 仍 `preparing`，§5.1 不放行）。
+
+#### 阶段 2 · qdrant（事务外）
+6. 删除并重新创建 Qdrant collection（幂等：不存在则忽略；可重试）。**不持任何 DB 事务/锁。**
+
+#### 阶段 3 · activate（一个短事务）
+7. `SELECT sys_libraries ... FOR UPDATE`，校验仍是本 operation。
+8. 为每篇活动文档建一条 job（带 `rebuild_operation_id=本 operation.id`、新 `document_revision`）；
+   写 `operation.expected_job_count`。
+9. `operation.status='running'`，提交。此后 §5.1 才放行这些 job（要求 `operation.status=='running'`）。
+
+#### 期间与完成
+- **重建期间普通写**（产生 `rebuild_operation_id=NULL` 的 job）在 `index_state='rebuilding'` 时
+  API 返回 503（带 `Retry-After`）或排队，待 `ready` 后处理。检索遇 `rebuilding/failed` 也 503。
+- Worker 按 §5.1 统一资格条件消费：仅 `operation.status=='running'` 且
+  `rebuild_operation_id==active_rebuild_operation_id` 的 job 可执行，普通 job superseded。
+- **finalize（即时 + 周期 reconcile 兜底）**：
+  - Worker 每标一条 job `done` 后**立即尝试 finalize**：按 §5.2 锁序 `library`(`FOR UPDATE`) →
+    `rebuild_operation`(`FOR UPDATE`) 加锁，幂等（已 `done`/`failed` 的 operation 直接跳过）。
+  - 另有**周期 reconcile**兜底（防 Worker 在 done 后、finalize 前崩溃）：**先无锁扫描** `running`
+    operation 的 id，再逐个按 `library → rebuild_operation` 锁序重新加锁后 finalize——
+    **不可**先锁 operation 再等 library（违反全局锁序会死锁）。
+  - finalize 判定：本-operation `done` job 数 == `expected_job_count` → operation `done`、
+    `index_state='ready'`、`active_rebuild_operation_id=NULL`，恢复普通写。
+  - 任一 job 终态 `failed` 或 collection 操作失败 → operation `failed`、`index_state='failed'`，
+    检索该库 503，不暴露半成品。
+
+> **实现注意（已验证）**：finalize 在锁内**必须重新读到 operation 的最新状态**，否则并发两个
+> finalize 会双双判定 `running` 而重复完成。坑在于先用 `db.get(op)` 取 `library_id` 会把对象放进
+> identity map，随后 `with_for_update` 返回缓存旧状态。修法：用标量查 `library_id`（不进 identity map）+
+> 锁定读加 `.execution_options(populate_existing=True)`。由真实 PG finalize 并发集成测试发现并修正。
+
+重试与递增：**重试同一 operation** 复用已递增的 `current_revision`（jobs 已是目标 revision），
+**不再递增**；只有显式发起**全新**重建才递增。rebuild operation 是批次 A 的**必要**结构（§4.6）。
+
+#### 失败恢复（各阶段崩溃）
+
+`active_rebuild_operation_id` 在「修复完成」或「全新重建完成」前**绝不静默清空**——它是恢复的锚点。
+
+| 崩溃位置 | operation 状态 | 恢复动作 |
+|---|---|---|
+| prepare 提交后崩溃 | `preparing` | 继续**同一** operation：（幂等）重跑阶段 2 qdrant + 阶段 3 activate；**不再 +revision**（revision 已在 prepare 递增） |
+| 阶段 2 后、activate 前崩溃 | `preparing` | 幂等重跑 `ensure_collection`（已存在则忽略），再 activate |
+| activate 后 running job 失败 | `running`→`failed` | 库保持 `failed`（检索 503）；管理员可**重试同一 operation**（复用 revision，重排失败/未完 job） |
+| 发起**全新** operation（放弃旧的） | 旧→`failed` | 旧 operation 的 `pending/processing/failed` job → `superseded`；**`done` job 保留作历史审计**（不改写，符合「重建不修改历史任务」原则）；新 operation 走完整三阶段，`current_revision += 1` |
+
+- 「重试同一 operation」与「全新 operation」的区别：前者复用已递增 revision、不重复 +1；后者递增。
+- 因 `UNIQUE (library_id) WHERE status IN ('preparing','running')`，同库同时只能有一个进行中 operation；
+  发起全新 operation 前必须先把旧的置 `failed`。
 
 ---
 
@@ -621,15 +721,23 @@ index_state = ready | rebuilding | failed
 
 ### 11.1 批次 A 迁移 0009
 
-DDL：
-- `documents.current_revision`，默认 1，NOT NULL。
-- `embedding_jobs.document_revision`，先默认/回填 1，再 NOT NULL。
-- `embedding_jobs.rebuild_operation_id` UUID NULL。
-- 活动 job 部分唯一索引 `(document_id, document_revision) WHERE status IN ('pending','processing')`。
-- `sys_libraries.lifecycle_mode` VARCHAR(16) NOT NULL DEFAULT `managed`。
-- `sys_libraries.index_state` VARCHAR(16) NOT NULL DEFAULT `ready`。
-- `sys_libraries.active_rebuild_operation_id` UUID NULL。
-- 新表 `rebuild_operations`（§4.6）。
+DDL（**注意循环外键创建顺序**）：
+1. `documents.current_revision` INT NOT NULL DEFAULT 1，`CHECK (current_revision >= 1)`。
+2. `embedding_jobs.document_revision` INT：先 DEFAULT 1 加列、回填存量为 1、再设 NOT NULL，
+   **回填后去掉 DB 默认值**（决策 2：强制应用层显式赋值，避免漏赋值静默落 1）。
+3. **先建表 `rebuild_operations`**（不含回指约束），带 `status` CHECK、
+   `UNIQUE (library_id) WHERE status IN ('preparing','running')`、`library_id` FK → `sys_libraries`。
+4. `embedding_jobs.rebuild_operation_id` UUID NULL，FK → `rebuild_operations(id)` **ON DELETE RESTRICT**。
+5. 活动 job 部分唯一索引 `uq_jobs_doc_rev_active (document_id, document_revision) WHERE status IN ('pending','processing')`。
+5b. operation 文档快照唯一索引 `uq_jobs_op_doc (rebuild_operation_id, document_id) WHERE rebuild_operation_id IS NOT NULL`
+   （§4.2：防同 operation 内重复 job 让 `done_count` 提前满足）。
+6. `sys_libraries.lifecycle_mode` VARCHAR(16) NOT NULL DEFAULT `managed`，CHECK in (managed, external)。
+7. `sys_libraries.index_state` VARCHAR(16) NOT NULL DEFAULT `ready`，CHECK in (ready, rebuilding, failed)。
+8. `sys_libraries.active_rebuild_operation_id` UUID NULL；最后 `ALTER TABLE ADD CONSTRAINT`
+   补 FK → `rebuild_operations(id)`（解开 sys_libraries ↔ rebuild_operations 循环依赖）。
+
+downgrade 逆序：先 drop `sys_libraries` 回指 FK → drop `uq_jobs_op_doc` / `uq_jobs_doc_rev_active`
+→ drop 列 → drop `rebuild_operations` 表。
 
 lifecycle_mode 回填（**必须在启用严格过滤前完成**）：
 - 存量库**全部默认 `managed`**。
@@ -801,14 +909,31 @@ current_revision
 |---|---|---|
 | 1 | `ready` + 普通 job（`rebuild_operation_id IS NULL`） | 允许执行 |
 | 2 | `ready` + rebuild job（`rebuild_operation_id` 非空，含失败 operation 遗留并被重试） | 拒绝并 `superseded` |
-| 3 | `rebuilding` + 当前 operation 的 job（`== active_rebuild_operation_id`） | 允许执行 |
-| 4 | `rebuilding` + 普通 job 或其他 operation 的 job | 拒绝并 `superseded` |
+| 3 | `rebuilding` + 当前 operation 的 job（`== active_rebuild_operation_id` 且 `operation.status=='running'`） | 允许执行 |
+| 4 | `rebuilding` + 普通 job / 其他 operation / operation 仍 `preparing` | 拒绝并 `superseded` |
 | 5 | `index_state == 'failed'` | 所有 job 都不可执行（两分支均不满足） |
 | 6 | embedding 期间库切换为 `rebuilding` | 最终写入检查（§5.4）按完整资格条件拦截旧 job → `superseded` |
 | 7 | 重建未全部 done 不得切回 `ready`；任一 job 终态 failed → operation/库转 `failed` | 状态机不提前 ready、不暴露半成品 |
 | 8 | 重建期间上传 / 更新 / 删除 | 返回 503，建议带 `Retry-After` |
-| 9 | Worker 与更新/删除/重建并发（设置 `lock_timeout`） | 无死锁；锁顺序始终 library → document |
+| 9 | Worker 与更新/删除/重建并发（`SET LOCAL lock_timeout='2s'`） | 无死锁；锁顺序始终 library → document |
 | 10 | `managed` 缺 `document_id` 必丢弃；`external` 绕过生命周期回查但仍执行 Casbin 权限校验 | 删除保护不被绕过；鉴权对两类库一致 |
+
+### 14.5 三阶段重建恢复 + 锁模式 + 外部库（补充用例）
+
+| # | 场景 | 期望 |
+|---|---|---|
+| R1 | prepare 提交后崩溃 → 恢复 | 继续同一 operation；幂等重跑 qdrant+activate；revision **不再 +1** |
+| R2 | 阶段 2（qdrant）后、activate 前崩溃 → 恢复 | 幂等重跑 `ensure_collection` 后 activate；最终一致 |
+| R3 | activate 后某 running job 失败 | 库 `failed`/检索 503；重试同一 operation 复用 revision 可完成 |
+| R4 | 最后一条 job done 后、finalize 前崩溃 | **周期 reconcile** 收口 → operation `done`、库 `ready` |
+| R5 | `FOR KEY SHARE` 并发性 | 同库多 Worker 最终写入可并发（互不阻塞）；rebuild 的 `FOR UPDATE` 与之**确实互斥**（rebuild 等待在途 Worker、并阻塞新写） |
+| R6 | `external` 库 上传/更新/删除/rebuild | 全部 **409**；**未调用任何 Qdrant 删除/重建**（断言 `delete_collection`/`delete_points` 未被调用） |
+| R7 | 空知识库 rebuild（无活动文档） | `expected_job_count=0`，finalize **直接完成** → 库 `ready` |
+| R8 | 同库并发发起两次 rebuild | 第二次被 `UNIQUE(library_id) WHERE status IN ('preparing','running')` 拒绝（一次仅一个进行中 operation） |
+| R9 | 同 operation 重复建 job | 被 `UNIQUE(rebuild_operation_id, document_id)` 拒绝；`done_count` 不会因重复而提前满足 |
+| R10 | 迁移后核对 `uq_jobs_op_doc` 谓词 | `pg_indexes` 显示 `WHERE (rebuild_operation_id IS NOT NULL)`，仅约束重建 job |
+| R11 | 发起全新 operation 后，旧 operation 的历史 job | `done` 仍为 `done`（保留审计）；仅 `pending/processing/failed` → `superseded` |
+| R12 | finalize 与 reconcile 并发同一 operation | 按 `library → rebuild_operation` 锁序，无死锁；operation **只被完成一次**（幂等，第二者见已 done 即跳过） |
 
 ---
 
@@ -886,7 +1011,9 @@ current_revision
 
 实现前需要确认以下决策：
 
-1. 接受 Worker 在最终 Qdrant upsert 期间持有单文档 PostgreSQL 行锁。
+1. 接受 Worker 在最终 Qdrant upsert 期间持有 library `FOR KEY SHARE` + document `FOR UPDATE`
+   （库共享锁让同库多 Worker 并发，仅与 rebuild 的 `FOR UPDATE` 互斥；不可对库用 `FOR UPDATE`，
+   否则全库写入被串行化）。
 2. 删除 204 表示逻辑删除完成，不等待物理清理。
 3. 检索过滤后候选不足时允许少于 Top-K，不返回 stale/deleted 内容凑数。
 4. Cleanup Worker 使用独立进程，而非合并到 Embedding Worker。

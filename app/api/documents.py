@@ -35,6 +35,7 @@ from app.schemas.documents import (
 from app.config import settings
 from app.services import embedding, ingest as ingest_service, qdrant, source_enrichment
 from app.services import rerank as rerank_svc
+from app.services import retrieval as retrieval_svc
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/libraries/{slug}", tags=["documents"])
@@ -69,23 +70,41 @@ async def _read_capped(file: UploadFile, limit: int) -> bytes:
     return b"".join(chunks)
 
 
+async def _lock_writable(db: AsyncSession, lib: Library) -> Library:
+    """写前置（#6 §6/§7.1）：库 FOR KEY SHARE 锁（与 Worker 并发、与 rebuild 互斥）+ 状态校验。
+
+    external 库 → 409（本系统不可写）；rebuilding/failed → 503（+Retry-After）。
+    持锁直到本事务 commit，保证 rebuild 的 FOR UPDATE 会等待在途写、写也看不到半途重建。
+    """
+    # 取 FOR KEY SHARE 锁（与 rebuild 的 FOR UPDATE 互斥，持锁至本事务 commit）。
+    # **必须读锁定后的新鲜行**：等 rebuild 释放后，新鲜行的 index_state 才反映最新状态；
+    # 不能用 require_lib 注入前加载的旧 lib（否则等到 rebuild 后仍按旧 ready 放行）。
+    fresh = (await db.execute(
+        select(Library).where(Library.id == lib.id).with_for_update(read=True, key_share=True)
+    )).scalars().first()
+    locked = fresh if isinstance(fresh, Library) else lib   # mock/缺行时回退到传入 lib
+    if locked.lifecycle_mode == "external":
+        raise HTTPException(status.HTTP_409_CONFLICT, "external 库由外部系统管理，本系统禁止写入")
+    if locked.index_state != "ready":
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "library index rebuilding",
+            headers={"Retry-After": "5"},
+        )
+    return locked
+
+
 async def _apply_reingest(db: AsyncSession, lib: Library, doc: Document, body: "DocumentIngestRequest", *, force: bool = False):
-    """更新已存在文档：重切+重 embed，并清旧 Qdrant points（仅真正改动时）。
+    """更新已存在文档：重切 + 开新代际（current_revision+=1 + supersede 旧 job）。
 
     force=True（显式 PUT）总是重做；force=False（external_id upsert）内容没变则 no-op。
-    返回 (job, chunk_count)。Qdrant 清理失败则回滚 + 502。
+    返回 (job, chunk_count)。#6 决策 1：**不再同步删 Qdrant 旧 points**——靠检索按 revision
+    过滤即不可见，物理清理走批次 B 的 cleanup outbox。
     """
     job, chunk_count, changed = await ingest_service.reingest_document(
         db=db, library=lib, document=doc,
         new_text=body.text, title=body.title, metadata=body.metadata, splitter=body.splitter,
         force=force,
     )
-    if changed:
-        try:
-            await qdrant.delete_points_by_document_id(lib.qdrant_collection, str(doc.id))
-        except Exception as exc:  # noqa: BLE001
-            await db.rollback()
-            raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"qdrant cleanup failed: {exc}") from exc
     await db.commit()
     return job, chunk_count
 
@@ -94,18 +113,18 @@ async def _ingest_or_upsert(db: AsyncSession, lib: Library, user: User, doc_data
     """单条文档摄入：有 external_id 且库内已存在同键未删文档 → reingest 覆盖更新；否则新建。
 
     返回 import 结果 dict（document_id/title/chunk_count/status/job_id/external_id）。
-    upsert 命中且内容有变时，同步按 document_id 清 Qdrant 旧 points（不能丢给后台，
-    否则会与 worker 重嵌入竞争把新 points 误删）。
+    #6 决策 1：upsert 命中改内容时**不再**同步删 Qdrant 旧 points——靠 revision 过滤即不可见，
+    物理清理走批次 B outbox。
     """
     ext = doc_data.get("external_id")
     if ext:
-        # external_id 非唯一索引，历史可能重复 → 取最新一条
+        # external_id 非唯一索引，历史可能重复 → 取最新一条（FOR UPDATE：_new_generation 前提）
         existing = (await db.execute(
             select(Document).where(
                 Document.library_id == lib.id,
                 Document.external_id == ext,
                 Document.deleted_at.is_(None),
-            ).order_by(Document.created_at.desc()).limit(1)
+            ).order_by(Document.created_at.desc()).limit(1).with_for_update()
         )).scalars().first()
         if existing is not None:
             job, chunk_count, changed = await ingest_service.reingest_document(
@@ -114,12 +133,6 @@ async def _ingest_or_upsert(db: AsyncSession, lib: Library, user: User, doc_data
                 metadata=doc_data["metadata"], splitter=doc_data["splitter"],
                 force=False, chunks=doc_data.get("chunks"),
             )
-            if changed:
-                try:
-                    await qdrant.delete_points_by_document_id(lib.qdrant_collection, str(existing.id))
-                except Exception as exc:  # noqa: BLE001
-                    await db.rollback()
-                    raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"qdrant cleanup failed: {exc}") from exc
             return {
                 "document_id": str(existing.id), "title": doc_data["title"],
                 "chunk_count": chunk_count, "status": existing.status,
@@ -149,15 +162,16 @@ async def ingest(
     user: User = Depends(current_active_user),
     db: AsyncSession = Depends(get_db),
 ) -> DocumentIngestResponse:
+    await _lock_writable(db, lib)
     # external_id 自动 upsert：库内已有同 external_id 的未删文档 → 更新它（重 embed），而非新建
     if body.external_id:
-        # external_id 只是普通索引（非唯一），历史可能重复 → 取最新一条，不能用 scalar_one_or_none（会 500）
+        # external_id 普通索引，历史可能重复 → 取最新一条（FOR UPDATE：_new_generation 前提）
         existing = (await db.execute(
             select(Document).where(
                 Document.library_id == lib.id,
                 Document.external_id == body.external_id,
                 Document.deleted_at.is_(None),
-            ).order_by(Document.created_at.desc()).limit(1)
+            ).order_by(Document.created_at.desc()).limit(1).with_for_update()
         )).scalars().first()
         if existing is not None:
             try:
@@ -200,7 +214,11 @@ async def update_document(
     db: AsyncSession = Depends(get_db),
 ) -> DocumentIngestResponse:
     """更新文档正文/标题/metadata → 删旧向量 + 重新切分入队，worker 重 embed。"""
-    doc = await db.get(Document, document_id)
+    await _lock_writable(db, lib)
+    # 锁序 library→document：_new_generation 前提要求 document FOR UPDATE
+    doc = (await db.execute(
+        select(Document).where(Document.id == document_id).with_for_update()
+    )).scalars().first()
     if doc is None or doc.library_id != lib.id or doc.deleted_at is not None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "document not found")
     try:
@@ -257,6 +275,7 @@ async def delete_document(
     lib: Library = Depends(require_lib("delete")),
     db: AsyncSession = Depends(get_db),
 ) -> None:
+    await _lock_writable(db, lib)
     doc = await db.get(Document, document_id)
     if doc is None or doc.library_id != lib.id or doc.deleted_at is not None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "document not found")
@@ -349,6 +368,9 @@ async def query_library(
     lib: Library = Depends(require_lib("read")),
     db: AsyncSession = Depends(get_db),
 ) -> QueryResponse:
+    # 重建中/失败的库不返回半成品（#6 §9）
+    if lib.index_state in ("rebuilding", "failed"):
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "library index rebuilding")
     try:
         vector = await embedding.embed_one(
             body.query, model=lib.embedding_model, base_url=lib.embedding_base_url
@@ -365,12 +387,12 @@ async def query_library(
     recall_limit = max(settings.rerank_candidate_k, body.limit) if eff_rerank else body.limit
 
     try:
-        raw = await qdrant.search(
-            collection=lib.qdrant_collection,
-            vector=vector,
-            limit=recall_limit,
-            with_payload=True,
+        # 有界 overfetch + 可见性过滤（managed 回查 PG 丢弃陈旧/越库/已删；external 跳过）
+        raw = await retrieval_svc._recall_visible(
+            db, lib, lib.qdrant_collection, vector, needed=recall_limit,
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         log.exception("Qdrant search failed: %s", str(exc))
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "vector search failed")
@@ -432,6 +454,7 @@ async def import_file(
     user: User = Depends(current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
+    await _lock_writable(db, lib)
     filename = file.filename or "imported_file"
     # #13：后缀大小写不敏感 + 白名单。未知格式直接 415，不再「当纯文本」误吞二进制。
     lower_name = filename.lower()

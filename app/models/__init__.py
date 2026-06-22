@@ -5,6 +5,7 @@ from app.models.chunk import Chunk
 from app.models.document import Document
 from app.models.embedding_job import EmbeddingJob
 from app.models.library import Library
+from app.models.rebuild_operation import RebuildOperation
 from app.models.user import User
 
 __all__ = [
@@ -14,5 +15,6 @@ __all__ = [
     "Document",
     "EmbeddingJob",
     "Library",
+    "RebuildOperation",
     "User",
 ]

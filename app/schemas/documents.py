@@ -30,6 +30,7 @@ class DocumentRead(BaseModel):
     title: Optional[str] = None
     metadata: Optional[dict[str, Any]] = None
     content_hash: str
+    current_revision: int = 1            # #6 索引版本
     status: str
     last_error: Optional[str] = None
     created_at: datetime

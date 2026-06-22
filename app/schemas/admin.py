@@ -141,6 +141,9 @@ class LibraryRead(BaseModel):
     docx_table_aware: Optional[bool] = None
     qdrant_collection: str
     source_config: Optional[dict[str, Any]] = None
+    lifecycle_mode: str = "managed"                 # #6 managed | external
+    index_state: str = "ready"                      # #6 ready | rebuilding | failed
+    active_rebuild_operation_id: Optional[uuid.UUID] = None
     created_at: datetime
     deleted_at: Optional[datetime] = None
 
@@ -184,7 +187,9 @@ class EmbeddingJobRead(BaseModel):
     id: uuid.UUID
     library_id: uuid.UUID
     document_id: uuid.UUID
-    status: str
+    document_revision: int = 1                      # #6 该 job 对应的索引版本
+    rebuild_operation_id: Optional[uuid.UUID] = None
+    status: str                                     # pending|processing|done|failed|superseded
     worker_id: Optional[str] = None
     attempt_count: int
     last_error: Optional[str] = None

@@ -235,11 +235,13 @@ async def rebuild_collection(
     actor: User = Depends(current_superuser),
     db: AsyncSession = Depends(get_db),
 ) -> Library:
-    """重建 Qdrant collection：删旧建新（用当前 PG 里的 embedding_dim / distance）
-    + 把所有该库的文档标 pending、对应 embedding_jobs 标 pending，worker 会重新 embed 全部。
+    """重建 Qdrant collection（#6 §9 三阶段：prepare → qdrant → activate + finalize）。
+
+    external 库 409（外部 collection 本系统不得删/建）；已在重建中 409（单活动 operation）。
+    每篇活动文档 +revision、supersede 旧 job、新建带 rebuild_operation_id 的 job，worker 重 embed。
     """
-    from app.models.document import Document
-    from app.models.embedding_job import EmbeddingJob
+    from sqlalchemy.exc import IntegrityError
+    from app.services import rebuild as rebuild_svc
 
     row = await db.execute(
         select(Library).where(Library.slug == slug, Library.deleted_at.is_(None))
@@ -247,42 +249,11 @@ async def rebuild_collection(
     lib = row.scalar_one_or_none()
     if lib is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "library not found")
-
-    # 1. 删旧 collection（容忍不存在）
-    try:
-        await qdrant.delete_collection(lib.qdrant_collection)
-    except Exception:  # noqa: BLE001
-        log.exception("delete_collection failed; continuing")
-
-    # 2. 用当前 PG 参数重新建
-    try:
-        await qdrant.ensure_collection(
-            lib.qdrant_collection,
-            dim=lib.embedding_dim,
-            distance=lib.vector_distance,
-        )
-    except Exception as exc:  # noqa: BLE001
+    if lib.lifecycle_mode == "external":
         raise HTTPException(
-            status.HTTP_502_BAD_GATEWAY,
-            f"qdrant rebuild failed: {exc}",
-        ) from exc
-
-    # 3. 重置所有活动文档 → pending，并为每篇恰好新建一条 pending job（#5）。
-    #    不再把历史 job 全刷 pending：那样一文档多条历史 job 会被重复执行，
-    #    且没有历史 job 的文档反而不会被重建。保留历史 job 作为审计/失败记录。
-    from sqlalchemy import update as sa_update
-    await db.execute(
-        sa_update(Document)
-        .where(Document.library_id == lib.id, Document.deleted_at.is_(None))
-        .values(status="pending", last_error=None)
-    )
-    active_doc_ids = (await db.execute(
-        select(Document.id).where(
-            Document.library_id == lib.id, Document.deleted_at.is_(None)
+            status.HTTP_409_CONFLICT,
+            "external 库由外部系统管理，禁止 rebuild（不会删除其 collection）",
         )
-    )).scalars().all()
-    for doc_id in active_doc_ids:
-        db.add(EmbeddingJob(library_id=lib.id, document_id=doc_id, status="pending"))
 
     await audit_log.record(
         db, actor.id, "library.rebuild_collection",
@@ -290,6 +261,15 @@ async def rebuild_collection(
          "embedding_dim": lib.embedding_dim, "distance": lib.vector_distance},
     )
     await db.commit()
+
+    try:
+        await rebuild_svc.run_rebuild(db, lib.id)
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "该库已有进行中的重建任务")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"rebuild failed: {exc}") from exc
+
     await db.refresh(lib)
     return lib
 
@@ -307,8 +287,14 @@ async def delete_library(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "library not found")
     lib.deleted_at = datetime.now(timezone.utc)
     collection = lib.qdrant_collection
-    await audit_log.record(db, actor.id, "library.delete", {"slug": slug})
+    # external 库的 collection 由外部系统管理：**绝不删除其 Qdrant collection**（只取消注册）。
+    is_external = lib.lifecycle_mode == "external"
+    await audit_log.record(db, actor.id, "library.delete", {"slug": slug, "external": is_external})
     await db.commit()
+
+    if is_external:
+        log.info("library.delete: slug=%s 是 external，跳过 Qdrant collection 删除（%s）", slug, collection)
+        return None
 
     # Qdrant 异步清理（失败只记日志）
     async def _purge():

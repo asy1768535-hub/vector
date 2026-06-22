@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, Text, func, text
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -42,6 +42,8 @@ class Document(Base):
     title: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     doc_metadata: Mapped[Optional[dict[str, Any]]] = mapped_column("metadata", JSONB, nullable=True)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    # 索引版本（#6）：内容/title/metadata/任何入 payload 字段变更或重建都 +1。
+    current_revision: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
     last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 

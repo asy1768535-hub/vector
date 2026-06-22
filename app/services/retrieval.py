@@ -8,7 +8,10 @@ metadata_condition 支持的运算符（按 Dify 文档常见组合）：
 from __future__ import annotations
 
 import logging
-from typing import Any, Iterable
+import time
+from typing import Any
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.dify import (
     DifyRecord,
@@ -17,7 +20,7 @@ from app.schemas.dify import (
     MetadataConditionGroup,
 )
 from app.config import settings
-from app.services import embedding, qdrant, source_enrichment
+from app.services import embedding, qdrant, source_enrichment, visibility
 from app.services import rerank as rerank_svc
 
 log = logging.getLogger(__name__)
@@ -71,6 +74,51 @@ def _build_qdrant_filter(group: MetadataConditionGroup | None) -> dict[str, Any]
     return {key: clauses}
 
 
+async def _recall_visible(
+    db: AsyncSession | None, library, collection: str, vector, *, needed: int,
+    score_threshold: float | None = None, payload_filter: dict | None = None,
+) -> list[dict]:
+    """有界 overfetch + 可见性过滤 + 补召回（#6 §7.2）：返回过滤后的 raw 命中（最多 needed 条）。
+
+    db / library 为空（无生命周期上下文）时退化为单次召回不过滤。
+    """
+    if db is None or library is None:
+        return await qdrant.search(collection, vector, limit=needed,
+                                   score_threshold=score_threshold,
+                                   payload_filter=payload_filter, with_payload=True)
+    factor = max(1, settings.visibility_overfetch_factor)
+    cap = settings.visibility_total_candidate_cap
+    budget = settings.visibility_latency_budget_ms / 1000.0
+    start = time.monotonic()
+    limit = min(max(needed * factor, needed), settings.visibility_overfetch_max)
+    seen: set = set()
+    visible: list[dict] = []
+    rounds = 0
+    while True:
+        raw = await qdrant.search(collection, vector, limit=limit,
+                                  score_threshold=score_threshold,
+                                  payload_filter=payload_filter, with_payload=True)
+        payloads = [(it.get("payload") or {}) for it in raw]
+        mask = await visibility.compute_visible_mask(db, library, payloads)
+        for it, ok in zip(raw, mask):
+            pid = it.get("id")
+            if ok and pid not in seen:
+                seen.add(pid)
+                visible.append(it)
+        if len(visible) >= needed:
+            break
+        rounds += 1
+        if rounds > settings.visibility_refetch_max_rounds:
+            break
+        if limit >= cap or len(raw) < limit:        # 到上限 / Qdrant 已无更多
+            break
+        if (time.monotonic() - start) > budget:
+            log.info("visibility refetch stopped by latency budget (%sms)", settings.visibility_latency_budget_ms)
+            break
+        limit = min(limit * 2, cap)
+    return visible[:needed]
+
+
 async def run_retrieval(
     *,
     collection: str,
@@ -79,6 +127,8 @@ async def run_retrieval(
     request: DifyRetrievalRequest,
     source_config: dict[str, Any] | None = None,
     rerank_enabled: bool | None = None,
+    db: AsyncSession | None = None,
+    library=None,
 ) -> DifyRetrievalResponse:
     vector = await embedding.embed_one(
         request.query, model=embedding_model, base_url=embedding_base_url
@@ -93,13 +143,11 @@ async def run_retrieval(
     recall_limit = max(settings.rerank_candidate_k, top_k) if eff_rerank else top_k
 
     qdrant_filter = _build_qdrant_filter(request.metadata_condition)
-    raw = await qdrant.search(
-        collection,
-        vector,
-        limit=recall_limit,
+    # 有界 overfetch + 可见性过滤（managed 库回查 PG 丢弃陈旧/越库/已删；external 库跳过）
+    raw = await _recall_visible(
+        db, library, collection, vector, needed=recall_limit,
         score_threshold=request.retrieval_setting.score_threshold,
         payload_filter=qdrant_filter,
-        with_payload=True,
     )
 
     payloads = [(item.get("payload") or {}) for item in raw]

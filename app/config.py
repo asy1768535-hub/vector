@@ -87,6 +87,16 @@ class Settings(BaseSettings):
     # /import-file 单次上传字节上限（默认 50MiB），超出 413，避免一次性 read 打爆内存。
     max_import_file_bytes: int = 50 * 1024 * 1024
 
+    # ---- 检索可见性过滤（#6 批次 A，revision 维度）----
+    retrieval_consistency_filter: bool = True   # 总开关；关掉则不回查 PG（灰度/回滚用）
+    visibility_overfetch_factor: int = 3        # 初始 overfetch 倍数（相对 top_k / 召回数）
+    visibility_overfetch_max: int = 200         # 单次召回上限
+    visibility_refetch_max_rounds: int = 2      # 过滤后不足时的补召回轮数上限（2~3）
+    visibility_total_candidate_cap: int = 500   # 累计候选硬上限
+    visibility_latency_budget_ms: int = 800     # 检索补召回的延迟预算（毫秒）
+    # worker 写 Qdrant 的有界超时（秒）——锁内只做一次，禁止长退避
+    qdrant_upsert_timeout_seconds: float = 30.0
+
     # ---- Worker ----
     embed_batch_size: int = 32
     embed_worker_batch_docs: int = 8
@@ -95,6 +105,8 @@ class Settings(BaseSettings):
     embed_worker_max_attempts: int = 5
     # 自检失败时 worker 进入 degraded（暂停消费），每隔这么多秒重测一次
     worker_degraded_retry_seconds: int = 30
+    # rebuild operation 周期收口间隔（秒）：即使持续有任务也定期 reconcile，防崩溃遗留 operation 卡住
+    worker_reconcile_seconds: int = 30
 
     # ---- Chunking defaults ----
     default_chunk_size: int = 1000

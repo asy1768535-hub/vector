@@ -115,11 +115,14 @@ def main() -> None:
                 if existing:
                     # 已存在 → 只更新 source_config（让补全配置生效），其余字段保持
                     cur.execute(
-                        "UPDATE sys_libraries SET source_config = %s WHERE slug = %s",
+                        # 接入已有外部 collection → 必须 external（其生命周期由外部系统管理，
+                        # 本系统不写/不 rebuild，且不参与 revision/tombstone 过滤，#6 §4.5）
+                        "UPDATE sys_libraries SET source_config = %s, lifecycle_mode = 'external' WHERE slug = %s",
                         (Json(source_config) if source_config else None, args.slug),
                     )
                     print(f"[INFO] slug='{args.slug}' already exists (id={existing[0]}).")
                     print(f"       Updated source_config -> {json.dumps(source_config, ensure_ascii=False) if source_config else 'NULL'}")
+                    print("       lifecycle_mode -> external")
                     return
 
                 lib_id = uuid.uuid4()
@@ -129,12 +132,14 @@ def main() -> None:
                         (id, slug, name, description,
                          embedding_model, embedding_dim, vector_distance,
                          embedding_base_url, chunk_size, chunk_overlap,
-                         qdrant_collection, source_config, created_by, created_at, deleted_at)
+                         qdrant_collection, source_config, lifecycle_mode,
+                         created_by, created_at, deleted_at)
                     VALUES
                         (%s, %s, %s, %s,
                          %s, %s, 'cosine',
                          %s, %s, %s,
-                         %s, %s, NULL, NOW(), NULL)
+                         %s, %s, 'external',
+                         NULL, NOW(), NULL)
                     """,
                     (
                         str(lib_id),
@@ -150,7 +155,7 @@ def main() -> None:
                         Json(source_config) if source_config else None,
                     ),
                 )
-        print(f"[OK] Registration successful!")
+        print("[OK] Registration successful!")
         print(f"   id         : {lib_id}")
         print(f"   slug       : {args.slug}")
         print(f"   collection : {args.collection}")
@@ -158,7 +163,7 @@ def main() -> None:
             print(f"   source     : {source_config['db_name']}.{source_config['table']} "
                   f"({source_config['key_field']} -> {source_config['text_column']})")
         else:
-            print(f"   source     : (none, returns payload.text directly)")
+            print("   source     : (none, returns payload.text directly)")
         print()
         print("Next steps:")
         print("  1. Grant 'read' permission to the target user in admin UI -> Permissions")

@@ -79,10 +79,11 @@ async def delete_collection(collection: str) -> None:
     resp.raise_for_status()
 
 
-async def upsert_points(collection: str, points: list[dict[str, Any]]) -> None:
+async def upsert_points(collection: str, points: list[dict[str, Any]], *, timeout: float | None = None) -> None:
     if not points:
         return
-    async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
+    client_timeout = httpx.Timeout(timeout) if timeout is not None else _DEFAULT_TIMEOUT
+    async with httpx.AsyncClient(timeout=client_timeout) as client:
         resp = await client.put(
             _url(f"/collections/{collection}/points?wait=true"),
             headers=_headers(),

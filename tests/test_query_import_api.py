@@ -35,6 +35,8 @@ mock_library = Library(
     embedding_dim=1024,
     chunk_size=1000,
     chunk_overlap=120,
+    lifecycle_mode="managed",
+    index_state="ready",
 )
 
 async def override_user():
@@ -96,6 +98,8 @@ def test_query_library_endpoint(mock_search, mock_embed, client, monkeypatch):
     # 显式关掉 rerank，使该用例不依赖 .env 的全局开关、也不联网（只验 dense 路径）
     monkeypatch.setattr(settings, "rerank_enabled", False)
     monkeypatch.setattr(settings, "rerank_base_url", "")
+    # 关掉可见性回查（本用例验 dense/enrich 路径，不验 #6 过滤；过滤有独立单测+E2E）
+    monkeypatch.setattr(settings, "retrieval_consistency_filter", False)
     mock_embed.return_value = [0.1] * 1024
     mock_search.return_value = [
         {
@@ -136,6 +140,7 @@ def test_query_rerank_backfills_and_keeps_both_scores(mock_embed, mock_search, m
     monkeypatch.setattr(settings, "rerank_enabled", True)
     monkeypatch.setattr(settings, "rerank_base_url", "http://mock-rerank/rerank")
     monkeypatch.setattr(settings, "rerank_model", "bge-reranker-v2-m3")
+    monkeypatch.setattr(settings, "retrieval_consistency_filter", False)  # 本用例验 rerank，不验 #6 过滤
 
     mock_embed.return_value = [0.1] * 1024
     mock_search.return_value = [
@@ -383,6 +388,7 @@ def _job(**kw) -> EmbeddingJob:
     kw.setdefault("document_id", uuid.uuid4())
     kw.setdefault("status", "done")
     kw.setdefault("attempt_count", 0)
+    kw.setdefault("document_revision", 1)
     kw.setdefault("created_at", datetime.now(timezone.utc))
     return EmbeddingJob(**kw)
 
