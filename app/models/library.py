@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -29,6 +29,16 @@ class Library(Base):
 
     chunk_size: Mapped[int] = mapped_column(Integer, nullable=False, default=1000)
     chunk_overlap: Mapped[int] = mapped_column(Integer, nullable=False, default=120)
+    # 库级 embedding 单批大小；null = 用全局 settings.embed_batch_size
+    embed_batch_size: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # 库级 rerank 开关；null = 继承全局 settings.rerank_enabled
+    rerank_enabled: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    # 库级图片 OCR 开关；null = 继承全局 settings.ocr_enabled（默认关）
+    ocr_enabled: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    # 库级 docx 表格感知切块开关；null = 继承全局 settings.docx_table_aware（默认关）。
+    # 开启后 docx 上传走 extract_docx_segments + chunk_segments（每表单独成块带表头/章节上下文），
+    # 表格召回更稳但 chunk 数/成本上升；散文为主的库默认扁平更优（实测）。
+    docx_table_aware: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     qdrant_collection: Mapped[str] = mapped_column(String(128), nullable=False)
 
     # 源数据补全配置（JSONB）：当 Qdrant payload 只存外键、正文在别的业务库时，

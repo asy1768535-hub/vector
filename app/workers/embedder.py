@@ -40,6 +40,28 @@ def _worker_id() -> str:
     return f"{socket.gethostname()}-{os.getpid()}"
 
 
+def _build_payload(lib: Library, doc: Document, chunk: Chunk) -> dict:
+    """构造单个 Qdrant point 的 payload。
+
+    关键：用户提供的 doc_metadata 先展开，系统保留字段**最后**写入，
+    保证 document_id/chunk_id/text/title/library_id 等系统字段恒胜，
+    用户无法通过 metadata 覆盖它们（否则会破坏删除/检索完整性、伪造文档归属）。
+    """
+    payload = dict(doc.doc_metadata or {})
+    payload.update(
+        {
+            "library_id": str(lib.id),
+            "document_id": str(doc.id),
+            "chunk_id": str(chunk.id),
+            "seq": chunk.seq,
+            "text": chunk.text,
+            "title": doc.title,
+            "external_id": doc.external_id,
+        }
+    )
+    return payload
+
+
 async def _reset_stale_jobs(db: AsyncSession) -> int:
     """超时仍在 processing 的任务重置为 pending；返回被重置条数。"""
     cutoff_sql = text(
@@ -113,8 +135,8 @@ async def _process_job(db: AsyncSession, job: EmbeddingJob) -> None:
 
     texts = [c.text for c in chunks]
     try:
-        # 分批调 embedding，避免单次请求过大
-        batch = settings.embed_batch_size
+        # 分批调 embedding，避免单次请求过大（库级覆盖优先，否则用全局）
+        batch = lib.embed_batch_size or settings.embed_batch_size
         vectors: list[list[float]] = []
         for i in range(0, len(texts), batch):
             piece = await embedding.embed_texts(
@@ -135,16 +157,7 @@ async def _process_job(db: AsyncSession, job: EmbeddingJob) -> None:
                 {
                     "id": str(chunk.id),
                     "vector": vec,
-                    "payload": {
-                        "library_id": str(lib.id),
-                        "document_id": str(doc.id),
-                        "chunk_id": str(chunk.id),
-                        "seq": chunk.seq,
-                        "text": chunk.text,
-                        "title": doc.title,
-                        "external_id": doc.external_id,
-                        **(doc.doc_metadata or {}),
-                    },
+                    "payload": _build_payload(lib, doc, chunk),
                 }
             )
         await qdrant.upsert_points(lib.qdrant_collection, points)
@@ -197,7 +210,28 @@ async def _mark_failed(db: AsyncSession, job: EmbeddingJob, reason: str) -> None
 async def run(watch: bool) -> None:
     worker_id = _worker_id()
     log.info("starting worker id=%s watch=%s batch_docs=%s", worker_id, watch, settings.embed_worker_batch_docs)
+    # 启动自检：embedding / Qdrant 用不了时立刻报（非 fatal）。
+    from app.services import selfcheck
+    degraded = not await selfcheck.run_startup_check("worker")
+    if degraded:
+        log.error("[worker] 自检失败 → 进入 degraded：暂停消费，避免把 pending 任务刷成 failed。")
     while True:
+        # degraded：不 claim 任务，定时重测自检（embedding + Qdrant 都要好），恢复后再消费
+        if degraded:
+            if not watch:
+                # 单次模式下依赖不可用，直接退出（cron 会下次再来）
+                log.error("[worker] 依赖不可用且非 watch 模式，退出。")
+                return
+            ok, msg = await selfcheck.check_consumable()
+            if ok:
+                log.warning("[worker] 依赖已恢复（embedding + Qdrant），退出 degraded，恢复消费。")
+                degraded = False
+            else:
+                log.error("[worker] degraded：暂停消费，%ss 后重测（%s）",
+                          settings.worker_degraded_retry_seconds, msg)
+                await asyncio.sleep(settings.worker_degraded_retry_seconds)
+                continue
+
         async with async_session_factory() as session:
             reset = await _reset_stale_jobs(session)
             if reset:

@@ -21,6 +21,9 @@ dependencies = [
     "casbin-sqlalchemy-adapter>=1.4",
     "python-multipart>=0.0.9",
     "email-validator>=2.1",
+    "python-docx>=1.1",
+    "pypdf>=4.0",
+    "openpyxl>=3.1",
 ]
 
 [project.optional-dependencies]
@@ -28,6 +31,10 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "ruff>=0.5",
+]
+# 图片/扫描件 OCR（按库 ocr_enabled 开启时才需要）：pip install -e .[ocr]
+ocr = [
+    "rapidocr_onnxruntime>=1.2",
 ]
 
 [build-system]

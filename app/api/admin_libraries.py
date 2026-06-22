@@ -60,6 +60,10 @@ async def create_library(
         embedding_dim=embedding_dim,
         vector_distance=body.vector_distance,
         embedding_base_url=body.embedding_base_url,
+        embed_batch_size=body.embed_batch_size,
+        rerank_enabled=body.rerank_enabled,
+        ocr_enabled=body.ocr_enabled,
+        docx_table_aware=body.docx_table_aware,
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
         qdrant_collection="",  # 写完 ID 后再 set
@@ -155,6 +159,24 @@ async def update_library(
             setattr(lib, field, value)
             changes[field] = value
 
+    # embed_batch_size 特殊：用 model_fields_set 区分「没传=不改」与「显式传 null=清空回全局」，
+    # 这样前端能把库级覆盖清回全局默认（其余 Optional 字段仍是 None=不改的旧语义）。
+    if "embed_batch_size" in body.model_fields_set:
+        lib.embed_batch_size = body.embed_batch_size
+        changes["embed_batch_size"] = body.embed_batch_size
+    # rerank_enabled 同理：null 可清回"继承全局"
+    if "rerank_enabled" in body.model_fields_set:
+        lib.rerank_enabled = body.rerank_enabled
+        changes["rerank_enabled"] = body.rerank_enabled
+    # ocr_enabled 同理：null 可清回"继承全局"
+    if "ocr_enabled" in body.model_fields_set:
+        lib.ocr_enabled = body.ocr_enabled
+        changes["ocr_enabled"] = body.ocr_enabled
+    # docx_table_aware 同理：null 可清回"继承全局"
+    if "docx_table_aware" in body.model_fields_set:
+        lib.docx_table_aware = body.docx_table_aware
+        changes["docx_table_aware"] = body.docx_table_aware
+
     # 全文源（高级哨兵）：不传 → 不变；传 {} → 清空；传非空 dict → 校验后写入
     if body.source_config is not None:
         if body.source_config == {}:
@@ -175,6 +197,36 @@ async def update_library(
     await db.commit()
     await db.refresh(lib)
     return lib
+
+
+@router.post("/{slug}/test-embedding")
+async def test_embedding(
+    slug: str,
+    _: User = Depends(current_superuser),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    """就地探活该库的 embedding 配置（模型 + base_url；key 走全局 settings）。
+
+    用于建/改库后确认这个库真的能用 —— 避免配错 model/base_url 后等到摄入才发现。
+    """
+    from app.services import selfcheck
+
+    row = await db.execute(select(Library).where(Library.slug == slug, Library.deleted_at.is_(None)))
+    lib = row.scalar_one_or_none()
+    if lib is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "library not found")
+    ok, msg, dim = await selfcheck.probe_embedding_config(
+        model=lib.embedding_model,
+        base_url=lib.embedding_base_url,
+        expected_dim=lib.embedding_dim,
+    )
+    return {
+        "ok": ok,
+        "message": msg,
+        "dim": dim,
+        "embedding_model": lib.embedding_model,
+        "embedding_base_url": lib.embedding_base_url or settings.embedding_base_url,
+    }
 
 
 @router.post("/{slug}/rebuild-collection", response_model=LibraryRead)

@@ -45,6 +45,26 @@ class Settings(BaseSettings):
     embedding_base_url: str = "http://10.0.10.2:8111/v1/embeddings"
     embedding_model: str = "bge-m3"
     embedding_dim: int = 1024
+    # 远程 embedding 服务的 API Key（如阿里云 DashScope）；留空 = 不发鉴权头（本地 bge-m3）
+    embedding_api_key: str = ""
+
+    # ---- Rerank（默认关闭；配好本地/远程 reranker 地址再开）----
+    # rerank_provider: "standard" = 标准 /rerank 格式（Infinity/TEI/Jina/Cohere 兼容）；
+    #                  "dashscope" = 阿里云 DashScope 原生 text-rerank（input/parameters 结构）
+    rerank_provider: str = "standard"
+    rerank_enabled: bool = False
+    rerank_base_url: str = ""
+    rerank_model: str = ""
+    rerank_api_key: str = ""        # 留空则复用 embedding_api_key（同一家服务商同 key 时省事）
+    rerank_candidate_k: int = 50   # 重排前从 Qdrant 召回多少候选
+
+    # ---- OCR（图片/扫描件抽文字；默认关，按库 ocr_enabled 覆盖；需装 rapidocr_onnxruntime）----
+    ocr_enabled: bool = False
+
+    # ---- docx 表格感知切块（默认关，按库 docx_table_aware 覆盖）----
+    # 关：docx 走扁平正文切分（散文为主的库实测更优）；开：每个表格单独成块带表头/章节上下文，
+    # 表格召回更稳但 chunk 数/成本上升。表格很重的库（或 rerank 不可用时）建议在库上开。
+    docx_table_aware: bool = False
 
     # ---- Qdrant ----
     qdrant_url: str = "http://10.0.10.2:6333"
@@ -60,6 +80,12 @@ class Settings(BaseSettings):
     jwt_lifetime_seconds: int = 60 * 60 * 12  # 12h
     cookie_secure: bool = False  # 生产置 true
     cookie_name: str = "vk_session"
+    # 公开注册 /auth/register：内部部门平台默认关闭，只许超管经 /admin/users 建用户。
+    allow_public_registration: bool = False
+
+    # ---- 文件导入 ----
+    # /import-file 单次上传字节上限（默认 50MiB），超出 413，避免一次性 read 打爆内存。
+    max_import_file_bytes: int = 50 * 1024 * 1024
 
     # ---- Worker ----
     embed_batch_size: int = 32
@@ -67,6 +93,8 @@ class Settings(BaseSettings):
     embed_worker_poll_seconds: float = 1.0
     embed_worker_stale_seconds: int = 3600
     embed_worker_max_attempts: int = 5
+    # 自检失败时 worker 进入 degraded（暂停消费），每隔这么多秒重测一次
+    worker_degraded_retry_seconds: int = 30
 
     # ---- Chunking defaults ----
     default_chunk_size: int = 1000

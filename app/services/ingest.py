@@ -9,7 +9,7 @@ import logging
 import uuid
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete as sa_delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.chunk import Chunk
@@ -35,8 +35,13 @@ async def ingest_text(
     metadata: dict[str, Any] | None,
     splitter: str,
     created_by: uuid.UUID | None,
+    chunks: list[str] | None = None,
 ) -> tuple[Document, EmbeddingJob, int, bool]:
-    """返回 (document, job, chunk_count, was_existing)。"""
+    """返回 (document, job, chunk_count, was_existing)。
+
+    chunks 不为 None 时直接用它作为分片（跳过 split_text）——用于表格感知切分等
+    上游已组好块的场景；content_hash / 去重仍按扁平 text 计算，语义不变。
+    """
     chash = _content_hash(text)
 
     # 幂等检查
@@ -62,8 +67,8 @@ async def ingest_text(
         chunk_count = len(chunk_count_row.scalars().all())
         return existing, job, chunk_count, True
 
-    # 切分
-    chunks_text = splitter_service.split_text(
+    # 切分（上游已组好块则直接用）
+    chunks_text = chunks if chunks is not None else splitter_service.split_text(
         text,
         chunk_size=library.chunk_size,
         chunk_overlap=library.chunk_overlap,
@@ -107,3 +112,75 @@ async def ingest_text(
         library.slug, doc.id, len(chunk_objs), job.id,
     )
     return doc, job, len(chunk_objs), False
+
+
+async def reingest_document(
+    *,
+    db: AsyncSession,
+    library: Library,
+    document: Document,
+    new_text: str,
+    title: str | None,
+    metadata: dict[str, Any] | None,
+    splitter: str,
+    force: bool = False,
+    chunks: list[str] | None = None,
+) -> tuple[EmbeddingJob | None, int, bool]:
+    """更新已存在文档：删旧 chunk → 用新文本重切 → 更新 doc → 新建 pending job。
+
+    chunks 不为 None 时直接用它作分片（跳过 split_text）；no-op 判定仍按扁平 new_text。
+
+    返回 (job, chunk_count, changed)。changed=False 表示判定为 no-op、未做改动。
+    force=True 时跳过 no-op 判定（总是重切+重 embed）—— 用于显式 PUT 更新，
+    因为 splitter 未持久化、无法检测"仅切分方式变化"，显式更新一律重做最稳。
+    no-op 判定（仅 force=False 时）只看正文/title/metadata，给 external_id upsert 做幂等。
+    Qdrant 旧 points 的清理由调用方负责（需要 await HTTP）。
+    """
+    new_hash = _content_hash(new_text)
+    unchanged = (
+        not force
+        and new_hash == document.content_hash
+        and title == document.title
+        and (metadata or None) == (document.doc_metadata or None)
+    )
+    if unchanged:
+        cnt = await db.execute(
+            select(func.count()).select_from(Chunk).where(Chunk.document_id == document.id)
+        )
+        return None, int(cnt.scalar_one()), False
+
+    chunks_text = chunks if chunks is not None else splitter_service.split_text(
+        new_text,
+        chunk_size=library.chunk_size,
+        chunk_overlap=library.chunk_overlap,
+        splitter=splitter,
+    )
+    if not chunks_text:
+        raise ValueError("text produced zero chunks after splitting")
+
+    # 删旧 chunk（旧 Qdrant points 由调用方按 document_id 清）
+    await db.execute(sa_delete(Chunk).where(Chunk.document_id == document.id))
+
+    document.content_hash = new_hash
+    document.title = title
+    document.doc_metadata = metadata
+    document.status = "pending"
+    document.last_error = None
+
+    for seq, txt in enumerate(chunks_text):
+        db.add(Chunk(
+            document_id=document.id,
+            library_id=library.id,
+            seq=seq,
+            text=txt,
+            token_count=len(txt),
+            chunk_metadata={"title": title, "external_id": document.external_id}
+            if (title or document.external_id) else None,
+        ))
+
+    job = EmbeddingJob(library_id=library.id, document_id=document.id, status="pending")
+    db.add(job)
+    await db.flush()
+    log.info("reingest queued: lib=%s doc_id=%s chunks=%s job_id=%s",
+             library.slug, document.id, len(chunks_text), job.id)
+    return job, len(chunks_text), True

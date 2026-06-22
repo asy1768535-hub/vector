@@ -56,10 +56,26 @@ export default {
                             <el-descriptions-item label="Qdrant">
                                 <el-tag :type="health.qdrant ? 'success' : 'danger'">{{ health.qdrant ? 'OK' : 'DOWN' }}</el-tag>
                             </el-descriptions-item>
+                            <el-descriptions-item label="Embedding 服务">
+                                <el-tag :type="health.embedding === 'ok' ? 'success' : 'danger'">
+                                    {{ health.embedding === 'ok' ? 'OK' : 'FAIL' }}
+                                </el-tag>
+                            </el-descriptions-item>
                             <el-descriptions-item label="Embedding 模型">
                                 {{ health.embedding_model }} ({{ health.embedding_dim }}维)
                             </el-descriptions-item>
+                            <el-descriptions-item label="Rerank">
+                                <el-tag :type="health.rerank === 'ok' ? 'success' : health.rerank === 'fail' ? 'danger' : 'info'">
+                                    {{ health.rerank === 'ok' ? 'OK' : health.rerank === 'fail' ? 'FAIL' : '未启用' }}
+                                </el-tag>
+                            </el-descriptions-item>
                         </el-descriptions>
+                        <el-alert v-if="health.embedding !== 'ok'" type="error" :closable="false" show-icon
+                                  style="margin-top:12px" title="Embedding 服务不可用 —— 文档摄入会全部失败！">
+                            <template #default>
+                                <div style="word-break:break-all">{{ health.embedding_error || '请检查 EMBEDDING_MODEL / EMBEDDING_API_KEY / EMBEDDING_BASE_URL。' }}</div>
+                            </template>
+                        </el-alert>
                     </template>
                 </el-card>
             </el-col>

@@ -9,6 +9,7 @@ export default {
         const slug = ref(null);
         const fileInput = ref(null);
         const selectedFile = ref(null);
+        const externalId = ref('');
         const loading = ref(false);
         const importResult = ref(null);
 
@@ -52,11 +53,12 @@ export default {
             }
             loading.value = true;
             try {
-                const resp = await api.importFile(slug.value, selectedFile.value);
+                const resp = await api.importFile(slug.value, selectedFile.value, externalId.value.trim() || null);
                 importResult.value = resp;
                 ElMessage.success(`导入成功！共导入 ${resp.imported_count} 篇文档。`);
                 // Clear selection
                 selectedFile.value = null;
+                externalId.value = '';
                 if (fileInput.value) {
                     fileInput.value.value = '';
                 }
@@ -82,6 +84,7 @@ export default {
             slug,
             fileInput,
             selectedFile,
+            externalId,
             loading,
             importResult,
             triggerFileSelect,
@@ -113,7 +116,7 @@ export default {
                         </el-form-item>
 
                         <el-form-item label="选择要导入的文件" required>
-                            <input type="file" ref="fileInput" style="display:none" @change="onFileChange" accept=".txt,.md,.json,.csv" />
+                            <input type="file" ref="fileInput" style="display:none" @change="onFileChange" accept=".txt,.md,.json,.csv,.docx,.xlsx,.pdf" />
                             <div style="display: flex; flex-direction: column; gap: 8px;">
                                 <div>
                                     <el-button type="primary" @click="triggerFileSelect">选择本地文件</el-button>
@@ -123,11 +126,21 @@ export default {
                                     大小: {{ formatSize(selectedFile.size) }}
                                 </div>
                                 <div style="font-size: 12px; color: #909399; margin-top: 4px;">
-                                    支持的文件类型: <b>.txt, .md, .json, .csv</b> <br/>
+                                    支持的文件类型: <b>.txt, .md, .json, .csv, .docx, .xlsx, .pdf</b> <br/>
                                     - .txt/.md：作为单篇文档直接摄入并自动分片；<br/>
                                     - .json：支持文档对象或对象数组 (需包含 text 字段)；<br/>
-                                    - .csv：将每行作为一篇文档导入 (首列或 text/content 列作为正文)。
+                                    - .csv：将每行作为一篇文档导入 (首列或 text/content 列作为正文)；<br/>
+                                    - .docx：提取 Word 段落 + 表格文本 (若该库开启「图片 OCR」，内嵌图片也会 OCR 抽文字)；<br/>
+                                    - .xlsx：每个工作表按表格切分入库 (首行作表头，带工作表名上下文)；旧版 .xls 暂不支持，请先在 Excel 中『另存为』.xlsx；<br/>
+                                    - .pdf：提取文字层，作为单篇文档摄入 (扫描件/图片 PDF 无文字层，需 OCR，暂不支持)。
                                 </div>
+                            </div>
+                        </el-form-item>
+
+                        <el-form-item label="外部 ID (external_id，选填)">
+                            <el-input v-model="externalId" placeholder="留空=新建文档；填写后同库同 external_id 会被覆盖更新 (upsert)" clearable />
+                            <div style="font-size: 12px; color: #909399; margin-top: 4px;">
+                                供外部系统幂等同步：重复上传同一 external_id 会重切+重嵌入覆盖旧文档，不会重复入库。仅作用于单文件上传 (json 数组/csv 多行按每行自带 external_id)。
                             </div>
                         </el-form-item>
 
@@ -166,6 +179,11 @@ export default {
                         <el-table-column prop="document_id" label="文档 ID" width="100">
                             <template #default="{row}">
                                 <span class="mono">{{ row.document_id.slice(0, 8) }}…</span>
+                            </template>
+                        </el-table-column>
+                        <el-table-column prop="job_id" label="任务 ID" width="100">
+                            <template #default="{row}">
+                                <span class="mono">{{ row.job_id ? row.job_id.slice(0, 8) + '…' : '—' }}</span>
                             </template>
                         </el-table-column>
                     </el-table>

@@ -4,6 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from app.auth.backend import cookie_backend, fastapi_users
+from app.config import settings
 from app.schemas.users import UserCreate, UserRead, UserUpdate
 
 
@@ -19,12 +20,14 @@ def build_auth_router() -> APIRouter:
         tags=["auth"],
     )
 
-    # POST /auth/register —— 默认开放，生产环境若要管控可移除
-    router.include_router(
-        fastapi_users.get_register_router(UserRead, UserCreate),
-        prefix="/auth",
-        tags=["auth"],
-    )
+    # POST /auth/register —— #16：默认关闭（内部平台只许超管经 /admin/users 建用户）。
+    # 需要开放自助注册时在 .env 设 ALLOW_PUBLIC_REGISTRATION=true。
+    if settings.allow_public_registration:
+        router.include_router(
+            fastapi_users.get_register_router(UserRead, UserCreate),
+            prefix="/auth",
+            tags=["auth"],
+        )
 
     # POST /auth/forgot-password, /auth/reset-password
     router.include_router(

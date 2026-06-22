@@ -19,7 +19,8 @@ export default {
             form: {
                 slug: '', name: '', description: '',
                 embedding_model: '', embedding_dim: null, vector_distance: 'cosine',
-                embedding_base_url: '',
+                embedding_base_url: '', embed_batch_size: null, rerank_enabled: null, ocr_enabled: null,
+                docx_table_aware: null,
                 chunk_size: 1000, chunk_overlap: 120,
             },
         });
@@ -28,7 +29,8 @@ export default {
             form: {
                 name: '', description: '',
                 embedding_model: '', embedding_dim: null, vector_distance: 'cosine',
-                embedding_base_url: '',
+                embedding_base_url: '', embed_batch_size: null, rerank_enabled: null, ocr_enabled: null,
+                docx_table_aware: null,
                 chunk_size: 1000, chunk_overlap: 120,
             },
         });
@@ -46,7 +48,8 @@ export default {
             create.form = {
                 slug: '', name: '', description: '',
                 embedding_model: '', embedding_dim: null, vector_distance: 'cosine',
-                embedding_base_url: '',
+                embedding_base_url: '', embed_batch_size: null, rerank_enabled: null, ocr_enabled: null,
+                docx_table_aware: null,
                 chunk_size: 1000, chunk_overlap: 120,
             };
             create.open = true;
@@ -59,6 +62,7 @@ export default {
                 if (!body[k]) body[k] = null;
             }
             if (!body.embedding_dim) body.embedding_dim = null;
+            if (!body.embed_batch_size) body.embed_batch_size = null;
             // 全文源由后端按约定自动生成，无需前端传
             try {
                 await api.createLibrary(body);
@@ -77,6 +81,10 @@ export default {
                 embedding_dim: row.embedding_dim,
                 vector_distance: row.vector_distance,
                 embedding_base_url: row.embedding_base_url || '',
+                embed_batch_size: row.embed_batch_size ?? null,
+                rerank_enabled: row.rerank_enabled ?? null,
+                ocr_enabled: row.ocr_enabled ?? null,
+                docx_table_aware: row.docx_table_aware ?? null,
                 chunk_size: row.chunk_size,
                 chunk_overlap: row.chunk_overlap,
             };
@@ -133,6 +141,19 @@ export default {
             }
         }
 
+        async function testEmbedding(row) {
+            try {
+                const r = await api.testLibraryEmbedding(row.slug);
+                if (r.ok && r.message === 'ok') {
+                    ElMessage.success(`「${row.slug}」embedding 正常：${r.embedding_model} / ${r.dim}维`);
+                } else if (r.ok) {
+                    ElMessage.warning(`「${row.slug}」可达但有问题：${r.message}`);
+                } else {
+                    ElMessageBox.alert(r.message, `「${row.slug}」embedding 测试失败`, { type: 'error' });
+                }
+            } catch (e) { ElMessage.error(e.message || String(e)); }
+        }
+
         async function del(row) {
             try {
                 await ElMessageBox.confirm(
@@ -149,7 +170,7 @@ export default {
 
         onMounted(load);
         return { libs, loading, showDeleted, create, edit, openCreate, submitCreate, openEdit, submitEdit,
-                 rebuild, del, load, srcSummary };
+                 rebuild, del, testEmbedding, load, srcSummary };
     },
     template: `
     <div>
@@ -196,8 +217,9 @@ export default {
                     </el-tag>
                 </template>
             </el-table-column>
-            <el-table-column label="操作" width="260" fixed="right">
+            <el-table-column label="操作" width="320" fixed="right">
                 <template #default="{row}">
+                    <el-button size="small" type="success" plain :disabled="!!row.deleted_at" @click="testEmbedding(row)">测试</el-button>
                     <el-button size="small" :disabled="!!row.deleted_at" @click="openEdit(row)">编辑</el-button>
                     <el-button size="small" type="warning" :disabled="!!row.deleted_at" @click="rebuild(row)">重建</el-button>
                     <el-button size="small" type="danger" :disabled="!!row.deleted_at" @click="del(row)">删除</el-button>
@@ -226,6 +248,34 @@ export default {
                 <el-form-item label="模型接口地址">
                     <el-input v-model="create.form.embedding_base_url"
                               placeholder="默认：http://10.0.10.2:8111/v1/embeddings" />
+                </el-form-item>
+                <el-form-item label="单批大小">
+                    <el-input-number v-model="create.form.embed_batch_size" :min="1" :max="256" placeholder="默认全局 EMBED_BATCH_SIZE" />
+                    <span style="margin-left:8px;color:#909399;font-size:12px">留空=全局；阿里云填 10，本地 bge-m3 可填 32</span>
+                </el-form-item>
+                <el-form-item label="Rerank 重排">
+                    <el-select v-model="create.form.rerank_enabled" style="width:160px">
+                        <el-option :value="null" label="继承全局" />
+                        <el-option :value="true" label="开启" />
+                        <el-option :value="false" label="关闭" />
+                    </el-select>
+                    <span style="margin-left:8px;color:#909399;font-size:12px">需先在 .env 配 RERANK_* 地址才实际生效</span>
+                </el-form-item>
+                <el-form-item label="图片 OCR">
+                    <el-select v-model="create.form.ocr_enabled" style="width:160px">
+                        <el-option :value="null" label="继承全局" />
+                        <el-option :value="true" label="开启" />
+                        <el-option :value="false" label="关闭" />
+                    </el-select>
+                    <span style="margin-left:8px;color:#909399;font-size:12px">开启后上传 docx 会 OCR 内嵌图片（较慢，含敏感信息请谨慎）</span>
+                </el-form-item>
+                <el-form-item label="docx 表格感知">
+                    <el-select v-model="create.form.docx_table_aware" style="width:160px">
+                        <el-option :value="null" label="继承全局" />
+                        <el-option :value="true" label="开启" />
+                        <el-option :value="false" label="关闭" />
+                    </el-select>
+                    <span style="margin-left:8px;color:#909399;font-size:12px">开启后 docx 每个表格单独成块带表头/章节上下文，表格召回更稳但分片数/成本上升；表格很重的库建议开</span>
                 </el-form-item>
                 <el-form-item label="分片大小">
                     <el-input-number v-model="create.form.chunk_size" :min="200" :max="8000" />
@@ -271,6 +321,34 @@ export default {
                 <el-form-item label="模型接口地址">
                     <el-input v-model="edit.form.embedding_base_url"
                               placeholder="默认：http://10.0.10.2:8111/v1/embeddings" />
+                </el-form-item>
+                <el-form-item label="单批大小">
+                    <el-input-number v-model="edit.form.embed_batch_size" :min="1" :max="256" placeholder="默认全局 EMBED_BATCH_SIZE" />
+                    <span style="margin-left:8px;color:#909399;font-size:12px">留空=全局；阿里云填 10，本地 bge-m3 可填 32</span>
+                </el-form-item>
+                <el-form-item label="Rerank 重排">
+                    <el-select v-model="edit.form.rerank_enabled" style="width:160px">
+                        <el-option :value="null" label="继承全局" />
+                        <el-option :value="true" label="开启" />
+                        <el-option :value="false" label="关闭" />
+                    </el-select>
+                    <span style="margin-left:8px;color:#909399;font-size:12px">需先在 .env 配 RERANK_* 地址才实际生效</span>
+                </el-form-item>
+                <el-form-item label="图片 OCR">
+                    <el-select v-model="edit.form.ocr_enabled" style="width:160px">
+                        <el-option :value="null" label="继承全局" />
+                        <el-option :value="true" label="开启" />
+                        <el-option :value="false" label="关闭" />
+                    </el-select>
+                    <span style="margin-left:8px;color:#909399;font-size:12px">开启后上传 docx 会 OCR 内嵌图片（较慢，含敏感信息请谨慎）；改开关只影响之后新上传/重灌的文档</span>
+                </el-form-item>
+                <el-form-item label="docx 表格感知">
+                    <el-select v-model="edit.form.docx_table_aware" style="width:160px">
+                        <el-option :value="null" label="继承全局" />
+                        <el-option :value="true" label="开启" />
+                        <el-option :value="false" label="关闭" />
+                    </el-select>
+                    <span style="margin-left:8px;color:#909399;font-size:12px">开启后 docx 每个表格单独成块带表头/章节上下文；改开关只影响之后新上传/重灌的文档</span>
                 </el-form-item>
                 <el-form-item label="分片大小">
                     <el-input-number v-model="edit.form.chunk_size" :min="200" :max="8000" />

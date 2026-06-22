@@ -60,6 +60,9 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     # ── startup ──────────────────────────────────────────────
     # 预热 Casbin enforcer，确保 policy 已加载入内存
     get_enforcer()
+    # 启动自检：embedding 服务 / Qdrant 配置错配时大声报（非 fatal，不阻断启动）
+    from app.services import selfcheck
+    await selfcheck.run_startup_check("API")
     log.info("API started on %s:%s", settings.api_host, settings.api_port)
     yield
     # ── shutdown ─────────────────────────────────────────────

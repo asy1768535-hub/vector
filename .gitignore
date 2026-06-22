@@ -6,7 +6,10 @@ __pycache__/
 venv/
 /.env
 /.env.local
+.env.bak*
+*.bak
 .pytest_cache/
+.pytest-tmp/
 .ruff_cache/
 .mypy_cache/
 .idea/
@@ -16,3 +19,12 @@ node_modules/
 admin-ui/dist/
 admin-ui/.vite/
 cpwsImportData/
+
+# Claude Code 本机配置（每台机器自有，不入库）
+.claude/settings.local.json
+
+# 评测集：真实数据(含项目/人员等)不入库；仓库只保留通用示例与说明。
+# 真实评测集放仓库外(如桌面)，或放回 eval/ 也会被忽略；用 --dataset 指定路径。
+/eval/dataset*.jsonl
+!/eval/dataset.example.jsonl
+/eval/report*.md

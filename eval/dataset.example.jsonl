@@ -1,0 +1,8 @@
+{"query": "高血压患者的日常饮食注意事项有哪些？", "library": "medical", "expected_doc_ids": ["00000000-0000-0000-0000-000000000abc"], "note": "按文档命中：列出该问题应召回的文档 id（可多个）"}
+{"query": "公司年假是怎么计算的", "library": "hr", "expected_text": ["入职满一年", "每年5天带薪年假"], "note": "按片段命中：返回正文里出现任一片段即算命中（大小写/空白不敏感）"}
+{"query": "如何申请报销差旅费", "library": "hr", "expected_doc_ids": ["00000000-0000-0000-0000-0000000000de"], "expected_text": ["差旅报销需在30天内"], "note": "两者都给：命中 doc_id 或 片段 任一即可"}
+{"query": "系统用什么组件生成报表和台账文件？", "library": "construction", "expected_text": ["报表生成 | Apache POI", "台账导出 | EasyExcel"], "note": "表格类样本：xlsx 表格切块渲染为『表头 | 值』行，期望片段命中任一行即可。把示例值替换成你库里的真实单元格文本。"}
+{"query": "技术选型里数据库用的什么？", "library": "construction", "expected_text": ["数据库 | MySQL"], "note": "表格类样本：命中工作表『技术选型』中的『类别 | 方案』行。"}
+{"query": "材料台账里钢筋这一项对应的负责人是谁？", "library": "construction", "expected_text": ["钢筋 | 张工"], "note": "表格类样本：某台账字段对应负责人，命中『材料 | 负责人』行。"}
+{"query": "基坑监测工作表里支护模块的方案是什么？", "library": "construction", "expected_text": ["支护 | 钢板桩+锚索"], "note": "表格类样本：某工作表某模块的方案，命中『模块 | 方案』行。"}
+{"query": "测试报告里失败率是多少？", "library": "construction", "expected_text": ["失败率 | 2.3%"], "note": "表格类样本：测试报告表格中的失败率单元格，命中『指标 | 值』行。"}

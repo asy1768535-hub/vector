@@ -25,18 +25,23 @@ async def embed_texts(
     *,
     model: str | None = None,
     base_url: str | None = None,
+    api_key: str | None = None,
 ) -> list[list[float]]:
     """批量向量化。返回与 texts 等长的向量列表。
 
     base_url：库级覆盖；不传则用全局 settings.embedding_base_url。
     model：同上。
+    api_key：远程服务鉴权（如阿里云 DashScope）；不传则用全局 settings.embedding_api_key。
+        为空时不发 Authorization 头（本地 bge-m3 无需鉴权）。
     """
     if not texts:
         return []
     payload = {"model": model or settings.embedding_model, "input": list(texts)}
     url = base_url or settings.embedding_base_url
+    key = api_key if api_key is not None else settings.embedding_api_key
+    headers = {"Authorization": f"Bearer {key}"} if key else None
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        resp = await client.post(url, json=payload)
+        resp = await client.post(url, json=payload, headers=headers)
     if resp.status_code != 200:
         raise EmbeddingError(f"embedding service {resp.status_code}: {resp.text[:300]}")
     body = resp.json()
@@ -55,7 +60,11 @@ async def embed_texts(
 
 
 async def embed_one(
-    text: str, *, model: str | None = None, base_url: str | None = None
+    text: str,
+    *,
+    model: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
 ) -> list[float]:
-    vectors = await embed_texts([text], model=model, base_url=base_url)
+    vectors = await embed_texts([text], model=model, base_url=base_url, api_key=api_key)
     return vectors[0]

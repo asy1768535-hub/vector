@@ -20,7 +20,7 @@ class DocumentIngestResponse(BaseModel):
     document_id: uuid.UUID
     status: str
     chunk_count: int
-    job_id: uuid.UUID
+    job_id: Optional[uuid.UUID] = None   # 无新任务（如 no-op upsert / 去重命中）时为 null
 
 
 class DocumentRead(BaseModel):
@@ -44,7 +44,9 @@ class LibraryStats(BaseModel):
     chunk_count: int
     pending_jobs: int
     processing_jobs: int
+    done_jobs: int
     failed_jobs: int
+    total_jobs: int
 
 
 class QueryRequest(BaseModel):
@@ -72,10 +74,21 @@ class ImportFileDocResult(BaseModel):
     title: str
     chunk_count: int
     status: str
+    job_id: Optional[str] = None          # 摄入任务 ID，供上传后查任务状态
+    external_id: Optional[str] = None     # 调用方去重键（命中 upsert 时回显）
+
+
+class ImportFileDocError(BaseModel):
+    index: int                # 在本次解析出的文档列表中的序号（0-based）
+    title: Optional[str] = None
+    external_id: Optional[str] = None
+    error: str                # 失败原因
 
 
 class ImportFileResponse(BaseModel):
-    status: str               # "success"
+    status: str               # "success" | "partial"（全失败直接返回 400，不会是本响应）
     imported_count: int
+    failed_count: int = 0
     documents: list[ImportFileDocResult]
+    errors: list[ImportFileDocError] = []
 

@@ -12,6 +12,8 @@ export default {
         const loading = ref(false);
         const dialog = reactive({
             open: false,
+            mode: 'create',   // 'create' | 'edit'
+            docId: null,
             form: { title: '', external_id: '', text: '', splitter: 'text', metadata_json: '' },
         });
 
@@ -58,7 +60,22 @@ export default {
         watch(slug, loadDocs);
 
         function openIngest() {
+            dialog.mode = 'create';
+            dialog.docId = null;
             dialog.form = { title: '', external_id: '', text: '', splitter: 'text', metadata_json: '' };
+            dialog.open = true;
+        }
+
+        function openEdit(row) {
+            dialog.mode = 'edit';
+            dialog.docId = row.id;
+            dialog.form = {
+                title: row.title || '',
+                external_id: row.external_id || '',
+                text: '',
+                splitter: 'text',
+                metadata_json: row.metadata ? JSON.stringify(row.metadata) : '',
+            };
             dialog.open = true;
         }
 
@@ -80,8 +97,12 @@ export default {
                     splitter: dialog.form.splitter,
                     metadata,
                 };
-                const resp = await api.ingestDocument(slug.value, body);
-                ElMessage.success(`已入队 ${resp.chunk_count} 个分片 (doc_id=${resp.document_id.slice(0, 8)}…)`);
+                const resp = dialog.mode === 'edit'
+                    ? await api.updateDocument(slug.value, dialog.docId, body)
+                    : await api.ingestDocument(slug.value, body);
+                ElMessage.success(dialog.mode === 'edit'
+                    ? `已更新并重新入队 ${resp.chunk_count} 个分片`
+                    : `已入队 ${resp.chunk_count} 个分片 (doc_id=${resp.document_id.slice(0, 8)}…)`);
                 dialog.open = false;
                 loadDocs();
             } catch (e) { ElMessage.error(e.message); }
@@ -104,7 +125,7 @@ export default {
         });
 
         return { myLibs, slug, docs, stats, loading, canInsert, canDelete, dialog,
-                 loadDocs, openIngest, submitIngest, del };
+                 loadDocs, openIngest, openEdit, submitIngest, del };
     },
     template: `
     <div>
@@ -119,11 +140,13 @@ export default {
             </div>
         </div>
 
-        <el-row v-if="stats" :gutter="20" style="margin-bottom:16px">
-            <el-col :span="6"><el-card><div>文档数</div><b style="font-size:24px">{{ stats.document_count }}</b></el-card></el-col>
-            <el-col :span="6"><el-card><div>分片数</div><b style="font-size:24px">{{ stats.chunk_count }}</b></el-card></el-col>
-            <el-col :span="6"><el-card><div>排队中</div><b style="font-size:24px">{{ stats.pending_jobs }}</b></el-card></el-col>
-            <el-col :span="6"><el-card><div>失败</div><b style="font-size:24px;color:#f56c6c">{{ stats.failed_jobs }}</b></el-card></el-col>
+        <el-row v-if="stats" :gutter="12" style="margin-bottom:16px">
+            <el-col :span="4"><el-card><div>文档数</div><b style="font-size:24px">{{ stats.document_count }}</b></el-card></el-col>
+            <el-col :span="4"><el-card><div>分片数</div><b style="font-size:24px">{{ stats.chunk_count }}</b></el-card></el-col>
+            <el-col :span="4"><el-card><div>排队中</div><b style="font-size:24px">{{ stats.pending_jobs }}</b></el-card></el-col>
+            <el-col :span="4"><el-card><div>处理中</div><b style="font-size:24px">{{ stats.processing_jobs }}</b></el-card></el-col>
+            <el-col :span="4"><el-card><div>已完成</div><b style="font-size:24px;color:#67c23a">{{ stats.done_jobs }}</b></el-card></el-col>
+            <el-col :span="4"><el-card><div>失败</div><b style="font-size:24px;color:#f56c6c">{{ stats.failed_jobs }}</b></el-card></el-col>
         </el-row>
 
         <el-table :data="docs" border v-loading="loading">
@@ -143,18 +166,21 @@ export default {
                 <template #default="{row}"><span class="mono">{{ row.content_hash.slice(0, 12) }}…</span></template>
             </el-table-column>
             <el-table-column prop="created_at" label="创建时间" width="180" />
-            <el-table-column label="操作" width="120" fixed="right">
+            <el-table-column label="操作" width="180" fixed="right">
                 <template #default="{row}">
+                    <el-button size="small" :disabled="!canInsert" @click="openEdit(row)">编辑</el-button>
                     <el-button size="small" type="danger" :disabled="!canDelete" @click="del(row)">删除</el-button>
                 </template>
             </el-table-column>
         </el-table>
 
-        <el-dialog v-model="dialog.open" :title="'向 ' + slug + ' 提交文档'" width="640px">
+        <el-dialog v-model="dialog.open" :title="dialog.mode === 'edit' ? '编辑文档（整篇替换并重 embed）' : ('向 ' + slug + ' 提交文档')" width="640px">
+            <el-alert v-if="dialog.mode === 'edit'" type="warning" :closable="false" style="margin-bottom:12px"
+                      title="更新会用下面的正文整篇替换旧内容：删除旧分片与旧向量，重新切分并重新 embed。请粘贴完整的新正文。" />
             <el-form label-width="100px">
                 <el-form-item label="标题"><el-input v-model="dialog.form.title" /></el-form-item>
                 <el-form-item label="external_id">
-                    <el-input v-model="dialog.form.external_id" placeholder="可选；用于幂等" />
+                    <el-input v-model="dialog.form.external_id" :disabled="dialog.mode === 'edit'" placeholder="可选；用于幂等/upsert" />
                 </el-form-item>
                 <el-form-item label="切分方式">
                     <el-radio-group v-model="dialog.form.splitter">
@@ -174,7 +200,7 @@ export default {
             </el-form>
             <template #footer>
                 <el-button @click="dialog.open = false">取消</el-button>
-                <el-button type="primary" @click="submitIngest">提交（异步 embed）</el-button>
+                <el-button type="primary" @click="submitIngest">{{ dialog.mode === 'edit' ? '保存并重新 embed' : '提交（异步 embed）' }}</el-button>
             </template>
         </el-dialog>
     </div>

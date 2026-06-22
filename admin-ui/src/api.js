@@ -86,6 +86,8 @@ export const updateLibrary = (slug, data) => request(`/admin/libraries/${slug}`,
 export const deleteLibrary = (slug) => request(`/admin/libraries/${slug}`, { method: 'DELETE' });
 export const rebuildLibraryCollection = (slug) =>
     request(`/admin/libraries/${slug}/rebuild-collection`, { method: 'POST' });
+export const testLibraryEmbedding = (slug) =>
+    request(`/admin/libraries/${slug}/test-embedding`, { method: 'POST' });
 
 // ── Admin: Permissions ───────────────────────────────────────
 export const listUserPerms = (user_id) => request(`/admin/permissions?user_id=${user_id}`);
@@ -95,6 +97,8 @@ export const revokePerms = (data) => request('/admin/permissions', jsonBody('DEL
 // ── Documents（library 维度） ─────────────────────────────────
 export const ingestDocument = (slug, data) =>
     request(`/libraries/${slug}/documents`, jsonBody('POST', data));
+export const updateDocument = (slug, id, data) =>
+    request(`/libraries/${slug}/documents/${id}`, jsonBody('PUT', data));
 export const listDocuments = (slug, params = {}) => {
     const qs = new URLSearchParams(params).toString();
     return request(`/libraries/${slug}/documents` + (qs ? '?' + qs : ''));
@@ -104,14 +108,21 @@ export const deleteDocument = (slug, id) =>
 export const libraryStats = (slug) => request(`/libraries/${slug}/stats`);
 export const queryLibrary = (slug, data) =>
     request(`/libraries/${slug}/query`, jsonBody('POST', data));
-export const importFile = (slug, file) => {
+export const importFile = (slug, file, externalId = null) => {
     const formData = new FormData();
     formData.append('file', file);
+    // 选填：带 external_id 时，库内同键文档会被覆盖更新（upsert），而非新建
+    if (externalId) formData.append('external_id', externalId);
     return request(`/libraries/${slug}/import-file`, {
         method: 'POST',
         body: formData,
     });
 };
+// 任务状态（库级，普通用户可查）：单查 + 按文档列出
+export const getLibraryJob = (slug, jobId) =>
+    request(`/libraries/${slug}/jobs/${jobId}`);
+export const listDocumentJobs = (slug, documentId) =>
+    request(`/libraries/${slug}/documents/${documentId}/jobs`);
 
 // ── Admin: Jobs ──────────────────────────────────────────────
 export const listJobs = (params = {}) => {
@@ -119,6 +130,9 @@ export const listJobs = (params = {}) => {
     return request('/admin/jobs' + (qs ? '?' + qs : ''));
 };
 export const retryJob = (id) => request(`/admin/jobs/${id}/retry`, { method: 'POST' });
+export const jobStats = () => request('/admin/jobs/stats');
+export const resetFailedJobs = (libraryId = null) =>
+    request('/admin/jobs/reset-failed' + (libraryId ? `?library_id=${libraryId}` : ''), { method: 'POST' });
 
 // ── Admin: Audit log ─────────────────────────────────────────
 export const listAudit = (params = {}) => {
