@@ -107,12 +107,17 @@ async def ingest_text(
         status="pending",
         created_by=created_by,
     )
-    db.add(doc)
     try:
-        await db.flush()  # 拿到 doc.id；此处可能撞活动行唯一索引（并发同身份插入）
+        # 用 SAVEPOINT 只包住本次 INSERT：撞唯一索引时只回滚这一条，
+        # 绝不动同一 session/事务里已成功的其它文档（批量导入安全的关键）。
+        async with db.begin_nested():
+            db.add(doc)
+            await db.flush()  # 拿到 doc.id；可能撞活动行唯一索引（并发同身份插入）
     except IntegrityError:
-        # 并发：另一个请求刚用相同身份建好了 → 回滚本次插入，重查胜出记录返回（#4）
-        await db.rollback()
+        # 并发：另一请求已用相同身份建好 → savepoint 已回滚本条，重查胜出记录返回（#4）。
+        # 不调用 session 级 rollback（那会把同批前面成功的文档也回滚）。
+        if doc in db:
+            db.expunge(doc)  # 确保被回滚的 doc 不会在端点 commit 时被再次 INSERT
         winner = await _find_active(db, library.id, external_id, chash)
         if winner is None:
             raise  # 不是身份冲突（其它约束）→ 抛出
