@@ -43,20 +43,36 @@ async def override_user():
     return mock_user
 
 
-def make_db_mock(*, existing=None, scalar_list=None, get_return=None):
+def make_db_mock(*, existing=None, scalar_list=None, get_return=None, library=None):
     """构造贴近真实 AsyncSession 的 mock。
 
     关键点：`await db.execute(...)` 返回的是同步 Result，其 .scalars()/.first()/.all()
     都是同步方法——裸 AsyncMock 会把它们变成协程导致链式调用炸。这里显式建一个同步
     Result，让 external_id 查重等 `(await db.execute(...)).scalars().first()` 正常工作。
+
+    针对 #6 写守卫：_lock_writable 会 `SELECT sys_libraries ... FOR KEY SHARE`，期望拿到
+    Library 行（拿不到则 404）。这里按语句是否命中 sys_libraries 派发——库查询返回 library
+    （默认 mock_library），其余查询走 existing 语义，避免库锁查到 Document 或误 404。
     """
     db = AsyncMock()  # commit/flush/get/rollback 是 async → AsyncMock 合适
+    lib_obj = library if library is not None else mock_library
+
     result = MagicMock()
     result.scalars.return_value.first.return_value = existing
     result.scalars.return_value.all.return_value = scalar_list or []
     result.scalar_one.return_value = 0
     result.scalar_one_or_none.return_value = existing
-    db.execute = AsyncMock(return_value=result)
+
+    lib_result = MagicMock()
+    lib_result.scalars.return_value.first.return_value = lib_obj
+    lib_result.scalars.return_value.all.return_value = [lib_obj]
+    lib_result.scalar_one.return_value = lib_obj
+    lib_result.scalar_one_or_none.return_value = lib_obj
+
+    async def _execute(stmt, *a, **k):
+        return lib_result if "sys_libraries" in str(stmt).lower() else result
+
+    db.execute = _execute
     if get_return is not None:
         db.get = AsyncMock(return_value=get_return)
     return db

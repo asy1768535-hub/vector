@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 
 class DocumentIngestRequest(BaseModel):
@@ -28,7 +28,10 @@ class DocumentRead(BaseModel):
     library_id: uuid.UUID
     external_id: Optional[str] = None
     title: Optional[str] = None
-    metadata: Optional[dict[str, Any]] = None
+    metadata: Optional[dict[str, Any]] = Field(
+        default=None,
+        validation_alias=AliasChoices("doc_metadata", "metadata"),
+    )
     content_hash: str
     current_revision: int = 1            # #6 索引版本
     status: str
