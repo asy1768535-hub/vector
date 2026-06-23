@@ -30,11 +30,20 @@
 | # | 文档 | 用途 |
 |---|---|---|
 | 13 | [API 完整参考](./13-api-reference.md) | 所有 endpoint 速查 |
-| 14 | [数据库 Schema](./14-database-schema.md) | 8 表 + casbin_rule 字段说明 |
+| 14 | [数据库 Schema](./14-database-schema.md) | 9 业务表 + casbin_rule（迁移至 0010） |
 | 15 | [部署 / 生产清单](./15-deployment.md) | 上线前要检查的项 |
 | 16 | [测试](./16-testing.md) | 跑测试 + 加测试 |
 | 17 | [常见问题](./17-faq.md) | 踩坑速查 |
 
+## 一致性与发布
+
+| # | 文档 | 主题 |
+|---|---|---|
+| 19 | [源库正文补全](./19-source-enrichment.md) | 跨库按外键回查正文 |
+| 20 | [修订与删除一致性](./20-revision-and-deletion-consistency.md) | revision / 删除 outbox / 三阶段重建 |
+| 21 | [批次 A 实施方案](./21-batch-a-implementation-plan.md) | 一致性实现记录 |
+| 22 | [内部试运行清单](./22-internal-pilot-checklist.md) | 上线门槛 + 六步验收 |
+
 ---
 
-完整架构决策记录见 `C:\Users\Administrator\.claude\plans\dify-stateless-muffin.md`。
+更多设计与一致性方案见上表 20/21 篇及各专题文档。

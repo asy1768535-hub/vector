@@ -61,5 +61,5 @@ ACC_API_KEY=<服务器上的明文Key> python scripts/acceptance.py --slug <已�
 
 ## 五、试运行期定位（非阻断，记录即可）
 
-- 检索默认 **dense、不重排**；建议调用方 `top_k >= 5`。本地 reranker 待后续部署（可把 hit@5 再抬约 10pp）。
+- 检索默认 **dense、不重排**；建议调用方 `top_k >= 5`。本地 reranker 待后续部署（可提升精度；此前的提升数据来自 DashScope qwen3-rerank，不代表本地 bge-reranker 已验证）。
 - 表格/跨段汇总类问题召回较弱，属已知项，等真实使用反馈再优化切分或加 query 改写。
