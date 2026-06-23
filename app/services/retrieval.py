@@ -87,11 +87,13 @@ async def _recall_visible(
                                    score_threshold=score_threshold,
                                    payload_filter=payload_filter, with_payload=True)
     factor = max(1, settings.visibility_overfetch_factor)
-    cap = settings.visibility_total_candidate_cap
+    per_search_max = settings.visibility_overfetch_max        # 单次召回上限（每轮 limit 不得超过它）
+    total_cap = settings.visibility_total_candidate_cap       # 累计候选硬上限
     budget = settings.visibility_latency_budget_ms / 1000.0
     start = time.monotonic()
-    limit = min(max(needed * factor, needed), settings.visibility_overfetch_max)
-    seen: set = set()
+    limit = min(max(needed * factor, needed), per_search_max)
+    seen: set = set()           # 可见且去重后的命中
+    examined: set = set()       # 已检视过的所有候选 point id（累计上限用）
     visible: list[dict] = []
     rounds = 0
     while True:
@@ -102,6 +104,7 @@ async def _recall_visible(
         mask = await visibility.compute_visible_mask(db, library, payloads)
         for it, ok in zip(raw, mask):
             pid = it.get("id")
+            examined.add(pid)
             if ok and pid not in seen:
                 seen.add(pid)
                 visible.append(it)
@@ -110,12 +113,12 @@ async def _recall_visible(
         rounds += 1
         if rounds > settings.visibility_refetch_max_rounds:
             break
-        if limit >= cap or len(raw) < limit:        # 到上限 / Qdrant 已无更多
+        if len(examined) >= total_cap or len(raw) < limit:   # 累计上限 / Qdrant 已无更多
             break
         if (time.monotonic() - start) > budget:
             log.info("visibility refetch stopped by latency budget (%sms)", settings.visibility_latency_budget_ms)
             break
-        limit = min(limit * 2, cap)
+        limit = min(limit * 2, per_search_max)               # 单次 limit 永不超过 overfetch_max
     return visible[:needed]
 
 
@@ -135,6 +138,7 @@ async def run_retrieval(
     )
 
     top_k = request.retrieval_setting.top_k
+    threshold = request.retrieval_setting.score_threshold or 0.0   # 0 = 不额外过滤（#11）
     # rerank 生效：库级覆盖优先，否则全局，且必须配好了 reranker 地址
     eff_rerank = (
         (rerank_enabled if rerank_enabled is not None else settings.rerank_enabled)
@@ -143,11 +147,10 @@ async def run_retrieval(
     recall_limit = max(settings.rerank_candidate_k, top_k) if eff_rerank else top_k
 
     qdrant_filter = _build_qdrant_filter(request.metadata_condition)
-    # 有界 overfetch + 可见性过滤（managed 库回查 PG 丢弃陈旧/越库/已删；external 库跳过）
+    # #11：**不在 Qdrant 召回阶段用 score_threshold 提前过滤**（rerank 模式下会把候选按 vector_score
+    # 提前裁掉，threshold 语义应作用于最终分）。召回只做可见性过滤。
     raw = await _recall_visible(
-        db, library, collection, vector, needed=recall_limit,
-        score_threshold=request.retrieval_setting.score_threshold,
-        payload_filter=qdrant_filter,
+        db, library, collection, vector, needed=recall_limit, payload_filter=qdrant_filter,
     )
 
     payloads = [(item.get("payload") or {}) for item in raw]
@@ -164,35 +167,39 @@ async def run_retrieval(
         for i in range(len(raw))
     ]
 
-    # 重排：召回候选按 query 相关性重排取前 top_k；失败/未启用回退向量序（绝不阻断检索）
+    # #11：rerank 对**全部召回候选**打分（top_k=recall_limit）→ 之后才按 final_score 过滤+截断；
+    # 失败/未启用回退向量序（绝不阻断检索）。
     order, rerank_scores = await rerank_svc.rank_candidates(
-        request.query, contents, top_k=top_k, enabled=bool(eff_rerank)
+        request.query, contents, top_k=recall_limit, enabled=bool(eff_rerank)
     )
 
+    # 先按 final_score 过滤 threshold，再截取 top_k（#11 点 4）。order 已按相关性降序。
     records: list[DifyRecord] = []
     for i in order:
         item, payload, enriched, src_row = raw[i], payloads[i], enr.texts[i], enr.rows[i]
-        # 正文优先级：源库补全 > payload.text
+        vector_score = float(item.get("score") or 0.0)
+        rr_score = rerank_scores.get(i)
+        # final_score：有 rerank_score 用之（rerank 成功命中），否则 vector_score（dense / fallback / 未命中）
+        final_score = rr_score if rr_score is not None else vector_score
+        if threshold > 0 and final_score < threshold:
+            continue
         content = enriched if enriched is not None else (payload.get("text") or "")
         title = payload.get("title") or ""
-        # 业务 metadata：剥掉内部字段
         metadata = {k: v for k, v in payload.items() if k not in internal_keys}
         metadata.setdefault("document_id", payload.get("document_id"))
         metadata.setdefault("chunk_id", payload.get("chunk_id"))
-        # 把源库带回的 extra_columns 也并入 metadata（不覆盖已有键）
         if src_row:
             for col in extra_columns:
                 metadata.setdefault(col, src_row.get(col))
-        # 双分数留痕便于排查质量：vector_score 恒有；rerank_score 仅重排命中时有
-        vector_score = float(item.get("score") or 0.0)
-        rr_score = rerank_scores.get(i)
+        # 双分数留痕：vector_score 恒有；rerank_score 仅重排命中时有
         metadata["vector_score"] = vector_score
         if rr_score is not None:
             metadata["rerank_score"] = rr_score
-        score = rr_score if rr_score is not None else vector_score
-        records.append(DifyRecord(content=content or "", score=score, title=title, metadata=metadata))
+        records.append(DifyRecord(content=content or "", score=final_score, title=title, metadata=metadata))
+        if len(records) >= top_k:
+            break
 
-    log.info("retrieval: collection=%s top_k=%s recalled=%s returned=%s rerank=%s enriched=%s",
-             collection, top_k, len(raw), len(records),
+    log.info("retrieval: collection=%s top_k=%s thr=%s recalled=%s returned=%s rerank=%s enriched=%s",
+             collection, top_k, threshold, len(raw), len(records),
              "yes" if eff_rerank else "no", "yes" if enr.enabled else "no")
     return DifyRetrievalResponse(records=records)

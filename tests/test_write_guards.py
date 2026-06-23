@@ -51,3 +51,32 @@ def test_ready_managed_library_write_ok(client, monkeypatch):
         job = MagicMock(); job.id = uuid.uuid4()
         it.return_value = (doc, job, 1, False)
         assert _ingest(client).status_code == status.HTTP_201_CREATED
+
+
+# ── 阻断3：重建期间禁止改/删库配置（503）─────────────────────────────
+def _admin_client(monkeypatch, index_state):
+    from app.auth.backend import current_superuser
+    from app.models.user import User
+    import uuid
+    su = User(id=uuid.uuid4(), email="su@x", is_superuser=True, is_active=True)
+    monkeypatch.setattr(mock_library, "lifecycle_mode", "managed")
+    monkeypatch.setattr(mock_library, "index_state", index_state)
+    app.dependency_overrides[current_superuser] = lambda: su
+    app.dependency_overrides[get_db] = lambda: make_db_mock()
+    return TestClient(app)
+
+
+def test_update_library_blocked_while_rebuilding(monkeypatch):
+    try:
+        resp = _admin_client(monkeypatch, "rebuilding").patch("/admin/libraries/testlib", json={"name": "x"})
+        assert resp.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_delete_library_blocked_while_rebuilding(monkeypatch):
+    try:
+        resp = _admin_client(monkeypatch, "rebuilding").delete("/admin/libraries/testlib")
+        assert resp.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+    finally:
+        app.dependency_overrides.clear()

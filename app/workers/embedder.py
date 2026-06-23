@@ -50,6 +50,8 @@ def eligibility(job, document, library, operation) -> bool:
     """
     if document is None or library is None:
         return False
+    if getattr(library, "deleted_at", None) is not None:   # #7：库已删 → 任何 job 不执行
+        return False
     if document.deleted_at is not None:
         return False
     if job.document_revision != document.current_revision:
@@ -249,9 +251,16 @@ async def _process_job(db: AsyncSession, job: EmbeddingJob) -> None:
 
 async def _mark_failed(db: AsyncSession, job: EmbeddingJob, reason: str) -> None:
     now = datetime.now(timezone.utc)
-    # revision 守卫（#6）：若本 job 已不是文档当前 revision（embedding 期间文档被更新/删除），
-    # 它是过期任务 → 直接 superseded，**绝不**回 pending、也**绝不**把新版本文档标 failed。
-    doc = await db.get(Document, job.document_id)
+    # revision 守卫（#6）：embedding 期间文档可能被另一事务更新/删除。**必须读新鲜行**——
+    # 先 rollback 清掉本 session 的 identity-map 缓存与可能的未决事务，再按锁序
+    # library FOR KEY SHARE → document FOR UPDATE 重新读取，避免 db.get 返回缓存旧 revision。
+    await db.rollback()
+    await db.execute(
+        select(Library.id).where(Library.id == job.library_id).with_for_update(read=True, key_share=True)
+    )
+    doc = (await db.execute(
+        select(Document).where(Document.id == job.document_id).with_for_update()
+    )).scalar_one_or_none()
     if doc is None or doc.deleted_at is not None or job.document_revision != doc.current_revision:
         await db.execute(
             update(EmbeddingJob).where(EmbeddingJob.id == job.id).values(

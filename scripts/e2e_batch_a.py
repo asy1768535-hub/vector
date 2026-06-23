@@ -29,6 +29,7 @@ from app.models.document import Document
 from app.models.embedding_job import EmbeddingJob
 from app.models.library import Library
 from app.models.rebuild_operation import RebuildOperation
+from app.models.cleanup_outbox import CleanupOutbox
 from app.services import embedding, qdrant, ingest as ing, rebuild as rebuild_svc
 from app.services.retrieval import _recall_visible
 from app.workers.embedder import _process_job
@@ -154,6 +155,56 @@ async def main():
     check("R-resume 恢复后库 ready", libr.index_state == "ready", libr.index_state)
     check("R-resume 恢复后可检索", str(rdoc) in await _visible_ids(lib_r, T1))
 
+    # ── R-retry：两篇文档（一 done 一 failed）→ 重试同一 operation；done 任务原样保留 ────
+    from sqlalchemy import update as _upd
+    lib_f = await _new_lib("retry")
+    async with async_session_factory() as s:
+        lib = await s.get(Library, lib_f)
+        dA, _, _, _ = await ing.ingest_text(db=s, library=lib, text=T1, title="fa", external_id="FA",
+                                            metadata=None, splitter="text", created_by=None)
+        dB, _, _, _ = await ing.ingest_text(db=s, library=lib, text=T2, title="fb", external_id="FB",
+                                            metadata=None, splitter="text", created_by=None)
+        await s.commit(); idA, idB = dA.id, dB.id
+    await _process_pending(lib_f)
+    # rebuild → 2 个 job；先把 B 置 failed（只剩 A pending），真实处理 A（真嵌入→done+points），
+    # 再 finalize 使 operation/库 failed。这样 A 是「真正 done（有向量）」。
+    async with async_session_factory() as s:
+        await rebuild_svc.run_rebuild(s, lib_f)
+    async with async_session_factory() as s:
+        op_id = (await s.get(Library, lib_f)).active_rebuild_operation_id
+        rev_at_rebuild = (await s.get(Document, idA)).current_revision
+        await s.execute(_upd(EmbeddingJob).where(
+            EmbeddingJob.rebuild_operation_id == op_id, EmbeddingJob.document_id == idB)
+                        .values(status="failed"))
+        await s.commit()
+    await _process_pending(lib_f)        # 真实嵌入 A → A done（有 points），即时 finalize 见 B failed → 库 failed
+    async with async_session_factory() as s:
+        jobA = (await s.execute(select(EmbeddingJob).where(
+            EmbeddingJob.rebuild_operation_id == op_id, EmbeddingJob.document_id == idA))).scalar_one()
+        jobA_id, jobA_attempts, jobA_status = jobA.id, jobA.attempt_count, jobA.status
+    check("R-retry 失败后库 failed", (await _get(Library, lib_f)).index_state == "failed")
+    # 重试同一 operation：复用 op、不新建、不加 revision
+    async with async_session_factory() as s:
+        retry_id = await rebuild_svc.run_rebuild(s, lib_f)
+    # 重试后、处理前：done 任务 A 必须原样保留（id/status/attempt_count 不变），只有 B 被重置
+    async with async_session_factory() as s:
+        jA = (await s.execute(select(EmbeddingJob).where(EmbeddingJob.id == jobA_id))).scalar_one_or_none()
+        jB = (await s.execute(select(EmbeddingJob).where(
+            EmbeddingJob.rebuild_operation_id == op_id, EmbeddingJob.document_id == idB))).scalar_one()
+        ops_f = (await s.execute(select(RebuildOperation).where(RebuildOperation.library_id == lib_f))).scalars().all()
+    check("R-retry done 任务原样保留(id/status/attempt 不变)",
+          jA is not None and jA.status == "done" and jA.attempt_count == jobA_attempts,
+          f"jA={'None' if jA is None else (jA.status, jA.attempt_count)}")
+    check("R-retry 仅失败任务被重置为 pending", jB.status == "pending")
+    check("R-retry 复用同一 operation(未新建、未加 revision)",
+          retry_id == str(op_id) and len(ops_f) == 1
+          and (await _get(Document, idA)).current_revision == rev_at_rebuild)
+    await _process_pending(lib_f)
+    libf2 = await _get(Library, lib_f)
+    check("R-retry 重试后库 ready", libf2.index_state == "ready", libf2.index_state)
+    check("R-retry 重试后两篇均可检索",
+          str(idA) in await _visible_ids(lib_f, T1) and str(idB) in await _visible_ids(lib_f, T2))
+
     # ── R-empty：空库 rebuild 直接完成 ──────────────────────────────
     lib_e = await _new_lib("empty")
     async with async_session_factory() as s:
@@ -175,6 +226,7 @@ async def _cleanup():
         for slug in SLUGS:
             lib = (await db.execute(select(Library).where(Library.slug == slug))).scalar_one_or_none()
             if lib:
+                await db.execute(CleanupOutbox.__table__.delete().where(CleanupOutbox.library_id == lib.id))
                 await db.execute(EmbeddingJob.__table__.delete().where(EmbeddingJob.library_id == lib.id))
                 await db.execute(Chunk.__table__.delete().where(Chunk.library_id == lib.id))
                 await db.execute(RebuildOperation.__table__.delete().where(RebuildOperation.library_id == lib.id))

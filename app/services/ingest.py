@@ -256,6 +256,10 @@ async def reingest_document(
 
     # 开新代际：current_revision+=1 + supersede 旧 job + 建带新 revision 的 job
     job = await _new_generation(db, library, document)
+    # #7：入 cleanup outbox 删旧 revision points（target=新 current_revision，删 < target 与缺 revision）
+    from app.services import cleanup as cleanup_service
+    await cleanup_service.enqueue_delete_before_revision(
+        db, library, document.id, document.current_revision)
     log.info("reingest queued: lib=%s doc_id=%s rev=%s chunks=%s job_id=%s",
              library.slug, document.id, document.current_revision, len(chunks_text), job.id)
     return job, len(chunks_text), True

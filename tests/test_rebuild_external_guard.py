@@ -1,10 +1,12 @@
-"""#6 R6：external 库 rebuild → 409，且绝不调用任何 Qdrant 删除/重建。"""
+"""#6 R6：external 库 rebuild → 409（API）+ Service 层防护，且绝不调用任何 Qdrant 删除/重建。"""
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
 
@@ -13,6 +15,7 @@ from app.auth.backend import current_superuser
 from app.db import get_db
 from app.models.library import Library
 from app.models.user import User
+from app.services import rebuild as rebuild_svc
 
 _su = User(id=uuid.uuid4(), email="r@x", is_superuser=True, is_active=True)
 
@@ -46,3 +49,17 @@ def test_rebuild_external_returns_409_without_touching_qdrant():
             rr.assert_not_called()        # 连重建编排都不进入
     finally:
         app.dependency_overrides.clear()
+
+
+def test_service_run_rebuild_rejects_external_without_qdrant():
+    """Service 层 run_rebuild 对 external 库直接抛 ExternalLibraryError，绝不调 Qdrant。"""
+    ext = _ext_lib()
+    res = MagicMock(); res.scalar_one.return_value = ext
+    db = MagicMock(); db.execute = AsyncMock(return_value=res)
+
+    with patch("app.services.qdrant.delete_collection", new_callable=AsyncMock) as dc, \
+         patch("app.services.qdrant.ensure_collection", new_callable=AsyncMock) as ec:
+        with pytest.raises(rebuild_svc.ExternalLibraryError):
+            asyncio.run(rebuild_svc.run_rebuild(db, ext.id))
+        dc.assert_not_called()
+        ec.assert_not_called()

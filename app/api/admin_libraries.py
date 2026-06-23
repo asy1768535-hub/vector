@@ -142,10 +142,18 @@ async def update_library(
     - 改 embedding_model / embedding_base_url 不会重 embed 已有 chunk；
       新提交的文档用新参数。
     """
-    row = await db.execute(select(Library).where(Library.slug == slug, Library.deleted_at.is_(None)))
+    # 锁新鲜库行（FOR UPDATE，与 rebuild 互斥）；重建中禁止改配置（dim/distance 等会与在建 collection 冲突）
+    row = await db.execute(
+        select(Library).where(Library.slug == slug, Library.deleted_at.is_(None)).with_for_update()
+    )
     lib = row.scalar_one_or_none()
     if lib is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "library not found")
+    if lib.index_state != "ready":
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "library index rebuilding，暂不可改配置",
+            headers={"Retry-After": "5"},
+        )
     changes: dict[str, object] = {}
     editable_fields = (
         "name", "description", "chunk_size", "chunk_overlap",
@@ -264,7 +272,10 @@ async def rebuild_collection(
 
     try:
         await rebuild_svc.run_rebuild(db, lib.id)
-    except IntegrityError:
+    except rebuild_svc.ExternalLibraryError:
+        await db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "external 库不支持 rebuild")
+    except (rebuild_svc.ConcurrentRebuildError, IntegrityError):
         await db.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, "该库已有进行中的重建任务")
     except Exception as exc:  # noqa: BLE001
@@ -281,27 +292,34 @@ async def delete_library(
     actor: User = Depends(current_superuser),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    row = await db.execute(select(Library).where(Library.slug == slug, Library.deleted_at.is_(None)))
+    row = await db.execute(
+        select(Library).where(Library.slug == slug, Library.deleted_at.is_(None)).with_for_update()
+    )
     lib = row.scalar_one_or_none()
     if lib is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "library not found")
+    if lib.index_state != "ready":
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "library index rebuilding，暂不可删除",
+            headers={"Retry-After": "5"},
+        )
     lib.deleted_at = datetime.now(timezone.utc)
-    collection = lib.qdrant_collection
+    # 终止该库在途 embedding job（否则删 collection 后它们会反复失败）
+    from sqlalchemy import update as sa_update
+    from app.models.embedding_job import EmbeddingJob as _EJob
+    await db.execute(
+        sa_update(_EJob).where(
+            _EJob.library_id == lib.id, _EJob.status.in_(("pending", "processing"))
+        ).values(status="superseded", finished_at=datetime.now(timezone.utc))
+    )
     # external 库的 collection 由外部系统管理：**绝不删除其 Qdrant collection**（只取消注册）。
     is_external = lib.lifecycle_mode == "external"
     await audit_log.record(db, actor.id, "library.delete", {"slug": slug, "external": is_external})
+    # #7：managed 库改为单事务入 cleanup outbox（替代不可靠的 BackgroundTask）；external 跳过。
+    if not is_external:
+        from app.services import cleanup as cleanup_service
+        await cleanup_service.enqueue_delete_collection(db, lib)
     await db.commit()
-
     if is_external:
-        log.info("library.delete: slug=%s 是 external，跳过 Qdrant collection 删除（%s）", slug, collection)
-        return None
-
-    # Qdrant 异步清理（失败只记日志）
-    async def _purge():
-        try:
-            await qdrant.delete_collection(collection)
-        except Exception:  # noqa: BLE001
-            log.exception("delete_collection failed: %s", collection)
-
-    background.add_task(_purge)
+        log.info("library.delete: slug=%s 是 external，跳过 Qdrant collection 删除（%s）", slug, lib.qdrant_collection)
     return None

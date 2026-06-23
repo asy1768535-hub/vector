@@ -108,6 +108,14 @@ class Settings(BaseSettings):
     # rebuild operation 周期收口间隔（秒）：即使持续有任务也定期 reconcile，防崩溃遗留 operation 卡住
     worker_reconcile_seconds: int = 30
 
+    # ---- Cleanup Worker（#7：Qdrant 物理清理 outbox 消费）----
+    cleanup_worker_batch: int = 16              # 单轮抢多少条 outbox
+    cleanup_worker_poll_seconds: float = 2.0    # 空闲轮询间隔
+    cleanup_worker_max_attempts: int = 10       # 超过即标 failed（死信）
+    cleanup_backoff_base_seconds: float = 5.0   # 指数退避基数
+    cleanup_backoff_max_seconds: float = 900.0  # 退避上限（15min）
+    cleanup_stale_seconds: int = 600            # processing 超时重置为 pending
+
     # ---- Chunking defaults ----
     default_chunk_size: int = 1000
     default_chunk_overlap: int = 120

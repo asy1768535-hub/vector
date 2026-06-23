@@ -40,8 +40,8 @@ class EmbeddingJob(Base):
     document_id: Mapped[uuid.UUID] = mapped_column(
         PgUUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False
     )
-    # 建 job 时快照 documents.current_revision（#6）。回填后迁移去掉 DB 默认，应用层显式赋值。
-    document_revision: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    # 建 job 时快照 documents.current_revision（#6）。迁移已去 DB 默认（与 0009 一致）→ 应用层必须显式赋值。
+    document_revision: Mapped[int] = mapped_column(Integer, nullable=False)
     # 非空=本 job 由某次 rebuild operation 创建；ON DELETE RESTRICT 禁止删 operation 把旧 job 变普通 job。
     rebuild_operation_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         PgUUID(as_uuid=True),

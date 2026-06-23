@@ -40,14 +40,14 @@ async def compute_visible_mask(
         did = p.get("document_id")
         if did:
             ids.append(str(did))
-    info: dict[str, tuple[str, int]] = {}
+    info: dict[str, tuple[str, int, object]] = {}
     if ids:
         rows = (await db.execute(
-            select(Document.id, Document.library_id, Document.current_revision).where(
+            select(Document.id, Document.library_id, Document.current_revision, Document.deleted_at).where(
                 Document.id.in_(list(set(ids)))
             )
         )).all()
-        info = {str(did): (str(lib_id), int(rev)) for did, lib_id, rev in rows}
+        info = {str(did): (str(lib_id), int(rev), deleted) for did, lib_id, rev, deleted in rows}
 
     lib_id = str(library.id)
     mask: list[bool] = []
@@ -57,10 +57,13 @@ async def compute_visible_mask(
             mask.append(False)            # managed 库缺 document_id = 数据异常 → 丢弃
             continue
         rec = info.get(str(did))
-        if rec is None:                    # 不存在（已删硬删/异常）
+        if rec is None:                    # 不存在（硬删/异常）
             mask.append(False)
             continue
-        doc_lib, cur_rev = rec
+        doc_lib, cur_rev, deleted_at = rec
+        if deleted_at is not None:         # #7 已 tombstone → 立即不可见（不等 Qdrant 清理）
+            mask.append(False)
+            continue
         if doc_lib != lib_id:              # 库不匹配
             mask.append(False)
             continue

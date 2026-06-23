@@ -93,13 +93,36 @@ async def upsert_points(collection: str, points: list[dict[str, Any]], *, timeou
 
 
 async def delete_points_by_document_id(collection: str, document_id: str) -> None:
-    """按 payload.document_id 过滤删除（库删文档用）。"""
+    """按 payload.document_id 过滤删除（删文档全部 points）。collection 不存在视为成功（幂等）。"""
     async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
         resp = await client.post(
             _url(f"/collections/{collection}/points/delete?wait=true"),
             headers=_headers(),
             json={"filter": {"must": [{"key": "document_id", "match": {"value": document_id}}]}},
         )
+    if resp.status_code == 404:
+        return
+    resp.raise_for_status()
+
+
+async def delete_points_before_revision(collection: str, document_id: str, target_revision: int) -> None:
+    """删该 document_id 中 document_revision 缺失或 < target 的 points（更新后清旧版本，#7 §6.1）。
+
+    选择删除：document_id==X AND NOT(document_revision >= target) →
+    保留 == target（当前版本），删 < target 与缺 revision 的历史 points。collection 不存在视为成功。
+    """
+    flt = {
+        "must": [{"key": "document_id", "match": {"value": document_id}}],
+        "must_not": [{"key": "document_revision", "range": {"gte": target_revision}}],
+    }
+    async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
+        resp = await client.post(
+            _url(f"/collections/{collection}/points/delete?wait=true"),
+            headers=_headers(),
+            json={"filter": flt},
+        )
+    if resp.status_code == 404:
+        return
     resp.raise_for_status()
 
 
