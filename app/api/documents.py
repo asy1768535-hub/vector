@@ -33,7 +33,8 @@ from app.schemas.documents import (
     QueryResponse,
 )
 from app.config import settings
-from app.services import embedding, ingest as ingest_service, qdrant, source_enrichment
+from app.services import embedding, ingest as ingest_service, source_enrichment
+from app.services import cleanup as cleanup_service
 from app.services import rerank as rerank_svc
 from app.services import retrieval as retrieval_svc
 
@@ -79,10 +80,11 @@ async def _lock_writable(db: AsyncSession, lib: Library) -> Library:
     # 取 FOR KEY SHARE 锁（与 rebuild 的 FOR UPDATE 互斥，持锁至本事务 commit）。
     # **必须读锁定后的新鲜行**：等 rebuild 释放后，新鲜行的 index_state 才反映最新状态；
     # 不能用 require_lib 注入前加载的旧 lib（否则等到 rebuild 后仍按旧 ready 放行）。
-    fresh = (await db.execute(
+    locked = (await db.execute(
         select(Library).where(Library.id == lib.id).with_for_update(read=True, key_share=True)
     )).scalars().first()
-    locked = fresh if isinstance(fresh, Library) else lib   # mock/缺行时回退到传入 lib
+    if locked is None:   # 锁定时行已不存在（理论上软删保留行，此为防御）→ 404，不回退旧对象
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "library not found")
     if locked.lifecycle_mode == "external":
         raise HTTPException(status.HTTP_409_CONFLICT, "external 库由外部系统管理，本系统禁止写入")
     if locked.index_state != "ready":
@@ -275,27 +277,28 @@ async def delete_document(
     lib: Library = Depends(require_lib("delete")),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    await _lock_writable(db, lib)
-    doc = await db.get(Document, document_id)
+    locked = await _lock_writable(db, lib)
+    doc = (await db.execute(
+        select(Document).where(Document.id == document_id).with_for_update()
+    )).scalars().first()
     if doc is None or doc.library_id != lib.id or doc.deleted_at is not None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "document not found")
+    # #7：单事务 tombstone + supersede 在途 job + 入 cleanup outbox（移除不可靠的 BackgroundTask）。
+    # 提交后检索立即不可见（按 deleted_at 过滤）；Qdrant 物理清理由 Cleanup Worker 幂等执行。
     now = datetime.now(timezone.utc)
     await db.execute(
         update(Document).where(Document.id == doc.id).values(
             deleted_at=now, status="deleted", updated_at=now
         )
     )
+    await db.execute(
+        update(EmbeddingJob).where(
+            EmbeddingJob.document_id == doc.id,
+            EmbeddingJob.status.in_(("pending", "processing")),
+        ).values(status="superseded", finished_at=now)
+    )
+    await cleanup_service.enqueue_delete_document(db, locked, doc.id)
     await db.commit()
-    collection = lib.qdrant_collection
-    doc_id_str = str(doc.id)
-
-    async def _purge():
-        try:
-            await qdrant.delete_points_by_document_id(collection, doc_id_str)
-        except Exception:  # noqa: BLE001
-            log.exception("delete_points failed: collection=%s doc=%s", collection, doc_id_str)
-
-    background.add_task(_purge)
     return None
 
 

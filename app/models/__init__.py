@@ -2,6 +2,7 @@
 from app.models.api_key import ApiKey
 from app.models.audit import AuditLog
 from app.models.chunk import Chunk
+from app.models.cleanup_outbox import CleanupOutbox
 from app.models.document import Document
 from app.models.embedding_job import EmbeddingJob
 from app.models.library import Library
@@ -12,6 +13,7 @@ __all__ = [
     "ApiKey",
     "AuditLog",
     "Chunk",
+    "CleanupOutbox",
     "Document",
     "EmbeddingJob",
     "Library",
