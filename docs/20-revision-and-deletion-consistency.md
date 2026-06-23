@@ -280,10 +280,13 @@ active_rebuild_operation_id UUID NULL REFERENCES rebuild_operations(id)  -- 当�
   - `external`：**只绕过文档 revision/tombstone 回查**，由外部系统 / 源库补全管理；通常与
     `source_config`（跨库正文补全）同时使用。必须由超管**显式**设置，避免误把内部库标成 external。
     **注意：`external` 不绕过知识库权限校验（Casbin），鉴权与 managed 库完全一致。**
-  - **`external` 库禁止本系统改其生命周期**：上传 / 更新 / 删除 / rebuild **一律返回 409**
-    （collection 由外部系统管理，本系统不得增删改其向量或 collection）。
-    **rebuild 尤其绝不能对 external 库 `delete_collection`**（否则会误删 `case_chunks_000` 等外部 collection）。
-    Casbin 鉴权仍照常执行（先鉴权、再因 external 拒绝）。
+  - **`external` 库的契约**（统一定义）：
+    - **文档级写入与重建 → 409**：文档上传 / 更新 / 文档删除（`POST/PUT/DELETE /libraries/{slug}/documents...`、
+      `import-file`）与 `rebuild-collection`，因会增删改外部 collection 的向量，**一律 409**。
+      rebuild **绝不**对 external 库 `delete_collection`（否则误删 `case_chunks_000` 等外部 collection）。
+    - **库取消注册（`DELETE /admin/libraries/{slug}`）→ 允许（204）**：这是删 sys_libraries 注册行，
+      不属于"改外部 collection"；**保留外部 collection 不删**（见 §7 delete_library 对 external 跳过 delete_collection）。
+    - Casbin 鉴权对两类库一致（先鉴权、再因 external 拒绝文档写/rebuild）。
 - `index_state` 见 §9：重建期间置 `rebuilding`，查询返回 503；仅当本次 operation 的全部当前
   revision job 都 done 后才回 `ready`。
 - `active_rebuild_operation_id`：`rebuilding` 时指向当前 operation（§4.6）；资格条件（§5.1）据此
@@ -1026,3 +1029,33 @@ current_revision
    现阶段触发一次完整 re-embed，payload-only 轻量更新作为后续优化。
 
 以上决策通过后，再为批次 A 编写具体实施计划；批次 A 验收通过后才进入批次 B。
+
+---
+
+## 18. 实现状态（批次 A / B 均已实现）
+
+**批次 A（#6 revision + 重建一致性）**：已实现（迁移 0009）。详见
+[21-batch-a-implementation-plan](./21-batch-a-implementation-plan.md) §14「完成情况」。
+
+**批次 B（#7 删除 outbox + 检索删除维度）**：已实现（迁移 0010）。
+
+- 模型/迁移：`qdrant_cleanup_outbox`（`app/models/cleanup_outbox.py`，迁移 0010）：event_type
+  （delete_document_all / delete_document_before_revision / delete_collection）、`idempotency_key` 唯一、
+  指数退避字段（attempt_count/available_at）、部分索引 `ix_cleanup_claim`。
+- 删除/更新事务性入队（`app/services/cleanup.py`，`ON CONFLICT(idempotency_key) DO NOTHING` 幂等）：
+  - `delete_document`：单事务 tombstone + supersede 在途 job + `delete_document_all` outbox（移除 BackgroundTask）。
+  - `reingest`：`delete_document_before_revision`（target=新 current_revision）。
+  - `delete_library`：managed → `delete_collection` outbox；external 跳过（不删外部 collection）。
+- Cleanup Worker（`app/workers/cleanup.py`）：`FOR UPDATE SKIP LOCKED` 抢锁、按 event_type 幂等删 Qdrant
+  （`delete_points_before_revision` 删 revision<target 或缺失）、失败指数退避（available_at+backoff）、
+  超 max_attempts → failed（死信）、processing 超时重置。
+- 检索可见性（`app/services/visibility.py`）：回查加 `deleted_at` 维度——**删除提交即不可见**（不等 Qdrant 清理）。
+
+> 修正记录：`cleanup._process` 失败路径须**先捕获 row.id/attempt_count** 再 rollback（否则 rollback 后
+> 访问过期 ORM 属性触发异步 lazy load → MissingGreenlet）；由真实 PG 集成测试发现并修复。
+
+**测试**：mock 套件 149 passed / 11 skipped；真实 PG 集成——批次 A 8 项、批次 B 2 项（幂等去重、失败退避重排）；
+可重复 E2E `scripts/e2e_batch_a.py`（17/17）、`scripts/e2e_batch_b.py`（13/13：删除立即不可见→cleanup 清零、
+幂等、reingest 旧版本清理、external 不删 collection）。
+
+**发布**：批次 A、B 一起发布（删除一致性需 B）；上线顺序见 §11.3。

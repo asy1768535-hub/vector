@@ -60,11 +60,31 @@ RestartSec=10
 WantedBy=multi-user.target
 ```
 
-启用：
+`/etc/systemd/system/vector-kb-cleanup.service`（#7：Qdrant 清理 outbox 消费）：
+
+```ini
+[Unit]
+Description=Vector KB Cleanup Worker
+After=network.target
+
+[Service]
+User=vkb
+WorkingDirectory=/opt/vector-kb
+EnvironmentFile=/opt/vector-kb/.env
+ExecStart=/opt/vector-kb/.venv/bin/python -m app.workers.cleanup --watch
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+启用（生产需 **三类进程**：API + embedding worker + cleanup worker）：
 
 ```bash
 systemctl enable --now vector-kb-api
 systemctl enable --now vector-kb-worker@1 vector-kb-worker@2 vector-kb-worker@3
+systemctl enable --now vector-kb-cleanup
 ```
 
 ### Docker（可选）
@@ -116,10 +136,13 @@ HTTPS 终止后把 `COOKIE_SECURE=true` 即可。
 # 创建
 createdb -h <host> -U postgres vector_kb
 
-# 应用 schema
+# 应用 schema（当前 head 为 0010）
 DB_HOST=<host> DB_USER=postgres DB_PASSWORD=… DB_NAME=vector_kb \
   alembic upgrade head
 ```
+
+> 升级到 #6/#7：`alembic upgrade head`（含 0009 revision/rebuild_operations、0010 qdrant_cleanup_outbox）。
+> 注意：0009 的活动唯一索引创建前，若库内已有违反唯一性的历史活动行需先清理（见 docs/20 §11.1）。
 
 建议 PG 配置：
 

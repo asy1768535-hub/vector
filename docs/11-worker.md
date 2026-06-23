@@ -1,4 +1,19 @@
-# 11 · Embedding Worker
+# 11 · Worker
+
+> 系统有**两个 worker**：Embedding Worker（本文）+ Cleanup Worker。生产需各起一个常驻进程。
+
+## Cleanup Worker（#7 删除/重建的 Qdrant 物理清理）
+
+```bash
+python -m app.workers.cleanup --watch    # 长跑：消费 qdrant_cleanup_outbox
+python -m app.workers.cleanup            # 处理完即退出（cron 友好）
+```
+
+删除文档/库、reingest 后会在同事务写入 `qdrant_cleanup_outbox`；Cleanup Worker 用
+`FOR UPDATE SKIP LOCKED` 抢锁、幂等执行 Qdrant 删除、失败指数退避重试、超上限标 failed。
+逻辑可见性在删除提交时即生效（检索按 `deleted_at` 过滤），不依赖本进程是否跑完。
+
+## Embedding Worker
 
 ## 启动
 

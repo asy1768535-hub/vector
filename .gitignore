@@ -28,3 +28,14 @@ cpwsImportData/
 /eval/dataset*.jsonl
 !/eval/dataset.example.jsonl
 /eval/report*.md
+
+# 本机工具与含业务数据/绕权限的开发脚本——不入库
+# （.gitignore 不支持行尾注释，patterns 必须独占一行）
+# /tools/cloudflared.exe 等本机二进制
+/tools/
+# scripts/ask.py：检索手测，绕权限校验、直打正文，仅本地开发用
+/scripts/ask.py
+# scripts/build_eval_test_one.py：内嵌业务评测题与文档片段
+/scripts/build_eval_test_one.py
+# scripts/build_bge_compare.py：bge/云对比的一次性本地工具
+/scripts/build_bge_compare.py
