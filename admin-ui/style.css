@@ -274,3 +274,59 @@ iconify-icon { display: inline-block; vertical-align: -0.125em; }
     font-size: 13px;
     color: var(--el-text-color-primary);
 }
+
+/* ── 「替换已有文档」下拉：稳定两行布局，长文件名只压缩文件名、不挤掉状态/rev ── */
+.replace-doc-popper .el-select-dropdown__item {
+    height: auto;
+    min-height: 58px;
+    padding: 8px 12px;
+    line-height: 1.45;
+    white-space: normal;          /* 覆盖 EP 默认 nowrap，允许两行 */
+}
+.replace-doc-popper .el-select-dropdown__item + .el-select-dropdown__item {
+    border-top: 1px solid var(--el-border-color-lighter, #f0f0f0);  /* 选项浅色分隔线 */
+}
+.replace-doc-popper .rdoc {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    width: 100%;
+}
+.replace-doc-popper .rdoc-l1 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;                 /* 允许子项收缩，省略号生效 */
+}
+.replace-doc-popper .rdoc-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;          /* 长文件名单行省略 */
+    font-weight: 600;
+}
+.replace-doc-popper .rdoc-meta {
+    flex: 0 0 auto;               /* 状态 + rev 标签永不被挤压 */
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+.replace-doc-popper .rdoc-l2 {
+    display: flex;
+    gap: 10px;
+    min-width: 0;
+    font-size: 12px;
+    color: var(--el-text-color-secondary, #909399);
+}
+.replace-doc-popper .rdoc-ext {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;          /* external_id 单行省略 */
+}
+.replace-doc-popper .rdoc-time {
+    flex: 0 0 auto;
+    white-space: nowrap;
+}

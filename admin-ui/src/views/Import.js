@@ -1,4 +1,4 @@
-import { onMounted, ref, watch } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import * as api from '../api.js';
 import { store } from '../store.js';
@@ -19,6 +19,7 @@ export default {
         const docsLoading = ref(false);
         const loading = ref(false);
         const importResult = ref(null);
+        const docQuery = ref('');          // 替换下拉的搜索串（自定义 filter-method）
 
         async function loadLibs() {
             try {
@@ -75,9 +76,22 @@ export default {
             try { return new Date(t).toLocaleString(); } catch (e) { return t; }
         }
 
-        // 给可搜索下拉用的过滤串：标题 + external_id 都能搜到
-        function searchKey(d) {
-            return [d.title || '', d.external_id || '', (d.id || '').slice(0, 8)].join(' ');
+        // 自定义过滤：按文件名 / external_id / 短 document ID 搜索（不依赖把搜索串塞进 label）
+        function filterDocs(q) {
+            docQuery.value = (q || '').trim().toLowerCase();
+        }
+        const displayDocs = computed(() => {
+            const q = docQuery.value;
+            if (!q) return docs.value;
+            return docs.value.filter((d) =>
+                (d.title || '').toLowerCase().includes(q) ||
+                (d.external_id || '').toLowerCase().includes(q) ||
+                (d.id || '').toLowerCase().includes(q),
+            );
+        });
+        // 每次打开下拉重置搜索串，保证显示全部可选文档
+        function onReplaceVisible(v) {
+            if (v) docQuery.value = '';
         }
 
         function selectedDoc() {
@@ -153,7 +167,7 @@ export default {
             libs, slug, mode, fileInput, selectedFile, externalId,
             replaceDocId, docs, docsLoading, loading, importResult,
             triggerFileSelect, onFileChange, handleImport, formatSize,
-            fmtTime, searchKey, OP_LABEL, OP_TAG,
+            fmtTime, displayDocs, filterDocs, onReplaceVisible, OP_LABEL, OP_TAG,
         };
     },
     template: `
@@ -189,16 +203,23 @@ export default {
 
                         <el-form-item v-if="mode === 'replace'" label="选择要替换的文档" required>
                             <el-select v-model="replaceDocId" filterable :loading="docsLoading"
-                                       placeholder="按文件名 / external_id 搜索选择" style="width: 100%">
-                                <el-option v-for="d in docs" :key="d.id"
-                                           :label="(d.title || '(无标题)') + '  ·  ' + searchKey(d)" :value="d.id">
-                                    <div style="line-height:1.4; padding: 2px 0;">
-                                        <div><b>{{ d.title || '(无标题)' }}</b>
-                                            <el-tag size="small" type="info" style="margin-left:6px">{{ d.status }}</el-tag>
-                                            <el-tag size="small" style="margin-left:4px">rev {{ d.current_revision }}</el-tag>
+                                       :filter-method="filterDocs" @visible-change="onReplaceVisible"
+                                       popper-class="replace-doc-popper" :fit-input-width="true"
+                                       no-data-text="当前知识库暂无可替换文档"
+                                       placeholder="按文件名 / external_id / 文档ID 搜索选择" style="width: 100%">
+                                <el-option v-for="d in displayDocs" :key="d.id"
+                                           :label="d.title || '(无标题)'" :value="d.id">
+                                    <div class="rdoc">
+                                        <div class="rdoc-l1">
+                                            <span class="rdoc-name">{{ d.title || '(无标题)' }}</span>
+                                            <span class="rdoc-meta">
+                                                <el-tag size="small" type="info">{{ d.status }}</el-tag>
+                                                <el-tag size="small">rev {{ d.current_revision }}</el-tag>
+                                            </span>
                                         </div>
-                                        <div style="font-size:12px; color:#909399;">
-                                            external_id: {{ d.external_id || '（无，仍可选）' }} · 更新于 {{ fmtTime(d.updated_at) }}
+                                        <div class="rdoc-l2">
+                                            <span class="rdoc-ext">external_id: {{ d.external_id || '（无）' }}</span>
+                                            <span class="rdoc-time">更新于 {{ fmtTime(d.updated_at) }}</span>
                                         </div>
                                     </div>
                                 </el-option>
