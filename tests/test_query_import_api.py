@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 from fastapi import status
+from sqlalchemy.exc import IntegrityError
 
 from app.main import app
 from app.auth.backend import current_active_user
@@ -628,3 +629,193 @@ def test_import_pdf_ocr_unavailable_returns_install_hint(mock_extract, client, m
     )
     assert resp.status_code == status.HTTP_400_BAD_REQUEST
     assert ".[ocr]" in resp.json()["detail"]
+
+
+# ───────── 新增 / 替换上传：operation 字段 + 按 document ID 替换闭环 ─────────
+
+def _doc(*, external_id="ext-keep", library_id=None, deleted_at=None, doc_metadata=None):
+    """构造一个替换目标文档（_replace_document 只读这几个属性）。"""
+    d = MagicMock()
+    d.id = uuid.uuid4()
+    d.library_id = library_id if library_id is not None else mock_library.id
+    d.external_id = external_id
+    d.deleted_at = deleted_at
+    d.status = "pending"
+    d.doc_metadata = doc_metadata
+    return d
+
+
+def _lib(**over):
+    base = dict(
+        id=mock_library.id, slug="testlib", name="Test", qdrant_collection="testlib_col",
+        embedding_model="bge-m3", embedding_base_url="http://m", embedding_dim=1024,
+        chunk_size=1000, chunk_overlap=120, lifecycle_mode="managed", index_state="ready",
+    )
+    base.update(over)
+    return Library(**base)
+
+
+@patch("app.services.ingest.ingest_text", new_callable=AsyncMock)
+def test_add_mode_returns_created(mock_ingest, client):
+    """新增模式：新建文档 → operation=created。"""
+    doc = MagicMock()
+    doc.id = uuid.uuid4()
+    doc.status = "pending"
+    mock_ingest.return_value = (doc, MagicMock(id="j"), 1, False)
+    resp = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("a.txt", b"hello world", "text/plain")},
+    )
+    assert resp.status_code == status.HTTP_201_CREATED
+    assert resp.json()["documents"][0]["operation"] == "created"
+
+
+@patch("app.services.ingest.ingest_text", new_callable=AsyncMock)
+def test_add_mode_identical_returns_unchanged_with_real_doc_info(mock_ingest, client):
+    """新增模式：内容命中去重（was_existing=True）→ operation=unchanged；
+    回显数据库里真实保留的旧文件名/external_id，而非本次上传的文件名。"""
+    doc = MagicMock()
+    doc.id = uuid.uuid4()
+    doc.status = "pending"
+    doc.title = "original_name.txt"      # 库里真实保留的旧文件名
+    doc.external_id = "orig-ext"
+    mock_ingest.return_value = (doc, MagicMock(id="j"), 1, True)
+    resp = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("newly_uploaded.txt", b"dup content", "text/plain")},  # 故意用不同文件名
+    )
+    assert resp.status_code == status.HTTP_201_CREATED
+    body = resp.json()["documents"][0]
+    assert body["operation"] == "unchanged"
+    assert body["title"] == "original_name.txt"   # 真实旧文件名，不是 newly_uploaded.txt
+    assert body["external_id"] == "orig-ext"
+
+
+@patch("app.services.ingest.reingest_document", new_callable=AsyncMock)
+def test_replace_keeps_id_external_id_and_forces_reingest(mock_re, client):
+    """替换：document_id 不变、external_id 保留、走 reingest(force=True)、标题更新为新文件名。"""
+    target = _doc(external_id="keep-me")
+    app.dependency_overrides[get_db] = lambda: make_db_mock(existing=target)
+    mock_re.return_value = (MagicMock(id="job-x"), 3, True)
+    resp = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("new.txt", b"new body", "text/plain")},
+        data={"replace_document_id": str(target.id)},
+    )
+    assert resp.status_code == status.HTTP_201_CREATED
+    body = resp.json()["documents"][0]
+    assert body["document_id"] == str(target.id)
+    assert body["external_id"] == "keep-me"
+    assert body["operation"] == "updated"
+    assert body["chunk_count"] == 3
+    # force=True 保证 revision+1 / supersede 旧 job / cleanup outbox（不另写更新逻辑）
+    assert mock_re.await_args.kwargs["force"] is True
+    assert mock_re.await_args.kwargs["title"] == "new.txt"
+
+
+@patch("app.services.ingest.reingest_document", new_callable=AsyncMock)
+def test_replace_preserves_metadata_when_file_has_none(mock_re, client):
+    """替换：上传文件未带 metadata 时，保留目标文档原 metadata（不清空作者/分类等）。"""
+    target = _doc(doc_metadata={"author": "alice", "category": "legal"})
+    app.dependency_overrides[get_db] = lambda: make_db_mock(existing=target)
+    mock_re.return_value = (MagicMock(id="job-z"), 1, True)
+    resp = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("new.txt", b"new body without metadata", "text/plain")},
+        data={"replace_document_id": str(target.id)},
+    )
+    assert resp.status_code == status.HTTP_201_CREATED
+    # 传给 reingest 的 metadata 应是目标原 metadata，而非 None
+    assert mock_re.await_args.kwargs["metadata"] == {"author": "alice", "category": "legal"}
+
+
+@patch("app.services.ingest.reingest_document", new_callable=AsyncMock)
+def test_replace_duplicate_content_returns_409(mock_re, client):
+    """替换：新内容与同库另一篇无 external_id 文档相同 → 撞唯一约束 → 回滚并 409（不 500）。"""
+    target = _doc()
+    db = make_db_mock(existing=target)
+    app.dependency_overrides[get_db] = lambda: db
+    mock_re.side_effect = IntegrityError("stmt", {}, Exception("duplicate content_hash"))
+    resp = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("dup.txt", b"identical to another doc", "text/plain")},
+        data={"replace_document_id": str(target.id)},
+    )
+    assert resp.status_code == status.HTTP_409_CONFLICT
+    db.rollback.assert_awaited()
+
+
+@patch("app.services.ingest.reingest_document", new_callable=AsyncMock)
+def test_replace_doc_without_external_id(mock_re, client):
+    """替换：目标没有 external_id 也能按 document ID 替换。"""
+    target = _doc(external_id=None)
+    app.dependency_overrides[get_db] = lambda: make_db_mock(existing=target)
+    mock_re.return_value = (MagicMock(id="job-y"), 1, True)
+    resp = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("x.txt", b"abc def ghi", "text/plain")},
+        data={"replace_document_id": str(target.id)},
+    )
+    assert resp.status_code == status.HTTP_201_CREATED
+    body = resp.json()["documents"][0]
+    assert body["document_id"] == str(target.id)
+    assert body["external_id"] is None
+    assert body["operation"] == "updated"
+
+
+def test_replace_target_not_found_404(client):
+    """替换：目标不存在 → 404。"""
+    app.dependency_overrides[get_db] = lambda: make_db_mock(existing=None)
+    resp = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("x.txt", b"abc def", "text/plain")},
+        data={"replace_document_id": str(uuid.uuid4())},
+    )
+    assert resp.status_code == status.HTTP_404_NOT_FOUND
+
+
+def test_replace_target_other_library_404(client):
+    """替换：目标属于别的库 → 404。"""
+    target = _doc(library_id=uuid.uuid4())
+    app.dependency_overrides[get_db] = lambda: make_db_mock(existing=target)
+    resp = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("x.txt", b"abc def", "text/plain")},
+        data={"replace_document_id": str(target.id)},
+    )
+    assert resp.status_code == status.HTTP_404_NOT_FOUND
+
+
+def test_replace_multi_doc_file_returns_400(client):
+    """替换：多文档文件（JSON 数组）→ 400，不允许一对多。"""
+    payload = json.dumps([{"text": "doc one"}, {"text": "doc two"}]).encode("utf-8")
+    resp = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("multi.json", payload, "application/json")},
+        data={"replace_document_id": str(uuid.uuid4())},
+    )
+    assert resp.status_code == status.HTTP_400_BAD_REQUEST
+
+
+def test_replace_on_external_library_rejected(client):
+    """替换：external 库仍按现有规则拒绝写入 → 409。"""
+    target = _doc()
+    app.dependency_overrides[get_db] = lambda: make_db_mock(existing=target, library=_lib(lifecycle_mode="external"))
+    resp = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("x.txt", b"abc def", "text/plain")},
+        data={"replace_document_id": str(target.id)},
+    )
+    assert resp.status_code == status.HTTP_409_CONFLICT
+
+
+def test_replace_on_rebuilding_library_rejected(client):
+    """替换：rebuilding 库仍按现有规则拒绝写入 → 503。"""
+    target = _doc()
+    app.dependency_overrides[get_db] = lambda: make_db_mock(existing=target, library=_lib(index_state="rebuilding"))
+    resp = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("x.txt", b"abc def", "text/plain")},
+        data={"replace_document_id": str(target.id)},
+    )
+    assert resp.status_code == status.HTTP_503_SERVICE_UNAVAILABLE

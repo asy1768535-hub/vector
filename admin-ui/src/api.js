@@ -108,11 +108,13 @@ export const deleteDocument = (slug, id) =>
 export const libraryStats = (slug) => request(`/libraries/${slug}/stats`);
 export const queryLibrary = (slug, data) =>
     request(`/libraries/${slug}/query`, jsonBody('POST', data));
-export const importFile = (slug, file, externalId = null) => {
+export const importFile = (slug, file, { externalId = null, replaceDocumentId = null } = {}) => {
     const formData = new FormData();
     formData.append('file', file);
     // 选填：带 external_id 时，库内同键文档会被覆盖更新（upsert），而非新建
     if (externalId) formData.append('external_id', externalId);
+    // 选填：替换模式——按 document ID 覆盖目标文档（不依赖 external_id）
+    if (replaceDocumentId) formData.append('replace_document_id', replaceDocumentId);
     return request(`/libraries/${slug}/import-file`, {
         method: 'POST',
         body: formData,

@@ -11,6 +11,7 @@ from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Query, status, File, UploadFile
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.backend import current_active_user
@@ -139,17 +140,59 @@ async def _ingest_or_upsert(db: AsyncSession, lib: Library, user: User, doc_data
                 "document_id": str(existing.id), "title": doc_data["title"],
                 "chunk_count": chunk_count, "status": existing.status,
                 "job_id": str(job.id) if job is not None else None, "external_id": ext,
+                "operation": "updated" if changed else "unchanged",
             }
 
-    doc, job, chunk_count, _existing = await ingest_service.ingest_text(
+    doc, job, chunk_count, was_existing = await ingest_service.ingest_text(
         db=db, library=lib, text=doc_data["text"], title=doc_data["title"],
         external_id=ext, metadata=doc_data["metadata"], splitter=doc_data["splitter"],
         created_by=user.id, chunks=doc_data.get("chunks"),
     )
+    # 去重命中（was_existing）：回显数据库里真实保留的旧文件名/external_id，
+    # 而非本次上传的文件名——否则前端会显示一个其实没入库的名字。
     return {
-        "document_id": str(doc.id), "title": doc_data["title"],
+        "document_id": str(doc.id),
+        "title": doc.title if was_existing else doc_data["title"],
         "chunk_count": chunk_count, "status": doc.status,
-        "job_id": str(job.id) if job is not None else None, "external_id": ext,
+        "job_id": str(job.id) if job is not None else None,
+        "external_id": doc.external_id if was_existing else ext,
+        "operation": "unchanged" if was_existing else "created",
+    }
+
+
+async def _replace_document(db: AsyncSession, lib: Library, target_id: uuid.UUID, doc_data: dict) -> dict:
+    """按 document ID 替换已有文档（不依赖 external_id）：复用 reingest/revision 流程（force=True）。
+
+    校验目标属于本库且未删（否则 404）；保留 document_id 与 external_id，标题更新为新文件名。
+    force=True → 必然 current_revision+1、supersede 旧 job、旧向量按 revision 立即不可见、入 cleanup outbox。
+    """
+    target = (await db.execute(
+        select(Document).where(Document.id == target_id).with_for_update()
+    )).scalars().first()
+    if target is None or target.library_id != lib.id or target.deleted_at is not None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "document not found")
+    # 文件上传不带 metadata（doc_data["metadata"]=None）时保留目标原 metadata，
+    # 避免替换正文却清空作者/分类/过滤字段；文件显式带 metadata（如 json）才覆盖。
+    new_meta = doc_data.get("metadata")
+    meta = new_meta if new_meta is not None else target.doc_metadata
+    try:
+        job, chunk_count, _changed = await ingest_service.reingest_document(
+            db=db, library=lib, document=target,
+            new_text=doc_data["text"], title=doc_data["title"],
+            metadata=meta, splitter=doc_data["splitter"],
+            force=True, chunks=doc_data.get("chunks"),
+        )
+    except IntegrityError as exc:
+        # 无 external_id 文档受 (library_id, content_hash) 活动行唯一约束保护：
+        # 替换成与同库另一篇文档完全相同的内容会撞约束 → 回滚并转 409（而非 500）。
+        await db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "相同内容已存在") from exc
+    return {
+        "document_id": str(target.id), "title": doc_data["title"],
+        "chunk_count": chunk_count, "status": target.status,
+        "job_id": str(job.id) if job is not None else None,
+        "external_id": target.external_id,   # 保留目标原 external_id（替换不改身份）
+        "operation": "updated",              # force=True 必然走新代际
     }
 
 
@@ -453,6 +496,7 @@ async def query_library(
 async def import_file(
     file: UploadFile = File(...),
     external_id: Optional[str] = Form(default=None),
+    replace_document_id: Optional[uuid.UUID] = Form(default=None),
     lib: Library = Depends(require_lib("insert")),
     user: User = Depends(current_active_user),
     db: AsyncSession = Depends(get_db),
@@ -647,6 +691,26 @@ async def import_file(
 
     if not documents_to_ingest:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "No valid content found to ingest")
+
+    # 替换模式（新增/替换上传）：按 document ID 覆盖目标文档，不依赖 external_id。
+    # 仅允许解析为单篇文档的文件；多篇（json 数组 / csv 多行）明确拒绝，避免一对多歧义。
+    if replace_document_id is not None:
+        if len(documents_to_ingest) != 1:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "替换只支持解析为单篇文档的文件；JSON 数组 / CSV 多行会产生多篇文档，不能用于替换",
+            )
+        doc_data = documents_to_ingest[0]
+        doc_data["title"] = filename  # 标题更新为新文件名
+        try:
+            result = await _replace_document(db, lib, replace_document_id, doc_data)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+        await db.commit()
+        return {
+            "status": "success", "imported_count": 1, "failed_count": 0,
+            "documents": [result], "errors": [],
+        }
 
     # 表单 external_id 只作用于"单文档"上传（txt/md/pdf/docx/xlsx 或单对象 json）；
     # 多文档（json 数组 / csv 多行）保留每条自带的 external_id，避免互相 upsert 覆盖。

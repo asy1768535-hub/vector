@@ -80,6 +80,7 @@ class ImportFileDocResult(BaseModel):
     status: str
     job_id: Optional[str] = None          # 摄入任务 ID，供上传后查任务状态
     external_id: Optional[str] = None     # 调用方去重键（命中 upsert 时回显）
+    operation: Optional[str] = None       # created | updated | unchanged（向后兼容，旧客户端可忽略）
 
 
 class ImportFileDocError(BaseModel):
