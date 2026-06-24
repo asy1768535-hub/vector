@@ -7,6 +7,7 @@ pytest tests/
 pytest tests/test_dify_contract.py -v        # 跑单个文件
 pytest tests/ -k casbin                       # 按关键字过滤
 pytest tests/ --cov=app                       # 带覆盖率（需 pytest-cov）
+pytest tests/test_pdf_extract.py -q           # PDF 文字层/扫描页 OCR 逐页逻辑（monkeypatch，不需真实模型）
 ```
 
 ## 当前覆盖

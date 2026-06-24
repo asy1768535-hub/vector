@@ -61,6 +61,14 @@ class Settings(BaseSettings):
     # ---- OCR（图片/扫描件抽文字；默认关，按库 ocr_enabled 覆盖；需装 rapidocr_onnxruntime）----
     ocr_enabled: bool = False
 
+    # ---- PDF 扫描页 OCR 安全参数（仅当库 ocr_enabled 开启时生效）----
+    # 单页非空白字符数 < 该阈值 → 视为图片页，走渲染 + OCR（否则用文字层）
+    pdf_ocr_min_text_chars: int = 20
+    # 渲染扫描页的 DPI（建议 150~300）；越高越清晰但越慢越占内存
+    pdf_ocr_render_dpi: int = 200
+    # 单份 PDF 最多 OCR 多少页（只统计真正进 OCR 的页）；超过即 400 快速失败，不继续渲染
+    pdf_ocr_max_pages: int = 50
+
     # ---- docx 表格感知切块（默认关，按库 docx_table_aware 覆盖）----
     # 关：docx 走扁平正文切分（散文为主的库实测更优）；开：每个表格单独成块带表头/章节上下文，
     # 表格召回更稳但 chunk 数/成本上升。表格很重的库（或 rerank 不可用时）建议在库上开。

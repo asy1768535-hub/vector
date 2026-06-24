@@ -47,8 +47,11 @@ def test_ready_managed_library_write_ok(client, monkeypatch):
     with patch("app.services.ingest.ingest_text", new_callable=AsyncMock) as it:
         from unittest.mock import MagicMock
         import uuid
-        doc = MagicMock(); doc.id = uuid.uuid4(); doc.status = "pending"
-        job = MagicMock(); job.id = uuid.uuid4()
+        doc = MagicMock()
+        doc.id = uuid.uuid4()
+        doc.status = "pending"
+        job = MagicMock()
+        job.id = uuid.uuid4()
         it.return_value = (doc, job, 1, False)
         assert _ingest(client).status_code == status.HTTP_201_CREATED
 

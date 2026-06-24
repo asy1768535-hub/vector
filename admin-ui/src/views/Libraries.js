@@ -267,7 +267,7 @@ export default {
                         <el-option :value="true" label="开启" />
                         <el-option :value="false" label="关闭" />
                     </el-select>
-                    <span style="margin-left:8px;color:#909399;font-size:12px">开启后上传 docx 会 OCR 内嵌图片（较慢，含敏感信息请谨慎）</span>
+                    <span style="margin-left:8px;color:#909399;font-size:12px">开启后会识别 DOCX 内嵌图片及 PDF 扫描页（较慢，敏感文件请用本地 OCR）</span>
                 </el-form-item>
                 <el-form-item label="docx 表格感知">
                     <el-select v-model="create.form.docx_table_aware" style="width:160px">
@@ -340,7 +340,7 @@ export default {
                         <el-option :value="true" label="开启" />
                         <el-option :value="false" label="关闭" />
                     </el-select>
-                    <span style="margin-left:8px;color:#909399;font-size:12px">开启后上传 docx 会 OCR 内嵌图片（较慢，含敏感信息请谨慎）；改开关只影响之后新上传/重灌的文档</span>
+                    <span style="margin-left:8px;color:#909399;font-size:12px">开启后会识别 DOCX 内嵌图片及 PDF 扫描页（较慢，敏感文件请用本地 OCR）；改开关只影响之后新上传/重灌的文档</span>
                 </el-form-item>
                 <el-form-item label="docx 表格感知">
                     <el-select v-model="edit.form.docx_table_aware" style="width:160px">

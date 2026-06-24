@@ -17,21 +17,6 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.types import Scope
 
-
-class NoCacheStaticFiles(StaticFiles):
-    """零构建 SPA：给静态文件加 no-cache 头，避免浏览器缓存旧 JS。
-
-    admin-ui 是直接编辑即生效的源码（无打包/无 hash 文件名），默认 StaticFiles
-    的条件缓存会让浏览器一直用旧版本。这里强制每次都重新校验。
-    """
-
-    async def get_response(self, path: str, scope: Scope):
-        response = await super().get_response(path, scope)
-        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-        response.headers["Pragma"] = "no-cache"
-        response.headers["Expires"] = "0"
-        return response
-
 from app.api.admin_audit import router as admin_audit_router
 from app.api.admin_jobs import router as admin_jobs_router
 from app.api.admin_libraries import router as admin_libraries_router
@@ -52,6 +37,22 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger(__name__)
+
+
+class NoCacheStaticFiles(StaticFiles):
+    """零构建 SPA：给静态文件加 no-cache 头，避免浏览器缓存旧 JS。
+
+    admin-ui 是直接编辑即生效的源码（无打包/无 hash 文件名），默认 StaticFiles
+    的条件缓存会让浏览器一直用旧版本。这里强制每次都重新校验。
+    """
+
+    async def get_response(self, path: str, scope: Scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
+
 
 _DEFAULT_JWT_SECRET = "please-change-me-in-env"
 

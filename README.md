@@ -19,7 +19,7 @@
 
 | 维度 | 初始版 | 当前版 |
 |---|---|---|
-| 文件摄入 | 以纯文本为主 | TXT / MD / JSON / CSV / **DOCX / XLSX / 文字版 PDF**（+ 可选 OCR、表格感知切块） |
+| 文件摄入 | 以纯文本为主 | TXT / MD / JSON / CSV / **DOCX / XLSX / PDF**（DOCX 内嵌图片 + PDF 扫描页 OCR、表格感知切块） |
 | Worker | 1 个 Embedding Worker | **Embedding + Cleanup 两个 Worker** |
 | 检索 | Dense | Dense + **可选 Rerank** + 双分数（vector_score / rerank_score）+ score_threshold 语义 |
 | 文档身份 | 简单内容去重 | **external_id / content_hash** 明确身份规则 |
@@ -75,9 +75,9 @@
 | `.json` `.csv` | 结构化（单对象 / 数组 / 多行，自动取 text/content 列） |
 | `.docx` | Word：段落 + 表格；可选 **表格感知切块**（库级 `docx_table_aware`）、内嵌图片 OCR |
 | `.xlsx` | Excel：按工作表表格感知切分（`.xls` 旧格式不支持，请另存为 `.xlsx`） |
-| `.pdf` | **文字版** PDF（扫描件需 OCR，本期不支持） |
+| `.pdf` | 文字层直接提取；开启库级 OCR 后逐页支持**扫描页与混合 PDF**（图片页渲染→OCR，带 `【第 N 页】` 标记） |
 
-OCR 按库级 `ocr_enabled` 开启（需装 `rapidocr_onnxruntime`）。详见 [docs/09 文档摄入](./docs/09-document-ingest.md)。
+OCR 按库级 `ocr_enabled` 开启（需装 OCR 依赖：`pip install -e ".[ocr]"`）。详见 [docs/09 文档摄入](./docs/09-document-ingest.md)。
 
 ## 6. 文档摄入、更新与删除机制
 
@@ -172,7 +172,7 @@ ACC_API_KEY=<有 insert/read/delete 权限的明文Key> python scripts/acceptanc
 
 - 检索默认 **Dense、不重排**；本地 Reranker 尚未部署（开启重排可提升精度，属增强项非阻塞项；此前的提升数据来自 DashScope qwen3-rerank，不代表本地 bge-reranker 已验证）。
 - 无 Hybrid（稀疏+稠密融合）检索。
-- **扫描件 PDF / `.xls` 旧格式**不支持；复杂版式解析有限。
+- 扫描件 PDF 需**开启库级 OCR**（默认关）；`.xls` 旧格式不支持（请另存为 `.xlsx`）；不还原图片表格行列结构、不做票据字段结构化。
 - Embedding 为单点：试运行务必 pin 住 provider（推荐本地 bge-m3）。
 - 当前适合**单 API 进程**；多副本部署前需增加 Casbin Watcher（或主动同步），保证权限策略跨进程一致。
 

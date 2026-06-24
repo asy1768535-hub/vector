@@ -69,7 +69,9 @@ def test_import_unknown_suffix_returns_415(client):
 def test_import_uppercase_suffix_routed_not_as_text(client):
     """.TXT（大写）应按 txt 处理而非落入未知分支被拒。"""
     with patch("app.services.ingest.ingest_text", new_callable=AsyncMock) as mi:
-        doc = MagicMock(); doc.id = "00000000-0000-0000-0000-0000000000d1"; doc.status = "pending"
+        doc = MagicMock()
+        doc.id = "00000000-0000-0000-0000-0000000000d1"
+        doc.status = "pending"
         mi.return_value = (doc, MagicMock(id="00000000-0000-0000-0000-0000000000d2"), 1, False)
         files = {"file": ("NOTES.TXT", "大写后缀正文".encode("utf-8"), "text/plain")}
         resp = client.post("/libraries/testlib/import-file", files=files)
@@ -90,8 +92,11 @@ def test_import_all_fail_returns_400(client):
 
 
 def test_import_partial_returns_partial(client):
-    doc = MagicMock(); doc.id = "00000000-0000-0000-0000-0000000000e1"; doc.status = "pending"
-    job = MagicMock(); job.id = "00000000-0000-0000-0000-0000000000e2"
+    doc = MagicMock()
+    doc.id = "00000000-0000-0000-0000-0000000000e1"
+    doc.status = "pending"
+    job = MagicMock()
+    job.id = "00000000-0000-0000-0000-0000000000e2"
     with patch("app.services.ingest.ingest_text", new_callable=AsyncMock) as mi:
         # 第一条成功，第二条失败
         mi.side_effect = [(doc, job, 1, False), ValueError("bad second")]

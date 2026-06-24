@@ -1,8 +1,6 @@
 """文本切分单元测试。"""
 from __future__ import annotations
 
-import pytest
-
 from app.services.splitter import split_text
 
 

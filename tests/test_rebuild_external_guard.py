@@ -32,7 +32,8 @@ def _ext_lib():
 def test_rebuild_external_returns_409_without_touching_qdrant():
     lib = _ext_lib()
     db = MagicMock()
-    res = MagicMock(); res.scalar_one_or_none.return_value = lib
+    res = MagicMock()
+    res.scalar_one_or_none.return_value = lib
     db.execute = AsyncMock(return_value=res)
     db.commit = AsyncMock()
 
@@ -54,8 +55,10 @@ def test_rebuild_external_returns_409_without_touching_qdrant():
 def test_service_run_rebuild_rejects_external_without_qdrant():
     """Service 层 run_rebuild 对 external 库直接抛 ExternalLibraryError，绝不调 Qdrant。"""
     ext = _ext_lib()
-    res = MagicMock(); res.scalar_one.return_value = ext
-    db = MagicMock(); db.execute = AsyncMock(return_value=res)
+    res = MagicMock()
+    res.scalar_one.return_value = ext
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=res)
 
     with patch("app.services.qdrant.delete_collection", new_callable=AsyncMock) as dc, \
          patch("app.services.qdrant.ensure_collection", new_callable=AsyncMock) as ec:

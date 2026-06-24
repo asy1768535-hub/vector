@@ -27,7 +27,8 @@ def test_execute_event_dispatch_delete_all():
          patch("app.services.qdrant.delete_collection", new_callable=AsyncMock) as h:
         asyncio.run(cleanup_svc.execute_event(row))
         f.assert_awaited_once_with("lib_c", str(row.document_id))
-        g.assert_not_called(); h.assert_not_called()
+        g.assert_not_called()
+        h.assert_not_called()
 
 
 def test_execute_event_dispatch_before_revision():

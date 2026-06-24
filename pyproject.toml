@@ -33,8 +33,11 @@ dev = [
     "ruff>=0.5",
 ]
 # 图片/扫描件 OCR（按库 ocr_enabled 开启时才需要）：pip install -e .[ocr]
+# 含 DOCX 内嵌图片 OCR 与 PDF 扫描页 OCR（pypdfium2 渲染扫描页 → RapidOCR 识别）。
 ocr = [
     "rapidocr_onnxruntime>=1.2",
+    "pypdfium2",
+    "Pillow>=10",
 ]
 
 [build-system]

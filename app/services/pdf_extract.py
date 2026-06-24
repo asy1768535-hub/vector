@@ -1,0 +1,136 @@
+"""PDF 逐页文字提取（文字层优先，图片页可选 OCR）。
+
+设计（见 docs/23）：
+- `pypdf` 读文字层；单页非空白字符数 >= min_text_chars → 直接用文字层。
+- 低文字页：OCR 关 → 跳过；OCR 开但引擎不可用（ocr=None）→ 抛 PdfOcrUnavailableError；
+  OCR 开 → 仅对该页用 `pypdfium2` 渲染 PNG，交给现有 `ocr_image` 识别。
+- 输出按页码合并，带 `【第 N 页】` 来源标记，保持原页序。
+- 只对低文字页渲染，且每次只持有一页 PNG；OCR 页数超 max_ocr_pages 即快速失败，不再渲染。
+
+错误一律转 PdfExtractError（消息不含正文/密钥/内部栈）。
+"""
+from __future__ import annotations
+
+import io
+import logging
+from collections.abc import Callable
+
+import pypdf
+
+log = logging.getLogger(__name__)
+
+
+class PdfExtractError(ValueError):
+    """PDF 提取失败（损坏/加密/无可提取文本/超限等），调用方映射为 400。"""
+
+
+class PdfOcrUnavailableError(PdfExtractError):
+    """需要 OCR 但 OCR 依赖未安装（库开了 ocr_enabled 但引擎不可用）。"""
+
+
+def _meaningful_char_count(text: str) -> int:
+    """非空白字符数——用于判断一页是否含有效文字层。"""
+    return len("".join(text.split()))
+
+
+def _open_reader(data: bytes):
+    """打开 PDF（独立函数便于测试 monkeypatch）。"""
+    return pypdf.PdfReader(io.BytesIO(data))
+
+
+def _render_page_png(data: bytes, page_index: int, dpi: int) -> bytes:
+    """用 pypdfium2 把单页渲染成 PNG 字节（懒加载，只渲染该页）。
+
+    缺依赖（pypdfium2/Pillow 未装）→ PdfOcrUnavailableError；
+    渲染本身失败 → PdfExtractError。两者都不向外暴露裸 ImportError/内部栈。
+    """
+    try:
+        import pypdfium2 as pdfium  # 懒加载：未装 OCR extra 时不影响基础服务
+    except ImportError:
+        raise PdfOcrUnavailableError(
+            "PDF 渲染依赖未安装（pypdfium2/Pillow）；请执行 pip install -e \".[ocr]\""
+        ) from None
+
+    try:
+        pdf = pdfium.PdfDocument(data)
+        try:
+            page = pdf[page_index]
+            bitmap = page.render(scale=dpi / 72.0)
+            pil_image = bitmap.to_pil()
+            buf = io.BytesIO()
+            pil_image.save(buf, format="PNG")
+            return buf.getvalue()
+        finally:
+            pdf.close()
+    except ImportError:
+        # 渲染期才暴露的缺依赖（如 Pillow 未装，to_pil 失败）同样按“需装 OCR”处理
+        raise PdfOcrUnavailableError(
+            "PDF 渲染依赖未安装（pypdfium2/Pillow）；请执行 pip install -e \".[ocr]\""
+        ) from None
+    except Exception:  # noqa: BLE001  渲染失败转用户可读错误（消息不含内部栈/正文）
+        raise PdfExtractError(f"PDF 第 {page_index + 1} 页渲染失败") from None
+
+
+def extract_pdf_text(
+    data: bytes,
+    *,
+    ocr_enabled: bool,
+    ocr: Callable[[bytes], str] | None,
+    min_text_chars: int,
+    render_dpi: int,
+    max_ocr_pages: int,
+) -> str:
+    """逐页提取并合并 PDF 文本。返回带 `【第 N 页】` 标记的正文。
+
+    抛 PdfOcrUnavailableError（需 OCR 但引擎缺）/ PdfExtractError（损坏、超限、最终无文本）。
+    """
+    try:
+        reader = _open_reader(data)
+        pages = list(reader.pages)
+    except Exception:  # noqa: BLE001  —— 不向外暴露内部细节（可能含路径/正文）
+        raise PdfExtractError("PDF 解析失败（文件可能损坏或加密）") from None
+
+    parts: list[tuple[int, str]] = []
+    ocr_pages_used = 0
+
+    for idx, page in enumerate(pages):
+        try:
+            text = (page.extract_text() or "").strip()
+        except Exception:  # noqa: BLE001  单页抽取失败按图片页处理，不连累整份
+            text = ""
+
+        if _meaningful_char_count(text) >= min_text_chars:
+            parts.append((idx, text))
+            continue
+
+        # 低文字页：可能是扫描图片页，也可能只有少量文字（如“审批通过”）——短文字不能丢
+        if not ocr_enabled:
+            if text:  # 保留已有短文字；纯空白/图片页才跳过
+                parts.append((idx, text))
+            continue
+        if ocr is None:
+            raise PdfOcrUnavailableError(
+                "PDF 含扫描页需要 OCR，但 OCR 依赖未安装；请执行 pip install -e \".[ocr]\""
+            )
+        if ocr_pages_used >= max_ocr_pages:
+            raise PdfExtractError(
+                f"PDF 需 OCR 的扫描页超过上限 {max_ocr_pages} 页，已停止处理"
+            )
+
+        png = _render_page_png(data, idx, render_dpi)
+        ocr_pages_used += 1
+        ocr_text = (ocr(png) or "").strip()
+        del png  # 立即释放该页 PNG 引用
+        # 合并原短文字与 OCR 结果；OCR 为空也保留原文字，不让短文字页丢内容
+        merged = "\n".join(
+            t for t in (text, ocr_text) if _meaningful_char_count(t) > 0
+        )
+        if merged:
+            parts.append((idx, merged))
+
+    if not parts:
+        if ocr_enabled:
+            raise PdfExtractError("PDF OCR 后仍无可识别文本")
+        raise PdfExtractError("PDF 无可提取文本；如为扫描件，请在知识库开启图片 OCR")
+
+    return "\n\n".join(f"【第 {idx + 1} 页】\n{text}" for idx, text in parts)

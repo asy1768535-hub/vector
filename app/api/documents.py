@@ -535,28 +535,32 @@ async def import_file(
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid CSV format: {str(e)}")
 
     elif suffix == ".pdf":
-        # PDF：用 pypdf 逐页抽文字层（仅文字版；扫描件无文字层 → 走 OCR，本期不支持）
-        try:
-            import pypdf
+        # PDF：文字层优先；图片/扫描页在库级 ocr_enabled 开启时逐页渲染 + OCR（见 docs/23）。
+        # 文字版行为不变；OCR 默认关，关闭时纯扫描件给出"去开启 OCR"的明确 400。
+        from app.services import ocr as ocr_svc
+        from app.services import pdf_extract
 
-            reader = pypdf.PdfReader(io.BytesIO(content))
-            text = "\n".join((page.extract_text() or "") for page in reader.pages).strip()
-            if not text:
-                raise HTTPException(
-                    status.HTTP_400_BAD_REQUEST,
-                    "PDF 无可提取的文本（多为扫描件/图片 PDF，需 OCR，暂不支持）",
-                )
-            documents_to_ingest.append({
-                "text": text,
-                "title": filename,
-                "external_id": None,
-                "metadata": None,
-                "splitter": "text"
-            })
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid PDF format: {str(e)}")
+        eff_ocr = lib.ocr_enabled if lib.ocr_enabled is not None else settings.ocr_enabled
+        ocr_cb = ocr_svc.ocr_image if (eff_ocr and ocr_svc.is_available()) else None
+        try:
+            text = pdf_extract.extract_pdf_text(
+                content,
+                ocr_enabled=bool(eff_ocr),
+                ocr=ocr_cb,
+                min_text_chars=settings.pdf_ocr_min_text_chars,
+                render_dpi=settings.pdf_ocr_render_dpi,
+                max_ocr_pages=settings.pdf_ocr_max_pages,
+            )
+        except pdf_extract.PdfExtractError as exc:
+            # 含 PdfOcrUnavailableError（需 OCR 但依赖缺）——消息已是用户可读的提示
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+        documents_to_ingest.append({
+            "text": text,
+            "title": filename,
+            "external_id": None,
+            "metadata": None,
+            "splitter": "text",
+        })
 
     elif suffix == ".docx":
         # Word 文档：抽段落 + 表格（表格内容也入库）；库开了 OCR 则连内嵌图片一起识别。

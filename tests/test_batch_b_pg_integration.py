@@ -45,7 +45,10 @@ def test_enqueue_idempotent_one_row():
         slug = "itb_" + uuid.uuid4().hex[:8]
         try:
             async with Session() as s:
-                lib = _lib(slug); s.add(lib); await s.commit(); lib_id = lib.id
+                lib = _lib(slug)
+                s.add(lib)
+                await s.commit()
+                lib_id = lib.id
             doc_id = uuid.uuid4()
             async with Session() as s:
                 lib = await s.get(Library, lib_id)
@@ -70,7 +73,10 @@ def test_reset_stale_marks_max_attempts_failed():
         slug = "itb_" + uuid.uuid4().hex[:8]
         try:
             async with Session() as s:
-                lib = _lib(slug); s.add(lib); await s.commit(); lib_id = lib.id
+                lib = _lib(slug)
+                s.add(lib)
+                await s.commit()
+                lib_id = lib.id
             old = datetime(2000, 1, 1, tzinfo=timezone.utc)   # 远古 claimed_at → 必然 stale
             at_max, below = uuid.uuid4(), uuid.uuid4()
             async with Session() as s:
@@ -103,7 +109,10 @@ def test_cleanup_worker_retries_with_backoff_on_failure():
         slug = "itb_" + uuid.uuid4().hex[:8]
         try:
             async with Session() as s:
-                lib = _lib(slug); s.add(lib); await s.commit(); lib_id = lib.id
+                lib = _lib(slug)
+                s.add(lib)
+                await s.commit()
+                lib_id = lib.id
             # 模拟已 claim 一次的 processing 行（attempt_count=1）
             rid = uuid.uuid4()
             async with Session() as s:
@@ -112,7 +121,6 @@ def test_cleanup_worker_retries_with_backoff_on_failure():
                     document_id=uuid.uuid4(), collection_name=f"c_{slug}",
                     idempotency_key=f"k-{rid}", status="processing", attempt_count=1))
                 await s.commit()
-                row = await s.get(CleanupOutbox, rid)
 
             # Qdrant 删除失败 → _process 应退避重排为 pending、available_at 未来、保留 last_error
             with patch("app.services.qdrant.delete_points_by_document_id",

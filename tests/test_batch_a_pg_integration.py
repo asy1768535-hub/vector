@@ -45,9 +45,11 @@ async def _seed_lib(Session, slug):
         lib = Library(slug=slug, name="IT", qdrant_collection=f"c_{slug}",
                       embedding_model="m", embedding_dim=8, chunk_size=1000, chunk_overlap=120,
                       lifecycle_mode="managed", index_state="ready")
-        s.add(lib); await s.flush()
+        s.add(lib)
+        await s.flush()
         doc = Document(library_id=lib.id, content_hash="h", current_revision=1, status="pending")
-        s.add(doc); await s.commit()
+        s.add(doc)
+        await s.commit()
         return lib.id, doc.id
 
 
@@ -161,7 +163,9 @@ def test_lock_mutex_key_share_vs_for_update():
         try:
             lib_id, _ = await _seed_lib(Session, slug)
             s1, s2, s3 = Session(), Session(), Session()
-            a = await s1.__aenter__(); b = await s2.__aenter__(); c = await s3.__aenter__()
+            a = await s1.__aenter__()
+            b = await s2.__aenter__()
+            c = await s3.__aenter__()
             try:
                 # S1 持 FOR KEY SHARE
                 await a.execute(select(Library.id).where(Library.id == lib_id).with_for_update(read=True, key_share=True))
@@ -196,14 +200,17 @@ def test_retry_jobs_guard_leaves_processing_untouched():
             async with Session() as s:
                 op = RebuildOperation(library_id=lib_id, collection_name="c",
                                       status="running", expected_job_count=1)
-                s.add(op); await s.flush()
+                s.add(op)
+                await s.flush()
                 lib = await s.get(Library, lib_id)
-                lib.index_state = "rebuilding"; lib.active_rebuild_operation_id = op.id
+                lib.index_state = "rebuilding"
+                lib.active_rebuild_operation_id = op.id
                 jid = uuid.uuid4()
                 s.add(EmbeddingJob(id=jid, library_id=lib_id, document_id=doc_id, status="processing",
                                    document_revision=2, rebuild_operation_id=op.id,
                                    worker_id="w-1", claimed_at=claimed, attempt_count=1))
-                await s.commit(); op_id = op.id
+                await s.commit()
+                op_id = op.id
 
             # retry-2 进来：op 仍 running → _retry_jobs 必须 no-op
             async with Session() as s:
@@ -295,12 +302,15 @@ def test_finalize_concurrent_completes_once():
             # 构造 running operation + 1 条 done job（expected=1）
             async with Session() as s:
                 op = RebuildOperation(library_id=lib_id, collection_name="c", status="running", expected_job_count=1)
-                s.add(op); await s.flush()
+                s.add(op)
+                await s.flush()
                 lib = await s.get(Library, lib_id)
-                lib.index_state = "rebuilding"; lib.active_rebuild_operation_id = op.id
+                lib.index_state = "rebuilding"
+                lib.active_rebuild_operation_id = op.id
                 s.add(EmbeddingJob(library_id=lib_id, document_id=doc_id, status="done",
                                    document_revision=2, rebuild_operation_id=op.id))
-                await s.commit(); op_id = op.id
+                await s.commit()
+                op_id = op.id
 
             async def fin():
                 async with Session() as s:

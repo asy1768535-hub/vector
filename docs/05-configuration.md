@@ -71,6 +71,18 @@
 
 库级 chunk_size / chunk_overlap 优先于这两个默认值。
 
+### PDF 扫描页 OCR（仅当库 `ocr_enabled` 开启时生效）
+
+文字版 PDF 不受影响；只有低文字页才渲染 + OCR。需 `pip install -e ".[ocr]"`（含 `pypdfium2`、`Pillow`、RapidOCR）。
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `PDF_OCR_MIN_TEXT_CHARS` | `20` | 单页非空白字符数 < 此值 → 视为图片页走 OCR（否则用文字层） |
+| `PDF_OCR_RENDER_DPI` | `200` | 渲染扫描页的 DPI（建议 150~300，越高越清晰也越慢） |
+| `PDF_OCR_MAX_PAGES` | `50` | 单份 PDF 最多 OCR 多少页（只计真正进 OCR 的页）；超过即 400 快速失败 |
+
+> OCR 在上传请求内**同步**执行，大批扫描页会较慢；靠上面两个上限兜底。详见 [09 文档摄入](./09-document-ingest.md)。
+
 ## 加新配置项
 
 1. 在 `app/config.py` 的 `Settings` 类加字段，pydantic 自动校验类型

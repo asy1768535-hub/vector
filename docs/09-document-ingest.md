@@ -155,6 +155,24 @@ DELETE /libraries/{slug}/documents/{doc_id}
 | 文档变 `failed` | 看 `documents.last_error` 或 `embedding_jobs.last_error` |
 | 检索查不到刚摄入的 | 文档状态是不是 `ready`？Qdrant payload 里 chunk_id 是不是写进去了？ |
 
+## PDF 逐页文字层 / 扫描页 OCR
+
+`/import-file` 上传 `.pdf` 时（`app/services/pdf_extract.py`），**逐页**判断：
+
+1. `pypdf` 抽该页文字层，非空白字符数 **≥ `PDF_OCR_MIN_TEXT_CHARS`** → 直接用文字层。
+2. 低于阈值（图片/扫描页）：
+   - 库级 `ocr_enabled` **关** → 跳过该页（单张图片页不会让整份失败）；若整份都无文字 → `400`，提示去开启 OCR。
+   - **开**但 OCR 依赖缺 → `400`，提示 `pip install -e ".[ocr]"`。
+   - **开**且可用 → 仅对该页用 `pypdfium2` 渲染为 PNG（`PDF_OCR_RENDER_DPI`），交给现有 `ocr.ocr_image()` 识别。
+
+各页按原页序合并，带 `【第 N 页】` 来源标记后作为一份文档（`splitter="text"`）入库。约束：
+
+- 只对低文字页渲染，每次只持有一页 PNG；OCR 在上传请求内**同步**执行。
+- 真正进 OCR 的页数超过 **`PDF_OCR_MAX_PAGES`** 立即 `400`，不再渲染（防 CPU 跑飞）。
+- 不还原图片表格行列结构、不做票据字段结构化、不接云 OCR。
+
+> 文字版 PDF 行为与之前一致，不触发 OCR。参数见 [05 配置](./05-configuration.md)。
+
 ## 批量摄入
 
 当前没有专门的批量接口（spec 里规划过 `/documents:batch`，但首版未实现）。要批量插入：

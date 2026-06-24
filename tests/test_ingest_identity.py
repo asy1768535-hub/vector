@@ -98,9 +98,12 @@ def test_integrityerror_savepoint_returns_winner_without_session_rollback():
         library_id=lib.id, external_id="ext-1", content_hash="h", status="ready",
     )
     none_res = _none_result()
-    win_res = MagicMock(); win_res.scalars.return_value.first.return_value = winner
-    job_res = MagicMock(); job_res.scalars.return_value.first.return_value = None
-    cnt_res = MagicMock(); cnt_res.scalar_one.return_value = 3
+    win_res = MagicMock()
+    win_res.scalars.return_value.first.return_value = winner
+    job_res = MagicMock()
+    job_res.scalars.return_value.first.return_value = None
+    cnt_res = MagicMock()
+    cnt_res.scalar_one.return_value = 3
 
     db = _make_db(
         [none_res, win_res, job_res, cnt_res],

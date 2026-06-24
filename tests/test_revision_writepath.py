@@ -55,7 +55,8 @@ def test_new_generation_carries_rebuild_operation_id():
 def test_ingest_text_new_doc_revision_1():
     """新建文档：current_revision=1，job.document_revision=1。"""
     lib = _lib()
-    none_res = MagicMock(); none_res.scalars.return_value.first.return_value = None
+    none_res = MagicMock()
+    none_res.scalars.return_value.first.return_value = None
     db = MagicMock()
     db.execute = AsyncMock(return_value=none_res)   # _find_active → None
     added = []
@@ -63,7 +64,9 @@ def test_ingest_text_new_doc_revision_1():
     db.add_all = MagicMock()
     db.flush = AsyncMock()
     # begin_nested 作为 async 上下文管理器
-    cm = MagicMock(); cm.__aenter__ = AsyncMock(return_value=None); cm.__aexit__ = AsyncMock(return_value=False)
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=None)
+    cm.__aexit__ = AsyncMock(return_value=False)
     db.begin_nested = MagicMock(return_value=cm)
 
     doc, job, cnt, was = asyncio.run(ing.ingest_text(

@@ -310,8 +310,11 @@ def test_import_file_with_api_key_no_cookie():
     """API Key (Bearer) 能调用上传接口，不依赖浏览器 cookie；返回含 job_id。"""
     mock_user.is_superuser = True
     app.dependency_overrides[get_db] = override_db
-    doc = MagicMock(); doc.id = uuid.uuid4(); doc.status = "pending"
-    job = MagicMock(); job.id = uuid.uuid4()
+    doc = MagicMock()
+    doc.id = uuid.uuid4()
+    doc.status = "pending"
+    job = MagicMock()
+    job.id = uuid.uuid4()
     with patch("app.deps.load_active_library", new_callable=AsyncMock) as ml, \
          patch("app.auth.api_key.APIKeyStrategy.read_token", new_callable=AsyncMock) as rt, \
          patch("app.services.ingest.ingest_text", new_callable=AsyncMock) as mi:
@@ -370,7 +373,8 @@ def test_import_file_external_id_upsert():
 
     app.dependency_overrides[current_active_user] = override_user
     app.dependency_overrides[get_db] = _ov_db
-    job = MagicMock(); job.id = uuid.uuid4()
+    job = MagicMock()
+    job.id = uuid.uuid4()
     try:
         with patch("app.deps.load_active_library", new_callable=AsyncMock) as ml, \
              patch("app.services.ingest.reingest_document", new_callable=AsyncMock) as rr, \
@@ -501,7 +505,9 @@ def test_import_docx_table_aware_passes_segment_chunks():
     app.dependency_overrides[current_active_user] = override_user
     app.dependency_overrides[get_db] = override_db
     mock_library.docx_table_aware = True
-    doc = MagicMock(); doc.id = uuid.uuid4(); doc.status = "pending"
+    doc = MagicMock()
+    doc.id = uuid.uuid4()
+    doc.status = "pending"
     segs = [{"kind": "table", "heading": "技术选型", "caption": "技术选型",
              "header": "类别 | 方案", "rows": ["类别 | 方案", "数据库 | MySQL"]}]
     try:
@@ -537,3 +543,88 @@ def test_import_xls_rejected(client):
     )
     assert resp.status_code == status.HTTP_400_BAD_REQUEST
     assert "xlsx" in resp.json()["detail"]
+
+
+# ── docs/23：PDF 文字层 / 扫描页 OCR 接入上传 ─────────────────────────────────
+from app.services.pdf_extract import PdfExtractError, PdfOcrUnavailableError  # noqa: E402
+
+
+@patch("app.services.ingest.ingest_text", new_callable=AsyncMock)
+@patch("app.services.pdf_extract.extract_pdf_text")
+def test_import_text_pdf_ocr_off_ingests(mock_extract, mock_ingest, client):
+    """OCR 关 + 文字 PDF：提取出的带页码正文照常入库，splitter=text，ocr_enabled=False。"""
+    mock_extract.return_value = "【第 1 页】\n文字版PDF内容"
+    doc = MagicMock()
+    doc.id = uuid.uuid4()
+    doc.status = "pending"
+    mock_ingest.return_value = (doc, MagicMock(id=uuid.uuid4()), 1, False)
+
+    resp = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("doc.pdf", b"%PDF-1.4 fake", "application/pdf")},
+    )
+    assert resp.status_code == status.HTTP_201_CREATED
+    kw = mock_ingest.call_args[1]
+    assert kw["text"] == "【第 1 页】\n文字版PDF内容"
+    assert kw["splitter"] == "text"
+    assert mock_extract.call_args.kwargs["ocr_enabled"] is False   # 库未开 + 全局默认关
+
+
+@patch("app.services.pdf_extract.extract_pdf_text")
+def test_import_scanned_pdf_ocr_off_returns_enable_hint(mock_extract, client):
+    """OCR 关 + 扫描 PDF：服务抛 PdfExtractError → 400，提示去开启 OCR。"""
+    mock_extract.side_effect = PdfExtractError(
+        "PDF 无可提取文本；如为扫描件，请在知识库开启图片 OCR"
+    )
+    resp = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("scan.pdf", b"%PDF-1.4 fake", "application/pdf")},
+    )
+    assert resp.status_code == status.HTTP_400_BAD_REQUEST
+    assert "OCR" in resp.json()["detail"]
+
+
+@patch("app.services.ingest.ingest_text", new_callable=AsyncMock)
+@patch("app.services.pdf_extract.extract_pdf_text")
+def test_import_pdf_ocr_on_passes_flag_and_params(mock_extract, mock_ingest, client, monkeypatch):
+    """库开 ocr_enabled：把库级开关、ocr_image 回调与三个 pdf_ocr_* 参数传给服务。"""
+    monkeypatch.setattr(mock_library, "ocr_enabled", True)
+    sentinel = object()
+    monkeypatch.setattr("app.services.ocr.is_available", lambda: True)
+    monkeypatch.setattr("app.services.ocr.ocr_image", sentinel)
+    monkeypatch.setattr(settings, "pdf_ocr_min_text_chars", 20)
+    monkeypatch.setattr(settings, "pdf_ocr_render_dpi", 200)
+    monkeypatch.setattr(settings, "pdf_ocr_max_pages", 50)
+    mock_extract.return_value = "【第 1 页】\nx"
+    doc = MagicMock()
+    doc.id = uuid.uuid4()
+    doc.status = "pending"
+    mock_ingest.return_value = (doc, MagicMock(id=uuid.uuid4()), 1, False)
+
+    resp = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("scan.pdf", b"%PDF-1.4 fake", "application/pdf")},
+    )
+    assert resp.status_code == status.HTTP_201_CREATED
+    kw = mock_extract.call_args.kwargs
+    assert kw["ocr_enabled"] is True
+    assert kw["ocr"] is sentinel
+    assert kw["min_text_chars"] == 20
+    assert kw["render_dpi"] == 200
+    assert kw["max_ocr_pages"] == 50
+
+
+@patch("app.services.pdf_extract.extract_pdf_text")
+def test_import_pdf_ocr_unavailable_returns_install_hint(mock_extract, client, monkeypatch):
+    """OCR 开但引擎缺：服务抛 PdfOcrUnavailableError → 400，提示安装 .[ocr]。"""
+    monkeypatch.setattr(mock_library, "ocr_enabled", True)
+    monkeypatch.setattr("app.services.ocr.is_available", lambda: True)
+    mock_extract.side_effect = PdfOcrUnavailableError(
+        'PDF 含扫描页需要 OCR，但 OCR 依赖未安装；请执行 pip install -e ".[ocr]"'
+    )
+    resp = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("scan.pdf", b"%PDF-1.4 fake", "application/pdf")},
+    )
+    assert resp.status_code == status.HTTP_400_BAD_REQUEST
+    assert ".[ocr]" in resp.json()["detail"]
