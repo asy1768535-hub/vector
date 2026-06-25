@@ -119,11 +119,15 @@ async def rerank(
     model: str | None = None,
     base_url: str | None = None,
     api_key: str | None = None,
+    provider: str | None = None,
 ) -> list[tuple[int, float]]:
     """对 documents 按与 query 的相关性重排。
 
     返回 [(原始下标, relevance_score), ...]，按分降序，长度 <= top_n。
     标准 /rerank 响应：{"results": [{"index": i, "relevance_score": s}, ...]}。
+
+    provider 显式传入时覆盖全局 settings.rerank_provider（调用方可强制 "standard"，
+    不受 .env 的 RERANK_PROVIDER 影响）；为 None 时回退 settings。
     """
     if not documents:
         return []
@@ -131,7 +135,7 @@ async def rerank(
     # key 优先级：显式传入 > RERANK_API_KEY > 复用 EMBEDDING_API_KEY（同服务商同 key 省事）
     key = api_key if api_key is not None else (settings.rerank_api_key or settings.embedding_api_key)
     mdl = model or settings.rerank_model
-    if (settings.rerank_provider or "standard").lower() == "dashscope":
+    if (provider or settings.rerank_provider or "standard").lower() == "dashscope":
         # DashScope 原生 text-rerank：input/parameters 结构，结果在 output.results
         payload = {
             "model": mdl,

@@ -1,0 +1,75 @@
+name: CI
+
+# 自动质量检查：测试 / 代码规范 / 数据库迁移 / 发布安全。
+# 不下载任何模型，不调用真实 Embedding / Rerank / OCR / Qdrant / 云服务——
+# 单测全程 mock；仅 pg-integration job 连临时 PostgreSQL service（CI 专用账号/库）。
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint-and-test:
+    name: Lint + unit tests + release safety
+    runs-on: ubuntu-latest
+    env:
+      # 明确的测试值，绝不指向真实服务/凭据（单测已 mock，不会真正使用）
+      APP_DEBUG: "true"
+      JWT_SECRET: ci-not-a-real-secret-rotate-before-use-0000
+      EMBEDDING_API_KEY: ""
+      RERANK_API_KEY: ""
+      QDRANT_API_KEY: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install (with dev + ocr extras)
+        run: pip install -e ".[dev,ocr]"
+      - name: Ruff
+        run: ruff check app tests scripts
+      - name: Pytest (mocked; PG integration auto-skips without DSN)
+        run: pytest -q
+      - name: Release safety check
+        run: python scripts/check_release_safety.py
+
+  pg-integration:
+    name: PostgreSQL migration + integration tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          # CI 专用账号 / 密码 / 库（与开发机 .env 无关，不读取真实数据库配置）
+          POSTGRES_USER: vkci
+          POSTGRES_PASSWORD: vkci_ci_pass
+          POSTGRES_DB: vector_kb_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vkci -d vector_kb_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      # settings.db_* 由这些 env 提供（env.py 据此为 Alembic 构造 sync DSN）
+      DB_HOST: 127.0.0.1
+      DB_PORT: "5432"
+      DB_USER: vkci
+      DB_PASSWORD: vkci_ci_pass
+      DB_NAME: vector_kb_ci
+      # PG 集成测试 / 迁移测试的显式测试 DSN（仅指向临时 CI 库）
+      VECTOR_KB_PG_TEST_DSN: postgresql+asyncpg://vkci:vkci_ci_pass@127.0.0.1:5432/vector_kb_ci
+      JWT_SECRET: ci-not-a-real-secret-rotate-before-use-0000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install (with dev + ocr extras)
+        run: pip install -e ".[dev,ocr]"
+      # 现有 PG 测试已覆盖「空库 → Alembic upgrade 到 head」与唯一索引/outbox 结构，
+      # 不重复另建迁移测试；只运行这两份集成测试文件（不跑依赖真实 Qdrant/Embedding 的 E2E 脚本）。
+      - name: PG integration + Alembic migration tests
+        run: pytest -q tests/test_batch_a_pg_integration.py tests/test_batch_b_pg_integration.py

@@ -56,7 +56,8 @@ async def _new_lib(name_suffix):
             chunk_size=1000, chunk_overlap=120, vector_distance="cosine",
             lifecycle_mode="managed", index_state="ready",
         )
-        s.add(lib); await s.commit()
+        s.add(lib)
+        await s.commit()
         lib_id = lib.id
     await qdrant.ensure_collection(coll, dim=settings.embedding_dim, distance="cosine")
     return lib_id
@@ -94,7 +95,8 @@ async def main():
         lib = await s.get(Library, lib_id)
         doc, _, _, _ = await ing.ingest_text(db=s, library=lib, text=T1, title="d", external_id="E1",
                                              metadata=None, splitter="text", created_by=None)
-        await s.commit(); doc_id = doc.id
+        await s.commit()
+        doc_id = doc.id
     await _process_pending(lib_id)
     check("R-rev 新建 rev1 可见", str(doc_id) in await _visible_ids(lib_id, T1))
 
@@ -137,7 +139,8 @@ async def main():
         lib = await s.get(Library, lib_r)
         doc, _, _, _ = await ing.ingest_text(db=s, library=lib, text=T1, title="r", external_id="R1",
                                              metadata=None, splitter="text", created_by=None)
-        await s.commit(); rdoc = doc.id
+        await s.commit()
+        rdoc = doc.id
     await _process_pending(lib_r)
     # 模拟崩溃：只跑 prepare（建 preparing operation + bump revision），不 qdrant/activate
     async with async_session_factory() as s:
@@ -164,7 +167,8 @@ async def main():
                                             metadata=None, splitter="text", created_by=None)
         dB, _, _, _ = await ing.ingest_text(db=s, library=lib, text=T2, title="fb", external_id="FB",
                                             metadata=None, splitter="text", created_by=None)
-        await s.commit(); idA, idB = dA.id, dB.id
+        await s.commit()
+        idA, idB = dA.id, dB.id
     await _process_pending(lib_f)
     # rebuild → 2 个 job；先把 B 置 failed（只剩 A pending），真实处理 A（真嵌入→done+points），
     # 再 finalize 使 operation/库 failed。这样 A 是「真正 done（有向量）」。
@@ -181,7 +185,7 @@ async def main():
     async with async_session_factory() as s:
         jobA = (await s.execute(select(EmbeddingJob).where(
             EmbeddingJob.rebuild_operation_id == op_id, EmbeddingJob.document_id == idA))).scalar_one()
-        jobA_id, jobA_attempts, jobA_status = jobA.id, jobA.attempt_count, jobA.status
+        jobA_id, jobA_attempts = jobA.id, jobA.attempt_count
     check("R-retry 失败后库 failed", (await _get(Library, lib_f)).index_state == "failed")
     # 重试同一 operation：复用 op、不新建、不加 revision
     async with async_session_factory() as s:

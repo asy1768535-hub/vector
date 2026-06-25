@@ -53,7 +53,9 @@ async def _new_lib(suffix, lifecycle="managed"):
                       embedding_base_url=settings.embedding_base_url,
                       chunk_size=1000, chunk_overlap=120, vector_distance="cosine",
                       lifecycle_mode=lifecycle, index_state="ready")
-        s.add(lib); await s.commit(); lib_id = lib.id
+        s.add(lib)
+        await s.commit()
+        lib_id = lib.id
     await qdrant.ensure_collection(coll, dim=settings.embedding_dim, distance="cosine")
     return lib_id
 
@@ -63,7 +65,8 @@ async def _ingest(lib_id, text, ext):
         lib = await s.get(Library, lib_id)
         doc, _, _, _ = await ing.ingest_text(db=s, library=lib, text=text, title=ext, external_id=ext,
                                              metadata=None, splitter="text", created_by=None)
-        await s.commit(); return doc.id
+        await s.commit()
+        return doc.id
 
 
 async def _process_pending(lib_id):
