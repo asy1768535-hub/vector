@@ -28,6 +28,12 @@ admin-ui/dist/
 admin-ui/.vite/
 cpwsImportData/
 
+# 备份产物（PG dump / Qdrant 快照等）——绝不入库（见 docs/27）
+/backups/
+*.dump
+*.backup
+*.snapshot
+
 # Claude Code 本机配置（每台机器自有，不入库）
 .claude/settings.local.json
 

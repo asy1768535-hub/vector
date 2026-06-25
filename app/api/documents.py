@@ -42,9 +42,10 @@ from app.services import retrieval as retrieval_svc
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/libraries/{slug}", tags=["documents"])
 
-# #13：导入文件后缀白名单（小写）。不在表内 → 415；.xls 在表内但会给出「另存为 xlsx」的专门提示。
+# #13：导入文件后缀白名单（小写）。不在表内 → 415；旧二进制格式 .xls/.doc 在表内，
+# 但会给出「另存为 .xlsx / .docx」的专门 400 提示（无纯 Python 解析库，不引系统依赖）。
 _SUPPORTED_IMPORT_SUFFIXES = {
-    ".json", ".csv", ".pdf", ".docx", ".xls", ".xlsx", ".txt", ".md", ".markdown",
+    ".json", ".csv", ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".txt", ".md", ".markdown",
 }
 
 _UPLOAD_READ_CHUNK = 1024 * 1024  # 1MiB 分块
@@ -645,6 +646,14 @@ async def import_file(
             raise
         except Exception as e:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid DOCX format: {str(e)}")
+
+    elif suffix == ".doc":
+        # 老式 .doc 是 OLE2 二进制（python-docx 只认 .docx），无纯 Python 解析库；
+        # 不引入系统依赖（LibreOffice/Word），明确提示另存为 .docx（与 .xls 一致）。
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "暂不支持 .doc 旧格式，请在 Word 中『另存为』.docx 后再上传。",
+        )
 
     elif suffix == ".xls":
         # 老式 .xls 需要 xlrd（未列入依赖），短期不支持；明确提示另存为 .xlsx。

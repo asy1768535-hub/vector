@@ -546,6 +546,16 @@ def test_import_xls_rejected(client):
     assert "xlsx" in resp.json()["detail"]
 
 
+def test_import_doc_rejected(client):
+    # 老式 .doc：在白名单内但优雅拒绝，明确提示另存为 .docx（不引系统依赖）
+    resp = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("旧合同.doc", b"\xd0\xcf\x11\xe0fake-doc", "application/msword")},
+    )
+    assert resp.status_code == status.HTTP_400_BAD_REQUEST
+    assert "docx" in resp.json()["detail"]
+
+
 # ── docs/23：PDF 文字层 / 扫描页 OCR 接入上传 ─────────────────────────────────
 from app.services.pdf_extract import PdfExtractError, PdfOcrUnavailableError  # noqa: E402
 
