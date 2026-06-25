@@ -136,6 +136,9 @@ export const jobStats = () => request('/admin/jobs/stats');
 export const resetFailedJobs = (libraryId = null) =>
     request('/admin/jobs/reset-failed' + (libraryId ? `?library_id=${libraryId}` : ''), { method: 'POST' });
 
+// ── Admin: Operations status（运行状态监控，docs/26） ─────────
+export const operationsStatus = () => request('/admin/operations/status');
+
 // ── Admin: Audit log ─────────────────────────────────────────
 export const listAudit = (params = {}) => {
     const qs = new URLSearchParams(params).toString();

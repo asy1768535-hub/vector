@@ -80,6 +80,10 @@ export default {
                         <el-icon><iconify-icon icon="mdi:cog-sync-outline"></iconify-icon></el-icon>
                         <template #title>任务监控</template>
                     </el-menu-item>
+                    <el-menu-item index="/operations">
+                        <el-icon><iconify-icon icon="mdi:heart-pulse"></iconify-icon></el-icon>
+                        <template #title>运行状态</template>
+                    </el-menu-item>
                     <el-menu-item index="/audit">
                         <el-icon><iconify-icon icon="mdi:history"></iconify-icon></el-icon>
                         <template #title>审计日志</template>

@@ -299,10 +299,29 @@ async def run(watch: bool) -> None:
     worker_id = _worker_id()
     log.info("starting worker id=%s watch=%s batch_docs=%s", worker_id, watch, settings.embed_worker_batch_docs)
     # 启动自检：embedding / Qdrant 用不了时立刻报（非 fatal）。
-    from app.services import selfcheck
+    from app.services import heartbeat, selfcheck
     degraded = not await selfcheck.run_startup_check("worker")
     if degraded:
         log.error("[worker] 自检失败 → 进入 degraded：暂停消费，避免把 pending 任务刷成 failed。")
+    # 运行状态心跳：独立后台任务，与主循环解耦——长任务 / degraded sleep 期间照常打卡（docs/26）。
+    hb_stop = asyncio.Event()
+    hb_instance = heartbeat.make_instance_id()
+    hb_task = asyncio.create_task(heartbeat.heartbeat_loop(
+        "embedding_worker", hb_instance,
+        hostname=heartbeat.HOSTNAME, pid=heartbeat.PID, started_at=heartbeat.STARTED_AT,
+        stop_event=hb_stop, metadata_provider=lambda: {"watch": watch, "degraded": degraded},
+    ))
+
+    async def _stop_heartbeat() -> None:
+        hb_stop.set()
+        await heartbeat.beat("embedding_worker", hb_instance, hostname=heartbeat.HOSTNAME,
+                             pid=heartbeat.PID, started_at=heartbeat.STARTED_AT, status="stopping")
+        hb_task.cancel()
+        try:
+            await hb_task
+        except asyncio.CancelledError:
+            pass
+
     last_reconcile = 0.0
     while True:
         # 周期 reconcile：即使持续有任务也按间隔收口 running operation（不只在空闲时）。
@@ -321,6 +340,7 @@ async def run(watch: bool) -> None:
             if not watch:
                 # 单次模式下依赖不可用，直接退出（cron 会下次再来）
                 log.error("[worker] 依赖不可用且非 watch 模式，退出。")
+                await _stop_heartbeat()
                 return
             ok, msg = await selfcheck.check_consumable()
             if ok:
@@ -348,6 +368,7 @@ async def run(watch: bool) -> None:
                 except Exception:  # noqa: BLE001
                     log.exception("final reconcile failed")
                 log.info("no pending jobs; exiting")
+                await _stop_heartbeat()
                 return
             await asyncio.sleep(settings.embed_worker_poll_seconds)
             continue

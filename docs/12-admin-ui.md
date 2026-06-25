@@ -50,6 +50,7 @@ admin-ui/
 | `#/libraries` | Libraries | superuser |
 | `#/permissions` | Permissions | superuser |
 | `#/jobs` | Jobs | superuser |
+| `#/operations` | RuntimeStatus | superuser |
 | `#/audit` | Audit | superuser |
 
 `app.js` 里 `router.beforeEach` 守卫：
@@ -173,6 +174,14 @@ cookie 过期后，下次 fetch 401 → 自动跳登录 → 登录后跳回原�
 - 表格：embedding_jobs 列表
 - 过滤：status（pending / processing / done / failed）
 - 重试按钮：失败 / 卡死的 job
+
+### RuntimeStatus（运行状态，docs/26 / 批次 C2）
+
+- 数据源：`GET /admin/operations/status`（`api.operationsStatus()`），右上角「刷新」手动拉取，无自动轮询/WebSocket
+- **服务状态表**：API / Embedding Worker / Cleanup Worker 三类恒定一行，标签 在线(success) / 降级(warning) / 离线(info)；列「在线/已知」= `online_instances/known_instances`，「最后心跳」相对时间（自报降级附注「（降级）」），「主机/PID」
+- **Embedding 任务 / Cleanup Outbox** 两张统计卡（含死信 = failed）
+- **重建**卡：进行中 operation 进度条 `done/expected (pct%)` + 失败库数
+- 与 `/health`（此刻能否连通）互补：此页看「某进程是否在线 + 上次心跳」
 
 ### Audit
 

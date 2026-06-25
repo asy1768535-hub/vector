@@ -19,6 +19,7 @@ import Search from './views/Search.js';
 import Import from './views/Import.js';
 import ApiKeys from './views/ApiKeys.js';
 import Jobs from './views/Jobs.js';
+import RuntimeStatus from './views/RuntimeStatus.js';
 import Audit from './views/Audit.js';
 
 const routes = [
@@ -37,6 +38,7 @@ const routes = [
             { path: 'import', component: Import, meta: { title: '导入数据' } },
             { path: 'api-keys', component: ApiKeys, meta: { title: 'API Key' } },
             { path: 'jobs', component: Jobs, meta: { title: '任务监控', admin: true } },
+            { path: 'operations', component: RuntimeStatus, meta: { title: '运行状态', admin: true } },
             { path: 'audit', component: Audit, meta: { title: '审计日志', admin: true } },
         ],
     },

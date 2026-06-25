@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -19,6 +21,7 @@ from starlette.types import Scope
 
 from app.api.admin_audit import router as admin_audit_router
 from app.api.admin_jobs import router as admin_jobs_router
+from app.api.admin_operations import router as admin_operations_router
 from app.api.admin_libraries import router as admin_libraries_router
 from app.api.admin_permissions import router as admin_permissions_router
 from app.api.admin_users import router as admin_users_router
@@ -83,9 +86,25 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     # 启动自检：embedding 服务 / Qdrant 配置错配时大声报（非 fatal，不阻断启动）
     from app.services import selfcheck
     await selfcheck.run_startup_check("API")
+    # 运行状态心跳：独立后台任务（docs/26）；写失败只记日志，不影响 API 请求处理
+    from app.services import heartbeat
+    hb_stop = asyncio.Event()
+    hb_instance = heartbeat.make_instance_id()
+    hb_task = asyncio.create_task(heartbeat.heartbeat_loop(
+        "api", hb_instance,
+        hostname=heartbeat.HOSTNAME, pid=heartbeat.PID, started_at=heartbeat.STARTED_AT,
+        stop_event=hb_stop, also_prune=True,
+    ))
     log.info("API started on %s:%s", settings.api_host, settings.api_port)
     yield
     # ── shutdown ─────────────────────────────────────────────
+    # 停心跳：置位 → 写一次 stopping → 取消任务（失败均忽略，不阻断关闭）
+    hb_stop.set()
+    await heartbeat.beat("api", hb_instance, hostname=heartbeat.HOSTNAME, pid=heartbeat.PID,
+                         started_at=heartbeat.STARTED_AT, status="stopping")
+    hb_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await hb_task
     # 优雅关闭跨库补全的 asyncpg 连接池
     from app.services import source_enrichment
     await source_enrichment.close_all_pools()
@@ -111,6 +130,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_permissions_router)
     app.include_router(admin_audit_router)
     app.include_router(admin_jobs_router)
+    app.include_router(admin_operations_router)
 
     # 浏览器/插件会自动探测热重载 WebSocket，静默关闭避免刷屏日志
     @app.websocket("/ws/live")

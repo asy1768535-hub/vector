@@ -135,6 +135,26 @@ async def _process(db: AsyncSession, row: CleanupOutbox) -> None:
 async def run(watch: bool) -> None:
     worker_id = _worker_id()
     log.info("starting cleanup worker id=%s watch=%s", worker_id, watch)
+    # 运行状态心跳：独立后台任务，与主循环解耦——长任务 / 空闲 poll 期间照常打卡（docs/26）。
+    from app.services import heartbeat
+    hb_stop = asyncio.Event()
+    hb_instance = heartbeat.make_instance_id()
+    hb_task = asyncio.create_task(heartbeat.heartbeat_loop(
+        "cleanup_worker", hb_instance,
+        hostname=heartbeat.HOSTNAME, pid=heartbeat.PID, started_at=heartbeat.STARTED_AT,
+        stop_event=hb_stop, metadata_provider=lambda: {"watch": watch},
+    ))
+
+    async def _stop_heartbeat() -> None:
+        hb_stop.set()
+        await heartbeat.beat("cleanup_worker", hb_instance, hostname=heartbeat.HOSTNAME,
+                             pid=heartbeat.PID, started_at=heartbeat.STARTED_AT, status="stopping")
+        hb_task.cancel()
+        try:
+            await hb_task
+        except asyncio.CancelledError:
+            pass
+
     while True:
         async with async_session_factory() as s:
             reset = await _reset_stale(s)
@@ -144,6 +164,7 @@ async def run(watch: bool) -> None:
         if not rows:
             if not watch:
                 log.info("no pending cleanup; exiting")
+                await _stop_heartbeat()
                 return
             await asyncio.sleep(settings.cleanup_worker_poll_seconds)
             continue

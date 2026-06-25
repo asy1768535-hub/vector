@@ -124,6 +124,11 @@ class Settings(BaseSettings):
     cleanup_backoff_max_seconds: float = 900.0  # 退避上限（15min）
     cleanup_stale_seconds: int = 600            # processing 超时重置为 pending
 
+    # ---- Heartbeat / 运行状态监控（docs/26）----
+    heartbeat_interval_seconds: int = 15     # 各进程心跳写入间隔
+    heartbeat_offline_seconds: int = 60      # 超过该秒数未更新即判离线
+    heartbeat_prune_seconds: int = 3600      # 超过该秒数未更新即清理过期心跳行
+
     # ---- Chunking defaults ----
     default_chunk_size: int = 1000
     default_chunk_overlap: int = 120

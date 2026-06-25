@@ -182,9 +182,21 @@ POST /admin/jobs/{job_id}/retry
 | 加快失败放弃 | `EMBED_WORKER_MAX_ATTEMPTS` ↓ |
 | 多机部署吞吐 | 起 N 个 worker 进程（SKIP LOCKED 自动分布） |
 
+## 运行状态心跳（旁路，docs/26 / 批次 C2）
+
+两个 Worker（与 API 一样）在 `run()` 启动时各起一个**独立的 `heartbeat_loop` asyncio 任务**
+（`app/services/heartbeat.py`），每 ~15s 往 `service_heartbeats` upsert 一行，**与主循环迭代解耦**：
+
+- 处理一个 >60s 的长任务、或 degraded `asyncio.sleep` 等待期间，主循环阻塞，但心跳任务并发照常打卡 → 该实例**保持在线**（degraded 时 `metadata.degraded=true`，页面显示「在线但降级」）。
+- 心跳走**独立短事务 / 独立 AsyncSession**，写失败只记 WARNING、绝不抛、绝不污染或回滚业务事务，也绝不让主循环退出——后果仅是页面短暂显示「离线」，恢复后自动回到「在线」。
+- 退出前（无 pending、单次模式 return）置位 stop_event → 写一次 `status='stopping'` → 取消任务；`stopping` 实例不计入在线。
+
+聚合在超管接口 `GET /admin/operations/status` 与后台「运行状态」页（`/console/#/operations`）查看。
+
 ## 监控
 
 - **「任务监控」页**：`/console/#/jobs`，按状态过滤
+- **「运行状态」页**：`/console/#/operations`，三类进程 online/degraded/offline + 任务/Outbox/重建聚合（docs/26）
 - **直接 SQL**：
 
 ```sql

@@ -207,3 +207,60 @@ class EmbeddingJobStats(BaseModel):
     done: int
     failed: int
     total: int
+
+
+# ── Operations status（运行状态监控，docs/26 / 批次 C2） ──────────────────
+class ServiceInstanceLatest(BaseModel):
+    """某 service_type 最新一个非 stopping 实例（供页面展示 host/pid/最后心跳）。"""
+    instance_id: str
+    hostname: str
+    pid: int
+    last_seen_at: datetime
+    seconds_since_last_seen: int
+    heartbeat_metadata: Optional[dict[str, Any]] = None
+
+
+class ServiceStatus(BaseModel):
+    """单类进程（api / embedding_worker / cleanup_worker）的聚合在线状态。"""
+    service_type: str
+    status: str                                  # online | degraded | offline
+    online_instances: int
+    known_instances: int
+    latest: Optional[ServiceInstanceLatest] = None
+
+
+class CleanupOutboxStats(BaseModel):
+    """Cleanup Outbox 按状态聚合；dead_letter = 已达 max_attempts 的 failed。"""
+    pending: int
+    processing: int
+    done: int
+    failed: int
+    dead_letter: int
+    total: int
+
+
+class LibraryIndexStats(BaseModel):
+    """按 index_state 计活动库数（未删库）。"""
+    rebuilding: int
+    failed: int
+
+
+class RebuildOperationStatus(BaseModel):
+    """活动重建 operation 的进度摘要（last_error 截断、不含堆栈）。"""
+    library_slug: str
+    status: str                                  # preparing | running
+    expected_job_count: int
+    done_job_count: int
+    progress_pct: float
+    last_error: Optional[str] = None
+
+
+class OperationsStatus(BaseModel):
+    """GET /admin/operations/status 响应：三类进程在线 + 任务/Outbox/重建聚合。"""
+    now: datetime
+    offline_threshold_seconds: int
+    services: list[ServiceStatus]
+    embedding_jobs: EmbeddingJobStats
+    cleanup_outbox: CleanupOutboxStats
+    libraries: LibraryIndexStats
+    rebuild_operations: list[RebuildOperationStatus]
