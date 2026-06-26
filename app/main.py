@@ -20,12 +20,14 @@ from fastapi.staticfiles import StaticFiles
 from starlette.types import Scope
 
 from app.api.admin_audit import router as admin_audit_router
+from app.api.admin_chat_logs import router as admin_chat_logs_router
 from app.api.admin_jobs import router as admin_jobs_router
 from app.api.admin_operations import router as admin_operations_router
 from app.api.admin_libraries import router as admin_libraries_router
 from app.api.admin_permissions import router as admin_permissions_router
 from app.api.admin_users import router as admin_users_router
 from app.api.api_keys import router as api_keys_router
+from app.api.chat import router as chat_router
 from app.api.documents import router as documents_router
 from app.api.health import router as health_router
 from app.api.me import router as me_router
@@ -125,10 +127,12 @@ def create_app() -> FastAPI:
     app.include_router(me_router)
     app.include_router(documents_router)
     app.include_router(retrieval_router)
+    app.include_router(chat_router)
     app.include_router(admin_users_router)
     app.include_router(admin_libraries_router)
     app.include_router(admin_permissions_router)
     app.include_router(admin_audit_router)
+    app.include_router(admin_chat_logs_router)
     app.include_router(admin_jobs_router)
     app.include_router(admin_operations_router)
 

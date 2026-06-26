@@ -70,6 +70,10 @@ class LibraryCreate(BaseModel):
     docx_table_aware: Optional[bool] = Field(
         default=None, description="Per-library docx table-aware chunking; null = inherit global DOCX_TABLE_AWARE.",
     )
+    retrieval_mode: Optional[str] = Field(
+        default=None, pattern="^(dense|hybrid)$",
+        description="检索模式：dense=纯向量(默认)；hybrid=向量+pg_trgm 关键词 RRF 融合。不传按 dense。",
+    )
     # 默认按「约定」自动生成 PGSQL 全文源（表=slug、列=content、外键=text_id、bigint、库=.env）。
     # 仅当显式传入 source_config 时才用自定义结构（高级/脚本用法）。
     source_config: Optional[dict[str, Any]] = Field(
@@ -116,6 +120,7 @@ class LibraryUpdate(BaseModel):
     rerank_enabled: Optional[bool] = Field(default=None)
     ocr_enabled: Optional[bool] = Field(default=None)
     docx_table_aware: Optional[bool] = Field(default=None)
+    retrieval_mode: Optional[str] = Field(default=None, pattern="^(dense|hybrid)$")
     # source_config 哨兵：不传=不改；传 {} =清空；传非空 dict=自定义。
     source_config: Optional[dict[str, Any]] = Field(default=None)
 
@@ -139,6 +144,7 @@ class LibraryRead(BaseModel):
     rerank_enabled: Optional[bool] = None
     ocr_enabled: Optional[bool] = None
     docx_table_aware: Optional[bool] = None
+    retrieval_mode: str = "dense"
     qdrant_collection: str
     source_config: Optional[dict[str, Any]] = None
     lifecycle_mode: str = "managed"                 # #6 managed | external
@@ -146,6 +152,51 @@ class LibraryRead(BaseModel):
     active_rebuild_operation_id: Optional[uuid.UUID] = None
     created_at: datetime
     deleted_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+# ── Library FAQ（常用问题）────────────────────────────────────────────────
+def _strip_required_question(v: str) -> str:
+    v = (v or "").strip()
+    if not v:
+        raise ValueError("question 去掉首尾空格后不能为空")
+    return v
+
+
+class LibraryFAQCreate(BaseModel):
+    question: str = Field(..., max_length=500)
+    sort_order: int = 0
+    is_active: bool = True
+
+    @field_validator("question")
+    @classmethod
+    def _q(cls, v: str) -> str:
+        return _strip_required_question(v)
+
+
+class LibraryFAQUpdate(BaseModel):
+    # 不传 = 不改；传 question 必须 strip 后非空（传空白串 → 422）
+    question: Optional[str] = Field(default=None, max_length=500)
+    sort_order: Optional[int] = None
+    is_active: Optional[bool] = None
+
+    @field_validator("question")
+    @classmethod
+    def _q(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        return _strip_required_question(v)
+
+
+class LibraryFAQRead(BaseModel):
+    id: uuid.UUID
+    library_id: uuid.UUID
+    question: str
+    sort_order: int
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
 
     model_config = {"from_attributes": True}
 

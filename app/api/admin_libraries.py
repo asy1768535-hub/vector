@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
@@ -9,13 +10,23 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.backend import current_superuser
+from app.auth.backend import current_active_user, current_superuser
+from app.casbin.enforcer import has_permission
 from app.config import settings
 from app.db import get_db
+from app.deps import require_lib
 from app.models.library import Library
+from app.models.library_faq import LibraryFAQQuestion
 from app.models.user import User
-from app.schemas.admin import LibraryCreate, LibraryRead, LibraryUpdate
-from app.services import audit_log, qdrant, source_enrichment
+from app.schemas.admin import (
+    LibraryCreate,
+    LibraryFAQCreate,
+    LibraryFAQRead,
+    LibraryFAQUpdate,
+    LibraryRead,
+    LibraryUpdate,
+)
+from app.services import audit_log, library_faq, qdrant, source_enrichment
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin/libraries", tags=["admin"])
@@ -64,6 +75,7 @@ async def create_library(
         rerank_enabled=body.rerank_enabled,
         ocr_enabled=body.ocr_enabled,
         docx_table_aware=body.docx_table_aware,
+        retrieval_mode=body.retrieval_mode or "dense",
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
         qdrant_collection="",  # 写完 ID 后再 set
@@ -158,6 +170,8 @@ async def update_library(
     editable_fields = (
         "name", "description", "chunk_size", "chunk_overlap",
         "embedding_model", "embedding_dim", "vector_distance", "embedding_base_url",
+        # retrieval_mode 是实值字段（dense/hybrid，永不为 None）：None=没传=不改，非 None=改。
+        "retrieval_mode",
     )
     for field in editable_fields:
         if not hasattr(body, field):
@@ -322,4 +336,74 @@ async def delete_library(
     await db.commit()
     if is_external:
         log.info("library.delete: slug=%s 是 external，跳过 Qdrant collection 删除（%s）", slug, lib.qdrant_collection)
+    return None
+
+
+# ── 常用问题（FAQ）：read 可看 active；admin/superuser 可管理 ───────────────
+def _can_manage_or_see_inactive(user: User, slug: str) -> bool:
+    """是否可管理 FAQ / 查看 inactive：superuser 直通，否则需库级 admin 权限。"""
+    return user.is_superuser or has_permission(str(user.id), slug, "admin")
+
+
+@router.get("/{slug}/faqs", response_model=list[LibraryFAQRead])
+async def list_library_faqs(
+    slug: str,
+    include_inactive: bool = Query(default=False),
+    user: User = Depends(current_active_user),
+    lib: Library = Depends(require_lib("read")),     # read 权限即可读；库不存在/无权 → 403
+    db: AsyncSession = Depends(get_db),
+) -> list[LibraryFAQQuestion]:
+    # include_inactive 只对 admin/superuser 生效；普通 read 用户强制只看 active
+    effective_inactive = include_inactive and _can_manage_or_see_inactive(user, slug)
+    return await library_faq.list_faqs(db, lib.id, include_inactive=effective_inactive)
+
+
+@router.post("/{slug}/faqs", response_model=LibraryFAQRead, status_code=status.HTTP_201_CREATED)
+async def create_library_faq(
+    slug: str,
+    body: LibraryFAQCreate,
+    actor: User = Depends(current_active_user),
+    lib: Library = Depends(require_lib("admin")),    # 需库级 admin 或 superuser
+    db: AsyncSession = Depends(get_db),
+) -> LibraryFAQQuestion:
+    faq = await library_faq.create_faq(db, lib.id, body)
+    await audit_log.record(db, actor.id, "library.faq.create", {"slug": slug, "faq_id": str(faq.id)})
+    await db.commit()
+    await db.refresh(faq)
+    return faq
+
+
+@router.patch("/{slug}/faqs/{faq_id}", response_model=LibraryFAQRead)
+async def update_library_faq(
+    slug: str,
+    faq_id: uuid.UUID,
+    body: LibraryFAQUpdate,
+    actor: User = Depends(current_active_user),
+    lib: Library = Depends(require_lib("admin")),
+    db: AsyncSession = Depends(get_db),
+) -> LibraryFAQQuestion:
+    faq = await library_faq.get_faq(db, lib.id, faq_id)
+    if faq is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "faq not found")
+    faq = await library_faq.update_faq(db, faq, body)
+    await audit_log.record(db, actor.id, "library.faq.update", {"slug": slug, "faq_id": str(faq_id)})
+    await db.commit()
+    await db.refresh(faq)
+    return faq
+
+
+@router.delete("/{slug}/faqs/{faq_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_library_faq(
+    slug: str,
+    faq_id: uuid.UUID,
+    actor: User = Depends(current_active_user),
+    lib: Library = Depends(require_lib("admin")),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    faq = await library_faq.get_faq(db, lib.id, faq_id)
+    if faq is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "faq not found")
+    await library_faq.delete_faq(db, faq)
+    await audit_log.record(db, actor.id, "library.faq.delete", {"slug": slug, "faq_id": str(faq_id)})
+    await db.commit()
     return None

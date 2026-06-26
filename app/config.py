@@ -58,6 +58,43 @@ class Settings(BaseSettings):
     rerank_api_key: str = ""        # 留空则复用 embedding_api_key（同一家服务商同 key 时省事）
     rerank_candidate_k: int = 50   # 重排前从 Qdrant 召回多少候选
 
+    # ---- Hybrid 检索（库级 retrieval_mode=hybrid 时生效；轻量第一版，无外部服务）----
+    hybrid_candidate_k: int = 50            # dense / keyword 各召回多少候选参与 RRF
+    hybrid_rrf_k: int = 60                  # RRF 平滑常数：score = Σ 1/(k+rank)，60 为业界常用默认
+    hybrid_keyword_threshold: float = 0.3   # pg_trgm word_similarity 命中门槛（0~1）
+    hybrid_keyword_title_boost: float = 1.5      # 文件名/标题命中加权
+    hybrid_keyword_external_id_boost: float = 2.0  # 文号/external_id 命中加权（编号类问题更稳）
+
+    # ---- Query Rewrite（多 query dense 召回；第一版，不接 LLM/Agent/Hybrid）----
+    # 关：单 query dense 召回（旧逻辑完全不变）。
+    # 开：normalize + 同义词/简称扩展出多个 query，分别 embedding+召回，按 chunk_id 合并去重，
+    #     再走现有 visibility / source_enrichment / rerank / threshold 流程。
+    query_rewrite_enabled: bool = False
+    query_rewrite_max_queries: int = 4               # 扩展后最多用几个 query（含原始；规则+LLM 合并后的硬上限）
+    query_rewrite_synonyms_path: str = "config/query_synonyms.json"  # 同义词/简称词典
+
+    # ---- LLM Query Rewrite（可选；只生成检索 query，绝不回答/接 Agent/工具）----
+    # 开启后：调 OpenAI 兼容 chat 接口把问题改写成多个检索 query，与规则 rewrite 合并。
+    # 失败/超时/非法 JSON 一律退回规则 rewrite，绝不阻断检索。
+    query_rewrite_llm_enabled: bool = False
+    query_rewrite_llm_base_url: str = ""             # 如 http://host:8000/v1 或 .../v1/chat/completions
+    query_rewrite_llm_model: str = ""
+    query_rewrite_llm_api_key: str = ""              # 本地服务可留空
+    query_rewrite_llm_timeout_seconds: float = 8.0
+    query_rewrite_llm_max_queries: int = 4           # LLM 单次最多产出几个 query
+
+    # ---- Chat 用户端（轻量问答 v1；默认关；OpenAI 兼容 chat 接口；只生成答案，不接 Agent/工具）----
+    # 关闭时 /chat/messages 返回 503。base_url 支持 .../v1 或完整 .../chat/completions；本地模型可不填 key。
+    chat_enabled: bool = False
+    chat_base_url: str = ""
+    chat_model: str = ""
+    chat_api_key: str = ""                            # 本地模型可留空（不发 Authorization 头）
+    chat_timeout_seconds: float = 30.0
+    chat_max_context_chars: int = 12000              # 拼进 prompt 的资料上限，超出截断
+    chat_temperature: float = 0.2
+    # 多轮上下文：带入最近 N 轮历史帮助理解追问（仅理解，不作事实依据）。0=不带历史。
+    chat_history_max_turns: int = 5
+
     # ---- OCR（图片/扫描件抽文字；默认关，按库 ocr_enabled 覆盖；需装 rapidocr_onnxruntime）----
     ocr_enabled: bool = False
 

@@ -1,4 +1,4 @@
-import { onMounted, ref } from 'vue';
+import { onMounted, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import * as api from '../api.js';
 import { store } from '../store.js';
@@ -11,6 +11,25 @@ export default {
         const limit = ref(5);
         const results = ref([]);
         const loading = ref(false);
+        const faqs = ref([]);            // 当前库的常用问题（active）
+
+        // 选库后加载该库 active FAQ；失败/无权不影响检索，静默清空
+        async function loadFaqs() {
+            faqs.value = [];
+            if (!slug.value) return;
+            try {
+                faqs.value = await api.listLibraryFaqs(slug.value);
+            } catch (e) {
+                faqs.value = [];
+            }
+        }
+        watch(slug, loadFaqs);
+
+        // 点击常用问题 → 填入查询框并立即检索
+        function pickFaq(q) {
+            query.value = q;
+            handleSearch();
+        }
 
         async function loadLibs() {
             try {
@@ -66,6 +85,8 @@ export default {
             limit,
             results,
             loading,
+            faqs,
+            pickFaq,
             handleSearch,
             formatScore
         };
@@ -93,6 +114,13 @@ export default {
                     <el-button type="primary" @click="handleSearch" :loading="loading">搜索</el-button>
                 </el-form-item>
             </el-form>
+            <div v-if="faqs.length" style="margin-top:4px">
+                <span style="color:#909399;font-size:13px;margin-right:8px">常用问题：</span>
+                <el-tag v-for="f in faqs" :key="f.id" effect="plain"
+                        style="cursor:pointer;margin:0 8px 8px 0" @click="pickFaq(f.question)">
+                    {{ f.question }}
+                </el-tag>
+            </div>
         </el-card>
 
         <el-table :data="results" border v-loading="loading" style="width: 100%">

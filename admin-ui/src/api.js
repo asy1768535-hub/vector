@@ -89,6 +89,19 @@ export const rebuildLibraryCollection = (slug) =>
 export const testLibraryEmbedding = (slug) =>
     request(`/admin/libraries/${slug}/test-embedding`, { method: 'POST' });
 
+// ── Admin: Library FAQ（常用问题） ───────────────────────────
+// options.includeInactive=true 时附带停用项（仅 admin/superuser 生效）
+export const listLibraryFaqs = (slug, options = {}) => {
+    const qs = options.includeInactive ? '?include_inactive=true' : '';
+    return request(`/admin/libraries/${slug}/faqs${qs}`);
+};
+export const createLibraryFaq = (slug, payload) =>
+    request(`/admin/libraries/${slug}/faqs`, jsonBody('POST', payload));
+export const updateLibraryFaq = (slug, faqId, payload) =>
+    request(`/admin/libraries/${slug}/faqs/${faqId}`, jsonBody('PATCH', payload));
+export const deleteLibraryFaq = (slug, faqId) =>
+    request(`/admin/libraries/${slug}/faqs/${faqId}`, { method: 'DELETE' });
+
 // ── Admin: Permissions ───────────────────────────────────────
 export const listUserPerms = (user_id) => request(`/admin/permissions?user_id=${user_id}`);
 export const grantPerms = (data) => request('/admin/permissions', jsonBody('PUT', data));
@@ -144,6 +157,74 @@ export const listAudit = (params = {}) => {
     const qs = new URLSearchParams(params).toString();
     return request('/admin/audit-log' + (qs ? '?' + qs : ''));
 };
+
+// ── Chat 用户端（轻量问答 v1） ───────────────────────────────
+export const listChatLibraries = () => request('/chat/libraries');
+export const sendChatMessage = (payload) => request('/chat/messages', jsonBody('POST', payload));
+
+// 会话历史
+export const listChatConversations = (includeArchived = false) =>
+    request('/chat/conversations' + (includeArchived ? '?include_archived=true' : ''));
+export const getChatConversationMessages = (id) =>
+    request(`/chat/conversations/${id}/messages`);
+export const archiveChatConversation = (id) =>
+    request(`/chat/conversations/${id}/archive`, { method: 'POST' });
+export const deleteChatConversation = (id) =>
+    request(`/chat/conversations/${id}`, { method: 'DELETE' });
+
+// 管理后台：问答日志
+export const adminListChatLogs = (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request('/admin/chat-logs' + (qs ? '?' + qs : ''));
+};
+
+// 流式问答（SSE over fetch）。handlers: { onSources, onDelta, onError, onDone }
+// 非 2xx（503/403/401 等）按普通错误抛出，由调用方处理；流内 error 走 onError。
+export async function streamChatMessage(payload, handlers = {}) {
+    const { onSources, onDelta, onError, onDone } = handlers;
+    const resp = await fetch(BASE + '/chat/stream', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+    });
+    if (resp.status === 401) {
+        if (onUnauthorized) onUnauthorized();
+        throw new Error('Unauthorized');
+    }
+    if (!resp.ok) {
+        let detail = `HTTP ${resp.status}`;
+        try { const j = await resp.json(); if (j && j.detail) detail = j.detail; } catch (_) { /* ignore */ }
+        const err = new Error(detail);
+        err.status = resp.status;
+        throw err;
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    const handleEvent = (ev) => {
+        const dataLine = ev.split('\n').find((l) => l.startsWith('data:'));
+        if (!dataLine) return;
+        const data = dataLine.slice(5).trim();
+        if (!data) return;
+        let obj;
+        try { obj = JSON.parse(data); } catch (_) { return; }
+        if (obj.type === 'sources') onSources && onSources(obj);
+        else if (obj.type === 'delta') onDelta && onDelta(obj.text || '');
+        else if (obj.type === 'error') onError && onError(obj.message || '生成失败');
+        else if (obj.type === 'done') onDone && onDone();
+    };
+    for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const events = buf.split('\n\n');
+        buf = events.pop();                       // 末段可能不完整，留到下一轮
+        for (const ev of events) handleEvent(ev);
+    }
+    buf += decoder.decode();
+    if (buf.trim()) handleEvent(buf);
+}
 
 // ── Health ───────────────────────────────────────────────────
 export const health = () => request('/health');

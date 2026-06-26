@@ -18,6 +18,7 @@ class Library(Base):
     __table_args__ = (
         CheckConstraint("lifecycle_mode IN ('managed','external')", name="ck_lib_lifecycle_mode"),
         CheckConstraint("index_state IN ('ready','rebuilding','failed')", name="ck_lib_index_state"),
+        CheckConstraint("retrieval_mode IN ('dense','hybrid')", name="ck_lib_retrieval_mode"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -43,6 +44,11 @@ class Library(Base):
     # 开启后 docx 上传走 extract_docx_segments + chunk_segments（每表单独成块带表头/章节上下文），
     # 表格召回更稳但 chunk 数/成本上升；散文为主的库默认扁平更优（实测）。
     docx_table_aware: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    # 检索模式（Hybrid 第一版）：dense=纯向量(默认)；hybrid=dense + pg_trgm 关键词 RRF 融合。
+    # 库级实值开关（非继承）；只影响查询、不需 rebuild。
+    retrieval_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="dense", server_default="dense"
+    )
     qdrant_collection: Mapped[str] = mapped_column(String(128), nullable=False)
 
     # 生命周期归属（#6/#7 设计 §4.5）：managed=本系统管理(参与 revision/tombstone 过滤)；

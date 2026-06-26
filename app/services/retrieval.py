@@ -20,7 +20,15 @@ from app.schemas.dify import (
     MetadataConditionGroup,
 )
 from app.config import settings
-from app.services import embedding, qdrant, source_enrichment, visibility
+from app.services import (
+    embedding,
+    keyword_search,
+    llm_query_rewrite,
+    qdrant,
+    query_rewrite,
+    source_enrichment,
+    visibility,
+)
 from app.services import rerank as rerank_svc
 
 log = logging.getLogger(__name__)
@@ -122,6 +130,201 @@ async def _recall_visible(
     return visible[:needed]
 
 
+def _hit_chunk_id(hit: dict) -> str:
+    """命中项的稳定去重键：优先 payload.chunk_id，回退 Qdrant point id（二者通常相等）。"""
+    return str((hit.get("payload") or {}).get("chunk_id") or hit.get("id"))
+
+
+# rewrite_source 输出的固定优先级顺序（便于稳定展示/断言）
+_SOURCE_ORDER = {"original": 0, "rule": 1, "llm": 2}
+
+
+def _order_sources(sources: list[str]) -> list[str]:
+    return sorted(dict.fromkeys(sources), key=lambda s: _SOURCE_ORDER.get(s, 99))
+
+
+async def _plan_queries(query: str) -> list[tuple[str, str]]:
+    """构造最终 query 计划：[(query, source)]，source ∈ {original, rule, llm}。
+
+    顺序与配额（任务 §1-§4）：
+      1. 原始 query 永远第一位、永远保留；
+      2. 规则 query（normalize/synonym）先加入，但当 LLM 会产出时**预留 1 个 slot 给 LLM**
+         （rule 阶段最多填到 cap-1，保证至少 1 条 LLM query 能进最终 plan）；
+      3. 加入 LLM query（填到 cap 上限）；
+      4. 若 LLM 没用满预留（或规则尚有余量），再用剩余规则 query 回填，避免浪费 slot；
+      5. 全程去重，总数不超过 QUERY_REWRITE_MAX_QUERIES。
+    LLM 仅在开关开启且配置齐全时调用；失败/超时/非法 JSON → generate() 返回 [] → 不预留 slot，
+    规则 query 正常填满上限（自动退回纯规则 rewrite）。
+    """
+    cap = max(1, settings.query_rewrite_max_queries)
+    plan: list[tuple[str, str]] = []
+
+    def _add(q: str, source: str) -> None:
+        if q and len(plan) < cap and all(q != p for p, _ in plan):
+            plan.append((q, source))
+
+    # 规则 rewrite：expand_query[0] 恒为原始 query，其余为 normalize/synonym（统一记为 rule）
+    rule = query_rewrite.expand_query(
+        query, query_rewrite.load_synonyms(), max_queries=cap,
+    )
+    original = rule[0] if rule else query
+    rule_expansions = list(rule[1:])
+
+    # LLM rewrite（可选）：失败/超时/非法 JSON → 返回 [] → reserve=0，等价于不启用
+    llm_qs: list[str] = []
+    if settings.query_rewrite_llm_enabled and llm_query_rewrite.is_configured():
+        llm_qs = await llm_query_rewrite.generate(
+            query,
+            base_url=settings.query_rewrite_llm_base_url,
+            model=settings.query_rewrite_llm_model,
+            api_key=settings.query_rewrite_llm_api_key,
+            timeout=settings.query_rewrite_llm_timeout_seconds,
+            max_queries=settings.query_rewrite_llm_max_queries,
+        )
+
+    _add(original, "original")                    # §1 原始永远第一位
+
+    # §2/§3 规则先加入，但 LLM 有产出时预留 1 个 slot（rule 阶段封顶 cap-reserve）
+    reserve = 1 if llm_qs else 0
+    rule_budget = cap - reserve
+    for q in rule_expansions:
+        if len(plan) >= rule_budget:
+            break
+        _add(q, "rule")
+
+    for q in llm_qs:                              # §3 加入 LLM，填到上限
+        if len(plan) >= cap:
+            break
+        _add(q, "llm")
+
+    for q in rule_expansions:                     # §4 还有空位 → 回填剩余规则 query（去重，不重复）
+        if len(plan) >= cap:
+            break
+        _add(q, "rule")
+
+    return plan
+
+
+async def _multi_query_recall(
+    db: AsyncSession | None, library, collection: str,
+    plan: list[tuple[str, str]], vectors: list[list[float]], *,
+    needed: int, payload_filter: dict | None,
+) -> list[dict]:
+    """多 query 召回：每个 query 向量各自走 _recall_visible（含可见性过滤），再按 chunk_id 合并去重。
+
+    合并规则：
+      - item["score"]（vector_score）取命中该 chunk 的各 query 中的**最高分**（保持 0~1 dense 语义，
+        供 threshold/返回用）；
+      - item["_fuse_score"] = 各命中 query 的分数之和（CombSUM）：同一 chunk 被多个 query 命中 →
+        融合分更高 → 排序更靠前（任务 §9「多次命中可提升排序」）；
+      - item["_matched_queries"]：命中该 chunk 的 query 文本（首次出现序、去重）；
+      - item["_rewrite_sources"]：命中来源集合（original/rule/llm，按固定优先级）。
+    可见性过滤在每路 _recall_visible 内部完成，合并不改变其语义。
+    """
+    merged: dict[str, dict] = {}
+    order: list[str] = []
+    for (q, source), vec in zip(plan, vectors):
+        hits = await _recall_visible(
+            db, library, collection, vec, needed=needed, payload_filter=payload_filter,
+        )
+        for hit in hits:
+            key = _hit_chunk_id(hit)
+            score = float(hit.get("score") or 0.0)
+            cur = merged.get(key)
+            if cur is None:
+                item = dict(hit)
+                item["score"] = score
+                item["_fuse_score"] = score
+                item["_matched_queries"] = [q]
+                item["_rewrite_sources"] = [source]
+                merged[key] = item
+                order.append(key)
+            else:
+                if q not in cur["_matched_queries"]:
+                    cur["_matched_queries"].append(q)
+                if source not in cur["_rewrite_sources"]:
+                    cur["_rewrite_sources"].append(source)
+                cur["_fuse_score"] += score                       # 多命中加成
+                if score > float(cur.get("score") or 0.0):
+                    cur["score"] = score                          # vector_score 取最高
+    fused = [merged[k] for k in order]
+    fused.sort(key=lambda it: it["_fuse_score"], reverse=True)    # 稳定：同分保留插入序
+    for it in fused:
+        it["_rewrite_sources"] = _order_sources(it["_rewrite_sources"])
+    return fused
+
+
+def _rrf_fuse(dense_hits: list[dict], keyword_hits: list[dict], *, k: int) -> list[dict]:
+    """RRF 融合 dense + keyword 两路（按 chunk_id 并集）。
+
+    rrf_score = Σ 1/(k + rank)，rank 从 1 起（两路各自名次）。返回 raw item，字段与 dense 对齐
+    并附 _vector_score / _rrf_score / _dense_rank / _keyword_rank。payload 优先取 dense 一路
+    （其 document_revision 是 embed 时快照，与 Qdrant 一致）；keyword-only 命中用 keyword payload。
+    稳定排序：rrf 降序，同分按插入序（dense 先入）→ dense 占先。
+    """
+    agg: dict[str, dict] = {}
+    order: list[str] = []
+
+    def _slot(key: str) -> dict:
+        if key not in agg:
+            agg[key] = {"payload": None, "rrf": 0.0, "vector": None,
+                        "dense_rank": None, "keyword_rank": None}
+            order.append(key)
+        return agg[key]
+
+    for rank, hit in enumerate(dense_hits, start=1):
+        e = _slot(_hit_chunk_id(hit))
+        e["dense_rank"] = rank
+        e["vector"] = float(hit.get("score") or 0.0)
+        e["rrf"] += 1.0 / (k + rank)
+        e["payload"] = hit.get("payload") or {}            # dense payload 优先
+    for rank, hit in enumerate(keyword_hits, start=1):
+        e = _slot(_hit_chunk_id(hit))
+        e["keyword_rank"] = rank
+        e["rrf"] += 1.0 / (k + rank)
+        if e["payload"] is None:                           # 仅 keyword 命中 → 用 keyword payload
+            e["payload"] = hit.get("payload") or {}
+
+    fused = [
+        {
+            "id": key,
+            "score": agg[key]["rrf"],
+            "payload": agg[key]["payload"] or {},
+            "_vector_score": agg[key]["vector"],
+            "_rrf_score": agg[key]["rrf"],
+            "_dense_rank": agg[key]["dense_rank"],
+            "_keyword_rank": agg[key]["keyword_rank"],
+        }
+        for key in order
+    ]
+    fused.sort(key=lambda it: it["_rrf_score"], reverse=True)
+    return fused
+
+
+async def _hybrid_recall(
+    db: AsyncSession, library, collection: str, vector, query: str, *,
+    needed: int, qdrant_filter: dict | None,
+) -> list[dict]:
+    """hybrid 召回：dense(Qdrant) + keyword(pg_trgm) → RRF 融合 → 一次性可见性过滤（任务 §4）。
+
+    metadata_condition（qdrant_filter）只能下推到 dense 一路；存在 filter 时把 keyword 命中
+    限定在 dense 候选内，避免引入未过滤候选（keyword 仅起重排/加权，不破坏过滤语义）。
+    """
+    cand_k = max(settings.hybrid_candidate_k, needed)
+    dense_hits = await qdrant.search(
+        collection, vector, limit=cand_k, payload_filter=qdrant_filter, with_payload=True,
+    )
+    keyword_hits = await keyword_search.recall(db, library, query, limit=cand_k)
+    if qdrant_filter is not None and keyword_hits:
+        dense_ids = {_hit_chunk_id(h) for h in dense_hits}
+        keyword_hits = [h for h in keyword_hits if _hit_chunk_id(h) in dense_ids]
+
+    fused = _rrf_fuse(dense_hits, keyword_hits, k=settings.hybrid_rrf_k)
+    mask = await visibility.compute_visible_mask(db, library, [it["payload"] for it in fused])
+    visible = [it for it, ok in zip(fused, mask) if ok]
+    return visible[:needed]
+
+
 async def run_retrieval(
     *,
     collection: str,
@@ -130,13 +333,10 @@ async def run_retrieval(
     request: DifyRetrievalRequest,
     source_config: dict[str, Any] | None = None,
     rerank_enabled: bool | None = None,
+    retrieval_mode: str = "dense",
     db: AsyncSession | None = None,
     library=None,
 ) -> DifyRetrievalResponse:
-    vector = await embedding.embed_one(
-        request.query, model=embedding_model, base_url=embedding_base_url
-    )
-
     top_k = request.retrieval_setting.top_k
     threshold = request.retrieval_setting.score_threshold or 0.0   # 0 = 不额外过滤（#11）
     # rerank 生效：库级覆盖优先，否则全局，且必须配好了 reranker 地址
@@ -149,9 +349,42 @@ async def run_retrieval(
     qdrant_filter = _build_qdrant_filter(request.metadata_condition)
     # #11：**不在 Qdrant 召回阶段用 score_threshold 提前过滤**（rerank 模式下会把候选按 vector_score
     # 提前裁掉，threshold 语义应作用于最终分）。召回只做可见性过滤。
-    raw = await _recall_visible(
-        db, library, collection, vector, needed=recall_limit, payload_filter=qdrant_filter,
+    # hybrid 需库级生命周期上下文（可见性 + keyword 查 PG）；缺 db/library 时退化为 dense。
+    hybrid = retrieval_mode == "hybrid" and db is not None and library is not None
+    # Query Rewrite 激活条件：规则开关开，或 LLM 改写开关开且配置齐全。dense 模式下生效。
+    qr_enabled = settings.query_rewrite_enabled or (
+        settings.query_rewrite_llm_enabled and llm_query_rewrite.is_configured()
     )
+    if hybrid:
+        # Hybrid（第一版）：单 query dense + keyword RRF 融合。Query Rewrite 多 query 仅在
+        # dense 模式生效，hybrid 第一版不与之叠加（保持简单、可解释）。
+        vector = await embedding.embed_one(
+            request.query, model=embedding_model, base_url=embedding_base_url,
+        )
+        raw = await _hybrid_recall(
+            db, library, collection, vector, request.query,
+            needed=recall_limit, qdrant_filter=qdrant_filter,
+        )
+    elif qr_enabled:
+        # Query Rewrite：规则(normalize+synonym) + 可选 LLM 改写 → 合并去重的多 query →
+        # 分别 embedding → 多路召回按 chunk_id 合并。后续 visibility/enrich/rerank/threshold 流程不变。
+        plan = await _plan_queries(request.query)
+        queries = [q for q, _ in plan]
+        vectors = await embedding.embed_texts(
+            queries, model=embedding_model, base_url=embedding_base_url,
+        )
+        raw = await _multi_query_recall(
+            db, library, collection, plan, vectors,
+            needed=recall_limit, payload_filter=qdrant_filter,
+        )
+    else:
+        # 旧逻辑完全不变：单 query embed + 单路召回。
+        vector = await embedding.embed_one(
+            request.query, model=embedding_model, base_url=embedding_base_url,
+        )
+        raw = await _recall_visible(
+            db, library, collection, vector, needed=recall_limit, payload_filter=qdrant_filter,
+        )
 
     payloads = [(item.get("payload") or {}) for item in raw]
 
@@ -177,11 +410,21 @@ async def run_retrieval(
     records: list[DifyRecord] = []
     for i in order:
         item, payload, enriched, src_row = raw[i], payloads[i], enr.texts[i], enr.rows[i]
-        vector_score = float(item.get("score") or 0.0)
+        if hybrid:
+            # hybrid：vector_score 可能为 None（keyword-only 命中）；base = rrf_score
+            vector_score = item.get("_vector_score")
+            base_score = item.get("_rrf_score") or 0.0
+        else:
+            vector_score = float(item.get("score") or 0.0)
+            base_score = vector_score
         rr_score = rerank_scores.get(i)
-        # final_score：有 rerank_score 用之（rerank 成功命中），否则 vector_score（dense / fallback / 未命中）
-        final_score = rr_score if rr_score is not None else vector_score
-        if threshold > 0 and final_score < threshold:
+        # final_score：有 rerank_score 用之（rerank 成功命中），否则 base（dense=vector / hybrid=rrf）
+        final_score = rr_score if rr_score is not None else base_score
+        # threshold（Dify score_threshold，0~1 相似度语义）只在分数可比时套用：
+        # dense 的 vector/rerank 分、hybrid 的 rerank 分都是 0~1；hybrid 未重排时 final=rrf（量级~1/k，
+        # 与 0~1 阈值不可比）→ 跳过 threshold，避免一刀切清空（任务 §8：不破坏 threshold 语义）。
+        threshold_applies = (not hybrid) or (rr_score is not None)
+        if threshold > 0 and threshold_applies and final_score < threshold:
             continue
         content = enriched if enriched is not None else (payload.get("text") or "")
         title = payload.get("title") or ""
@@ -191,15 +434,27 @@ async def run_retrieval(
         if src_row:
             for col in extra_columns:
                 metadata.setdefault(col, src_row.get(col))
-        # 双分数留痕：vector_score 恒有；rerank_score 仅重排命中时有
-        metadata["vector_score"] = vector_score
+        # 分数留痕：vector_score（dense 恒有；hybrid 仅 dense 命中项有）；rerank_score 仅重排命中时有
+        if vector_score is not None:
+            metadata["vector_score"] = vector_score
         if rr_score is not None:
             metadata["rerank_score"] = rr_score
+        if qr_enabled and not hybrid:
+            # Query Rewrite 留痕：命中该 chunk 的 query 文本 + 命中来源（original/rule/llm）
+            metadata["matched_queries"] = item.get("_matched_queries") or []
+            metadata["rewrite_source"] = item.get("_rewrite_sources") or []
+        if hybrid:
+            # Hybrid 融合留痕（普通用户可不显示，debug/日志可用）
+            metadata["retrieval_mode"] = "hybrid"
+            metadata["dense_rank"] = item.get("_dense_rank")
+            metadata["keyword_rank"] = item.get("_keyword_rank")
+            metadata["rrf_score"] = item.get("_rrf_score")
         records.append(DifyRecord(content=content or "", score=final_score, title=title, metadata=metadata))
         if len(records) >= top_k:
             break
 
-    log.info("retrieval: collection=%s top_k=%s thr=%s recalled=%s returned=%s rerank=%s enriched=%s",
-             collection, top_k, threshold, len(raw), len(records),
+    log.info("retrieval: collection=%s mode=%s qr=%s top_k=%s thr=%s recalled=%s returned=%s rerank=%s enriched=%s",
+             collection, "hybrid" if hybrid else "dense", "yes" if (qr_enabled and not hybrid) else "no",
+             top_k, threshold, len(raw), len(records),
              "yes" if eff_rerank else "no", "yes" if enr.enabled else "no")
     return DifyRetrievalResponse(records=records)

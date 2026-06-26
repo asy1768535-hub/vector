@@ -54,6 +54,10 @@ export default {
                     <el-icon><iconify-icon icon="mdi:text-search"></iconify-icon></el-icon>
                     <template #title>数据检索</template>
                 </el-menu-item>
+                <el-menu-item index="/chat">
+                    <el-icon><iconify-icon icon="mdi:chat-question-outline"></iconify-icon></el-icon>
+                    <template #title>智能问答</template>
+                </el-menu-item>
                 <el-menu-item index="/import">
                     <el-icon><iconify-icon icon="mdi:database-import-outline"></iconify-icon></el-icon>
                     <template #title>导入数据</template>
@@ -87,6 +91,10 @@ export default {
                     <el-menu-item index="/audit">
                         <el-icon><iconify-icon icon="mdi:history"></iconify-icon></el-icon>
                         <template #title>审计日志</template>
+                    </el-menu-item>
+                    <el-menu-item index="/chat-logs">
+                        <el-icon><iconify-icon icon="mdi:comment-text-multiple-outline"></iconify-icon></el-icon>
+                        <template #title>问答日志</template>
                     </el-menu-item>
                 </el-menu-item-group>
             </el-menu>

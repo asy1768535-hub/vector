@@ -44,6 +44,7 @@ async def retrieval(
             request=request,
             source_config=lib.source_config,
             rerank_enabled=lib.rerank_enabled,
+            retrieval_mode=lib.retrieval_mode,
             db=db,
             library=lib,
         )

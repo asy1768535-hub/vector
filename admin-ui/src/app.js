@@ -16,6 +16,8 @@ import Libraries from './views/Libraries.js';
 import Permissions from './views/Permissions.js';
 import Documents from './views/Documents.js';
 import Search from './views/Search.js';
+import Chat from './views/Chat.js';
+import ChatLogs from './views/ChatLogs.js';
 import Import from './views/Import.js';
 import ApiKeys from './views/ApiKeys.js';
 import Jobs from './views/Jobs.js';
@@ -35,6 +37,8 @@ const routes = [
             { path: 'permissions', component: Permissions, meta: { title: '权限矩阵', admin: true } },
             { path: 'documents', component: Documents, meta: { title: '文档' } },
             { path: 'search', component: Search, meta: { title: '数据检索' } },
+            { path: 'chat', component: Chat, meta: { title: '智能问答' } },
+            { path: 'chat-logs', component: ChatLogs, meta: { title: '问答日志', admin: true } },
             { path: 'import', component: Import, meta: { title: '导入数据' } },
             { path: 'api-keys', component: ApiKeys, meta: { title: 'API Key' } },
             { path: 'jobs', component: Jobs, meta: { title: '任务监控', admin: true } },
