@@ -266,7 +266,7 @@ export default {
         </div>
 
         <el-row :gutter="20">
-            <el-col :span="10">
+            <el-col :span="13">
                 <el-card>
                     <template #header>
                         <div class="card-header"><span>文件导入</span></div>
@@ -384,7 +384,7 @@ export default {
                 </el-card>
             </el-col>
 
-            <el-col :span="14">
+            <el-col :span="11">
                 <!-- 新增模式：上传队列 -->
                 <el-card v-if="mode === 'add'">
                     <template #header>
