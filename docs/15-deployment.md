@@ -4,6 +4,8 @@
 
 API 进程 + Worker 进程都无状态，可水平扩展；状态全在 PostgreSQL + Qdrant + bge-m3 三个外部服务里。
 
+> **部署方式**：本项目目前**不提供官方 Dockerfile**，推荐用 **Python 虚拟环境（`.venv`）+ systemd** 托管（见下「进程托管」）。如需容器化，可自行基于该 venv 流程编写 Dockerfile，但非内部试运行的必需项。
+
 ## 生产前必改清单
 
 | 项 | 检查 |
@@ -136,12 +138,12 @@ HTTPS 终止后把 `COOKIE_SECURE=true` 即可。
 # 创建
 createdb -h <host> -U postgres vector_kb
 
-# 应用 schema（当前 head 为 0011）
+# 应用 schema（当前 head 为 0015）
 DB_HOST=<host> DB_USER=postgres DB_PASSWORD=… DB_NAME=vector_kb \
   alembic upgrade head
 ```
 
-> 升级到 #6/#7/C2：`alembic upgrade head`（含 0009 revision/rebuild_operations、0010 qdrant_cleanup_outbox、0011 service_heartbeats）。
+> 升级到 v0.1.4：`alembic upgrade head`（含 0009 revision/rebuild_operations、0010 qdrant_cleanup_outbox、0011 service_heartbeats、0013 library_faq_questions、0014 chat_history、0015 hybrid_retrieval；旧 0012 hybrid 已回退，由 0015 幂等收编残留列）。
 > 注意：0009 的活动唯一索引创建前，若库内已有违反唯一性的历史活动行需先清理（见 docs/20 §11.1）。
 
 建议 PG 配置：

@@ -2,6 +2,7 @@ import { computed, onMounted, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import * as api from '../api.js';
 import { store } from '../store.js';
+import { humanizeError } from './import_errors.js';
 
 const OP_LABEL = { created: '新建', updated: '已更新', unchanged: '未变更' };
 const OP_TAG = { created: 'success', updated: 'warning', unchanged: 'info' };
@@ -16,18 +17,6 @@ const LEGACY_SAVE_AS = { '.doc': '请另存为 .docx 后再上传', '.xls': '请
 function fileExt(name) {
     const i = name.lastIndexOf('.');
     return i >= 0 ? name.slice(i).toLowerCase() : '';
-}
-
-// 后端错误 → 人话（按 HTTP 状态；其它显示后端 detail）
-function humanizeError(e) {
-    const detail = e && e.message ? e.message : '上传失败';
-    switch (e && e.status) {
-        case 413: return '文件超过上传大小限制';
-        case 415: return '暂不支持该文件类型';
-        case 400: return '文件内容无法解析或不符合格式';
-        case 409: return '当前知识库状态不允许上传';
-        default:  return detail;
-    }
 }
 
 export default {
@@ -59,7 +48,7 @@ export default {
                 } else {
                     libs.value = store.permissions
                         .filter((p) => p.actions.includes('insert'))
-                        .map((p) => ({ slug: p.library_slug, name: p.library_slug }));
+                        .map((p) => ({ slug: p.library_slug, name: p.library_name || p.library_slug }));
                 }
                 if (!slug.value && libs.value.length) slug.value = libs.value[0].slug;
             } catch (e) {
@@ -241,7 +230,7 @@ export default {
                 replaceDocId.value = null;
                 loadDocs();
             } catch (e) {
-                ElMessage.error(e.message || '操作失败，请检查文件格式');
+                ElMessage.error(humanizeError(e));
             } finally {
                 loading.value = false;
             }

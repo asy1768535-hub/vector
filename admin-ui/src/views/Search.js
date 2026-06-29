@@ -38,7 +38,7 @@ export default {
                 } else {
                     libs.value = store.permissions
                         .filter((p) => p.actions.includes('read'))
-                        .map((p) => ({ slug: p.library_slug, name: p.library_slug }));
+                        .map((p) => ({ slug: p.library_slug, name: p.library_name || p.library_slug }));
                 }
                 if (!slug.value && libs.value.length) slug.value = libs.value[0].slug;
             } catch (e) {

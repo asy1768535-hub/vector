@@ -29,7 +29,9 @@ class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
         log.info("user registered: %s (id=%s)", user.email, user.id)
 
     async def on_after_forgot_password(self, user: User, token: str, request=None):
-        log.info("password reset requested for %s; token=%s", user.email, token)
+        # 安全：绝不把 reset token 写日志（token 等价于一次性改密凭证）。
+        # 仅记录是谁请求了重置，便于审计/排障。
+        log.info("password reset requested: id=%s email=%s", user.id, user.email)
 
 
 async def get_user_manager(

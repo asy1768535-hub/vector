@@ -30,6 +30,11 @@ class AdminUserUpdate(BaseModel):
     is_superuser: Optional[bool] = None
 
 
+class AdminResetPassword(BaseModel):
+    # 专用重置密码入参：与 AdminUserUpdate 分开，避免 password 混入普通字段更新。
+    password: str = Field(..., min_length=8, max_length=128)
+
+
 class AdminUserRead(BaseModel):
     id: uuid.UUID
     email: EmailStr
@@ -220,6 +225,8 @@ class PermissionRevoke(BaseModel):
 class PermissionMatrixRow(BaseModel):
     library_slug: str
     actions: list[str]
+    # 可选：活动库的真实名称（仅 /me/permissions 填充，向后兼容；缺失时前端回退 slug）。
+    library_name: Optional[str] = None
 
 
 # ── Audit log ────────────────────────────────────────────────────────────

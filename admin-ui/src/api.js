@@ -12,7 +12,9 @@ async function request(path, options = {}) {
     });
     if (resp.status === 401) {
         if (onUnauthorized) onUnauthorized();
-        throw new Error('Unauthorized');
+        const err = new Error('登录已过期，请重新登录');
+        err.status = 401;
+        throw err;
     }
     if (resp.status === 204) return null;
     const ct = resp.headers.get('content-type') || '';
@@ -48,7 +50,14 @@ export async function login(email, password) {
     });
     if (resp.status === 400 || resp.status === 401) {
         const j = await resp.json().catch(() => ({}));
-        throw new Error(j.detail || '用户名或密码错误');
+        // fastapi-users 返回的是英文错误码（如 LOGIN_BAD_CREDENTIALS），统一映射成中文；
+        // 未知码也回退中文，避免把英文码直接抛给用户。
+        const code = typeof j.detail === 'string' ? j.detail : '';
+        const CN = {
+            LOGIN_BAD_CREDENTIALS: '邮箱或密码错误',
+            LOGIN_USER_NOT_VERIFIED: '账号未激活，请联系管理员',
+        };
+        throw new Error(CN[code] || '邮箱或密码错误');
     }
     if (!resp.ok) throw new Error(`登录失败: HTTP ${resp.status}`);
     return resp.status === 204 ? null : resp.json();
@@ -60,6 +69,11 @@ export async function logout() {
 
 export const me = () => request('/users/me');
 export const myPermissions = () => request('/me/permissions');
+// 修改自己的资料/密码（复用 fastapi-users PATCH /users/me，不新建更新逻辑）
+export const updateMe = (data) => request('/users/me', jsonBody('PATCH', data));
+// 管理员重置某用户密码（专用端点；password 不混入普通 PATCH）
+export const adminResetUserPassword = (userId, password) =>
+    request(`/admin/users/${userId}/reset-password`, jsonBody('POST', { password }));
 
 // ── API Keys 自助 ────────────────────────────────────────────
 export const listApiKeys = () => request('/me/api-keys');
@@ -190,7 +204,9 @@ export async function streamChatMessage(payload, handlers = {}) {
     });
     if (resp.status === 401) {
         if (onUnauthorized) onUnauthorized();
-        throw new Error('Unauthorized');
+        const err = new Error('登录已过期，请重新登录');
+        err.status = 401;
+        throw err;
     }
     if (!resp.ok) {
         let detail = `HTTP ${resp.status}`;

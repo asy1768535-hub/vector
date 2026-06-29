@@ -51,7 +51,7 @@ createdb -h 10.0.10.114 -p 5434 -U postgres vector_kb
 alembic upgrade head
 ```
 
-成功标志：`alembic upgrade head` 退出码 0，无报错；当前 head 为 **0010**。
+成功标志：`alembic upgrade head` 退出码 0，无报错；当前 head 为 **0015**（含 0013 常用问题、0014 聊天历史、0015 轻量 Hybrid 关键词索引；旧 0012 hybrid 已回退，由 0015 幂等收编）。
 
 ## 4. 创建首位超管
 

@@ -2,6 +2,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import * as api from '../api.js';
 import { store, hasPermission } from '../store.js';
+import { readableLibraries, resolveSelectedSlug } from '../menu_access.js';
 
 export default {
     setup() {
@@ -32,14 +33,14 @@ export default {
 
         async function loadLibs() {
             try {
-                // 普通用户没有 /admin/libraries 权限。这里用一个 trick：
-                // 超管 → 调 /admin/libraries；非超管 → 用 /me/permissions 推导出库列表
+                // 超管 → /admin/libraries；非超管 → 仅「有 read 权限」的库（文档页是读类页面）。
                 if (store.user?.is_superuser) {
                     libs.value = (await api.listLibraries()).filter((l) => !l.deleted_at);
                 } else {
-                    libs.value = store.permissions.map((p) => ({ slug: p.library_slug, name: p.library_slug }));
+                    libs.value = readableLibraries(store.permissions);
                 }
-                if (!slug.value && libs.value.length) slug.value = libs.value[0].slug;
+                // 选中库必须是当前可读库之一：当前 slug 失效 → 切到第一个；无可读库 → null（不发文档请求）。
+                slug.value = resolveSelectedSlug(slug.value, libs.value);
             } catch (e) { ElMessage.error(e.message); }
         }
 

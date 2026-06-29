@@ -1,8 +1,9 @@
-# 22 · 内部试运行上线清单（v0.1.0-internal-pilot）
+# 22 · 内部试运行上线清单（v0.1.4-internal-pilot）
 
 > **范围声明：本版本仅用于「单个部门、内部试运行 1~2 周」，不是全公司正式推广。**
-> 试运行暴露真实问题后再决定是否做 Hybrid、本地 reranker、复杂文档解析等增强。
-> 这些都**不是上线阻断项**——当前检索效果已足够开始试用。
+> v0.1.4 已把 轻量 Hybrid 检索 / Query Rewrite / 站内 Chat 作为**可选能力**落地（均默认关，需在 `.env` 显式开启）；
+> 试运行暴露真实问题后再决定是否启用本地 reranker、复杂文档解析等进一步增强。
+> 这些都**不是上线阻断项**——默认 dense 检索效果已足够开始试用。
 
 本清单是交给**部署人员**的一页式核对表。详细原理见 [04 快速开始](./04-quickstart.md)、[15 部署](./15-deployment.md)、[16 测试](./16-testing.md)、[20 一致性](./20-revision-and-deletion-consistency.md)。
 
@@ -10,15 +11,15 @@
 
 | 产物 | 说明 |
 |---|---|
-| 版本标签 `v0.1.0-internal-pilot` | 明确的可部署版本基线 |
+| 版本标签 `v0.1.4-internal-pilot` | 明确的可部署版本基线 |
 | `.env.example` | 无密钥配置模板，复制为 `.env` 后填写 |
 | `scripts/acceptance.py` | 六步闭环验收脚本（见下） |
-| pytest 全绿 | 156 passed / 12 集成用例需 `VECTOR_KB_PG_TEST_DSN` 时才跑 |
+| pytest 全绿 | 371 passed / 15 skipped（部分集成用例需 `VECTOR_KB_PG_TEST_DSN` 时才跑）|
 
 ## 二、服务器上线门槛（部署人员逐条确认）
 
 - [ ] **1. 服务器专用 `.env`**：由 `.env.example` 复制填写。`DB_PASSWORD` / `JWT_SECRET`(`openssl rand -hex 32`) / `EMBEDDING_API_KEY` / `QDRANT_API_KEY` 现填现管，**绝不进 git**。
-- [ ] **2. 数据库迁移**：`alembic upgrade head`（当前 head = **0010**，含 0009 revision/rebuild_operations、0010 qdrant_cleanup_outbox）。首次迁移注意 0009 活动唯一索引前需清理历史重复活动行（见 docs/20 §11.1）。
+- [ ] **2. 数据库迁移**：`alembic upgrade head`（当前 head = **0015**，含 0009 revision/rebuild_operations、0010 qdrant_cleanup_outbox、0011 service_heartbeats、0013 library_faq_questions、0014 chat_history、0015 hybrid_retrieval；旧 0012 hybrid 已回退，由 0015 幂等收编残留列）。首次迁移注意 0009 活动唯一索引前需清理历史重复活动行（见 docs/20 §11.1）。
 - [ ] **3. 托管三类进程**（systemd 单元见 docs/15）：
   - API：`uvicorn app.main:app --host 0.0.0.0 --port 8100`
   - Embedding Worker：`python -m app.workers.embedder --watch`
