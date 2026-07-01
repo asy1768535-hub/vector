@@ -71,6 +71,7 @@
 - 删除 `admin-ui/src/theme.js`。
 - 删除 `admin-ui/theme.test.mjs`。
 - 从 `admin-ui/src/app.js` 移除主题启动导入。
+- 从 `admin-ui/index.html` 移除 Element Plus 暗色变量表，并删除不再使用的 `admin-ui/vendor/element-plus.dark-css-vars.css`。
 - 从 `admin-ui/src/views/Layout.js` 移除主题导入、状态、处理函数和下拉菜单。
 - 从 `admin-ui/style.css` 删除 `ai-dark`、`government`、主题切换器和主题专属覆盖。
 - 将企业主题变量固化到 `:root`，并将有效的企业侧栏样式改为普通选择器。
