@@ -50,6 +50,8 @@ const ICONS = {
         '<path fill="currentColor" d="M5 13h10.59l-3.3 3.3 1.42 1.42L19.42 12l-5.71-5.72-1.42 1.42 3.3 3.3H5v2Z"/>',
     'mdi:plus':
         '<path fill="currentColor" d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2Z"/>',
+    'mdi:content-copy':
+        '<path fill="currentColor" d="M19 21H8a2 2 0 0 1-2-2V8h2v11h11v2m3-5H11a2 2 0 0 1-2-2V3a2 2 0 0 1 2-2h8l5 5v8a2 2 0 0 1-2 2m-3-13v4h4l-4-4Z"/>',
     'mdi:chevron-left':
         '<path fill="currentColor" d="M15.41 16.58 10.83 12l4.58-4.59L14 6l-6 6 6 6 1.41-1.42Z"/>',
     'mdi:chevron-right':
