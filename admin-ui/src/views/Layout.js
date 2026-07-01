@@ -77,7 +77,7 @@ export default {
     <el-container>
         <el-aside :width="effectiveCollapsed ? '64px' : '224px'" class="layout-aside" :class="{ 'is-collapsed': effectiveCollapsed }">
             <div class="logo">
-                <local-icon icon="carbon:chart-relationship"></local-icon>
+                <img class="app-brand-mark" src="./assets/app-brand-mark.png" alt="" />
                 <span v-show="!effectiveCollapsed">向量知识库</span>
             </div>
             <el-menu :default-active="currentPath" :collapse="effectiveCollapsed" :collapse-transition="false" router>
@@ -154,7 +154,11 @@ export default {
                                text @click="toggleSidebar" @keydown.enter="toggleSidebar">
                         <local-icon :icon="effectiveCollapsed ? 'mdi:menu' : 'mdi:backburger'"></local-icon>
                     </el-button>
-                    <span class="header-title">{{ pageTitle }}</span>
+                    <div class="header-breadcrumb">
+                        <span class="header-title">{{ pageTitle }}</span>
+                        <span class="header-breadcrumb-separator">/</span>
+                        <span class="header-product-name">向量知识库</span>
+                    </div>
                 </div>
                 <div class="header-right">
                     <el-dropdown @command="onUserCommand">
@@ -177,7 +181,7 @@ export default {
                     </el-dropdown>
                 </div>
             </el-header>
-            <el-main class="layout-main">
+            <el-main class="layout-main" :class="{ 'layout-main--chat': currentPath === '/chat' }">
                 <router-view />
             </el-main>
         </el-container>

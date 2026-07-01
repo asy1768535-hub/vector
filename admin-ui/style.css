@@ -424,13 +424,16 @@ local-icon { display: inline-block; vertical-align: -0.125em; }
     position: relative; z-index: 10;
 }
 .layout-aside .logo {
-    height: 60px; display: flex; align-items: center; gap: 10px;
-    padding: 0 18px; color: var(--app-sider-active-text);
-    font-weight: 700; font-size: 17px; letter-spacing: 0.5px;
+    height: 64px; display: flex; align-items: center; gap: 10px;
+    padding: 0 18px; color: var(--app-text);
+    font-size: 18px; font-weight: 700;
     white-space: nowrap; overflow: hidden;
     border-bottom: 1px solid var(--app-sider-border);
 }
-.layout-aside .logo local-icon { font-size: 26px; color: var(--app-primary); flex: none; }
+.app-brand-mark {
+    width: 34px; height: 34px;
+    object-fit: contain; flex: none;
+}
 .layout-aside.is-collapsed .logo { padding: 0; justify-content: center; }
 
 .layout-aside .el-menu {
@@ -473,7 +476,7 @@ local-icon { display: inline-block; vertical-align: -0.125em; }
 .layout-header {
     height: 64px; background: var(--app-header-bg);
     border-bottom: 1px solid var(--app-header-border);
-    padding: 0 22px; display: flex; align-items: center; justify-content: space-between;
+    padding: 0 24px; display: flex; align-items: center; justify-content: space-between;
     box-shadow: none;
 }
 .header-left { display: flex; align-items: center; gap: 14px; }
@@ -483,7 +486,19 @@ local-icon { display: inline-block; vertical-align: -0.125em; }
     transition: background 0.15s, color 0.15s;
 }
 .header-icon-btn:hover { background: var(--app-panel-2); color: var(--app-primary); }
-.header-title { font-weight: 600; font-size: 16px; color: var(--app-text); }
+.header-breadcrumb {
+    display: flex; align-items: center; gap: 12px;
+    min-width: 0;
+}
+.header-title {
+    color: var(--app-text);
+    font-size: 18px; font-weight: 650;
+}
+.header-breadcrumb-separator,
+.header-product-name {
+    color: var(--app-text-secondary);
+    font-size: 14px;
+}
 .header-right { display: flex; align-items: center; gap: 8px; }
 .header-user {
     display: flex; align-items: center; gap: 8px;
@@ -501,6 +516,10 @@ local-icon { display: inline-block; vertical-align: -0.125em; }
 .layout-main {
     padding: 24px; overflow: auto; height: calc(100vh - 64px);
     background: var(--app-page-bg);
+}
+.layout-main--chat {
+    padding: 20px;
+    overflow: hidden;
 }
 
 /* ============================ 内容通用 ============================ */
@@ -753,13 +772,6 @@ local-icon { display: inline-block; vertical-align: -0.125em; }
     background: #FFFFFF;
     border-right: 1px solid var(--color-border);
     box-shadow: none;
-}
-.layout-aside .logo {
-    color: var(--color-text-primary);
-    border-bottom: 1px solid var(--color-border);
-}
-.layout-aside .logo local-icon {
-    color: var(--color-primary);
 }
 .layout-aside .el-menu-item {
     border-left: 3px solid transparent;
