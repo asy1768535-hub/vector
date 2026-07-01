@@ -6,7 +6,7 @@ import DOMPurify from '../../vendor/dompurify.es.mjs';
 import { createStreamQueue } from '../stream_queue.js';
 import { copyTextToClipboard } from '../copy_text.js';
 
-// ── Markdown → 安全 HTML（净化 script/事件属性/javascript: URL 等 XSS） ──
+// ── Markdown → safe HTML ──
 function renderMarkdown(text) {
     if (!text) return '';
     const raw = marked.parse(text, { breaks: true, gfm: true });
@@ -19,24 +19,44 @@ function renderMarkdown(text) {
     });
 }
 
+// ── Time formatting ──
+function fmtTime(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    const now = new Date();
+    const sameDay = d.toDateString() === now.toDateString();
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    if (sameDay) return `今天 ${hh}:${mm}`;
+    const M = d.getMonth() + 1;
+    const D = d.getDate();
+    return `${M}/${D} ${hh}:${mm}`;
+}
+
+function fmtScore(s) { return (Number(s || 0) * 100).toFixed(1) + '%'; }
+
+function nowISO() { return new Date().toISOString(); }
+
 export default {
     setup() {
         const libs = ref([]);
         const currentSlug = ref(null);
         const conversations = ref([]);
         const currentConvId = ref(null);
-        const messages = ref([]);          // {role:'user'|'ai', text, sources?, error?, cursor?, statusText?}
+        const messages = ref([]);          // {role:'user'|'ai', text, sources?, error?, cursor?, statusText?, time}
         const input = ref('');
         const loading = ref(false);
         const chatDisabled = ref(false);
         const streamRef = ref(null);
         const mobileHistoryOpen = ref(false);
-        let _abortController = null;   // 切换会话/新建/卸载时取消旧请求
+        const topK = ref(5);
+        let _abortController = null;
 
-        // ── 流式队列：RAF 逐帧刷新，避免一次性大段渲染 ──
+        // ── Stream queue ──
         const _queue = createStreamQueue();
         let _rafId = null;
-        let _aiMsgRef = null;             // 当前正在生成的 aiMsg（直引 messages 中的对象）
+        let _aiMsgRef = null;
 
         function _flushDeltas() {
             if (!_aiMsgRef || _queue.isEmpty()) { _rafId = null; return; }
@@ -52,20 +72,17 @@ export default {
         }
 
         function _flushPending() {
-            // done 时立即排空队列，确保最终内容完整（不能丢字）
             if (_rafId) { cancelAnimationFrame(_rafId); _rafId = null; }
             _flushDeltas();
         }
 
         function _cleanupStream() {
-            // error / 切换 / 删除时清理，禁止内容串到其他消息
             if (_abortController) { _abortController.abort(); _abortController = null; }
             if (_rafId) { cancelAnimationFrame(_rafId); _rafId = null; }
             _queue.cleanup();
             _aiMsgRef = null;
         }
 
-        // ── 当前库的会话（会话跨库，按库过滤展示） ──
         const convsForLib = computed(() =>
             conversations.value.filter((c) => c.library_slug === currentSlug.value));
 
@@ -79,7 +96,7 @@ export default {
         async function loadConversations() {
             try {
                 conversations.value = await api.listChatConversations();
-            } catch (e) { /* 不阻断问答 */ }
+            } catch (e) { /* no-op */ }
         }
 
         function onLibChange() {
@@ -113,6 +130,7 @@ export default {
                     text: m.content + (m.status === 'failed' && m.error_message ? '\n\n*[失败]* ' + m.error_message : ''),
                     sources: m.sources || [],
                     error: m.status === 'failed',
+                    time: m.created_at || null,
                 }));
                 scrollToBottom();
             } catch (e) { ElMessage.error(e.message); }
@@ -139,17 +157,28 @@ export default {
 
         async function copyAnswer(text) {
             const value = String(text || '').trim();
-            if (!value) {
-                ElMessage.warning('暂无可复制内容');
-                return;
-            }
+            if (!value) { ElMessage.warning('暂无可复制内容'); return; }
             try {
                 await copyTextToClipboard(value);
                 ElMessage.success('回答已复制');
-            } catch (e) {
-                ElMessage.error(e.message || '复制失败，请手动选择内容');
+            } catch (e) { ElMessage.error(e.message || '复制失败，请手动选择内容'); }
+        }
+
+        function openDocDetail(source) {
+            if (!source) return;
+            const slug = currentSlug.value;
+            if (!slug) { ElMessage.warning('请先选择知识库'); return; }
+            // Navigate to documents page and attempt to open detail drawer
+            const docId = source.document_id || source.chunk_id;
+            if (docId) {
+                const url = `/console/#/documents?slug=${encodeURIComponent(slug)}&open=${encodeURIComponent(docId)}`;
+                window.open(url, '_blank');
+            } else {
+                ElMessage.warning('该来源缺少文档标识');
             }
         }
+
+        const remainingChars = computed(() => Math.max(0, 2000 - (input.value || '').length));
 
         async function send() {
             const q = (input.value || '').trim();
@@ -157,17 +186,17 @@ export default {
             if (!q) { ElMessage.warning('请输入问题'); return; }
             if (loading.value) return;
 
-            messages.value.push({ role: 'user', text: q });
+            const userTime = nowISO();
+            messages.value.push({ role: 'user', text: q, time: userTime });
             input.value = '';
-            const aiMsg = { role: 'ai', text: '', sources: [], loading: true, error: false, cursor: false, statusText: '正在检索资料…' };
+            const aiMsg = { role: 'ai', text: '', sources: [], loading: true, error: false, cursor: false, statusText: '正在检索资料…', time: null };
             messages.value.push(aiMsg);
             _aiMsgRef = aiMsg;
             loading.value = true;
             scrollToBottom();
-            // 取消上一个未完成的请求，避免旧流写入当前会话
             if (_abortController) { _abortController.abort(); }
             _abortController = new AbortController();
-            const payload = { library_slug: currentSlug.value, query: q, top_k: 5, show_debug: false };
+            const payload = { library_slug: currentSlug.value, query: q, top_k: topK.value, show_debug: false };
             if (currentConvId.value) payload.conversation_id = currentConvId.value;
             try {
                 await api.streamChatMessage(payload, {
@@ -183,7 +212,6 @@ export default {
                         _enqueueDelta(t);
                     },
                     onError: (msg) => {
-                        // 先刷出已收到但未渲染的 delta，避免丢最后一段文字
                         _flushPending();
                         _cleanupStream();
                         aiMsg.loading = false;
@@ -198,11 +226,12 @@ export default {
                         aiMsg.loading = false;
                         aiMsg.cursor = false;
                         aiMsg.statusText = '';
+                        aiMsg.time = nowISO();
                     },
                 }, _abortController.signal);
                 loadConversations();
             } catch (e) {
-                if (e.name === 'AbortError') { _abortController = null; return; } // 用户主动切换，不显示错误
+                if (e.name === 'AbortError') { _abortController = null; return; }
                 _abortController = null;
                 _cleanupStream();
                 aiMsg.error = true;
@@ -232,41 +261,38 @@ export default {
             }
         }
 
-        function fmtScore(s) { return (Number(s || 0) * 100).toFixed(1) + '%'; }
-
         onMounted(async () => { await loadLibs(); await loadConversations(); });
-        // 组件卸载时清理流式定时器，防止内存泄漏
         onBeforeUnmount(() => { _cleanupStream(); });
 
         return {
             libs, currentSlug, conversations, convsForLib, currentConvId, messages, input,
-            loading, chatDisabled, streamRef, mobileHistoryOpen,
-            onLibChange, newChat, selectConversation, archiveConv, deleteConv, send, copyAnswer, fmtScore,
-            renderMarkdown,
+            loading, chatDisabled, streamRef, mobileHistoryOpen, topK, remainingChars,
+            onLibChange, newChat, selectConversation, archiveConv, deleteConv, send, copyAnswer,
+            openDocDetail, loadLibs,
+            fmtScore, fmtTime, renderMarkdown,
         };
     },
     template: `
     <div class="chat-wrap" :class="{ 'is-history-open': mobileHistoryOpen }">
-        <!-- 左侧：会话历史面板 -->
-        <div class="chat-history-panel">
+        <!-- Left: conversation history card -->
+        <aside class="chat-history-panel">
             <div class="chat-history-title-row">
-                <div>
-                    <div class="chat-history-panel-title">会话历史</div>
-                    <div class="chat-history-panel-subtitle">最近的知识问答记录</div>
-                </div>
+                <span class="chat-history-panel-title">会话历史</span>
                 <el-button class="chat-new-button" circle :disabled="!currentSlug"
                            aria-label="新建会话" title="新建会话" @click="newChat">
                     <local-icon icon="mdi:plus"></local-icon>
                 </el-button>
             </div>
             <div class="chat-history-list">
-                <div class="chat-history-section-title" v-if="convsForLib.length">最近会话</div>
                 <el-empty v-if="!convsForLib.length" description="暂无历史会话" :image-size="40" />
                 <div v-for="c in convsForLib" :key="c.id"
                      class="chat-history-item"
                      :class="{ 'is-active': c.id === currentConvId }"
                      @click="selectConversation(c)">
-                    <div class="chat-history-item-title">{{ c.title }}</div>
+                    <div class="chat-history-item-body">
+                        <div class="chat-history-item-title">{{ c.title }}</div>
+                        <div class="chat-history-item-time">{{ fmtTime(c.updated_at) }}</div>
+                    </div>
                     <div class="chat-history-item-actions">
                         <local-icon icon="mdi:archive-arrow-down-outline" class="chat-history-action" title="归档"
                                     @click.stop="archiveConv(c)"></local-icon>
@@ -275,10 +301,11 @@ export default {
                     </div>
                 </div>
             </div>
-        </div>
+        </aside>
 
-        <!-- 右侧：问答主区 -->
-        <div class="chat-main">
+        <!-- Right: Q&A area card -->
+        <section class="chat-main">
+            <!-- Toolbar -->
             <div class="chat-toolbar">
                 <el-button class="chat-history-toggle" text
                            :aria-label="mobileHistoryOpen ? '关闭会话历史' : '打开会话历史'"
@@ -286,16 +313,19 @@ export default {
                     <local-icon icon="mdi:history"></local-icon>
                     会话历史
                 </el-button>
-                <span class="chat-toolbar-label">知识库</span>
-                <el-select v-model="currentSlug" placeholder="选择知识库" size="default"
-                           class="chat-library-select" @change="onLibChange">
-                    <el-option v-for="l in libs" :key="l.slug" :label="l.name" :value="l.slug" />
-                </el-select>
+                <div class="chat-toolbar-right">
+                    <span class="chat-toolbar-label">知识库</span>
+                    <el-select v-model="currentSlug" placeholder="选择知识库" size="default"
+                               class="chat-library-select" @change="onLibChange">
+                        <el-option v-for="l in libs" :key="l.slug" :label="l.name" :value="l.slug" />
+                    </el-select>
+                </div>
             </div>
 
             <el-alert v-if="chatDisabled" type="warning" :closable="false" show-icon
                       title="Chat 功能未启用" style="margin: 0 18px 16px" />
 
+            <!-- Messages -->
             <div ref="streamRef" class="chat-messages">
                 <div v-if="!messages.length" class="chat-empty">
                     <local-icon icon="carbon:chart-relationship" style="font-size:48px;color:var(--app-border);margin-bottom:16px"></local-icon>
@@ -304,7 +334,9 @@ export default {
                 </div>
                 <div v-for="(m, i) in messages" :key="i" class="chat-message-row"
                      :class="m.role === 'user' ? 'chat-message--user' : 'chat-message--ai'">
+                    <!-- AI avatar -->
                     <div v-if="m.role === 'ai'" class="chat-avatar chat-avatar--ai">AI</div>
+
                     <div class="chat-message-content">
                         <div class="chat-bubble" :class="{
                             'chat-bubble--user': m.role === 'user',
@@ -312,50 +344,74 @@ export default {
                             'chat-bubble--error': m.error,
                         }">
                             <div v-if="m.statusText" class="chat-status">{{ m.statusText }}</div>
-                            <div v-if="m.role === 'user'" class="chat-user-text">{{ m.text }}</div>
                             <div v-if="m.role === 'ai'" class="chat-ai-label">智能助手</div>
+                            <div v-if="m.role === 'user'" class="chat-user-text">{{ m.text }}</div>
                             <div v-if="m.role === 'ai'" class="chat-markdown"
                                  v-html="renderMarkdown(m.text) + (m.cursor ? '<span class=\\'chat-cursor\\'>|</span>' : '')"></div>
+                            <!-- Time row for AI messages -->
+                            <div v-if="m.role === 'ai' && m.time" class="chat-msg-time">{{ fmtTime(m.time) }}</div>
+                            <!-- Copy button -->
                             <div v-if="m.role === 'ai' && m.text" class="chat-answer-actions">
-                                <el-button class="chat-copy-answer" text aria-label="复制回答"
-                                           title="复制回答" @click="copyAnswer(m.text)">
+                                <el-button class="chat-copy-answer" text aria-label="复制回答" title="复制回答" @click="copyAnswer(m.text)">
                                     <local-icon icon="mdi:content-copy"></local-icon>
                                     复制
                                 </el-button>
                             </div>
                         </div>
-                        <el-collapse v-if="m.role === 'ai' && m.sources && m.sources.length" class="chat-sources">
-                            <el-collapse-item :title="'引用来源（' + m.sources.length + '）'">
-                                <div v-for="(s, si) in m.sources" :key="si" class="chat-source-item">
-                                    <div class="chat-source-header">
-                                        <span class="chat-source-num">[{{ si + 1 }}]</span>
-                                        <span class="chat-source-title">{{ s.title || '(无标题)' }}</span>
-                                        <el-tag size="small" :type="s.score >= 0.7 ? 'success' : s.score >= 0.5 ? 'warning' : 'info'">
-                                            {{ fmtScore(s.score) }}
-                                        </el-tag>
-                                    </div>
-                                    <div class="chat-source-content">{{ s.content }}</div>
-                                </div>
-                            </el-collapse-item>
-                        </el-collapse>
+
+                        <!-- Compact sources -->
+                        <div v-if="m.role === 'ai' && m.sources && m.sources.length" class="chat-sources">
+                            <div class="chat-sources-label">引用来源（{{ m.sources.length }}）</div>
+                            <div v-for="(s, si) in m.sources" :key="si" class="chat-source-item">
+                                <span class="chat-source-num">{{ si + 1 }}.</span>
+                                <span class="chat-source-title" :title="s.title || '(无标题)'">{{ s.title || '(无标题)' }}</span>
+                                <span class="chat-source-score">{{ fmtScore(s.score) }}</span>
+                                <div class="chat-source-summary">{{ (s.content || '').slice(0, 120) }}{{ (s.content || '').length > 120 ? '…' : '' }}</div>
+                                <el-button class="chat-source-detail" link type="primary" @click="openDocDetail(s)">文档详情</el-button>
+                            </div>
+                        </div>
                     </div>
-                    <div v-if="m.role === 'user'" class="chat-avatar chat-avatar--user">我</div>
+
+                    <!-- User time -->
+                    <div v-if="m.role === 'user'" class="chat-user-right">
+                        <div class="chat-avatar chat-avatar--user">我</div>
+                        <div v-if="m.time" class="chat-msg-time chat-msg-time--user">{{ fmtTime(m.time) }}</div>
+                    </div>
                 </div>
             </div>
 
+            <!-- Input area -->
             <div class="chat-input-bar">
                 <div class="chat-input-shell">
-                    <el-input v-model="input" type="textarea" :rows="2" resize="none"
+                    <el-input v-model="input" type="textarea" :rows="3" resize="none"
                               placeholder="继续提问，或输入问题..."
+                              :maxlength="2000"
                               @keydown.enter.exact.prevent="send"
                               class="chat-input" />
-                    <el-button type="primary" :loading="loading" :disabled="!currentSlug"
-                               @click="send" class="chat-send-btn">
-                        发送
-                    </el-button>
+                </div>
+                <div class="chat-input-footer">
+                    <div class="chat-input-footer-left">
+                        <span class="chat-input-hint">字数: {{ (input || '').length }} / 2000</span>
+                        <span class="chat-input-hint">检索数量</span>
+                        <el-select v-model="topK" size="small" class="chat-topk-select">
+                            <el-option :value="3" label="3" />
+                            <el-option :value="5" label="5" />
+                            <el-option :value="10" label="10" />
+                            <el-option :value="20" label="20" />
+                        </el-select>
+                    </div>
+                    <div class="chat-input-footer-right">
+                        <el-button class="chat-refresh-btn" text @click="loadLibs" title="刷新知识库">
+                            <local-icon icon="mdi:history"></local-icon>
+                        </el-button>
+                        <el-button type="primary" :loading="loading" :disabled="!currentSlug"
+                                   @click="send" class="chat-send-btn">
+                            发送
+                        </el-button>
+                    </div>
                 </div>
             </div>
-        </div>
+        </section>
     </div>
     `,
 };
