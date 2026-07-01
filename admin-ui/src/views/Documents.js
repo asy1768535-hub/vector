@@ -40,10 +40,10 @@ export default {
         );
 
         const canInsert = computed(() =>
-            store.user?.is_superuser || hasPermission(slug.value, 'insert')
+            Boolean(slug.value) && (store.user?.is_superuser || hasPermission(slug.value, 'insert'))
         );
         const canDelete = computed(() =>
-            store.user?.is_superuser || hasPermission(slug.value, 'delete')
+            Boolean(slug.value) && (store.user?.is_superuser || hasPermission(slug.value, 'delete'))
         );
         const isSuperuser = computed(() => Boolean(store.user?.is_superuser));
 
@@ -105,6 +105,7 @@ export default {
         }
 
         function openIngest() {
+            if (!slug.value || !canInsert.value) return;
             dialog.mode = 'create';
             dialog.docId = null;
             dialog.form = { title: '', external_id: '', text: '', splitter: 'text', metadata_json: '' };
@@ -112,6 +113,7 @@ export default {
         }
 
         function openEdit(row) {
+            if (!slug.value || !canInsert.value) return;
             dialog.mode = 'edit';
             dialog.docId = row.id;
             dialog.form = {
@@ -125,6 +127,10 @@ export default {
         }
 
         async function submitIngest() {
+            if (!slug.value) {
+                ElMessage.warning('请先选择知识库');
+                return;
+            }
             if (!dialog.form.text.trim()) {
                 ElMessage.warning('请输入正文');
                 return;
@@ -154,6 +160,7 @@ export default {
         }
 
         async function del(row) {
+            if (!slug.value) return;
             try {
                 await ElMessageBox.confirm(`删除文档 "${row.title || row.id.slice(0, 8)}"?`, '确认', { type: 'warning' });
                 await api.deleteDocument(slug.value, row.id);
@@ -196,7 +203,7 @@ export default {
         }
 
         async function retryDocument(row) {
-            if (!isSuperuser.value || row.status !== 'failed') return;
+            if (!slug.value || !isSuperuser.value || row.status !== 'failed') return;
             detail.row = row;
             try {
                 const jobs = await api.listDocumentJobs(slug.value, row.id);
@@ -262,8 +269,8 @@ export default {
           <div class="documents-stat"><span>失败</span><b class="documents-stat-value documents-stat-danger">{{ stats?.failed_jobs || 0 }}</b></div>
         </div>
         <div class="documents-actions">
-          <el-button :disabled="!canInsert" :title="canInsert ? '' : '没有写入权限'" @click="openFileImport">文件导入</el-button>
-          <el-button type="primary" :disabled="!canInsert" :title="canInsert ? '' : '没有写入权限'" @click="openIngest">提交文本</el-button>
+          <el-button :disabled="!canInsert" :title="!slug ? '请先选择知识库' : (canInsert ? '' : '没有写入权限')" @click="openFileImport">文件导入</el-button>
+          <el-button type="primary" :disabled="!canInsert" :title="!slug ? '请先选择知识库' : (canInsert ? '' : '没有写入权限')" @click="openIngest">提交文本</el-button>
         </div>
       </section>
 
@@ -374,7 +381,7 @@ export default {
         </template>
       </el-drawer>
 
-      <el-dialog v-model="dialog.open" :title="dialog.mode === 'edit' ? '编辑文档（整篇替换并重 embed）' : ('向 ' + slug + ' 提交文档')" width="640px">
+      <el-dialog v-model="dialog.open" :title="dialog.mode === 'edit' ? '编辑文档（整篇替换并重 embed）' : (slug ? ('向 ' + slug + ' 提交文档') : '提交文档')" width="640px">
         <el-alert v-if="dialog.mode === 'edit'" type="warning" :closable="false" style="margin-bottom:12px"
                   title="更新会用下面的正文整篇替换旧内容：删除旧分片与旧向量，重新切分并重新 embed。请粘贴完整的新正文。" />
         <el-form label-width="100px">
