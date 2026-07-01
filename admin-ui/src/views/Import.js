@@ -1,8 +1,10 @@
 import { computed, onMounted, ref, watch } from 'vue';
+import { useRoute } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import * as api from '../api.js';
 import { store } from '../store.js';
 import { humanizeError } from './import_errors.js';
+import { resolveImportEntry } from '../import_query.js';
 
 const OP_LABEL = { created: '新建', updated: '已更新', unchanged: '未变更' };
 const OP_TAG = { created: 'success', updated: 'warning', unchanged: 'info' };
@@ -21,6 +23,7 @@ function fileExt(name) {
 
 export default {
     setup() {
+        const route = useRoute();
         const libs = ref([]);
         const slug = ref(null);
         const mode = ref('add');           // 'add'（默认，多文件队列）| 'replace'（单文件）
@@ -50,7 +53,9 @@ export default {
                         .filter((p) => p.actions.includes('insert'))
                         .map((p) => ({ slug: p.library_slug, name: p.library_name || p.library_slug }));
                 }
-                if (!slug.value && libs.value.length) slug.value = libs.value[0].slug;
+                const entry = resolveImportEntry(route.query, libs.value, slug.value);
+                slug.value = entry.slug;
+                mode.value = entry.mode;
             } catch (e) {
                 ElMessage.error(e.message);
             }
