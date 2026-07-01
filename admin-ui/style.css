@@ -1,332 +1,856 @@
 /* =========================================================================
-   向量知识库 · 管理后台 —— Soybean 风格主题（基于 Element Plus，零构建）
-   - 品牌色 #646cff（靛蓝），通过覆盖 EP CSS 变量贯穿全站组件
-   - 深色侧边栏 + 卡片化内容 + 圆角阴影 + 暗色模式（EP dark css-vars 驱动）
+   向量知识库 · 管理后台 —— 企业主题样式
+   CSS 变量驱动，零 CDN
    ========================================================================= */
 
+/* ── Enterprise（默认） ── */
 :root {
-    --brand: #646cff;
-    --brand-600: #535bf2;
-    --brand-rgb: 100, 108, 255;
+    --color-primary: #176B57;
+    --color-primary-hover: #125846;
+    --color-primary-soft: #EAF4F0;
+    --color-info: #3976C5;
+    --color-info-soft: #EEF5FF;
+    --color-success: #21875B;
+    --color-warning: #D98218;
+    --color-danger: #D94848;
+    --color-text-primary: #17212B;
+    --color-text-regular: #3F4A56;
+    --color-text-secondary: #66717D;
+    --color-border: #DCE3E8;
+    --color-border-light: #E9EEF2;
+    --color-page-bg: #F5F7F8;
+    --color-surface: #FFFFFF;
 
-    /* 覆盖 Element Plus 主色（按钮/链接/选中态等全站生效） */
-    --el-color-primary: #646cff;
-    --el-color-primary-light-3: #8d93ff;
-    --el-color-primary-light-5: #abb0ff;
-    --el-color-primary-light-7: #c9ccff;
-    --el-color-primary-light-8: #d8daff;
-    --el-color-primary-light-9: #eef0ff;
-    --el-color-primary-dark-2: #505acc;
+    /* 兼容旧变量名 */
+    --app-primary: var(--color-primary);
+    --app-primary-light: #1E8B6E;
+    --app-primary-soft: var(--color-primary-soft);
+    --app-accent: var(--color-info);
+    --app-accent-soft: var(--color-info-soft);
+    --app-danger: var(--color-danger);
+    --app-page-bg: var(--color-page-bg);
+    --app-panel-bg: var(--color-surface);
+    --app-panel-2: #F8F9FB;
+    --app-border: var(--color-border);
+    --app-border-light: var(--color-border-light);
+    --app-text: var(--color-text-primary);
+    --app-text-secondary: var(--color-text-secondary);
+    --app-text-muted: #97A3B0;
 
+    --app-sider-bg: #FFFFFF;
+    --app-sider-text: var(--color-text-regular);
+    --app-sider-text-muted: #97A3B0;
+    --app-sider-active-bg: var(--color-primary-soft);
+    --app-sider-active-text: var(--color-primary);
+    --app-sider-border: var(--color-border);
+
+    --app-header-bg: #FFFFFF;
+    --app-header-border: var(--color-border);
+
+    --app-radius: 8px;
+    --app-radius-sm: 6px;
+
+    /* Element Plus 主色覆盖 */
+    --el-color-primary: #176B57;
+    --el-color-primary-light-3: #45A07D;
+    --el-color-primary-light-5: #72BCA0;
+    --el-color-primary-light-7: #A0D4C2;
+    --el-color-primary-light-8: #C3E5D8;
+    --el-color-primary-light-9: #EAF4F0;
+    --el-color-primary-dark-2: #125542;
+    --el-color-success: #21875B;
+    --el-color-warning: #D98218;
+    --el-color-danger: #D94848;
+    --el-color-info: #3976C5;
     --el-border-radius-base: 8px;
     --el-border-radius-small: 6px;
-
-    /* 侧边栏（亮暗模式都保持深色，Soybean 风格） */
-    --sider-bg: #1f2430;
-    --sider-bg-2: #242a38;
-    --sider-text: #c2c8d4;
-    --sider-text-muted: #7a8194;
+    --el-bg-color-page: #F5F7F8;
 }
 
+/* ============================ 全局 ============================ */
 html, body, #app {
-    margin: 0;
-    padding: 0;
-    height: 100%;
-    font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
-                 "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    margin: 0; padding: 0; height: 100%;
+    font-family: "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", sans-serif;
     -webkit-font-smoothing: antialiased;
     background: var(--el-bg-color-page);
     color: var(--el-text-color-primary);
 }
 
-/* 自定义滚动条，整体更精致 */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-thumb { background: rgba(144, 147, 153, 0.35); border-radius: 4px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(144, 147, 153, 0.55); }
+::-webkit-scrollbar-thumb { background: rgba(144,147,153,0.35); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(144,147,153,0.55); }
 ::-webkit-scrollbar-track { background: transparent; }
 
-iconify-icon { display: inline-block; vertical-align: -0.125em; }
+local-icon { display: inline-block; vertical-align: -0.125em; }
 
-/* ============================ 登录页 ============================ */
-.login-wrap {
-    min-height: 100vh;
-    display: flex;
-    background: var(--el-bg-color);
-}
-
-/* 左侧品牌面板（窄屏隐藏） */
-.login-brand {
-    flex: 1.1;
+/* ============================ Login Page ============================ */
+.login-shell {
     position: relative;
+    min-height: 100vh;
+    min-height: 100svh;
     overflow: hidden;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: linear-gradient(135deg, #4b53e0 0%, #646cff 45%, #8a7bff 100%);
-    color: #fff;
+    background: #eff4f2;
+    font-family: "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", sans-serif;
 }
-.login-brand::before,
-.login-brand::after {
-    content: "";
-    position: absolute;
-    border-radius: 50%;
-    background: rgba(255, 255, 255, 0.08);
-}
-.login-brand::before { width: 460px; height: 460px; top: -140px; right: -120px; }
-.login-brand::after  { width: 320px; height: 320px; bottom: -120px; left: -80px;
-                       background: rgba(255, 255, 255, 0.06); }
-.login-brand .brand-inner { position: relative; z-index: 1; text-align: center; padding: 40px; }
-.login-brand .brand-logo {
-    font-size: 64px;
-    margin-bottom: 18px;
-    filter: drop-shadow(0 6px 18px rgba(0, 0, 0, 0.25));
-}
-.login-brand h1 { font-size: 34px; margin: 0 0 12px; letter-spacing: 1px; font-weight: 700; }
-.login-brand p  { font-size: 15px; opacity: 0.85; margin: 0; line-height: 1.7; }
 
-/* 右侧表单区 */
-.login-form-side {
-    flex: 1;
+.login-bg-layer,
+.login-bg-wash {
+    position: absolute;
+    inset: 0;
+}
+
+.login-bg-layer {
+    background:
+        linear-gradient(120deg, rgba(250, 252, 251, 0.58) 10%, rgba(247, 250, 248, 0.34) 44%, rgba(247, 250, 249, 0.18) 100%),
+        url("./assets/login-bg.png") center center / cover no-repeat;
+    transform: scale(1.01);
+}
+
+.login-bg-wash {
+    background:
+        radial-gradient(circle at 18% 20%, rgba(255,255,255,0.34), transparent 26%),
+        radial-gradient(circle at 76% 22%, rgba(255,255,255,0.18), transparent 24%),
+        linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.14));
+    backdrop-filter: blur(0.5px);
+}
+
+.login-content {
+    position: relative;
+    z-index: 1;
+    min-height: 100vh;
+    min-height: 100svh;
+    box-sizing: border-box;
+    display: grid;
+    grid-template-columns: minmax(0, 1.2fr) minmax(360px, 460px);
+    gap: 56px;
+    align-items: center;
+    padding: 48px clamp(24px, 5vw, 80px);
+}
+
+.login-corner-brand {
+    position: absolute;
+    top: 26px;
+    left: 0;
+    z-index: 2;
+}
+
+.login-hero {
+    color: #16312a;
+    padding-right: clamp(8px, 2vw, 24px);
+    padding-top: 82px;
+}
+
+.login-hero-copy {
+    max-width: 640px;
+}
+
+.company-logo {
+    display: block;
+    width: clamp(220px, 26vw, 360px);
+    max-width: 100%;
+    height: auto;
+}
+
+.company-logo--corner {
+    width: clamp(132px, 14vw, 190px);
+    filter: none;
+}
+
+.login-brand-text {
+    max-width: 620px;
+}
+
+.login-kicker,
+.login-card-kicker {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.24em;
+    text-transform: uppercase;
+}
+
+.login-kicker {
+    color: rgba(23, 107, 87, 0.86);
+    margin-bottom: 16px;
+}
+
+.login-hero-title {
+    margin: 0 0 18px;
+    font-size: clamp(44px, 5.4vw, 70px);
+    line-height: 1.05;
+    letter-spacing: -0.03em;
+    color: #162b25;
+}
+
+.login-hero-sub {
+    margin: 0;
+    max-width: 620px;
+    font-size: 18px;
+    line-height: 1.85;
+    color: rgba(22, 43, 37, 0.82);
+}
+
+.login-hero-features {
+    display: grid;
+    gap: 18px;
+    margin-top: 42px;
+    max-width: 620px;
+}
+
+.login-hero-feature {
+    display: grid;
+    grid-template-columns: 64px minmax(0, 1fr);
+    align-items: center;
+    gap: 18px;
+    padding: 18px 20px;
+    background: rgba(255, 255, 255, 0.48);
+    border: 1px solid rgba(255, 255, 255, 0.72);
+    border-radius: 20px;
+    box-shadow: 0 18px 44px rgba(38, 78, 67, 0.08);
+    backdrop-filter: blur(12px);
+}
+
+.login-hero-icon {
+    width: 64px;
+    height: 64px;
+    border-radius: 18px;
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 24px;
+    background: linear-gradient(180deg, rgba(234, 244, 240, 0.98), rgba(244, 249, 246, 0.94));
+    color: var(--app-primary);
+    font-size: 31px;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.8);
 }
-.login-card { width: 360px; max-width: 100%; }
-.login-card .login-logo-sm {
-    display: none;
-    text-align: center;
-    font-size: 44px;
-    color: var(--brand);
-    margin-bottom: 8px;
+
+.login-hero-feature-title {
+    font-size: 21px;
+    font-weight: 700;
+    color: #1c2e29;
+    margin-bottom: 6px;
 }
-.login-title { margin: 0 0 6px; font-size: 26px; font-weight: 700; color: var(--el-text-color-primary); }
-.login-sub   { margin: 0 0 28px; font-size: 14px; color: var(--el-text-color-secondary); }
-.login-card .el-input { --el-input-height: 44px; }
+
+.login-hero-feature-desc {
+    font-size: 15px;
+    line-height: 1.75;
+    color: rgba(28, 46, 41, 0.72);
+}
+
+.login-panel {
+    display: flex;
+    justify-content: flex-end;
+}
+
+.login-card {
+    width: min(100%, 420px);
+    padding: 34px 34px 28px;
+    background: rgba(255, 255, 255, 0.82);
+    border: 1px solid rgba(255, 255, 255, 0.92);
+    border-radius: 28px;
+    box-shadow: 0 28px 80px rgba(30, 68, 58, 0.14);
+    backdrop-filter: blur(16px);
+}
+
+.login-card-head {
+    margin-bottom: 24px;
+}
+
+.login-card-kicker {
+    color: rgba(23, 107, 87, 0.74);
+    margin-bottom: 12px;
+}
+
+.login-title {
+    margin: 0 0 10px;
+    font-size: 32px;
+    font-weight: 700;
+    color: #162b25;
+}
+
+.login-sub {
+    margin: 0;
+    font-size: 15px;
+    line-height: 1.7;
+    color: rgba(22, 43, 37, 0.66);
+}
+
+.login-card .el-form-item {
+    margin-bottom: 14px;
+    align-items: center;
+}
+
+.login-card .el-form-item__label {
+    font-size: 18px;
+    font-weight: 600;
+    color: #21352f;
+    padding: 0 12px 0 0;
+    line-height: 1.4;
+}
+
+.login-card .el-form-item__content {
+    flex: 1;
+    min-width: 0;
+}
+
+.login-card .el-input {
+    --el-input-height: 52px;
+}
+
+.login-card .el-input__wrapper {
+    border-radius: 16px;
+    box-shadow: 0 0 0 1px rgba(24, 57, 48, 0.08) inset;
+    background: rgba(255,255,255,0.88);
+}
+
+.login-card .el-input__wrapper.is-focus {
+    box-shadow: 0 0 0 1px rgba(23, 107, 87, 0.25) inset, 0 0 0 4px rgba(23, 107, 87, 0.08);
+}
+
+.login-card .el-input__prefix {
+    color: rgba(22, 43, 37, 0.56);
+}
+
 .login-card .login-btn {
     width: 100%;
-    height: 44px;
-    font-size: 15px;
-    letter-spacing: 2px;
-    margin-top: 8px;
-    background: linear-gradient(135deg, #646cff, #8a7bff);
+    height: 52px;
+    margin-top: 4px;
     border: none;
+    border-radius: 16px;
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: 0.28em;
+    background: linear-gradient(135deg, #176B57 0%, #23866d 100%);
+    box-shadow: 0 18px 36px rgba(23, 107, 87, 0.22);
 }
-.login-card .login-btn:hover { opacity: 0.92; }
-.login-foot { margin-top: 22px; text-align: center; font-size: 12px; color: var(--el-text-color-placeholder); }
 
-@media (max-width: 860px) {
-    .login-brand { display: none; }
-    .login-card .login-logo-sm { display: block; }
+.login-card .login-btn:hover {
+    opacity: 0.96;
+    transform: translateY(-1px);
+}
+
+.login-foot {
+    margin-top: 18px;
+    text-align: center;
+    font-size: 12px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: rgba(24, 57, 48, 0.48);
+}
+
+@media (max-width: 1080px) {
+    .login-content {
+        grid-template-columns: 1fr;
+        gap: 28px;
+        padding: 28px 20px 36px;
+        align-items: start;
+    }
+
+    .login-hero {
+        padding-right: 0;
+        padding-top: 90px;
+    }
+
+    .login-hero-title {
+        font-size: clamp(34px, 10vw, 52px);
+    }
+
+    .login-hero-sub {
+        font-size: 16px;
+        line-height: 1.75;
+    }
+
+    .login-panel {
+        justify-content: flex-start;
+    }
+}
+
+@media (max-width: 720px) {
+    .login-bg-layer {
+        background-position: 58% center;
+    }
+
+    .login-corner-brand {
+        top: 18px;
+        left: 0;
+    }
+
+    .company-logo--corner {
+        width: min(44vw, 170px);
+    }
+
+    .login-hero-features {
+        gap: 14px;
+        margin-top: 28px;
+    }
+
+    .login-hero-feature {
+        grid-template-columns: 52px minmax(0, 1fr);
+        gap: 14px;
+        padding: 16px;
+        border-radius: 18px;
+    }
+
+    .login-hero-icon {
+        width: 52px;
+        height: 52px;
+        font-size: 26px;
+    }
+
+    .login-hero-feature-title {
+        font-size: 17px;
+    }
+
+    .login-hero-feature-desc {
+        font-size: 14px;
+        line-height: 1.6;
+    }
+
+    .login-card {
+        width: 100%;
+        padding: 26px 20px 22px;
+        border-radius: 22px;
+    }
+
+    .login-title {
+        font-size: 28px;
+    }
 }
 
 /* ============================ 主框架 ============================ */
 .layout-aside {
-    background: var(--sider-bg);
+    background: var(--app-sider-bg);
     height: 100vh;
     transition: width 0.22s ease;
-    box-shadow: 2px 0 8px rgba(0, 0, 0, 0.06);
-    position: relative;
-    z-index: 10;
+    border-right: 1px solid var(--app-sider-border);
+    position: relative; z-index: 10;
 }
 .layout-aside .logo {
-    height: 60px;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 0 18px;
-    color: #fff;
-    font-weight: 700;
-    font-size: 17px;
-    letter-spacing: 0.5px;
-    white-space: nowrap;
-    overflow: hidden;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    height: 60px; display: flex; align-items: center; gap: 10px;
+    padding: 0 18px; color: var(--app-sider-active-text);
+    font-weight: 700; font-size: 17px; letter-spacing: 0.5px;
+    white-space: nowrap; overflow: hidden;
+    border-bottom: 1px solid var(--app-sider-border);
 }
-.layout-aside .logo iconify-icon { font-size: 26px; color: var(--brand); flex: none; }
+.layout-aside .logo local-icon { font-size: 26px; color: var(--app-primary); flex: none; }
 .layout-aside.is-collapsed .logo { padding: 0; justify-content: center; }
 
-/* 侧边菜单（深色） */
 .layout-aside .el-menu {
     --el-menu-bg-color: transparent;
-    --el-menu-text-color: var(--sider-text);
-    --el-menu-hover-bg-color: rgba(255, 255, 255, 0.06);
-    --el-menu-hover-text-color: #fff;
-    --el-menu-active-color: #fff;
-    border-right: none;
-    padding: 8px 10px;
+    --el-menu-text-color: var(--app-sider-text);
+    --el-menu-hover-bg-color: rgba(128,128,128,0.08);
+    --el-menu-hover-text-color: var(--app-sider-active-text);
+    --el-menu-active-color: var(--app-sider-active-text);
+    border-right: none; padding: 8px 10px;
 }
 .layout-aside .el-menu-item,
 .layout-aside .el-sub-menu__title {
-    height: 44px;
-    border-radius: 8px;
-    margin: 2px 0;
-    font-size: 14px;
+    height: 44px; border-radius: var(--app-radius);
+    margin: 2px 0; font-size: 14px;
 }
-.layout-aside .el-menu-item iconify-icon { font-size: 18px; }
+.layout-aside .el-menu-item local-icon { font-size: 18px; }
 .layout-aside .el-menu-item.is-active {
-    background: linear-gradient(90deg, rgba(var(--brand-rgb), 0.85), rgba(var(--brand-rgb), 0.55));
-    color: #fff !important;
-    box-shadow: 0 4px 12px rgba(var(--brand-rgb), 0.35);
+    background: var(--app-sider-active-bg);
+    color: var(--app-sider-active-text) !important;
 }
-.layout-aside .el-menu-item.is-active iconify-icon { color: #fff; }
+.layout-aside .el-menu-item.is-active local-icon { color: var(--app-sider-active-text); }
 .layout-aside .el-menu-item-group__title {
-    color: var(--sider-text-muted);
-    font-size: 11px;
-    letter-spacing: 1px;
-    padding: 14px 12px 6px;
-    text-transform: uppercase;
+    color: var(--app-sider-text-muted); font-size: 11px;
+    letter-spacing: 1px; padding: 14px 12px 6px; text-transform: uppercase;
 }
+/* 底部收起按钮 */
+.sidebar-collapse-btn {
+    position: absolute; bottom: 0; left: 0; right: 0;
+    height: 48px; display: flex; align-items: center; justify-content: center;
+    cursor: pointer; color: var(--app-sider-text-muted);
+    border-top: 1px solid var(--app-sider-border);
+    transition: color 0.15s, background 0.15s;
+    font-size: 18px;
+}
+.sidebar-collapse-btn:hover { color: var(--app-primary); background: var(--app-panel-2); }
+.layout-aside { position: relative; padding-bottom: 48px; }
+.layout-aside .el-menu { padding-bottom: 0; }
 
 /* 顶栏 */
 .layout-header {
-    height: 60px;
-    background: var(--el-bg-color);
-    border-bottom: 1px solid var(--el-border-color-lighter);
-    padding: 0 22px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
+    height: 64px; background: var(--app-header-bg);
+    border-bottom: 1px solid var(--app-header-border);
+    padding: 0 22px; display: flex; align-items: center; justify-content: space-between;
+    box-shadow: none;
 }
 .header-left { display: flex; align-items: center; gap: 14px; }
 .header-icon-btn {
-    cursor: pointer;
-    font-size: 20px;
-    color: var(--el-text-color-regular);
-    display: flex;
-    align-items: center;
-    padding: 6px;
-    border-radius: 8px;
+    cursor: pointer; font-size: 20px; color: var(--app-text-secondary);
+    display: flex; align-items: center; padding: 6px; border-radius: var(--app-radius);
     transition: background 0.15s, color 0.15s;
 }
-.header-icon-btn:hover { background: var(--el-fill-color-light); color: var(--brand); }
-.header-title { font-weight: 600; font-size: 16px; color: var(--el-text-color-primary); }
+.header-icon-btn:hover { background: var(--app-panel-2); color: var(--app-primary); }
+.header-title { font-weight: 600; font-size: 16px; color: var(--app-text); }
 .header-right { display: flex; align-items: center; gap: 8px; }
 .header-user {
     display: flex; align-items: center; gap: 8px;
     cursor: pointer; padding: 6px 10px; border-radius: 10px;
     transition: background 0.15s;
 }
-.header-user:hover { background: var(--el-fill-color-light); }
+.header-user:hover { background: var(--app-panel-2); }
 .header-avatar {
     width: 30px; height: 30px; border-radius: 50%;
-    background: linear-gradient(135deg, #646cff, #8a7bff);
-    color: #fff; display: flex; align-items: center; justify-content: center;
+    background: var(--app-primary); color: #fff;
+    display: flex; align-items: center; justify-content: center;
     font-size: 14px; font-weight: 600; flex: none;
 }
 
 .layout-main {
-    padding: 20px;
-    overflow: auto;
-    height: calc(100vh - 60px);
-    background: var(--el-bg-color-page);
+    padding: 24px; overflow: auto; height: calc(100vh - 64px);
+    background: var(--app-page-bg);
 }
 
 /* ============================ 内容通用 ============================ */
 .page-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 18px;
-    flex-wrap: wrap;
-    gap: 12px;
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 18px; flex-wrap: wrap; gap: 12px;
 }
 .page-header h2 {
-    margin: 0;
-    font-size: 20px;
-    font-weight: 600;
-    color: var(--el-text-color-primary);
+    margin: 0; font-size: 20px; font-weight: 600;
+    color: var(--app-text);
     display: flex; align-items: center; gap: 8px;
 }
-.page-header h2 iconify-icon { color: var(--brand); }
+.page-header h2 local-icon { color: var(--app-primary); }
 
-/* 卡片更柔和 */
 .el-card {
-    border: 1px solid var(--el-border-color-lighter);
-    border-radius: 12px;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.03);
-    transition: box-shadow 0.2s;
+    border: 1px solid var(--app-border-light);
+    border-radius: var(--app-radius);
+    box-shadow: none;
+    background: var(--app-panel-bg);
 }
-.el-card:hover { box-shadow: 0 6px 20px rgba(0, 0, 0, 0.06); }
+.el-table { border-radius: var(--app-radius); overflow: hidden; }
+.el-table th.el-table__cell { background: var(--app-panel-2); font-weight: 600; }
 
-/* 表格更清爽 */
-.el-table { border-radius: 10px; overflow: hidden; }
-.el-table th.el-table__cell { background: var(--el-fill-color-light); font-weight: 600; }
-
-/* 统计小卡（Dashboard / Documents） */
 .stat-card { text-align: left; }
-.stat-card .stat-label { color: var(--el-text-color-secondary); font-size: 13px; }
-.stat-card .stat-value { font-size: 26px; font-weight: 700; margin-top: 6px; }
+.stat-card .stat-label { color: var(--app-text-secondary); font-size: 13px; }
+.stat-card .stat-value { font-size: 26px; font-weight: 700; margin-top: 6px; color: var(--app-text); }
 
 .mono {
     font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-    font-size: 12px;
-    color: var(--el-text-color-regular);
+    font-size: 12px; color: var(--app-text-secondary);
 }
 
 .api-key-box {
     padding: 12px 14px;
-    background: var(--el-color-primary-light-9);
-    border: 1px dashed var(--brand);
-    border-radius: 8px;
-    word-break: break-all;
-    font-family: monospace;
-    font-size: 13px;
-    color: var(--el-text-color-primary);
+    background: var(--app-primary-soft);
+    border: 1px dashed var(--app-primary);
+    border-radius: var(--app-radius);
+    word-break: break-all; font-family: monospace;
+    font-size: 13px; color: var(--app-text);
 }
 
-/* ── 「替换已有文档」下拉：稳定两行布局，长文件名只压缩文件名、不挤掉状态/rev ── */
+/* ── 替换文档下拉 ── */
 .replace-doc-popper .el-select-dropdown__item {
-    height: auto;
-    min-height: 58px;
-    padding: 8px 12px;
-    line-height: 1.45;
-    white-space: normal;          /* 覆盖 EP 默认 nowrap，允许两行 */
+    height: auto; min-height: 58px; padding: 8px 12px;
+    line-height: 1.45; white-space: normal;
 }
 .replace-doc-popper .el-select-dropdown__item + .el-select-dropdown__item {
-    border-top: 1px solid var(--el-border-color-lighter, #f0f0f0);  /* 选项浅色分隔线 */
+    border-top: 1px solid var(--app-border-light);
 }
-.replace-doc-popper .rdoc {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    width: 100%;
-}
-.replace-doc-popper .rdoc-l1 {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;                 /* 允许子项收缩，省略号生效 */
-}
+.replace-doc-popper .rdoc { display: flex; flex-direction: column; gap: 4px; width: 100%; }
+.replace-doc-popper .rdoc-l1 { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .replace-doc-popper .rdoc-name {
-    flex: 1 1 auto;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;          /* 长文件名单行省略 */
-    font-weight: 600;
+    flex: 1 1 auto; min-width: 0; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; font-weight: 600;
 }
-.replace-doc-popper .rdoc-meta {
-    flex: 0 0 auto;               /* 状态 + rev 标签永不被挤压 */
-    display: flex;
-    align-items: center;
-    gap: 4px;
-}
+.replace-doc-popper .rdoc-meta { flex: 0 0 auto; display: flex; align-items: center; gap: 4px; }
 .replace-doc-popper .rdoc-l2 {
-    display: flex;
-    gap: 10px;
-    min-width: 0;
-    font-size: 12px;
-    color: var(--el-text-color-secondary, #909399);
+    display: flex; gap: 10px; min-width: 0;
+    font-size: 12px; color: var(--app-text-secondary);
 }
-.replace-doc-popper .rdoc-ext {
-    flex: 1 1 auto;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;          /* external_id 单行省略 */
+.replace-doc-popper .rdoc-ext { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.replace-doc-popper .rdoc-time { flex: 0 0 auto; white-space: nowrap; }
+
+/* ── Chat 三栏布局 ── */
+.chat-wrap {
+    display: flex; gap: 0; height: 100%;
+    background: var(--app-page-bg);
 }
-.replace-doc-popper .rdoc-time {
-    flex: 0 0 auto;
-    white-space: nowrap;
+
+/* 中间：会话历史面板 */
+.chat-history-panel {
+    width: 290px; flex: none;
+    display: flex; flex-direction: column;
+    background: var(--app-panel-bg);
+    border-right: 1px solid var(--app-border);
 }
+.chat-history-panel-title {
+    font-size: 16px; font-weight: 700; color: var(--app-text);
+    padding: 18px 16px 0;
+}
+.chat-history-header {
+    padding: 12px 14px 12px;
+    border-bottom: 1px solid var(--app-border-light);
+}
+.chat-history-list {
+    flex: 1; overflow-y: auto; padding: 8px 10px;
+}
+.chat-history-section-title {
+    font-size: 11px; font-weight: 600; color: var(--app-text-muted);
+    text-transform: uppercase; letter-spacing: 0.5px;
+    padding: 6px 6px 8px;
+}
+.chat-history-item {
+    display: flex; align-items: center; gap: 6px;
+    padding: 9px 10px; border-radius: 6px; cursor: pointer;
+    transition: background 0.12s;
+    margin-bottom: 2px;
+}
+.chat-history-item:hover { background: var(--app-panel-2); }
+.chat-history-item.is-active {
+    background: var(--app-primary-soft);
+    border-left: 3px solid var(--app-primary);
+    padding-left: 7px;
+}
+.chat-history-item-title {
+    flex: 1; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; font-size: 13px; color: var(--app-text);
+}
+.chat-history-item.is-active .chat-history-item-title {
+    color: var(--app-primary); font-weight: 600;
+}
+.chat-history-item-actions {
+    display: flex; gap: 4px; opacity: 0; transition: opacity 0.12s;
+}
+.chat-history-item:hover .chat-history-item-actions { opacity: 1; }
+.chat-history-action {
+    font-size: 16px; color: var(--app-text-muted); cursor: pointer;
+    padding: 2px; border-radius: 4px; transition: color 0.12s, background 0.12s;
+}
+.chat-history-action:hover { background: var(--app-border-light); }
+.chat-history-action--danger:hover { color: var(--app-danger); }
+
+/* 右侧：问答主区 */
+.chat-main {
+    flex: 1; min-width: 0;
+    display: flex; flex-direction: column;
+    background: var(--app-page-bg);
+}
+.chat-messages {
+    flex: 1; overflow-y: auto; padding: 20px 24px;
+}
+.chat-empty {
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; height: 100%; text-align: center;
+}
+.chat-empty-title {
+    font-size: 18px; font-weight: 600; color: var(--app-text);
+    margin-bottom: 6px;
+}
+.chat-empty-desc {
+    font-size: 14px; color: var(--app-text-secondary);
+    max-width: 320px; line-height: 1.5;
+}
+
+/* 消息行 */
+.chat-message-row { margin-bottom: 16px; }
+.chat-message--user { display: flex; justify-content: flex-end; }
+.chat-message--ai  { display: flex; justify-content: flex-start; }
+
+/* 气泡 */
+.chat-bubble { max-width: 75%; min-width: 120px; }
+.chat-bubble--user {
+    background: var(--app-primary); color: #fff;
+    padding: 10px 16px; border-radius: 14px 14px 4px 14px;
+    line-height: 1.55;
+}
+.chat-bubble--ai {
+    background: var(--app-panel-bg);
+    border: 1px solid var(--app-border-light);
+    padding: 12px 16px; border-radius: 4px 14px 14px 14px;
+    line-height: 1.6; color: var(--app-text);
+}
+.chat-bubble--error {
+    border-color: var(--app-danger);
+}
+.chat-user-text { white-space: pre-wrap; word-break: break-word; font-size: 14px; }
+.chat-ai-label {
+    font-size: 11px; font-weight: 600; color: var(--app-primary);
+    text-transform: uppercase; letter-spacing: 0.5px;
+    margin-bottom: 4px;
+}
+.chat-status { font-size: 12px; color: var(--app-text-muted); margin-bottom: 6px; }
+
+/* 引用来源 */
+.chat-sources { margin-top: 6px; max-width: 75%; }
+.chat-source-item {
+    padding: 8px 10px; margin-bottom: 6px;
+    border: 1px solid var(--app-border-light); border-radius: 6px;
+    background: var(--app-panel-bg);
+}
+.chat-source-header {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 4px;
+}
+.chat-source-num { color: var(--app-text-muted); font-size: 12px; }
+.chat-source-title { font-weight: 600; font-size: 13px; flex: 1; }
+.chat-source-content {
+    font-size: 13px; color: var(--app-text-secondary);
+    white-space: pre-wrap; word-break: break-word; line-height: 1.5;
+}
+
+/* 输入栏 */
+.chat-input-bar {
+    border-top: 1px solid var(--app-border);
+    padding: 12px 20px; display: flex; gap: 10px; align-items: flex-end;
+    background: var(--app-panel-bg);
+}
+.chat-input { flex: 1; }
+.chat-send-btn { height: 54px; min-width: 72px; }
+
+/* ── Chat Markdown（在气泡内） ── */
+.chat-markdown h1, .chat-markdown h2, .chat-markdown h3,
+.chat-markdown h4, .chat-markdown h5, .chat-markdown h6 {
+    margin: 0.6em 0 0.3em; line-height: 1.35; font-weight: 600;
+}
+.chat-markdown h1 { font-size: 1.3em; } .chat-markdown h2 { font-size: 1.15em; } .chat-markdown h3 { font-size: 1.05em; }
+.chat-markdown p { margin: 0.3em 0; line-height: 1.65; }
+.chat-markdown ul, .chat-markdown ol { padding-left: 1.4em; margin: 0.3em 0; }
+.chat-markdown li { margin: 0.15em 0; }
+.chat-markdown blockquote {
+    border-left: 3px solid var(--app-primary);
+    margin: 0.4em 0; padding: 0.2em 0.8em;
+    color: var(--app-text-secondary);
+    background: var(--app-panel-2);
+    border-radius: 0 var(--app-radius-sm) var(--app-radius-sm) 0;
+}
+.chat-markdown pre {
+    background: #1e1e2e; color: #cdd6f4; padding: 10px 14px;
+    border-radius: var(--app-radius); overflow-x: auto;
+    font-size: 13px; line-height: 1.5; margin: 0.4em 0;
+}
+.chat-markdown code {
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 0.9em;
+}
+.chat-markdown :not(pre) > code {
+    background: var(--app-panel-2); padding: 1px 5px; border-radius: 4px; color: var(--app-danger);
+}
+.chat-markdown table { border-collapse: collapse; width: 100%; margin: 0.4em 0; font-size: 13px; }
+.chat-markdown th, .chat-markdown td {
+    border: 1px solid var(--app-border-light); padding: 6px 10px; text-align: left;
+}
+.chat-markdown th { background: var(--app-panel-2); font-weight: 600; }
+.chat-markdown a { color: var(--app-accent); text-decoration: none; }
+.chat-markdown a:hover { text-decoration: underline; }
+.chat-markdown hr { border: none; border-top: 1px solid var(--app-border-light); margin: 0.6em 0; }
+.chat-markdown strong { font-weight: 600; }
+
+/* Chat 光标 */
+.chat-cursor {
+    display: inline; color: var(--app-primary); font-weight: 700;
+    animation: chat-cursor-blink 0.8s step-end infinite;
+}
+@keyframes chat-cursor-blink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
+
+/* =========================================================================
+   侧栏精修
+   ========================================================================= */
+
+/* ── Enterprise 侧栏：白色背景 + 左边框绿色指示条 ── */
+.layout-aside {
+    background: #FFFFFF;
+    border-right: 1px solid var(--color-border);
+    box-shadow: none;
+}
+.layout-aside .logo {
+    color: var(--color-text-primary);
+    border-bottom: 1px solid var(--color-border);
+}
+.layout-aside .logo local-icon {
+    color: var(--color-primary);
+}
+.layout-aside .el-menu-item {
+    border-left: 3px solid transparent;
+    padding-left: 17px;
+    color: var(--color-text-regular);
+    font-weight: 400;
+}
+.layout-aside .el-menu-item.is-active {
+    background: var(--color-primary-soft);
+    border-left-color: var(--color-primary);
+    border-radius: 0 6px 6px 0;
+    color: var(--color-primary);
+    font-weight: 600;
+    box-shadow: none;
+}
+.layout-aside .el-menu-item.is-active local-icon {
+    color: var(--color-primary);
+}
+.layout-aside .el-menu-item-group__title {
+    color: var(--color-text-secondary);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    padding: 16px 12px 6px 17px;
+}
+
+/* ── 侧栏菜单项左边框过渡动画 ── */
+.layout-aside .el-menu-item {
+    transition: border-left-color 0.18s, background 0.18s, padding-left 0.18s;
+}
+
+/* ============================ 响应式 ============================ */
+@media (max-width: 1199px) {
+    .layout-aside { width: 64px !important; }
+    .layout-aside .logo span,
+    .layout-aside .el-menu-item-group__title,
+    .layout-aside .el-menu .el-menu-item span { display: none; }
+    .layout-aside .sidebar-collapse-btn { display: none; }
+    .layout-main { padding: 16px; }
+}
+
+/* ============================ 基础组件类 ============================ */
+
+/* 页面标题 */
+.page-title {
+    font-size: 22px; font-weight: 600; color: var(--color-text-primary);
+    margin: 0 0 20px; display: flex; align-items: center; gap: 8px;
+}
+
+/* 页面操作栏 */
+.page-toolbar {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 16px; flex-wrap: wrap; gap: 12px;
+}
+
+/* 筛选栏 */
+.filter-bar {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 12px 16px; background: var(--color-surface);
+    border: 1px solid var(--color-border-light); border-radius: var(--app-radius);
+    margin-bottom: 16px;
+}
+
+/* 内容面板 */
+.content-panel {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border-light);
+    border-radius: var(--app-radius); padding: 20px;
+}
+
+/* 状态标签基类 */
+.status-tag { font-size: 12px; }
+.status-tag--success { color: var(--color-success); }
+.status-tag--info    { color: var(--color-info); }
+.status-tag--warning { color: var(--color-warning); }
+.status-tag--danger  { color: var(--color-danger); }
+
+/* 表格容器 */
+.table-container {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border-light);
+    border-radius: var(--app-radius); overflow: hidden;
+}
+
+/* 图标按钮 */
+.icon-btn {
+    cursor: pointer; font-size: 18px; color: var(--color-text-secondary);
+    padding: 4px; border-radius: 4px; transition: color 0.12s, background 0.12s;
+    display: inline-flex; align-items: center;
+}
+.icon-btn:hover { color: var(--color-primary); background: var(--color-primary-soft); }
+.icon-btn--danger:hover { color: var(--color-danger); background: #FEF0F0; }
+
+/* 空状态和错误状态由 Element Plus el-empty / el-alert 承担，不额外定义 */

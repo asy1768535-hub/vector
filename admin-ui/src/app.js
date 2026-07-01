@@ -8,7 +8,8 @@ import zhCn from 'element-plus/locale/zh-cn';
 import { store, refreshAuth } from './store.js';
 import { setUnauthorizedHandler } from './api.js';
 import { canAccessRoute } from './menu_access.js';
-import './theme.js';  // 启动即应用暗色偏好
+import './preview_mode.js';
+import './icons.js';   // 注册 <local-icon> 自定义元素（本地 SVG，不访问公网）
 
 import Login from './views/Login.js';
 import Layout from './views/Layout.js';
@@ -94,7 +95,7 @@ setUnauthorizedHandler(() => {
 
 const app = createApp({ template: '<router-view />' });
 // 让 Vue 把 <iconify-icon> 当原生自定义元素，不去解析成组件
-app.config.compilerOptions.isCustomElement = (tag) => tag === 'iconify-icon';
+app.config.compilerOptions.isCustomElement = (tag) => tag === 'local-icon';
 app.use(ElementPlus, { locale: zhCn });
 app.use(router);
 app.mount('#app');

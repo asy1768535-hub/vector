@@ -1,0 +1,104 @@
+// 本地 SVG 图标集 — 不依赖任何公网 CDN/API。
+// 注册自定义元素 <local-icon icon="prefix:name">，行为兼容 iconify-icon 的基础用法。
+// 支持 style、title、class 属性。
+
+const ICONS = {
+    // ── Material Design Icons (mdi) ──
+    'mdi:archive-arrow-down-outline':
+        '<path fill="currentColor" d="M20 21H4V10h2v9h12v-9h2v11M3 3h18v6H3V3m2 2v2h14V5H5m5 8h4v-3l4 4-4 4v-3h-4v-2Z"/>',
+    'mdi:trash-can-outline':
+        '<path fill="currentColor" d="M9 3v1H4v2h1v13a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V6h1V4h-5V3H9m0 5h2v9H9V8m4 0h2v9h-2V8Z"/>',
+    'mdi:email-outline':
+        '<path fill="currentColor" d="M22 6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V6m-2 0l-8 5-8-5h16m0 12H4V8l8 5 8-5v10Z"/>',
+    'mdi:lock-outline':
+        '<path fill="currentColor" d="M12 17a2 2 0 0 0 2-2 2 2 0 0 0-2-2 2 2 0 0 0-2 2 2 2 0 0 0 2 2m6-9h-1V6a5 5 0 0 0-10 0v2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2M8 6a4 4 0 0 1 8 0v2H8V6m11 14H5V10h14v10Z"/>',
+    'mdi:view-dashboard-outline':
+        '<path fill="currentColor" d="M19 5v2h-4V5h4M9 5v6H5V5h4m10 8v6h-4v-6h4M9 13v6H5v-6h4m12-10h-6v6h6V3m-8 0H3v10h10V3m8 14h-6v6h6v-6m-8 0H3v6h10v-6Z"/>',
+    'mdi:file-document-outline':
+        '<path fill="currentColor" d="M6 2h8l6 6v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2m0 2v16h12V9h-5V4H6m2 4h4v2H8v-2m0 4h8v2H8v-2m0 4h5v2H8v-2Z"/>',
+    'mdi:text-search':
+        '<path fill="currentColor" d="M19.31 18.9l3.08 3.1L21 23.39l-3.12-3.07A6.99 6.99 0 0 1 5 16a7 7 0 0 1 9.12-6.74A7.97 7.97 0 0 0 6 16a6 6 0 0 0 10.91 3.5H20v1.4h-1.57l.88.88M16 6a6 6 0 1 0 0 12A6 6 0 0 0 16 6m0 2a4 4 0 1 1 0 8 4 4 0 0 1 0-8Z"/>',
+    'mdi:chat-question-outline':
+        '<path fill="currentColor" d="M12 3C6.5 3 2 6.58 2 11a7.2 7.2 0 0 0 2.75 5.5c0 .6-.42 1.5-.92 2.1l-.31.4c-.11.13-.22.28-.29.41-.08.13-.16.28-.19.44-.04.16-.04.33 0 .5.04.16.14.3.26.41.11.12.25.2.4.25.15.04.32.06.49.02.2-.04.4-.14.55-.27.17-.13.32-.28.45-.45.13-.18.24-.38.33-.58l.05-.12c.05-.14.1-.28.13-.43.58.25 1.21.38 1.86.38 1.25 0 2.42-.38 3.38-1.04l2.7 1.35.45-1.69C20.88 15.14 22 13.18 22 11c0-4.42-4.5-8-10-8m0 2c4.42 0 8 3.13 8 6a5.8 5.8 0 0 1-2.09 4.36l-.3.22.36 1.37-1.92-.96-.33.17A5.86 5.86 0 0 1 12 17c-1.05 0-2.04-.28-2.89-.76L8.5 16l-.61.24c-.02.04-.04.08-.07.12a1.2 1.2 0 0 1-.18.2c-.05.04-.09.06-.12.07h-.02c.12-.28.23-.6.23-.98v-.51l-.3-.23A5.99 5.99 0 0 1 4 11c0-2.87 3.58-6 8-6m-1 5v2h2v-2h-2m0 3v2h2v-2h-2Z"/>',
+    'mdi:database-import-outline':
+        '<path fill="currentColor" d="M12 3C8.59 3 5.69 4.07 4.53 5.23 3.37 6.39 3 7.62 3 9s.37 2.61 1.53 3.77S8.59 15 12 15s6.31-1.07 7.47-2.23S21 10.38 21 9s-.37-2.61-1.53-3.77S15.41 3 12 3m0 2c3.01 0 5.54.88 6.72 1.78C19.46 7.34 17.86 8 15.5 8c-.17 0-.33 0-.5-.03V6.5L9 10l6 3.5v-1.53c.33.02.66.03 1 .03 2.22 0 3.74-.58 4.5-1.22C19.46 11.66 17.01 13 12 13s-7.46-1.34-8.5-2.22C3.54 11.66 4.78 13 7 13v2c-2.34 0-4-.96-4-2v3c0 1.38.37 2.61 1.53 3.77S8.59 21 12 21s6.31-1.07 7.47-2.23S21 17.38 21 16v-3c0 .88-.78 1.64-2 2.22V17c0 .34-.16.78-.78 1.28C17.54 18.82 16.07 19 12 19s-5.54-.18-6.22-.72C5.16 17.78 5 17.34 5 17v-1.16c.99.64 2.71 1.16 5 1.16v-2c-2.34 0-4-.96-4-2v-3c0 .88.54 1.64 1.5 2.22S8.59 12 12 12Z"/>',
+    'mdi:key-variant':
+        '<path fill="currentColor" d="M22 19h-6v-4h-2.68A6.98 6.98 0 0 1 6 20a7 7 0 0 1-7-7 7 7 0 0 1 7-7c3 0 5.56 1.92 6.58 4.5H22v6M6 9a4 4 0 0 0 0 8 4 4 0 0 0 0-8m0 2a2 2 0 1 1 0 4 2 2 0 0 1 0-4Z"/>',
+    'mdi:account-group-outline':
+        '<path fill="currentColor" d="M12 5a3.5 3.5 0 1 1 0 7 3.5 3.5 0 0 1 0-7m0 2a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3m-5 3.5A2.5 2.5 0 0 1 9.5 8 2.5 2.5 0 0 1 12 10.5a2.5 2.5 0 0 1-2.5 2.5A2.5 2.5 0 0 1 7 10.5M19 13a2 2 0 0 1-2-2 2 2 0 0 1 2-2 2 2 0 0 1 2 2 2 2 0 0 1-2 2m-7 1c2.25 0 6 1.12 6 3.33V20H6v-2.67C6 15.12 9.75 14 12 14m0 2c-2.01 0-4 .9-4 2h8c0-1.1-1.99-2-4-2Z"/>',
+    'mdi:bookshelf':
+        '<path fill="currentColor" d="M9 3v15h3V3H9m3 2 4 13 3-1-4-13-3 1M5 5v13h3V5H5M3 19v2h18v-2H3Z"/>',
+    'mdi:shield-key-outline':
+        '<path fill="currentColor" d="M21 11c0 5.55-3.84 10.74-9 12-5.16-1.26-9-6.45-9-12V5l9-4 9 4v6m-9 10c3.75-1 7-5.46 7-9.78V6.3l-7-3.12L5 6.3v4.92C5 15.54 8.25 20 12 21m0-4a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0-2a1 1 0 0 1-1-1 1 1 0 0 1 1-1 1 1 0 0 1 1 1 1 1 0 0 1-1 1Z"/>',
+    'mdi:cog-sync-outline':
+        '<path fill="currentColor" d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8m0 2a2 2 0 1 1 0 4 2 2 0 0 1 0-4m-1-7.35 2.83.97.36-2.78 2.45.78-.36 2.78 2.97.48.56 2.75-2.97-.48 1.4 2.41-.82.46 2.18 1.85-.85-.48-2.17-1.84.35-2.79-2.45-.78.35 2.79L12 1Z"/>',
+    'mdi:heart-pulse':
+        '<path fill="currentColor" d="M18 8.17c.82.6 2 1.53 2 3.83h-3.17L16 13.88l-.71-.71L12 9.88l-3.29 3.29-.71.71L5.17 12H4c0-2.3 1.18-3.23 2-3.83V3h12v5.17M12 2l2.83 2.83L12 7.66 9.17 4.83 12 2M8 14h2.59L12 15.41 13.41 14H16v-2h-2.59L12 10.59 10.59 12H8v2Z"/>',
+    'mdi:history':
+        '<path fill="currentColor" d="M13.5 8H12v5l4.28 2.54.72-1.21-3.5-2.08V8M13 3a9 9 0 0 0-9 9H1l3.96 4.03L9 12H6a7 7 0 0 1 7-7 7 7 0 0 1 7 7 7 7 0 0 1-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.9 8.9 0 0 0 13 21a9 9 0 0 0 9-9 9 9 0 0 0-9-9Z"/>',
+    'mdi:comment-text-multiple-outline':
+        '<path fill="currentColor" d="M12 23a1 1 0 0 1-1-1v-2h7a2 2 0 0 0 2-2V7h2a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2h-4v1l-4-2-2 2M8 3h12a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2m0 2v11h12V5H8m2 2h8v2h-8V7m0 4h5v2h-5v-2Z"/>',
+    'mdi:chevron-down':
+        '<path fill="currentColor" d="M7.41 8.58 12 13.17l4.59-4.59L18 10l-6 6-6-6 1.41-1.42Z"/>',
+    'mdi:lock-reset':
+        '<path fill="currentColor" d="M12.63 2c5.53 0 10.01 4.5 10.01 10s-4.48 10-10.01 10c-3.52 0-6.59-1.84-8.38-4.6l1.72-1.02a8 8 0 0 0 6.66 3.62c4.43 0 8-3.59 8-8s-3.57-8-8-8a7.98 7.98 0 0 0-7.16 4.56L7.5 9.5H1.29L1 4.79l2.13 1.69A9.97 9.97 0 0 1 12.63 2M13 7v4.17l2.59 2.59L14.18 15 11 11.83V7h2Z"/>',
+    'mdi:logout':
+        '<path fill="currentColor" d="M16 17v-3H9v-4h7V7l5 5-5 5M14 2a2 2 0 0 1 2 2v2h-2V4H5v16h9v-2h2v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9Z"/>',
+    'mdi:menu':
+        '<path fill="currentColor" d="M3 6h18v2H3V6m0 5h18v2H3v-2m0 5h18v2H3v-2Z"/>',
+    'mdi:backburger':
+        '<path fill="currentColor" d="M5 13h10.59l-3.3 3.3 1.42 1.42L19.42 12l-5.71-5.72-1.42 1.42 3.3 3.3H5v2Z"/>',
+    'mdi:plus':
+        '<path fill="currentColor" d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2Z"/>',
+    'mdi:chevron-left':
+        '<path fill="currentColor" d="M15.41 16.58 10.83 12l4.58-4.59L14 6l-6 6 6 6 1.41-1.42Z"/>',
+    'mdi:chevron-right':
+        '<path fill="currentColor" d="M8.59 16.58 13.17 12 8.59 7.41 10 6l6 6-6 6-1.41-1.42Z"/>',
+
+    // ── Carbon Icons ──
+    'carbon:chart-relationship':
+        '<path fill="currentColor" d="M26 6a3.996 3.996 0 0 0-3.858 3H17.93A4.98 4.98 0 0 0 14 5a4.99 4.99 0 0 0-3.93 2H6a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h4.07A4.98 4.98 0 0 0 14 17a4.99 4.99 0 0 0 3.93-2h4.21A3.993 3.993 0 1 0 26 16h-4.21a4.97 4.97 0 0 0-5.86-2H6v-4h9.93a4.98 4.98 0 0 0 5.86-2H26V6ZM6 9h4v4H6Zm8 7a3 3 0 1 1 3-3 3.003 3.003 0 0 1-3 3Zm12-7a2 2 0 1 1 2-2 2.002 2.002 0 0 1-2 2Z"/>',
+};
+
+// 备选回退图标（问号）
+const FALLBACK =
+    '<path fill="currentColor" d="M11 18h2v-2h-2v2m1-16A10 10 0 0 0 2 12a10 10 0 0 0 10 10 10 10 0 0 0 10-10A10 10 0 0 0 12 2m0 18a8 8 0 0 1-8-8 8 8 0 0 1 8-8 8 8 0 0 1 8 8 8 8 0 0 1-8 8m0-14a2 2 0 0 0-2 2h2a.5.5 0 0 1-.5-.5.5.5 0 0 1 .5-.5 2 2 0 0 1 0 4h-1v2h1a4 4 0 0 0 0-8Z"/>';
+
+// 部分图标（如 Carbon）坐标超出 24×24，使用更大的 viewBox
+const VIEWBOX_MAP = {
+    'carbon:chart-relationship': '0 0 32 32',
+};
+const DEFAULT_VIEWBOX = '0 0 24 24';
+
+/**
+ * 返回指定图标的 SVG 内联 HTML 字符串。
+ * @param {string} name 图标名，如 "mdi:view-dashboard-outline"
+ * @returns {string} SVG 标记
+ */
+export function iconSvg(name) {
+    const entry = ICONS[name];
+    const path = entry || FALLBACK;
+    const vb = VIEWBOX_MAP[name] || DEFAULT_VIEWBOX;
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${vb}" width="1em" height="1em" fill="none" aria-hidden="true">${path}</svg>`;
+}
+
+// ── 自定义元素 <local-icon>（仅浏览器环境） ──
+const _hasBrowser = typeof window !== 'undefined' && typeof HTMLElement !== 'undefined';
+const LocalIconElement = _hasBrowser ? class extends HTMLElement {
+    static get observedAttributes() { return ['icon']; }
+    attributeChangedCallback() { this._render(); }
+    connectedCallback() { this._render(); }
+    _render() {
+        const name = this.getAttribute('icon') || '';
+        this.innerHTML = iconSvg(name);
+        const t = this.getAttribute('title');
+        const svg = this.firstElementChild;
+        if (svg && t) svg.setAttribute('title', t);
+    }
+} : class { /* Node: no-op */ };
+
+if (_hasBrowser) {
+    if (!customElements.get('local-icon')) {
+        customElements.define('local-icon', LocalIconElement);
+    }
+}
