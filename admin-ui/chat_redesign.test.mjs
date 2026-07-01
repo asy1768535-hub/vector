@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 const chat = readFileSync(new URL('./src/views/Chat.js', import.meta.url), 'utf8');
+const css = readFileSync(new URL('./style.css', import.meta.url), 'utf8');
 
 assert.match(chat, /chat-history-title-row/);
 assert.match(chat, /chat-new-button/);
@@ -28,5 +29,15 @@ for (const forbidden of [
 ]) {
     assert.ok(!chat.includes(forbidden), `unexpected fake feature: ${forbidden}`);
 }
+
+assert.match(css, /\.chat-history-panel\s*\{[\s\S]*width:\s*290px/);
+assert.match(css, /\.chat-toolbar\s*\{/);
+assert.match(css, /\.chat-message-content\s*\{/);
+assert.match(css, /\.chat-avatar--ai\s*\{/);
+assert.match(css, /\.chat-input-shell\s*\{/);
+assert.match(css, /\.chat-copy-answer\s*\{/);
+assert.match(css, /\.chat-history-toggle\s*\{/);
+assert.match(css, /@media\s*\(max-width:\s*899px\)/);
+assert.match(css, /@media\s*\(max-width:\s*899px\)[\s\S]*\.chat-wrap\.is-history-open/);
 
 console.log('chat structure redesign test passed');
