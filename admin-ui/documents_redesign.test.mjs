@@ -42,3 +42,19 @@ test('loads at most 500 records and routes import with current library', () => {
     assert.ok(source.includes("path: '/import'"));
     assert.ok(source.includes("mode: 'add'"));
 });
+
+const css = await readFile(new URL('./style.css', import.meta.url), 'utf8');
+
+test('defines responsive document workspace styling', () => {
+    for (const token of [
+        '.documents-workspace',
+        '.documents-overview',
+        '.documents-stats',
+        '.documents-filters',
+        '.documents-table-shell',
+        '.documents-detail',
+        '@media (max-width: 1199px)',
+        '@media (max-width: 899px)',
+    ]) assert.ok(css.includes(token), `missing ${token}`);
+    assert.match(css, /\.documents-table-shell\s*\{[^}]*overflow-x:\s*auto/s);
+});
