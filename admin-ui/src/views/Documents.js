@@ -1,16 +1,31 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue';
+import { useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import * as api from '../api.js';
 import { store, hasPermission } from '../store.js';
 import { readableLibraries, resolveSelectedSlug } from '../menu_access.js';
+import {
+    documentDisplayName,
+    documentStatusLabel,
+    documentStatusTag,
+    documentType,
+    filterDocuments,
+    formatDocumentTime,
+    paginateDocuments,
+} from '../documents_ui.js';
 
 export default {
     setup() {
+        const router = useRouter();
         const libs = ref([]);
         const slug = ref(null);
         const docs = ref([]);
         const stats = ref(null);
         const loading = ref(false);
+        const filters = reactive({ keyword: '', status: '', type: '', dateRange: [] });
+        const page = ref(1);
+        const pageSize = ref(10);
+        const detail = reactive({ open: false, row: null, jobs: [], loading: false });
         const dialog = reactive({
             open: false,
             mode: 'create',   // 'create' | 'edit'
@@ -30,6 +45,17 @@ export default {
         const canDelete = computed(() =>
             store.user?.is_superuser || hasPermission(slug.value, 'delete')
         );
+        const isSuperuser = computed(() => Boolean(store.user?.is_superuser));
+
+        const processingCount = computed(() =>
+            Number(stats.value?.pending_jobs || 0) + Number(stats.value?.processing_jobs || 0)
+        );
+        const filteredDocs = computed(() => filterDocuments(docs.value, filters));
+        const pagination = computed(() => paginateDocuments(filteredDocs.value, page.value, pageSize.value));
+        const visibleDocs = computed(() => pagination.value.items);
+        const partialList = computed(() =>
+            Number(stats.value?.document_count || 0) > docs.value.length
+        );
 
         async function loadLibs() {
             try {
@@ -40,16 +66,22 @@ export default {
                     libs.value = readableLibraries(store.permissions);
                 }
                 // 选中库必须是当前可读库之一：当前 slug 失效 → 切到第一个；无可读库 → null（不发文档请求）。
-                slug.value = resolveSelectedSlug(slug.value, libs.value);
+                const nextSlug = resolveSelectedSlug(slug.value, libs.value);
+                if (nextSlug === slug.value) {
+                    slug.value = nextSlug;
+                    await loadDocs();
+                } else {
+                    slug.value = nextSlug;
+                }
             } catch (e) { ElMessage.error(e.message); }
         }
 
         async function loadDocs() {
-            if (!slug.value) return;
+            if (!slug.value) { docs.value = []; stats.value = null; return; }
             loading.value = true;
             try {
                 const [d, s] = await Promise.all([
-                    api.listDocuments(slug.value, { limit: 200 }),
+                    api.listDocuments(slug.value, { limit: 500 }),
                     api.libraryStats(slug.value),
                 ]);
                 docs.value = d;
@@ -58,7 +90,19 @@ export default {
             finally { loading.value = false; }
         }
 
-        watch(slug, loadDocs);
+        function resetFilters() {
+            filters.keyword = '';
+            filters.status = '';
+            filters.type = '';
+            filters.dateRange = [];
+            page.value = 1;
+            pageSize.value = 10;
+        }
+
+        function openFileImport() {
+            if (!slug.value || !canInsert.value) return;
+            router.push({ path: '/import', query: { library: slug.value, mode: 'add' } });
+        }
 
         function openIngest() {
             dialog.mode = 'create';
@@ -120,90 +164,245 @@ export default {
             }
         }
 
-        onMounted(async () => {
-            await loadLibs();
+        async function openDetail(row) {
+            detail.open = true;
+            detail.row = row;
+            detail.jobs = [];
+            await loadDetailJobs(row);
+        }
+
+        async function loadDetailJobs(row) {
+            if (!row || !slug.value) return;
+            detail.loading = true;
+            try {
+                detail.jobs = await api.listDocumentJobs(slug.value, row.id);
+            } catch (e) {
+                ElMessage.error(`加载文档任务失败：${e.message || String(e)}`);
+            } finally {
+                detail.loading = false;
+            }
+        }
+
+        async function retryJob(job) {
+            if (!isSuperuser.value || job.status !== 'failed') return;
+            try {
+                await ElMessageBox.confirm('确认重新提交这个失败任务？', '重试任务', { type: 'warning' });
+                await api.retryJob(job.id);
+                ElMessage.success('任务已重新提交');
+                await Promise.all([loadDetailJobs(detail.row), loadDocs()]);
+            } catch (e) {
+                if (e !== 'cancel') ElMessage.error(e.message || String(e));
+            }
+        }
+
+        async function retryDocument(row) {
+            if (!isSuperuser.value || row.status !== 'failed') return;
+            detail.row = row;
+            try {
+                const jobs = await api.listDocumentJobs(slug.value, row.id);
+                const failedJob = jobs.find((job) => job.status === 'failed');
+                if (!failedJob) {
+                    ElMessage.warning('未找到可重试的失败任务');
+                    return;
+                }
+                detail.jobs = jobs;
+                await retryJob(failedJob);
+            } catch (e) {
+                ElMessage.error(`加载文档任务失败：${e.message || String(e)}`);
+            }
+        }
+
+        function metadataText(row) {
+            if (!row?.metadata) return '—';
+            try { return JSON.stringify(row.metadata, null, 2); }
+            catch (_) { return '—'; }
+        }
+
+        watch(
+            () => [filters.keyword, filters.status, filters.type, ...(filters.dateRange || [])],
+            () => { page.value = 1; },
+        );
+        watch(pageSize, () => { page.value = 1; });
+        watch(slug, async () => {
+            detail.open = false;
+            detail.row = null;
+            resetFilters();
             await loadDocs();
         });
+        watch(() => pagination.value.page, (validPage) => {
+            if (page.value !== validPage) page.value = validPage;
+        });
 
-        return { myLibs, slug, docs, stats, loading, canInsert, canDelete, dialog,
-                 loadDocs, openIngest, openEdit, submitIngest, del };
+        onMounted(loadLibs);
+
+        return {
+            myLibs, slug, docs, stats, loading, canInsert, canDelete, isSuperuser,
+            processingCount, filters, page, pageSize, pagination, visibleDocs, partialList,
+            detail, dialog, loadDocs, resetFilters, openFileImport, openIngest, openEdit,
+            openDetail, retryJob, retryDocument, submitIngest, del, metadataText,
+            documentDisplayName, documentStatusLabel, documentStatusTag, documentType,
+            formatDocumentTime,
+        };
     },
     template: `
-    <div>
-        <div class="page-header">
-            <h2>文档</h2>
-            <div>
-                <el-select v-model="slug" placeholder="选择库" style="width:240px">
-                    <el-option v-for="l in myLibs" :key="l.slug" :label="l.name + ' (' + l.slug + ')'" :value="l.slug" />
-                </el-select>
-                <el-button @click="loadDocs" :loading="loading">刷新</el-button>
-                <el-button type="primary" :disabled="!canInsert" @click="openIngest">提交文档</el-button>
-            </div>
+    <div class="documents-workspace">
+      <section class="documents-overview">
+        <div class="documents-heading">
+          <div class="documents-eyebrow">KNOWLEDGE DOCUMENTS</div>
+          <h2>文档管理</h2>
+          <el-select v-model="slug" placeholder="选择知识库" style="width: 100%">
+            <el-option v-for="l in myLibs" :key="l.slug"
+                       :label="l.name + ' (' + l.slug + ')'" :value="l.slug" />
+          </el-select>
         </div>
+        <div class="documents-stats">
+          <div class="documents-stat"><span>文档总数</span><b class="documents-stat-value">{{ stats?.document_count || 0 }}</b></div>
+          <div class="documents-stat"><span>处理中</span><b class="documents-stat-value">{{ processingCount }}</b></div>
+          <div class="documents-stat"><span>已完成</span><b class="documents-stat-value">{{ stats?.done_jobs || 0 }}</b></div>
+          <div class="documents-stat"><span>失败</span><b class="documents-stat-value documents-stat-danger">{{ stats?.failed_jobs || 0 }}</b></div>
+        </div>
+        <div class="documents-actions">
+          <el-button :disabled="!canInsert" :title="canInsert ? '' : '没有写入权限'" @click="openFileImport">文件导入</el-button>
+          <el-button type="primary" :disabled="!canInsert" :title="canInsert ? '' : '没有写入权限'" @click="openIngest">提交文本</el-button>
+        </div>
+      </section>
 
-        <el-row v-if="stats" :gutter="12" style="margin-bottom:16px">
-            <el-col :span="4"><el-card><div>文档数</div><b style="font-size:24px">{{ stats.document_count }}</b></el-card></el-col>
-            <el-col :span="4"><el-card><div>分片数</div><b style="font-size:24px">{{ stats.chunk_count }}</b></el-card></el-col>
-            <el-col :span="4"><el-card><div>排队中</div><b style="font-size:24px">{{ stats.pending_jobs }}</b></el-card></el-col>
-            <el-col :span="4"><el-card><div>处理中</div><b style="font-size:24px">{{ stats.processing_jobs }}</b></el-card></el-col>
-            <el-col :span="4"><el-card><div>已完成</div><b style="font-size:24px;color:#67c23a">{{ stats.done_jobs }}</b></el-card></el-col>
-            <el-col :span="4"><el-card><div>失败</div><b style="font-size:24px;color:#f56c6c">{{ stats.failed_jobs }}</b></el-card></el-col>
-        </el-row>
+      <el-alert v-if="!myLibs.length" title="当前账号没有可读取的知识库"
+                type="info" :closable="false" show-icon />
 
-        <el-table :data="docs" border v-loading="loading">
-            <el-table-column label="ID" width="100">
-                <template #default="{row}"><span class="mono">{{ row.id.slice(0, 8) }}…</span></template>
+      <section class="documents-filters">
+        <el-input v-model="filters.keyword" clearable placeholder="搜索文件名、external_id 或文档 ID" />
+        <el-select v-model="filters.status" clearable placeholder="全部状态">
+          <el-option label="等待中" value="pending" />
+          <el-option label="处理中" value="processing" />
+          <el-option label="完成" value="ready" />
+          <el-option label="失败" value="failed" />
+        </el-select>
+        <el-select v-model="filters.type" clearable placeholder="全部类型">
+          <el-option label="PDF" value="pdf" />
+          <el-option label="Word" value="word" />
+          <el-option label="Excel" value="excel" />
+          <el-option label="Markdown" value="markdown" />
+          <el-option label="文本" value="text" />
+          <el-option label="其他" value="other" />
+        </el-select>
+        <el-date-picker v-model="filters.dateRange" type="daterange" value-format="YYYY-MM-DD"
+                        start-placeholder="开始日期" end-placeholder="结束日期" style="width: 100%" />
+        <div class="documents-filter-actions">
+          <el-button @click="resetFilters">重置</el-button>
+          <el-button :loading="loading" @click="loadDocs">刷新</el-button>
+        </div>
+      </section>
+
+      <section class="documents-table-panel">
+        <div v-if="partialList" class="documents-load-note">
+          当前加载 {{ docs.length }} / 总计 {{ stats.document_count }}，筛选与分页仅作用于已加载文档
+        </div>
+        <div class="documents-table-shell">
+          <el-table :data="visibleDocs" v-loading="loading" empty-text="当前条件下暂无文档">
+            <el-table-column label="文件名" min-width="250">
+              <template #default="{row}">
+                <div class="documents-file">
+                  <span class="documents-file-type">{{ documentType(row) }}</span>
+                  <span class="documents-file-name" :title="documentDisplayName(row)">{{ documentDisplayName(row) }}</span>
+                </div>
+              </template>
             </el-table-column>
-            <el-table-column prop="title" label="标题" min-width="200" />
-            <el-table-column prop="external_id" label="external_id" width="160" />
             <el-table-column label="状态" width="110">
-                <template #default="{row}">
-                    <el-tag :type="row.status === 'ready' ? 'success' : row.status === 'failed' ? 'danger' : 'warning'" size="small">
-                        {{ row.status }}
-                    </el-tag>
-                </template>
+              <template #default="{row}">
+                <el-tag :type="documentStatusTag(row.status)" size="small">{{ documentStatusLabel(row.status) }}</el-tag>
+              </template>
             </el-table-column>
-            <el-table-column prop="content_hash" label="content_hash" width="140">
-                <template #default="{row}"><span class="mono">{{ row.content_hash.slice(0, 12) }}…</span></template>
+            <el-table-column label="版本" width="80">
+              <template #default="{row}">v{{ row.current_revision || 0 }}</template>
             </el-table-column>
-            <el-table-column prop="created_at" label="创建时间" width="180" />
-            <el-table-column label="操作" width="180" fixed="right">
-                <template #default="{row}">
-                    <el-button size="small" :disabled="!canInsert" @click="openEdit(row)">编辑</el-button>
-                    <el-button size="small" type="danger" :disabled="!canDelete" @click="del(row)">删除</el-button>
-                </template>
+            <el-table-column label="external_id" min-width="150" show-overflow-tooltip>
+              <template #default="{row}">{{ row.external_id || '—' }}</template>
             </el-table-column>
-        </el-table>
+            <el-table-column label="更新时间" width="180">
+              <template #default="{row}">{{ formatDocumentTime(row.updated_at) }}</template>
+            </el-table-column>
+            <el-table-column label="操作" width="250" fixed="right">
+              <template #default="{row}">
+                <el-button link type="primary" @click="openDetail(row)">详情</el-button>
+                <el-button link type="primary" :disabled="!canInsert" @click="openEdit(row)">编辑</el-button>
+                <el-button v-if="isSuperuser && row.status === 'failed'" link type="warning"
+                           @click="retryDocument(row)">重试</el-button>
+                <el-button link type="danger" :disabled="!canDelete" @click="del(row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
+        <div class="documents-pagination">
+          <el-pagination v-model:current-page="page" v-model:page-size="pageSize"
+                         :page-sizes="[10, 20, 50]" :total="pagination.total"
+                         layout="total, sizes, prev, pager, next" />
+        </div>
+      </section>
 
-        <el-dialog v-model="dialog.open" :title="dialog.mode === 'edit' ? '编辑文档（整篇替换并重 embed）' : ('向 ' + slug + ' 提交文档')" width="640px">
-            <el-alert v-if="dialog.mode === 'edit'" type="warning" :closable="false" style="margin-bottom:12px"
-                      title="更新会用下面的正文整篇替换旧内容：删除旧分片与旧向量，重新切分并重新 embed。请粘贴完整的新正文。" />
-            <el-form label-width="100px">
-                <el-form-item label="标题"><el-input v-model="dialog.form.title" /></el-form-item>
-                <el-form-item label="external_id">
-                    <el-input v-model="dialog.form.external_id" :disabled="dialog.mode === 'edit'" placeholder="可选；用于幂等/upsert" />
-                </el-form-item>
-                <el-form-item label="切分方式">
-                    <el-radio-group v-model="dialog.form.splitter">
-                        <el-radio value="text">text</el-radio>
-                        <el-radio value="markdown">markdown</el-radio>
-                        <el-radio value="none">none (单一分片)</el-radio>
-                    </el-radio-group>
-                </el-form-item>
-                <el-form-item label="metadata">
-                    <el-input v-model="dialog.form.metadata_json" type="textarea" :rows="2"
-                              placeholder='可选 JSON，例如 {"author":"...","year":2024}' />
-                </el-form-item>
-                <el-form-item label="正文" required>
-                    <el-input v-model="dialog.form.text" type="textarea" :rows="10"
-                              placeholder="粘贴文本 / Markdown / JSON 字符串" />
-                </el-form-item>
-            </el-form>
-            <template #footer>
-                <el-button @click="dialog.open = false">取消</el-button>
-                <el-button type="primary" @click="submitIngest">{{ dialog.mode === 'edit' ? '保存并重新 embed' : '提交（异步 embed）' }}</el-button>
-            </template>
-        </el-dialog>
+      <el-drawer v-model="detail.open" class="documents-detail" title="文档详情" size="520px">
+        <template v-if="detail.row">
+          <div class="documents-detail-meta">
+            <span>标题</span><b>{{ documentDisplayName(detail.row) }}</b>
+            <span>文档 ID</span><span class="mono">{{ detail.row.id }}</span>
+            <span>external_id</span><span>{{ detail.row.external_id || '—' }}</span>
+            <span>状态</span><el-tag :type="documentStatusTag(detail.row.status)">{{ documentStatusLabel(detail.row.status) }}</el-tag>
+            <span>版本</span><span>v{{ detail.row.current_revision || 0 }}</span>
+            <span>content hash</span><span class="mono">{{ detail.row.content_hash || '—' }}</span>
+            <span>创建时间</span><span>{{ formatDocumentTime(detail.row.created_at) }}</span>
+            <span>更新时间</span><span>{{ formatDocumentTime(detail.row.updated_at) }}</span>
+            <span>最后错误</span><span class="documents-error">{{ detail.row.last_error || '—' }}</span>
+          </div>
+          <h3>Metadata</h3>
+          <pre class="documents-detail-json">{{ metadataText(detail.row) }}</pre>
+          <h3>摄入任务</h3>
+          <div v-loading="detail.loading">
+            <el-empty v-if="!detail.loading && !detail.jobs.length" description="暂无摄入任务" />
+            <article v-for="job in detail.jobs" :key="job.id" class="documents-job">
+              <div class="documents-job-head">
+                <el-tag :type="documentStatusTag(job.status)">{{ documentStatusLabel(job.status) }}</el-tag>
+                <el-button v-if="isSuperuser && job.status === 'failed'" link type="warning"
+                           @click="retryJob(job)">重试</el-button>
+              </div>
+              <div>创建：{{ formatDocumentTime(job.created_at) }}</div>
+              <div>开始：{{ formatDocumentTime(job.claimed_at) }}</div>
+              <div>结束：{{ formatDocumentTime(job.finished_at) }}</div>
+              <div>尝试次数：{{ job.attempt_count ?? '—' }}</div>
+              <div v-if="job.last_error" class="documents-error">{{ job.last_error }}</div>
+            </article>
+          </div>
+        </template>
+      </el-drawer>
+
+      <el-dialog v-model="dialog.open" :title="dialog.mode === 'edit' ? '编辑文档（整篇替换并重 embed）' : ('向 ' + slug + ' 提交文档')" width="640px">
+        <el-alert v-if="dialog.mode === 'edit'" type="warning" :closable="false" style="margin-bottom:12px"
+                  title="更新会用下面的正文整篇替换旧内容：删除旧分片与旧向量，重新切分并重新 embed。请粘贴完整的新正文。" />
+        <el-form label-width="100px">
+          <el-form-item label="标题"><el-input v-model="dialog.form.title" /></el-form-item>
+          <el-form-item label="external_id">
+            <el-input v-model="dialog.form.external_id" :disabled="dialog.mode === 'edit'" placeholder="可选；用于幂等/upsert" />
+          </el-form-item>
+          <el-form-item label="切分方式">
+            <el-radio-group v-model="dialog.form.splitter">
+              <el-radio value="text">text</el-radio>
+              <el-radio value="markdown">markdown</el-radio>
+              <el-radio value="none">none (单一分片)</el-radio>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item label="metadata">
+            <el-input v-model="dialog.form.metadata_json" type="textarea" :rows="2"
+                      placeholder='可选 JSON，例如 {"author":"...","year":2024}' />
+          </el-form-item>
+          <el-form-item label="正文" required>
+            <el-input v-model="dialog.form.text" type="textarea" :rows="10"
+                      placeholder="粘贴文本 / Markdown / JSON 字符串" />
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <el-button @click="dialog.open = false">取消</el-button>
+          <el-button type="primary" @click="submitIngest">{{ dialog.mode === 'edit' ? '保存并重新 embed' : '提交（异步 embed）' }}</el-button>
+        </template>
+      </el-dialog>
     </div>
     `,
 };
