@@ -4,7 +4,7 @@
 
 **Goal:** 将登录后的管理后台改为固定绿色企业主题，并把智能问答页重构为 224px 导航、290px 会话历史和自适应问答区组成的三栏工作台。
 
-**Architecture:** 保留现有零构建 Vue 3、Vue Router、Element Plus、API 和权限结构，只修改 `Layout.js`、`Chat.js`、`style.css` 及本地资源。先用静态结构测试锁定单主题、布局类名和禁止新增的伪功能，再逐步清理主题代码、重构 DOM、补齐响应式样式。
+**Architecture:** 保留现有零构建 Vue 3、Vue Router、Element Plus、API 和权限结构，只修改 `Layout.js`、`Chat.js`、`style.css` 及本地资源。允许新增只依赖浏览器剪贴板或 Vue 本地状态的控件，但不新增接口、请求字段或后端代码；先用静态结构测试锁定边界，再逐步清理主题代码、重构 DOM、补齐响应式样式。
 
 **Tech Stack:** Vue 3 ESM、Vue Router、Element Plus、本地 SVG 图标、原生 CSS、Node.js `node:test`/`assert`
 
@@ -17,6 +17,7 @@
 - 应用标识源文件：`D:\AI_work\job\向量库图片参考\9cdef80a-f621-497d-b7f9-bcf8c30a81f0-transparent.png`
 - 工作区当前已有未提交改动。不得回滚、覆盖或格式化与本任务无关的文件。
 - 不修改 `app/`、数据库、API 或聊天后端。
+- 按钮数量不是硬限制；新增按钮必须有完整纯前端行为，且不得调用新 API。计划只新增“复制回答”和“小屏会话历史开关”。
 - 基线命令：在 `admin-ui` 目录运行 `node --test`。
 - 当前基线：9 个测试文件通过。
 
@@ -382,6 +383,7 @@ git commit -m "feat(ui): align global shell with knowledge workspace"
 **Files:**
 - Create: `admin-ui/chat_redesign.test.mjs`
 - Modify: `admin-ui/src/views/Chat.js`
+- Modify: `admin-ui/src/icons.js`
 
 - [ ] **Step 1: 写聊天结构失败测试**
 
@@ -401,6 +403,10 @@ assert.match(chat, /chat-message-content/);
 assert.match(chat, /chat-avatar--ai/);
 assert.match(chat, /chat-avatar--user/);
 assert.match(chat, /chat-input-shell/);
+assert.match(chat, /copyAnswer/);
+assert.match(chat, /navigator\.clipboard/);
+assert.match(chat, /mobileHistoryOpen/);
+assert.match(chat, /chat-history-toggle/);
 
 for (const required of [
     'newChat', 'selectConversation', 'archiveConv', 'deleteConv', 'send',
@@ -426,7 +432,54 @@ node --test chat_redesign.test.mjs
 
 预期：失败，提示缺少 `chat-history-title-row`。
 
-- [ ] **Step 3: 重组会话历史栏**
+- [ ] **Step 3: 添加两个纯前端控制函数**
+
+在 `setup()` 的其他 `ref` 附近增加：
+
+```js
+const mobileHistoryOpen = ref(false);
+```
+
+在 `send()` 之前增加：
+
+```js
+async function copyAnswer(text) {
+    const value = String(text || '').trim();
+    if (!value) {
+        ElMessage.warning('暂无可复制内容');
+        return;
+    }
+    try {
+        if (!navigator.clipboard || !navigator.clipboard.writeText) {
+            throw new Error('clipboard unavailable');
+        }
+        await navigator.clipboard.writeText(value);
+        ElMessage.success('回答已复制');
+    } catch (_) {
+        const textarea = document.createElement('textarea');
+        textarea.value = value;
+        textarea.setAttribute('readonly', '');
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        const copied = document.execCommand('copy');
+        document.body.removeChild(textarea);
+        if (copied) ElMessage.success('回答已复制');
+        else ElMessage.error('复制失败，请手动选择内容');
+    }
+}
+```
+
+将以下成员加入 `return`：
+
+```js
+mobileHistoryOpen, copyAnswer,
+```
+
+复制函数不得导入或调用 `api.js`。
+
+- [ ] **Step 4: 重组会话历史栏**
 
 保留 `convsForLib`、归档、删除和会话循环。将历史栏顶部改为：
 
@@ -445,12 +498,24 @@ node --test chat_redesign.test.mjs
 
 从历史栏删除知识库选择器和原整行“新建会话”按钮。历史列表、空状态、会话标题、归档和删除按钮保持原有事件绑定。
 
-- [ ] **Step 4: 在问答主区添加知识库工具条**
+- [ ] **Step 5: 在问答主区添加知识库工具条和小屏历史开关**
+
+给根节点增加本地状态类：
+
+```html
+<div class="chat-wrap" :class="{ 'is-history-open': mobileHistoryOpen }">
+```
 
 在 `.chat-main` 内、警告和消息区之前加入：
 
 ```html
 <div class="chat-toolbar">
+    <el-button class="chat-history-toggle" text
+               :aria-label="mobileHistoryOpen ? '关闭会话历史' : '打开会话历史'"
+               @click="mobileHistoryOpen = !mobileHistoryOpen">
+        <local-icon icon="mdi:history"></local-icon>
+        会话历史
+    </el-button>
     <span class="chat-toolbar-label">知识库</span>
     <el-select v-model="currentSlug" placeholder="选择知识库" size="default"
                class="chat-library-select" @change="onLibChange">
@@ -461,7 +526,7 @@ node --test chat_redesign.test.mjs
 
 不得改变 `onLibChange()`、`loadLibs()` 或任何 API 调用。
 
-- [ ] **Step 5: 重组消息行但保留内容与引用**
+- [ ] **Step 6: 重组消息行并添加复制回答**
 
 将每条消息组织为头像加内容列：
 
@@ -480,6 +545,13 @@ node --test chat_redesign.test.mjs
             <div v-if="m.role === 'ai'" class="chat-ai-label">智能助手</div>
             <div v-if="m.role === 'ai'" class="chat-markdown"
                  v-html="renderMarkdown(m.text) + (m.cursor ? '<span class=\\'chat-cursor\\'>|</span>' : '')"></div>
+            <div v-if="m.role === 'ai' && m.text" class="chat-answer-actions">
+                <el-button class="chat-copy-answer" text aria-label="复制回答"
+                           title="复制回答" @click="copyAnswer(m.text)">
+                    <local-icon icon="mdi:content-copy"></local-icon>
+                    复制
+                </el-button>
+            </div>
         </div>
         <el-collapse v-if="m.role === 'ai' && m.sources && m.sources.length" class="chat-sources">
             <el-collapse-item :title="'引用来源（' + m.sources.length + '）'">
@@ -500,7 +572,14 @@ node --test chat_redesign.test.mjs
 </div>
 ```
 
-- [ ] **Step 6: 给输入区增加结构类，不改变发送行为**
+- [ ] **Step 7: 添加复制图标并重组输入区**
+
+在 `admin-ui/src/icons.js` 的 `ICONS` 对象中加入：
+
+```js
+'mdi:content-copy':
+    '<path fill="currentColor" d="M19 21H8a2 2 0 0 1-2-2V8h2v11h11v2m3-5H11a2 2 0 0 1-2-2V3a2 2 0 0 1 2-2h8l5 5v8a2 2 0 0 1-2 2m-3-13v4h4l-4-4Z"/>',
+```
 
 将输入区外层类改为：
 
@@ -521,7 +600,7 @@ node --test chat_redesign.test.mjs
 
 不得新增附件、设置、评价或查看原文按钮。
 
-- [ ] **Step 7: 运行聊天结构测试**
+- [ ] **Step 8: 运行聊天结构测试**
 
 ```powershell
 node --test chat_redesign.test.mjs markdown.test.mjs
@@ -529,10 +608,10 @@ node --test chat_redesign.test.mjs markdown.test.mjs
 
 预期：结构测试通过，Markdown 的 30 项测试继续通过。
 
-- [ ] **Step 8: 提交聊天结构**
+- [ ] **Step 9: 提交聊天结构**
 
 ```powershell
-git add admin-ui/chat_redesign.test.mjs admin-ui/src/views/Chat.js
+git add admin-ui/chat_redesign.test.mjs admin-ui/src/views/Chat.js admin-ui/src/icons.js
 git commit -m "feat(ui): restructure intelligent chat workspace"
 ```
 
@@ -558,8 +637,10 @@ assert.match(css, /\.chat-toolbar\s*\{/);
 assert.match(css, /\.chat-message-content\s*\{/);
 assert.match(css, /\.chat-avatar--ai\s*\{/);
 assert.match(css, /\.chat-input-shell\s*\{/);
+assert.match(css, /\.chat-copy-answer\s*\{/);
+assert.match(css, /\.chat-history-toggle\s*\{/);
 assert.match(css, /@media\s*\(max-width:\s*899px\)/);
-assert.match(css, /@media\s*\(max-width:\s*899px\)[\s\S]*flex-direction:\s*column/);
+assert.match(css, /@media\s*\(max-width:\s*899px\)[\s\S]*\.chat-wrap\.is-history-open/);
 ```
 
 - [ ] **Step 2: 运行测试并确认失败**
@@ -782,9 +863,23 @@ node --test chat_redesign.test.mjs
     min-width: 82px;
     height: 42px;
 }
+
+.chat-answer-actions {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 8px;
+}
+
+.chat-copy-answer {
+    color: var(--app-text-secondary);
+}
+
+.chat-history-toggle {
+    display: none;
+}
 ```
 
-- [ ] **Step 4: 添加无新增按钮的响应式规则**
+- [ ] **Step 4: 添加小屏历史开关的响应式规则**
 
 在 `style.css` 末尾加入：
 
@@ -816,10 +911,19 @@ node --test chat_redesign.test.mjs
     }
 
     .chat-history-panel {
+        display: none;
         width: 100%;
         max-height: 230px;
         border-right: 0;
         border-bottom: 1px solid var(--app-border);
+    }
+
+    .chat-wrap.is-history-open .chat-history-panel {
+        display: flex;
+    }
+
+    .chat-history-toggle {
+        display: inline-flex;
     }
 
     .chat-history-title-row {
@@ -921,12 +1025,13 @@ http://127.0.0.1:5599/?preview=1#/chat
 
 1. 1920px 宽：224px 导航、290px 会话栏、剩余区域为问答区。
 2. 1199px 宽：导航自动折叠，会话栏约 250px，无横向滚动。
-3. 899px 宽：会话栏在上、问答区在下，无新增展开按钮。
+3. 899px 宽：点击“会话历史”可打开和关闭顶部历史栏，不触发网络请求。
 4. 顶栏只有原折叠控制与用户菜单，不出现主题、消息或帮助入口。
 5. 新品牌标识在 34px 尺寸下清晰且无白底。
 6. 普通用户和超级管理员菜单仍按权限显示。
 7. 新建、切换、归档、删除、发送、流式回答、引用来源均可操作。
-8. 浏览器控制台无错误和缺失资源。
+8. “复制回答”能写入剪贴板，失败时显示中文错误，不触发网络请求。
+9. 浏览器控制台无错误和缺失资源。
 
 - [ ] **Step 5: 检查改动范围**
 
@@ -958,5 +1063,5 @@ git commit -m "chore(ui): remove obsolete logo drafts"
 - `node --test` 在 `admin-ui` 目录全绿。
 - 主题运行时代码、两套废弃主题和主题入口完全删除。
 - 新品牌标识已复制到正式资源目录并被全局框架引用。
-- 智能问答桌面端为参考图同构三栏，小屏不新增按钮且功能可访问。
-- 除主题切换外，现有按钮、路由、权限、API 和聊天行为没有减少或新增。
+- 智能问答桌面端为参考图同构三栏，小屏历史开关可用。
+- 复制回答和小屏历史开关只使用前端能力；后端接口、请求字段、路由、权限和聊天行为没有改变。
