@@ -417,11 +417,13 @@ local-icon { display: inline-block; vertical-align: -0.125em; }
 
 /* ============================ 主框架 ============================ */
 .layout-aside {
-    background: var(--app-sider-bg);
+    background: #FFFFFF;
     height: 100vh;
     transition: width 0.22s ease;
-    border-right: 1px solid var(--app-sider-border);
+    border-right: 1px solid var(--color-border);
+    box-shadow: none;
     position: relative; z-index: 10;
+    padding-bottom: 48px;
 }
 .layout-aside .logo {
     height: 64px; display: flex; align-items: center; gap: 10px;
@@ -449,15 +451,27 @@ local-icon { display: inline-block; vertical-align: -0.125em; }
     height: 44px; border-radius: var(--app-radius);
     margin: 2px 0; font-size: 14px;
 }
+.layout-aside .el-menu-item {
+    border-left: 3px solid transparent;
+    padding-left: 17px;
+    color: var(--color-text-regular);
+    font-weight: 400;
+    transition: border-left-color 0.18s, background 0.18s, padding-left 0.18s;
+}
 .layout-aside .el-menu-item local-icon { font-size: 18px; }
 .layout-aside .el-menu-item.is-active {
-    background: var(--app-sider-active-bg);
-    color: var(--app-sider-active-text) !important;
+    background: var(--color-primary-soft);
+    border-left: 3px solid var(--color-primary);
+    border-radius: 0 6px 6px 0;
+    color: var(--color-primary) !important;
+    font-weight: 600;
+    box-shadow: none;
 }
-.layout-aside .el-menu-item.is-active local-icon { color: var(--app-sider-active-text); }
+.layout-aside .el-menu-item.is-active local-icon { color: var(--color-primary); }
 .layout-aside .el-menu-item-group__title {
-    color: var(--app-sider-text-muted); font-size: 11px;
-    letter-spacing: 1px; padding: 14px 12px 6px; text-transform: uppercase;
+    color: var(--color-text-secondary); font-size: 11px;
+    font-weight: 600; letter-spacing: 0.5px;
+    padding: 16px 12px 6px 17px; text-transform: uppercase;
 }
 /* 底部收起按钮 */
 .sidebar-collapse-btn {
@@ -469,8 +483,6 @@ local-icon { display: inline-block; vertical-align: -0.125em; }
     font-size: 18px;
 }
 .sidebar-collapse-btn:hover { color: var(--app-primary); background: var(--app-panel-2); }
-.layout-aside { position: relative; padding-bottom: 48px; }
-.layout-aside .el-menu { padding-bottom: 0; }
 
 /* 顶栏 */
 .layout-header {
@@ -730,6 +742,30 @@ local-icon { display: inline-block; vertical-align: -0.125em; }
     background: #fbfcfc;
 }
 
+.chat-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    min-height: 240px;
+    text-align: center;
+}
+
+.chat-empty-title {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--app-text);
+    margin-bottom: 6px;
+}
+
+.chat-empty-desc {
+    font-size: 14px;
+    color: var(--app-text-secondary);
+    max-width: 320px;
+    line-height: 1.5;
+}
+
 .chat-message-row {
     display: flex;
     align-items: flex-start;
@@ -924,41 +960,8 @@ local-icon { display: inline-block; vertical-align: -0.125em; }
    侧栏精修
    ========================================================================= */
 
-/* ── Enterprise 侧栏：白色背景 + 左边框绿色指示条 ── */
-.layout-aside {
-    background: #FFFFFF;
-    border-right: 1px solid var(--color-border);
-    box-shadow: none;
-}
-.layout-aside .el-menu-item {
-    border-left: 3px solid transparent;
-    padding-left: 17px;
-    color: var(--color-text-regular);
-    font-weight: 400;
-}
-.layout-aside .el-menu-item.is-active {
-    background: var(--color-primary-soft);
-    border-left-color: var(--color-primary);
-    border-radius: 0 6px 6px 0;
-    color: var(--color-primary);
-    font-weight: 600;
-    box-shadow: none;
-}
-.layout-aside .el-menu-item.is-active local-icon {
-    color: var(--color-primary);
-}
-.layout-aside .el-menu-item-group__title {
-    color: var(--color-text-secondary);
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.5px;
-    padding: 16px 12px 6px 17px;
-}
-
-/* ── 侧栏菜单项左边框过渡动画 ── */
-.layout-aside .el-menu-item {
-    transition: border-left-color 0.18s, background 0.18s, padding-left 0.18s;
-}
+/* 侧栏背景与菜单项左边框过渡动画已在“主框架”区统一定义，
+   此处保留注释说明，避免重复规则。 */
 
 /* ============================ 响应式 ============================ */
 @media (max-width: 1199px) {
@@ -968,6 +971,9 @@ local-icon { display: inline-block; vertical-align: -0.125em; }
     .layout-aside .el-menu .el-menu-item span { display: none; }
     .layout-aside .sidebar-collapse-btn { display: none; }
     .layout-main { padding: 16px; }
+    .layout-main--chat { padding: 14px; }
+    .chat-history-panel { width: 250px; }
+    .chat-messages { padding: 20px; }
 }
 
 /* ============================ 基础组件类 ============================ */
@@ -1025,19 +1031,6 @@ local-icon { display: inline-block; vertical-align: -0.125em; }
 /* 空状态和错误状态由 Element Plus el-empty / el-alert 承担，不额外定义 */
 
 /* ============================ Chat 响应式 ============================ */
-@media (max-width: 1199px) {
-    .layout-main--chat {
-        padding: 14px;
-    }
-
-    .chat-history-panel {
-        width: 250px;
-    }
-
-    .chat-messages {
-        padding: 20px;
-    }
-}
 
 @media (max-width: 899px) {
     .layout-main--chat {

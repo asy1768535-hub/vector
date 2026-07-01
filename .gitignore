@@ -37,6 +37,9 @@ cpwsImportData/
 # Claude Code 本机配置（每台机器自有，不入库）
 .claude/settings.local.json
 
+# Claude Code / 工具生成的本地 brainstorm、preview 状态（含本机绝对路径）
+.superpowers/
+
 # 评测集：真实数据(含项目/人员等)不入库；仓库只保留通用示例与说明。
 # 真实评测集放仓库外(如桌面)，或放回 eval/ 也会被忽略；用 --dataset 指定路径。
 /eval/dataset*.jsonl

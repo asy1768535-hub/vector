@@ -4,6 +4,7 @@ import * as api from '../api.js';
 import { marked } from '../../vendor/marked.esm.js';
 import DOMPurify from '../../vendor/dompurify.es.mjs';
 import { createStreamQueue } from '../stream_queue.js';
+import { copyTextToClipboard } from '../copy_text.js';
 
 // ── Markdown → 安全 HTML（净化 script/事件属性/javascript: URL 等 XSS） ──
 function renderMarkdown(text) {
@@ -143,23 +144,10 @@ export default {
                 return;
             }
             try {
-                if (!navigator.clipboard || !navigator.clipboard.writeText) {
-                    throw new Error('clipboard unavailable');
-                }
-                await navigator.clipboard.writeText(value);
+                await copyTextToClipboard(value);
                 ElMessage.success('回答已复制');
-            } catch (_) {
-                const textarea = document.createElement('textarea');
-                textarea.value = value;
-                textarea.setAttribute('readonly', '');
-                textarea.style.position = 'fixed';
-                textarea.style.opacity = '0';
-                document.body.appendChild(textarea);
-                textarea.select();
-                const copied = document.execCommand('copy');
-                document.body.removeChild(textarea);
-                if (copied) ElMessage.success('回答已复制');
-                else ElMessage.error('复制失败，请手动选择内容');
+            } catch (e) {
+                ElMessage.error(e.message || '复制失败，请手动选择内容');
             }
         }
 

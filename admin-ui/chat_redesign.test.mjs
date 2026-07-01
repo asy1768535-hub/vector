@@ -12,8 +12,8 @@ assert.match(chat, /chat-message-content/);
 assert.match(chat, /chat-avatar--ai/);
 assert.match(chat, /chat-avatar--user/);
 assert.match(chat, /chat-input-shell/);
+assert.match(chat, /copyTextToClipboard/);
 assert.match(chat, /copyAnswer/);
-assert.match(chat, /navigator\.clipboard/);
 assert.match(chat, /mobileHistoryOpen/);
 assert.match(chat, /chat-history-toggle/);
 
