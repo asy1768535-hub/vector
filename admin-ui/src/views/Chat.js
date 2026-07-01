@@ -19,7 +19,6 @@ function renderMarkdown(text) {
     });
 }
 
-// ── Time formatting ──
 function fmtTime(iso) {
     if (!iso) return '';
     const d = new Date(iso);
@@ -44,7 +43,7 @@ export default {
         const currentSlug = ref(null);
         const conversations = ref([]);
         const currentConvId = ref(null);
-        const messages = ref([]);          // {role:'user'|'ai', text, sources?, error?, cursor?, statusText?, time}
+        const messages = ref([]);
         const input = ref('');
         const loading = ref(false);
         const chatDisabled = ref(false);
@@ -53,7 +52,6 @@ export default {
         const topK = ref(5);
         let _abortController = null;
 
-        // ── Stream queue ──
         const _queue = createStreamQueue();
         let _rafId = null;
         let _aiMsgRef = null;
@@ -168,7 +166,6 @@ export default {
             if (!source) return;
             const slug = currentSlug.value;
             if (!slug) { ElMessage.warning('请先选择知识库'); return; }
-            // Navigate to documents page and attempt to open detail drawer
             const docId = source.document_id || source.chunk_id;
             if (docId) {
                 const url = `/console/#/documents?slug=${encodeURIComponent(slug)}&open=${encodeURIComponent(docId)}`;
@@ -177,8 +174,6 @@ export default {
                 ElMessage.warning('该来源缺少文档标识');
             }
         }
-
-        const remainingChars = computed(() => Math.max(0, 2000 - (input.value || '').length));
 
         async function send() {
             const q = (input.value || '').trim();
@@ -266,7 +261,7 @@ export default {
 
         return {
             libs, currentSlug, conversations, convsForLib, currentConvId, messages, input,
-            loading, chatDisabled, streamRef, mobileHistoryOpen, topK, remainingChars,
+            loading, chatDisabled, streamRef, mobileHistoryOpen, topK,
             onLibChange, newChat, selectConversation, archiveConv, deleteConv, send, copyAnswer,
             openDocDetail, loadLibs,
             fmtScore, fmtTime, renderMarkdown,
@@ -319,6 +314,9 @@ export default {
                                class="chat-library-select" @change="onLibChange">
                         <el-option v-for="l in libs" :key="l.slug" :label="l.name" :value="l.slug" />
                     </el-select>
+                    <el-button class="chat-refresh-btn" text title="刷新" @click="loadLibs">
+                        <local-icon icon="mdi:database-import-outline"></local-icon>
+                    </el-button>
                 </div>
             </div>
 
@@ -334,7 +332,6 @@ export default {
                 </div>
                 <div v-for="(m, i) in messages" :key="i" class="chat-message-row"
                      :class="m.role === 'user' ? 'chat-message--user' : 'chat-message--ai'">
-                    <!-- AI avatar -->
                     <div v-if="m.role === 'ai'" class="chat-avatar chat-avatar--ai">AI</div>
 
                     <div class="chat-message-content">
@@ -348,9 +345,7 @@ export default {
                             <div v-if="m.role === 'user'" class="chat-user-text">{{ m.text }}</div>
                             <div v-if="m.role === 'ai'" class="chat-markdown"
                                  v-html="renderMarkdown(m.text) + (m.cursor ? '<span class=\\'chat-cursor\\'>|</span>' : '')"></div>
-                            <!-- Time row for AI messages -->
                             <div v-if="m.role === 'ai' && m.time" class="chat-msg-time">{{ fmtTime(m.time) }}</div>
-                            <!-- Copy button -->
                             <div v-if="m.role === 'ai' && m.text" class="chat-answer-actions">
                                 <el-button class="chat-copy-answer" text aria-label="复制回答" title="复制回答" @click="copyAnswer(m.text)">
                                     <local-icon icon="mdi:content-copy"></local-icon>
@@ -363,16 +358,19 @@ export default {
                         <div v-if="m.role === 'ai' && m.sources && m.sources.length" class="chat-sources">
                             <div class="chat-sources-label">引用来源（{{ m.sources.length }}）</div>
                             <div v-for="(s, si) in m.sources" :key="si" class="chat-source-item">
-                                <span class="chat-source-num">{{ si + 1 }}.</span>
-                                <span class="chat-source-title" :title="s.title || '(无标题)'">{{ s.title || '(无标题)' }}</span>
-                                <span class="chat-source-score">{{ fmtScore(s.score) }}</span>
-                                <div class="chat-source-summary">{{ (s.content || '').slice(0, 120) }}{{ (s.content || '').length > 120 ? '…' : '' }}</div>
-                                <el-button class="chat-source-detail" link type="primary" @click="openDocDetail(s)">文档详情</el-button>
+                                <div class="chat-source-left">
+                                    <span class="chat-source-num">{{ si + 1 }}.</span>
+                                    <span class="chat-source-title" :title="s.title || '(无标题)'">{{ s.title || '(无标题)' }}</span>
+                                    <span class="chat-source-score">{{ fmtScore(s.score) }}</span>
+                                    <div class="chat-source-summary">{{ s.content || '' }}</div>
+                                </div>
+                                <div class="chat-source-right">
+                                    <el-button class="chat-source-detail" link type="primary" @click="openDocDetail(s)">文档详情</el-button>
+                                </div>
                             </div>
                         </div>
                     </div>
 
-                    <!-- User time -->
                     <div v-if="m.role === 'user'" class="chat-user-right">
                         <div class="chat-avatar chat-avatar--user">我</div>
                         <div v-if="m.time" class="chat-msg-time chat-msg-time--user">{{ fmtTime(m.time) }}</div>
@@ -380,7 +378,7 @@ export default {
                 </div>
             </div>
 
-            <!-- Input area -->
+            <!-- Input area: unified editor -->
             <div class="chat-input-bar">
                 <div class="chat-input-shell">
                     <el-input v-model="input" type="textarea" :rows="3" resize="none"
@@ -388,22 +386,17 @@ export default {
                               :maxlength="2000"
                               @keydown.enter.exact.prevent="send"
                               class="chat-input" />
-                </div>
-                <div class="chat-input-footer">
-                    <div class="chat-input-footer-left">
-                        <span class="chat-input-hint">字数: {{ (input || '').length }} / 2000</span>
-                        <span class="chat-input-hint">检索数量</span>
-                        <el-select v-model="topK" size="small" class="chat-topk-select">
-                            <el-option :value="3" label="3" />
-                            <el-option :value="5" label="5" />
-                            <el-option :value="10" label="10" />
-                            <el-option :value="20" label="20" />
-                        </el-select>
-                    </div>
-                    <div class="chat-input-footer-right">
-                        <el-button class="chat-refresh-btn" text @click="loadLibs" title="刷新知识库">
-                            <local-icon icon="mdi:history"></local-icon>
-                        </el-button>
+                    <div class="chat-input-footer">
+                        <div class="chat-input-footer-left">
+                            <span class="chat-input-hint">{{ (input || '').length }} / 2000</span>
+                            <span class="chat-input-hint">检索数量</span>
+                            <el-select v-model="topK" size="small" class="chat-topk-select">
+                                <el-option :value="3" label="3" />
+                                <el-option :value="5" label="5" />
+                                <el-option :value="10" label="10" />
+                                <el-option :value="20" label="20" />
+                            </el-select>
+                        </div>
                         <el-button type="primary" :loading="loading" :disabled="!currentSlug"
                                    @click="send" class="chat-send-btn">
                             发送

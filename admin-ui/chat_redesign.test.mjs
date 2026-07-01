@@ -20,13 +20,11 @@ test('preserves existing core behaviors', () => {
     }
 });
 
-// ── New features: top_k selector ──
-test('allows top_k selector and rejects forbidden features', () => {
-    // Allowed new elements
-    for (const token of ['topK', '检索数量', 'topk-select']) {
+// ── Allowed / forbidden features ──
+test('allows top_k selector and refresh; rejects forbidden features', () => {
+    for (const token of ['topK', '检索数量', 'topk-select', 'loadLibs']) {
         assert.ok(chat.includes(token), `missing allowed feature: ${token}`);
     }
-    // Still forbidden
     for (const forbidden of [
         '上传附件', '点赞', '点踩', '查看原文', '消息中心', '帮助中心',
     ]) {
@@ -34,66 +32,85 @@ test('allows top_k selector and rejects forbidden features', () => {
     }
 });
 
-// ── New features: time formatting ──
+// ── Refresh button moved to toolbar ──
+test('refresh button is in toolbar, not using mdi:history', () => {
+    assert.ok(chat.includes('chat-toolbar-right'), 'toolbar right section exists');
+    // Refresh icon in toolbar (not mdi:history for refresh purpose)
+    assert.ok(chat.includes('database-import-outline'), 'uses database-import-outline for refresh icon');
+    // No separate chat-input-footer-right (unified in shell)
+    assert.ok(!chat.includes('chat-input-footer-right'), 'old footer-right class removed');
+});
+
+// ── Time formatting ──
 test('includes time formatting helpers', () => {
-    assert.ok(chat.includes('fmtTime'), 'missing fmtTime function');
+    assert.ok(chat.includes('fmtTime'), 'missing fmtTime');
     assert.ok(chat.includes('chat-msg-time'), 'missing message time element');
     assert.ok(chat.includes('nowISO'), 'missing nowISO helper');
 });
 
-// ── New features: compact sources ──
-test('replaces expanded source boxes with compact rows', () => {
-    // Must have compact source structure
+// ── Compact sources with two-column layout ──
+test('replaces expanded source boxes with two-column compact rows', () => {
+    assert.ok(chat.includes('chat-source-left'), 'missing source left column');
+    assert.ok(chat.includes('chat-source-right'), 'missing source right column');
     assert.ok(chat.includes('chat-source-summary'), 'missing compact source summary');
     assert.ok(chat.includes('chat-source-detail'), 'missing source detail link');
-    assert.ok(chat.includes('openDocDetail'), 'missing openDocDetail function');
-    // Must NOT have old collapsible pattern
-    assert.ok(!chat.includes('el-collapse'), 'old el-collapse sources still present');
+    assert.ok(chat.includes('openDocDetail'), 'missing openDocDetail');
+    assert.ok(!chat.includes('el-collapse'), 'old el-collapse still present');
     assert.ok(!chat.includes('el-collapse-item'), 'old el-collapse-item still present');
 });
 
-// ── New features: input enhancements ──
-test('input area has maxlength, char count, refresh button', () => {
-    assert.ok(chat.includes('maxlength="2000"'), 'missing maxlength on textarea');
-    assert.ok(chat.includes('remainingChars') || chat.includes('字数'), 'missing char count');
-    assert.ok(chat.includes('loadLibs'), 'missing refresh libraries action');
+// ── Input area: unified editor ──
+test('input area has maxlength, char count, and unified shell', () => {
+    assert.ok(chat.includes('maxlength="2000"'), 'missing maxlength');
+    assert.ok(chat.includes('chat-input-footer'), 'missing footer inside shell');
+    // Footer is inside chat-input-shell, not separate from it
+    const shellIdx = chat.indexOf('chat-input-shell');
+    const footerIdx = chat.indexOf('chat-input-footer');
+    const barEndIdx = chat.indexOf('chat-input-bar', shellIdx + 1);
+    // Footer should appear between shell start and next bar
+    assert.ok(footerIdx > shellIdx, 'footer must be inside input shell');
 });
 
 // ── CSS: two-card layout with 12px gap ──
 test('CSS defines two independent cards with 12px gap', () => {
-    // chat-wrap has gap
     assert.match(css, /\.chat-wrap\s*\{[\s\S]*?gap:\s*12px/);
-    // Both panels have card styling (border-radius + box-shadow)
     assert.match(css, /\.chat-history-panel\s*\{[\s\S]*?border-radius:\s*12px/);
     assert.match(css, /\.chat-main\s*\{[\s\S]*?border-radius:\s*12px/);
-    // No longer shares a single border (no outer border on wrap)
 });
 
-// ── CSS: history panel width ──
-test('history panel is ~310px on desktop and has 86-96px item height', () => {
+// ── CSS: history panel ──
+test('history panel ~310px, items 84-92px with box-sizing', () => {
     assert.match(css, /\.chat-history-panel\s*\{[\s\S]*?width:\s*310px/);
-    assert.match(css, /\.chat-history-item\s*\{[\s\S]*?min-height:\s*86px/);
-    // History items show time
+    assert.match(css, /\.chat-history-item\s*\{[\s\S]*?min-height:\s*84px/);
+    assert.match(css, /\.chat-history-item\s*\{[\s\S]*?max-height:\s*92px/);
+    assert.match(css, /\.chat-history-item\s*\{[\s\S]*?box-sizing:\s*border-box/);
     assert.match(css, /\.chat-history-item-time\s*\{/);
-    // Active state keeps green border + soft bg
     assert.match(css, /\.chat-history-item\.is-active\s*\{[\s\S]*?border-left-color:\s*var\(--app-primary\)/);
     assert.match(css, /\.chat-history-item\.is-active\s*\{[\s\S]*?background:\s*var\(--app-primary-soft\)/);
 });
 
 // ── CSS: message bubbles ──
-test('user bubble max-width ~46% or 520px', () => {
-    // User message content has max-width constraint
+test('user bubble max-width ~46% or 520px; AI width calc', () => {
     assert.match(css, /\.chat-message--user\s+\.chat-message-content\s*\{[\s\S]*?max-width:\s*min\(520px,\s*46%\)/);
 });
 
-test('AI answer max-width ~720px', () => {
-    assert.match(css, /\.chat-message-content\s*\{[\s\S]*?max-width:\s*720px/);
+test('AI message content uses width calc', () => {
+    assert.match(css, /\.chat-message-content\s*\{[\s\S]*?width:\s*min\(720px,\s*calc\(100%\s*-\s*48px\)\)/);
 });
 
-// ── CSS: input area height ~118-130px ──
-test('input area height and textarea sizing', () => {
-    assert.match(css, /\.chat-input\s+\.el-textarea__inner\s*\{[\s\S]*?min-height:\s*72px/);
+// ── CSS: messages overflow-x hidden ──
+test('chat-messages has overflow-x hidden', () => {
+    assert.match(css, /\.chat-messages\s*\{[\s\S]*?overflow-x:\s*hidden/);
+});
+
+// ── CSS: input area ──
+test('input area unified shell with footer inside', () => {
+    // shell is flex-direction: column
+    assert.match(css, /\.chat-input-shell\s*\{[\s\S]*?flex-direction:\s*column/);
+    // footer inside shell
     assert.match(css, /\.chat-input-footer\s*\{/);
+    // textarea height
+    assert.match(css, /\.chat-input\s+\.el-textarea__inner\s*\{[\s\S]*?min-height:\s*68px/);
     assert.match(css, /\.chat-topk-select\s*\{/);
 });
 
@@ -102,11 +119,29 @@ test('toolbar height ~68px', () => {
     assert.match(css, /\.chat-toolbar\s*\{[\s\S]*?min-height:\s*68px/);
 });
 
-// ── CSS: compact sources ──
-test('sources use compact grid layout', () => {
-    assert.match(css, /\.chat-source-item\s*\{[\s\S]*?display:\s*grid/);
+// ── CSS: font sizes ──
+test('AI text 15px/1.7, user 15px, source title 13px, summary 12px', () => {
+    assert.match(css, /\.chat-markdown\s*\{[\s\S]*?font-size:\s*15px[\s\S]*?line-height:\s*1\.7/);
+    assert.match(css, /\.chat-user-text\s*\{[\s\S]*?font-size:\s*15px/);
+    assert.match(css, /\.chat-source-title\s*\{[\s\S]*?font-size:\s*13px/);
+    assert.match(css, /\.chat-source-summary\s*\{[\s\S]*?font-size:\s*12px/);
+});
+
+// ── CSS: compact sources two-column ──
+test('sources use two-column flex layout with min-width:0', () => {
+    assert.match(css, /\.chat-source-item\s*\{[\s\S]*?display:\s*flex/);
+    assert.match(css, /\.chat-source-left\s*\{/);
+    assert.match(css, /\.chat-source-right\s*\{/);
     assert.match(css, /\.chat-source-summary\s*\{[\s\S]*?-webkit-line-clamp:\s*2/);
+    assert.match(css, /\.chat-source-summary\s*\{[\s\S]*?overflow-wrap:\s*anywhere/);
+    assert.match(css, /\.chat-source-title\s*\{[\s\S]*?min-width:\s*0/);
     assert.match(css, /\.chat-source-detail\s*\{/);
+});
+
+// ── CSS: no horizontal overflow in source items ──
+test('source items have min-width:0 to prevent overflow', () => {
+    assert.match(css, /\.chat-source-item\s*\{[\s\S]*?min-width:\s*0/);
+    assert.match(css, /\.chat-source-left\s*\{[\s\S]*?flex:\s*1[\s\S]*?min-width:\s*0/);
 });
 
 // ── Responsive ──
