@@ -1103,8 +1103,9 @@ local-icon { display: inline-block; vertical-align: -0.125em; }
 .documents-table-shell { width: 100%; overflow-x: auto; }
 .documents-table-shell .el-table { min-width: 920px; }
 .documents-file { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.documents-file-icon { flex: 0 0 auto; width: 26px; height: 30px; color: inherit; }
+.documents-file-icon { flex: 0 0 auto; width: 26px; height: 30px; color: inherit; object-fit: contain; }
 .documents-file-icon svg { width: 26px; height: 30px; display: block; }
+.documents-file-icon img { width: 26px; height: 30px; display: block; object-fit: contain; }
 .documents-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .documents-pagination { display: flex; justify-content: flex-end; margin-top: 16px; }
 .doc-link-btn { color: #7EB8E0 !important; }

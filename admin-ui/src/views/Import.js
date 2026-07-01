@@ -313,7 +313,7 @@ export default {
                         </el-form-item>
 
                         <el-form-item :label="mode === 'replace' ? '选择用于替换的新文件' : '选择要导入的文件（可多选）'" required>
-                            <input type="file" ref="fileInput" style="display:none" :multiple="mode === 'add'" @change="onFileChange" accept=".txt,.md,.json,.csv,.doc,.docx,.xlsx,.pdf" />
+                            <input type="file" ref="fileInput" style="display:none" :multiple="mode === 'add'" @change="onFileChange" accept=".txt,.md,.markdown,.json,.csv,.docx,.xlsx,.pdf" />
                             <div style="display: flex; flex-direction: column; gap: 8px;">
                                 <div>
                                     <el-button type="primary" @click="triggerFileSelect" :disabled="uploading || loading">
@@ -325,8 +325,8 @@ export default {
                                     大小: {{ formatSize(selectedFile.size) }}
                                 </div>
                                 <div style="font-size: 12px; color: #909399; margin-top: 4px;">
-                                    支持: <b>.txt, .md, .json, .csv, .docx, .xlsx, .pdf</b><br/>
-                                    - .txt/.md：单篇文档，自动分片；<br/>
+                                    支持: <b>.txt, .md, .markdown, .json, .csv, .docx, .xlsx, .pdf</b><br/>
+                                    - .txt/.md/.markdown：单篇文档，自动分片；<br/>
                                     - .json：文档对象或对象数组 (需含 text 字段)；<br/>
                                     - .csv：每行一篇文档 (首列或 text/content 列作正文)；<br/>
                                     - .docx：Word 段落 + 表格 (开启「图片 OCR」时内嵌图片也识别)；<br/>

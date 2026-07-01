@@ -290,6 +290,8 @@ export default {
           <el-option label="Word" value="word" />
           <el-option label="Excel" value="excel" />
           <el-option label="Markdown" value="markdown" />
+          <el-option label="JSON" value="json" />
+          <el-option label="CSV" value="csv" />
           <el-option label="文本" value="text" />
           <el-option label="其他" value="other" />
         </el-select>
@@ -310,7 +312,9 @@ export default {
             <el-table-column label="文件名" min-width="250">
               <template #default="{row}">
                 <div class="documents-file">
-                  <local-icon class="documents-file-icon" :icon="documentTypeIcon(row)"></local-icon>
+                  <img v-if="documentTypeIcon(row)" class="documents-file-icon"
+                       :src="documentTypeIcon(row)" alt="" aria-hidden="true" />
+                  <local-icon v-else class="documents-file-icon" icon="mdi:file-document-outline"></local-icon>
                   <span class="documents-file-name" :title="documentDisplayName(row)">{{ documentDisplayName(row) }}</span>
                 </div>
               </template>

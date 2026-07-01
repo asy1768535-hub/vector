@@ -23,6 +23,8 @@ test('infers supported document types from title suffix', () => {
     assert.equal(documentType({ title: 'a.xlsx' }), 'excel');
     assert.equal(documentType({ title: 'a.markdown' }), 'markdown');
     assert.equal(documentType({ title: 'a.txt' }), 'text');
+    assert.equal(documentType({ title: 'a.json' }), 'json');
+    assert.equal(documentType({ title: 'a.csv' }), 'csv');
     assert.equal(documentType({ title: 'a.bin' }), 'other');
 });
 
@@ -76,12 +78,16 @@ test('formats valid time and safely handles empty or invalid values', () => {
     assert.notEqual(formatDocumentTime('2026-06-01T08:00:00Z'), '—');
 });
 
-test('maps document type to icon name for all six types', () => {
-    assert.equal(documentTypeIcon({ title: 'a.pdf' }), 'doc:pdf');
-    assert.equal(documentTypeIcon({ title: 'a.DOCX' }), 'doc:word');
-    assert.equal(documentTypeIcon({ title: 'a.xlsx' }), 'doc:excel');
-    assert.equal(documentTypeIcon({ title: 'a.markdown' }), 'doc:markdown');
-    assert.equal(documentTypeIcon({ title: 'a.txt' }), 'doc:text');
-    assert.equal(documentTypeIcon({ title: 'a.bin' }), 'doc:other');
-    assert.equal(documentTypeIcon({}), 'doc:other');
+test('maps document type to icon asset path or null', () => {
+    assert.equal(documentTypeIcon({ title: 'a.pdf' }), './assets/file-types/pdf.svg');
+    assert.equal(documentTypeIcon({ title: 'a.DOCX' }), './assets/file-types/docx.svg');
+    assert.equal(documentTypeIcon({ title: 'a.xlsx' }), './assets/file-types/xlsx.svg');
+    assert.equal(documentTypeIcon({ title: 'a.markdown' }), './assets/file-types/md.svg');
+    assert.equal(documentTypeIcon({ title: 'a.txt' }), './assets/file-types/txt.svg');
+    assert.equal(documentTypeIcon({ title: 'a.json' }), './assets/file-types/json.svg');
+    assert.equal(documentTypeIcon({ title: 'a.csv' }), './assets/file-types/csv.svg');
+    assert.equal(documentTypeIcon({ title: 'a.doc' }), './assets/file-types/docx.svg');
+    assert.equal(documentTypeIcon({ title: 'a.xls' }), './assets/file-types/xlsx.svg');
+    assert.equal(documentTypeIcon({ title: 'a.bin' }), null);
+    assert.equal(documentTypeIcon({}), null);
 });

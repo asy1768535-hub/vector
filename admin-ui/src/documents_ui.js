@@ -22,17 +22,28 @@ export function documentType(row) {
     if (ext === 'xls' || ext === 'xlsx') return 'excel';
     if (ext === 'md' || ext === 'markdown') return 'markdown';
     if (ext === 'txt') return 'text';
+    if (ext === 'json') return 'json';
+    if (ext === 'csv') return 'csv';
     return 'other';
 }
 
+const FILE_TYPE_ASSETS = {
+    pdf:      './assets/file-types/pdf.svg',
+    word:     './assets/file-types/docx.svg',
+    excel:    './assets/file-types/xlsx.svg',
+    markdown: './assets/file-types/md.svg',
+    text:     './assets/file-types/txt.svg',
+    json:     './assets/file-types/json.svg',
+    csv:      './assets/file-types/csv.svg',
+};
+
+/**
+ * Return asset path for known file types, null for generic/unknown.
+ * Callers use the built-in mdi:file-document-outline icon when null.
+ */
 export function documentTypeIcon(row) {
     const t = documentType(row);
-    if (t === 'pdf') return 'doc:pdf';
-    if (t === 'word') return 'doc:word';
-    if (t === 'excel') return 'doc:excel';
-    if (t === 'markdown') return 'doc:markdown';
-    if (t === 'text') return 'doc:text';
-    return 'doc:other';
+    return FILE_TYPE_ASSETS[t] || null;
 }
 
 export function documentDisplayName(row) {
