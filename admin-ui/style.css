@@ -464,7 +464,6 @@ local-icon { display: inline-block; vertical-align: -0.125em; }
     border-left: 3px solid var(--color-primary);
     border-radius: 0 6px 6px 0;
     color: var(--color-primary) !important;
-    font-weight: 600;
     box-shadow: none;
 }
 .layout-aside .el-menu-item.is-active local-icon { color: var(--color-primary); }
@@ -993,9 +992,13 @@ local-icon { display: inline-block; vertical-align: -0.125em; }
 .documents-table-shell { width: 100%; overflow-x: auto; }
 .documents-table-shell .el-table { min-width: 920px; }
 .documents-file { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.documents-file-type { flex: 0 0 auto; min-width: 42px; padding: 4px 7px; border-radius: 6px; background: var(--app-primary-soft); color: var(--app-primary); text-transform: uppercase; text-align: center; font-size: 11px; font-weight: 700; }
+.documents-file-icon { flex: 0 0 auto; width: 26px; height: 30px; color: inherit; }
+.documents-file-icon svg { width: 26px; height: 30px; display: block; }
 .documents-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .documents-pagination { display: flex; justify-content: flex-end; margin-top: 16px; }
+.doc-link-btn { color: #7EB8E0 !important; }
+.doc-link-btn:hover { color: #5A9FCC !important; }
+.doc-link-btn.is-disabled { color: #B0D0E8 !important; }
 .documents-detail-meta { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 10px 14px; }
 .documents-detail-meta span { color: var(--app-text-secondary); font-size: 13px; }
 .documents-detail-meta b { color: var(--app-text); }

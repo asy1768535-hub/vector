@@ -5,6 +5,7 @@ import {
     documentStatusLabel,
     documentStatusTag,
     documentType,
+    documentTypeIcon,
     filterDocuments,
     formatDocumentTime,
     paginateDocuments,
@@ -73,4 +74,14 @@ test('formats valid time and safely handles empty or invalid values', () => {
     assert.equal(formatDocumentTime(null), '—');
     assert.equal(formatDocumentTime('not-a-date'), '—');
     assert.notEqual(formatDocumentTime('2026-06-01T08:00:00Z'), '—');
+});
+
+test('maps document type to icon name for all six types', () => {
+    assert.equal(documentTypeIcon({ title: 'a.pdf' }), 'doc:pdf');
+    assert.equal(documentTypeIcon({ title: 'a.DOCX' }), 'doc:word');
+    assert.equal(documentTypeIcon({ title: 'a.xlsx' }), 'doc:excel');
+    assert.equal(documentTypeIcon({ title: 'a.markdown' }), 'doc:markdown');
+    assert.equal(documentTypeIcon({ title: 'a.txt' }), 'doc:text');
+    assert.equal(documentTypeIcon({ title: 'a.bin' }), 'doc:other');
+    assert.equal(documentTypeIcon({}), 'doc:other');
 });

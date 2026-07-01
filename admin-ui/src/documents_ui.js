@@ -25,6 +25,16 @@ export function documentType(row) {
     return 'other';
 }
 
+export function documentTypeIcon(row) {
+    const t = documentType(row);
+    if (t === 'pdf') return 'doc:pdf';
+    if (t === 'word') return 'doc:word';
+    if (t === 'excel') return 'doc:excel';
+    if (t === 'markdown') return 'doc:markdown';
+    if (t === 'text') return 'doc:text';
+    return 'doc:other';
+}
+
 export function documentDisplayName(row) {
     if (row?.title) return row.title;
     if (row?.external_id) return row.external_id;

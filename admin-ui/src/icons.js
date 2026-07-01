@@ -57,6 +57,20 @@ const ICONS = {
     'mdi:chevron-right':
         '<path fill="currentColor" d="M8.59 16.58 13.17 12 8.59 7.41 10 6l6 6-6 6-1.41-1.42Z"/>',
 
+    // ── Document file type fold-corner icons (doc:xxx) ──
+    'doc:pdf':
+        '<path fill="#E74C3C" d="M4 2h12l6 6v4l-4 4V8h-6V2H4v22h10l2 2H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm12 0v6h6" fill-rule="evenodd"/><path fill="#C0392B" d="M22 16v6l-4 4v-6h-4l4-4z"/><text x="14.5" y="18" fill="#FFF" font-size="4.5" font-weight="700" font-family="sans-serif">PDF</text>',
+    'doc:word':
+        '<path fill="#3498DB" d="M4 2h12l6 6v4l-4 4V8h-6V2H4v22h10l2 2H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm12 0v6h6" fill-rule="evenodd"/><path fill="#2980B9" d="M22 16v6l-4 4v-6h-4l4-4z"/><text x="15" y="18" fill="#FFF" font-size="5" font-weight="700" font-family="sans-serif">W</text>',
+    'doc:excel':
+        '<path fill="#27AE60" d="M4 2h12l6 6v4l-4 4V8h-6V2H4v22h10l2 2H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm12 0v6h6" fill-rule="evenodd"/><path fill="#1E8449" d="M22 16v6l-4 4v-6h-4l4-4z"/><text x="13" y="18" fill="#FFF" font-size="4" font-weight="700" font-family="sans-serif">XLS</text>',
+    'doc:markdown':
+        '<path fill="#7F8C8D" d="M4 2h12l6 6v4l-4 4V8h-6V2H4v22h10l2 2H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm12 0v6h6" fill-rule="evenodd"/><path fill="#5D6D7E" d="M22 16v6l-4 4v-6h-4l4-4z"/><text x="14" y="18" fill="#FFF" font-size="4.2" font-weight="700" font-family="sans-serif">MD</text>',
+    'doc:text':
+        '<path fill="#17A589" d="M4 2h12l6 6v4l-4 4V8h-6V2H4v22h10l2 2H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm12 0v6h6" fill-rule="evenodd"/><path fill="#117A65" d="M22 16v6l-4 4v-6h-4l4-4z"/><text x="12.5" y="18" fill="#FFF" font-size="3.8" font-weight="700" font-family="sans-serif">TXT</text>',
+    'doc:other':
+        '<path fill="#95A5A6" d="M4 2h12l6 6v4l-4 4V8h-6V2H4v22h10l2 2H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm12 0v6h6" fill-rule="evenodd"/><path fill="#7F8C8D" d="M22 16v6l-4 4v-6h-4l4-4z"/>',
+
     // ── Carbon Icons ──
     'carbon:chart-relationship':
         '<path fill="currentColor" d="M26 6a3.996 3.996 0 0 0-3.858 3H17.93A4.98 4.98 0 0 0 14 5a4.99 4.99 0 0 0-3.93 2H6a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h4.07A4.98 4.98 0 0 0 14 17a4.99 4.99 0 0 0 3.93-2h4.21A3.993 3.993 0 1 0 26 16h-4.21a4.97 4.97 0 0 0-5.86-2H6v-4h9.93a4.98 4.98 0 0 0 5.86-2H26V6ZM6 9h4v4H6Zm8 7a3 3 0 1 1 3-3 3.003 3.003 0 0 1-3 3Zm12-7a2 2 0 1 1 2-2 2.002 2.002 0 0 1-2 2Z"/>',
@@ -69,6 +83,12 @@ const FALLBACK =
 // 部分图标（如 Carbon）坐标超出 24×24，使用更大的 viewBox
 const VIEWBOX_MAP = {
     'carbon:chart-relationship': '0 0 32 32',
+    'doc:pdf': '0 0 28 28',
+    'doc:word': '0 0 28 28',
+    'doc:excel': '0 0 28 28',
+    'doc:markdown': '0 0 28 28',
+    'doc:text': '0 0 28 28',
+    'doc:other': '0 0 28 28',
 };
 const DEFAULT_VIEWBOX = '0 0 24 24';
 

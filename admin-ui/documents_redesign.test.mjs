@@ -68,8 +68,8 @@ test('defines responsive document workspace styling', () => {
 });
 
 test('blocks write actions when no library is selected', () => {
-    assert.ok(source.includes('Boolean(slug.value) && (store.user?.is_superuser'), 'canInsert requires slug');
-    assert.ok(source.includes('Boolean(slug.value) && (store.user?.is_superuser'), 'canDelete requires slug');
+    assert.ok(source.includes("Boolean(slug.value) && (store.user?.is_superuser || hasPermission(slug.value, 'insert'))"), 'canInsert requires slug');
+    assert.ok(source.includes("Boolean(slug.value) && (store.user?.is_superuser || hasPermission(slug.value, 'delete'))"), 'canDelete requires slug');
     for (const guard of [
         "if (!slug.value || !canInsert.value) return;",
         "if (!slug.value) {\n                ElMessage.warning('请先选择知识库');",

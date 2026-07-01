@@ -9,6 +9,7 @@ import {
     documentStatusLabel,
     documentStatusTag,
     documentType,
+    documentTypeIcon,
     filterDocuments,
     formatDocumentTime,
     paginateDocuments,
@@ -247,7 +248,7 @@ export default {
             processingCount, filters, page, pageSize, pagination, visibleDocs, partialList,
             detail, dialog, loadDocs, resetFilters, openFileImport, openIngest, openEdit,
             openDetail, retryJob, retryDocument, submitIngest, del, metadataText,
-            documentDisplayName, documentStatusLabel, documentStatusTag, documentType,
+            documentDisplayName, documentStatusLabel, documentStatusTag, documentType, documentTypeIcon,
             formatDocumentTime,
         };
     },
@@ -255,7 +256,6 @@ export default {
     <div class="documents-workspace">
       <section class="documents-overview">
         <div class="documents-heading">
-          <div class="documents-eyebrow">KNOWLEDGE DOCUMENTS</div>
           <h2>文档管理</h2>
           <el-select v-model="slug" placeholder="选择知识库" style="width: 100%">
             <el-option v-for="l in myLibs" :key="l.slug"
@@ -310,7 +310,7 @@ export default {
             <el-table-column label="文件名" min-width="250">
               <template #default="{row}">
                 <div class="documents-file">
-                  <span class="documents-file-type">{{ documentType(row) }}</span>
+                  <local-icon class="documents-file-icon" :icon="documentTypeIcon(row)"></local-icon>
                   <span class="documents-file-name" :title="documentDisplayName(row)">{{ documentDisplayName(row) }}</span>
                 </div>
               </template>
@@ -331,8 +331,8 @@ export default {
             </el-table-column>
             <el-table-column label="操作" width="250" fixed="right">
               <template #default="{row}">
-                <el-button link type="primary" @click="openDetail(row)">详情</el-button>
-                <el-button link type="primary" :disabled="!canInsert" @click="openEdit(row)">编辑</el-button>
+                <el-button link class="doc-link-btn" @click="openDetail(row)">详情</el-button>
+                <el-button link class="doc-link-btn" :disabled="!canInsert" @click="openEdit(row)">编辑</el-button>
                 <el-button v-if="isSuperuser && row.status === 'failed'" link type="warning"
                            @click="retryDocument(row)">重试</el-button>
                 <el-button link type="danger" :disabled="!canDelete" @click="del(row)">删除</el-button>
