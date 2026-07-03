@@ -3,6 +3,7 @@ __pycache__/
 *$py.class
 *.egg-info/
 .venv/
+.run_logs/
 venv/
 
 # PDF OCR 真实测试样本（含客户业务文书）——不入库

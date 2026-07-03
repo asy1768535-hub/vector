@@ -3,62 +3,94 @@ import { useRoute } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import * as api from '../api.js';
 import { store } from '../store.js';
-import { humanizeError } from './import_errors.js';
 import { resolveImportEntry } from '../import_query.js';
-
-const OP_LABEL = { created: '新建', updated: '已更新', unchanged: '未变更' };
-const OP_TAG = { created: 'success', updated: 'warning', unchanged: 'info' };
-
-// 多文件队列项状态
-const ST_LABEL = { pending: '等待中', uploading: '上传中', submitted: '已提交', skipped: '跳过', failed: '失败' };
-const ST_TAG = { pending: 'info', uploading: 'warning', submitted: 'success', skipped: 'info', failed: 'danger' };
-
-// 旧二进制 Office 格式：无纯 Python 解析库，后端会 400 拒绝；前端在选择时即提示另存为新格式，
-// 避免进入队列后只看到笼统的 400 文案。
-const LEGACY_SAVE_AS = { '.doc': '请另存为 .docx 后再上传', '.xls': '请另存为 .xlsx 后再上传' };
-function fileExt(name) {
-    const i = name.lastIndexOf('.');
-    return i >= 0 ? name.slice(i).toLowerCase() : '';
-}
+import { humanizeError } from './import_errors.js';
+import {
+    ST_LABEL, ST_TAG, OP_LABEL, OP_TAG,
+    validateBatch, fileKey, formatSize, fileTypeIcon,
+    MAX_BATCH_SIZE, validateFile,
+} from '../import_ui.js';
+import { uploadEmpty } from '../illustrations.js';
 
 export default {
     setup() {
         const route = useRoute();
         const libs = ref([]);
         const slug = ref(null);
-        const mode = ref('add');           // 'add'（默认，多文件队列）| 'replace'（单文件）
+        const mode = ref('add');
         const fileInput = ref(null);
         const externalId = ref('');
-
-        // 替换模式（保持单文件）
-        const selectedFile = ref(null);
         const replaceDocId = ref(null);
+        const replaceFile = ref(null);
+        const replaceFileError = ref('');
         const docs = ref([]);
         const docsLoading = ref(false);
-        const loading = ref(false);        // 替换模式上传中
-        const importResult = ref(null);    // 替换模式结果
+        const loading = ref(false);
+        const importResult = ref(null);
         const docQuery = ref('');
+        const queue = ref([]);
+        const uploading = ref(false);
+        const stats = ref(null);
+        const dragOver = ref(false);
+        const showExtId = ref(false);
 
-        // 新增模式（多文件队列）
-        const queue = ref([]);             // [{ key, file, name, size, status, error }]
-        const uploading = ref(false);      // 队列上传中
-        const ranOnce = ref(false);        // 是否已点过「开始上传」（控制汇总/提示显示）
+        // ── Computed ─────────────────────────────────────────
+        const displayDocs = computed(() => {
+            const q = docQuery.value.toLowerCase();
+            if (!q) return docs.value;
+            return docs.value.filter((d) =>
+                (d.title || '').toLowerCase().includes(q) ||
+                (d.external_id || '').toLowerCase().includes(q) ||
+                (d.id || '').toLowerCase().includes(q)
+            );
+        });
 
+        const extIdSet = computed(() => Boolean(externalId.value.trim()));
+        const multiBlockedByExtId = computed(() =>
+            mode.value === 'add' && queue.value.length > 1 && extIdSet.value
+        );
+
+        const pendingCount = computed(() =>
+            queue.value.filter((it) => it.status === 'pending').length
+        );
+        const submittedCount = computed(() =>
+            queue.value.filter((it) => it.status === 'submitted').length
+        );
+        const skippedCount = computed(() =>
+            queue.value.filter((it) => it.status === 'skipped').length
+        );
+        const failedCount = computed(() =>
+            queue.value.filter((it) => it.status === 'failed').length
+        );
+        const invalidCount = computed(() =>
+            queue.value.filter((it) => it.status === 'invalid').length
+        );
+        const hasFailed = computed(() => failedCount.value > 0);
+
+        const canStart = computed(() =>
+            mode.value === 'add' && slug.value && pendingCount.value > 0 &&
+            !uploading.value && !multiBlockedByExtId.value
+        );
+
+        const canReplace = computed(() =>
+            mode.value === 'replace' && slug.value && replaceDocId.value &&
+            replaceFile.value && !replaceFileError.value && !loading.value
+        );
+
+        // ── Library loading ──────────────────────────────────
         async function loadLibs() {
             try {
                 if (store.user?.is_superuser) {
                     libs.value = (await api.listLibraries()).filter((l) => !l.deleted_at);
                 } else {
-                    libs.value = store.permissions
-                        .filter((p) => p.actions.includes('insert'))
+                    libs.value = (store.permissions || [])
+                        .filter((p) => (p.actions || []).includes('insert'))
                         .map((p) => ({ slug: p.library_slug, name: p.library_name || p.library_slug }));
                 }
                 const entry = resolveImportEntry(route.query, libs.value, slug.value);
                 slug.value = entry.slug;
                 mode.value = entry.mode;
-            } catch (e) {
-                ElMessage.error(e.message);
-            }
+            } catch (e) { ElMessage.error(e.message); }
         }
 
         async function loadDocs() {
@@ -66,392 +98,433 @@ export default {
             docsLoading.value = true;
             try {
                 docs.value = await api.listDocuments(slug.value, { limit: 500 });
-            } catch (e) {
-                ElMessage.error('加载文档列表失败：' + (e.message || e));
-                docs.value = [];
-            } finally {
-                docsLoading.value = false;
-            }
+            } catch (_) { docs.value = []; }
+            finally { docsLoading.value = false; }
         }
 
-        // 切库：清空队列与结果（不同库不混批）；进入替换模式刷新可替换文档
-        watch(slug, () => { clearQueue(); selectedFile.value = null; importResult.value = null; });
-        watch(mode, () => {
-            importResult.value = null;
-            if (mode.value === 'replace') { replaceDocId.value = null; loadDocs(); }
-        });
+        async function loadStats() {
+            if (!slug.value) { stats.value = null; return; }
+            try {
+                stats.value = await api.libraryStats(slug.value);
+            } catch (_) { stats.value = null; }
+        }
 
+        // ── File handling (add mode) ─────────────────────────
         function triggerFileSelect() {
             if (fileInput.value) fileInput.value.click();
         }
 
-        function onFileChange(event) {
-            const files = Array.from(event.target.files || []);
-            if (!files.length) return;
-            if (mode.value === 'replace') {
-                const ext = fileExt(files[0].name);
-                if (LEGACY_SAVE_AS[ext]) { ElMessage.warning(`${files[0].name}：${LEGACY_SAVE_AS[ext]}`); }
-                else { selectedFile.value = files[0]; importResult.value = null; }
-            } else {
-                // 新增模式：追加到队列（按 名+大小+修改时间 去重），可分次累加
-                const seen = new Set(queue.value.map((it) => it.key));
-                for (const f of files) {
-                    const ext = fileExt(f.name);
-                    if (LEGACY_SAVE_AS[ext]) {            // 旧格式不入队，直接提示另存为
-                        ElMessage.warning(`${f.name}：${LEGACY_SAVE_AS[ext]}`);
-                        continue;
-                    }
-                    const key = `${f.name}__${f.size}__${f.lastModified}`;
-                    if (seen.has(key)) continue;
-                    seen.add(key);
-                    queue.value.push({ key, file: f, name: f.name, size: f.size, status: 'pending', error: '' });
-                }
-                ranOnce.value = false;
+        function addFiles(files) {
+            if (!files || !files.length) return;
+            const existingKeys = queue.value.map((it) => it._key);
+            const { accepted, duplicates, invalid } = validateBatch(Array.from(files), existingKeys);
+
+            for (const { file } of accepted) {
+                queue.value.push({
+                    _key: fileKey(file),
+                    file,
+                    name: file.name,
+                    size: file.size,
+                    status: 'pending',
+                    error: '',
+                });
             }
-            // 允许再次选择相同文件触发 change
+            for (const { file, reason, failType } of invalid) {
+                queue.value.push({
+                    _key: fileKey(file),
+                    file: null,
+                    name: file.name,
+                    size: file.size,
+                    status: 'invalid',
+                    error: reason,
+                    _failType: failType || 'format',
+                });
+            }
+
+            const msgs = [];
+            if (duplicates.length) msgs.push(`${duplicates.length} 个重复文件已跳过`);
+            if (invalid.length) msgs.push(`${invalid.length} 个未通过校验`);
+            if (msgs.length) ElMessage.warning(msgs.join('；'));
+        }
+
+        function onFileChange(e) {
+            addFiles(e.target.files);
             if (fileInput.value) fileInput.value.value = '';
+        }
+
+        function onDragOver(e) {
+            e.preventDefault();
+            dragOver.value = true;
+        }
+        function onDragLeave() {
+            dragOver.value = false;
+        }
+        function onDrop(e) {
+            e.preventDefault();
+            dragOver.value = false;
+            addFiles(e.dataTransfer.files);
+        }
+
+        function removeItem(item) {
+            const idx = queue.value.indexOf(item);
+            if (idx >= 0) queue.value.splice(idx, 1);
         }
 
         function clearQueue() {
             queue.value = [];
-            ranOnce.value = false;
         }
 
-        function fmtTime(t) {
-            if (!t) return '—';
-            try { return new Date(t).toLocaleString(); } catch (e) { return t; }
-        }
-
-        function filterDocs(q) {
-            docQuery.value = (q || '').trim().toLowerCase();
-        }
-        const displayDocs = computed(() => {
-            const q = docQuery.value;
-            if (!q) return docs.value;
-            return docs.value.filter((d) =>
-                (d.title || '').toLowerCase().includes(q) ||
-                (d.external_id || '').toLowerCase().includes(q) ||
-                (d.id || '').toLowerCase().includes(q),
-            );
-        });
-        function onReplaceVisible(v) { if (v) docQuery.value = ''; }
-        function selectedDoc() {
-            return docs.value.find((d) => d.id === replaceDocId.value) || null;
-        }
-
-        function formatSize(bytes) {
-            if (bytes === 0) return '0 B';
-            const k = 1024;
-            const sizes = ['B', 'KB', 'MB', 'GB'];
-            const i = Math.floor(Math.log(bytes) / Math.log(k));
-            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-        }
-
-        // ── 新增模式：external_id 守卫与汇总 ────────────────────────────
-        // external_id 仅适用于单文件 upsert：队列 >1 且填了 external_id 时禁止上传。
-        const extIdSet = computed(() => externalId.value.trim() !== '');
-        const multiBlockedByExtId = computed(() => mode.value === 'add' && queue.value.length > 1 && extIdSet.value);
-        const hasFailed = computed(() => queue.value.some((it) => it.status === 'failed'));
-        const pendingCount = computed(() => queue.value.filter((it) => it.status === 'pending').length);
-        const summary = computed(() => {
-            const c = { submitted: 0, skipped: 0, failed: 0 };
-            for (const it of queue.value) if (c[it.status] !== undefined) c[it.status]++;
-            return c;
-        });
-        const canStart = computed(() =>
-            mode.value === 'add' && !!slug.value && pendingCount.value > 0 && !uploading.value && !multiBlockedByExtId.value,
-        );
-
-        // ── 新增模式：顺序逐个上传（失败不中断）────────────────────────
-        async function runQueue(onlyFailed) {
-            if (!slug.value) { ElMessage.warning('请选择目标库'); return; }
-            if (multiBlockedByExtId.value) {
-                ElMessage.warning('external_id 只适用于单文件 upsert；多文件上传请清空 external_id。');
-                return;
-            }
-            const targets = queue.value.filter((it) =>
-                onlyFailed ? it.status === 'failed' : it.status === 'pending',
-            );
-            if (!targets.length) {
-                ElMessage.info(onlyFailed ? '没有失败的文件可重试' : '没有待上传的文件');
-                return;
-            }
-            // external_id 仅在「队列恰好 1 个文件」时透传（单文件 upsert）；否则一律不带。
-            const extId = (queue.value.length === 1 && extIdSet.value) ? externalId.value.trim() : null;
-
-            uploading.value = true;
-            ranOnce.value = true;
-            try {
-                for (const it of targets) {
-                    it.status = 'uploading';
-                    it.error = '';
-                    try {
-                        const resp = await api.importFile(slug.value, it.file, { externalId: extId });
-                        const ops = (resp.documents || []).map((d) => d.operation).filter(Boolean);
-                        // 全部 unchanged → 跳过（相同内容已存在）；否则视为已提交
-                        it.status = (ops.length && ops.every((o) => o === 'unchanged')) ? 'skipped' : 'submitted';
-                    } catch (e) {
-                        it.status = 'failed';
-                        it.error = humanizeError(e);
-                    }
-                }
-            } finally {
-                uploading.value = false;
-            }
-            const s = summary.value;
-            ElMessage.success(`上传结束：成功 ${s.submitted}，跳过 ${s.skipped}，失败 ${s.failed}`);
-        }
-
-        // ── 替换模式：单文件（保持原行为）──────────────────────────────
-        function reportTip(resp) {
-            const ops = (resp.documents || []).map((d) => d.operation).filter(Boolean);
-            if (ops.length && ops.every((o) => o === 'unchanged')) {
-                ElMessage.warning('相同内容已存在，未重复新增');
+        // ── Replace mode file selection ──────────────────────
+        function onReplaceFileChange(e) {
+            const file = e.target.files?.[0];
+            if (!file) { replaceFile.value = null; replaceFileError.value = ''; return; }
+            const result = validateFile(file);
+            if (result.valid) {
+                replaceFile.value = file;
+                replaceFileError.value = '';
             } else {
-                ElMessage.success('替换成功：revision 已增加，旧内容已停止检索');
+                replaceFile.value = file;
+                replaceFileError.value = result.reason;
+            }
+            if (fileInput.value) fileInput.value.value = '';
+        }
+
+        function onReplaceDrop(e) {
+            e.preventDefault();
+            dragOver.value = false;
+            const file = e.dataTransfer.files?.[0];
+            if (!file) return;
+            const result = validateFile(file);
+            if (result.valid) {
+                replaceFile.value = file;
+                replaceFileError.value = '';
+            } else {
+                replaceFile.value = file;
+                replaceFileError.value = result.reason;
             }
         }
 
+        // ── Upload ───────────────────────────────────────────
+        async function runQueue(onlyFailed) {
+            if (!slug.value) return;
+            if (multiBlockedByExtId.value) {
+                ElMessage.warning('多文件模式下 external_id 只能用于单个文件');
+                return;
+            }
+            uploading.value = true;
+            const filterStatus = onlyFailed ? 'failed' : 'pending';
+            const items = queue.value.filter((it) => it.status === filterStatus);
+
+            for (const it of items) {
+                if (!it.file) continue;
+                it.status = 'uploading';
+                try {
+                    const extId = (items.length === 1 && extIdSet.value) ? externalId.value.trim() : null;
+                    const resp = await api.importFile(slug.value, it.file, { externalId: extId });
+                    const docs = (resp && resp.documents) ? resp.documents : [];
+                    const allUnchanged = docs.length > 0 && docs.every((d) => d.operation === 'unchanged');
+                    it.status = allUnchanged ? 'skipped' : 'submitted';
+                    it.error = '';
+                } catch (e) {
+                    it.status = 'failed';
+                    it.error = humanizeError(e);
+                }
+            }
+
+            uploading.value = false;
+            loadStats();
+            const ok = submittedCount.value + skippedCount.value;
+            const fail = failedCount.value;
+            ElMessage.success(`上传完成：${ok} 成功${fail > 0 ? `，${fail} 失败` : ''}`);
+        }
+
+        // ── Replace mode ─────────────────────────────────────
         async function handleReplace() {
-            if (!slug.value) { ElMessage.warning('请选择目标库'); return; }
-            if (!replaceDocId.value) { ElMessage.warning('请先选择要替换的已有文档'); return; }
-            if (!selectedFile.value) { ElMessage.warning('请先选择用于替换的新文件'); return; }
-            const target = selectedDoc();
-            const name = (target && (target.title || target.external_id)) || replaceDocId.value.slice(0, 8);
+            if (!slug.value || !replaceDocId.value || !replaceFile.value) return;
+            if (replaceFileError.value) {
+                ElMessage.warning('文件未通过校验：' + replaceFileError.value);
+                return;
+            }
+            const file = replaceFile.value;
             try {
                 await ElMessageBox.confirm(
-                    `将用新文件替换《${name}》，revision 将增加，旧内容会停止检索。`,
-                    '确认替换',
-                    { confirmButtonText: '确认替换', cancelButtonText: '取消', type: 'warning' },
+                    `确认用 "${file.name}" 替换当前文档？文档内容将完全覆盖，revision 递增。`,
+                    '确认替换', { type: 'warning' }
                 );
-            } catch (e) { return; }
+            } catch (_) { return; }
             loading.value = true;
             try {
-                const resp = await api.importFile(slug.value, selectedFile.value, { replaceDocumentId: replaceDocId.value });
+                const resp = await api.importFile(slug.value, file, { replaceDocumentId: replaceDocId.value });
                 importResult.value = resp;
-                reportTip(resp);
-                selectedFile.value = null;
-                if (fileInput.value) fileInput.value.value = '';
+                const docs = (resp && resp.documents) ? resp.documents : [];
+                const allUnchanged = docs.length > 0 && docs.every((d) => d.operation === 'unchanged');
+                if (allUnchanged) {
+                    ElMessage.warning('内容未变更，文档保持原样');
+                } else {
+                    ElMessage.success('替换成功');
+                }
+                replaceFile.value = null;
+                replaceFileError.value = '';
                 replaceDocId.value = null;
-                loadDocs();
+                await loadDocs();
+                await loadStats();
             } catch (e) {
                 ElMessage.error(humanizeError(e));
-            } finally {
-                loading.value = false;
-            }
+            } finally { loading.value = false; }
         }
+
+        function clearReplace() {
+            importResult.value = null;
+            replaceDocId.value = null;
+            replaceFile.value = null;
+            replaceFileError.value = '';
+        }
+
+        // ── Watchers ─────────────────────────────────────────
+        watch(slug, () => {
+            queue.value = [];
+            importResult.value = null;
+            replaceDocId.value = null;
+            replaceFile.value = null;
+            replaceFileError.value = '';
+            showExtId.value = false;
+            externalId.value = '';
+            loadDocs();
+            loadStats();
+        });
+        watch(mode, () => {
+            importResult.value = null;
+            clearQueue();
+            replaceFile.value = null;
+            replaceFileError.value = '';
+            if (mode.value === 'replace') {
+                replaceDocId.value = null;
+                loadDocs();
+                loadStats();
+            }
+        });
 
         onMounted(loadLibs);
 
         return {
-            libs, slug, mode, fileInput, externalId,
-            selectedFile, replaceDocId, docs, docsLoading, loading, importResult,
-            queue, uploading, ranOnce, extIdSet, multiBlockedByExtId, hasFailed,
-            pendingCount, summary, canStart,
-            triggerFileSelect, onFileChange, clearQueue, runQueue, handleReplace,
-            formatSize, fmtTime, displayDocs, filterDocs, onReplaceVisible,
-            OP_LABEL, OP_TAG, ST_LABEL, ST_TAG,
+            libs, slug, mode, fileInput, externalId, showExtId, replaceDocId,
+            replaceFile, replaceFileError,
+            docs, docsLoading, loading, importResult, docQuery,
+            queue, uploading, stats, dragOver,
+            displayDocs, extIdSet, multiBlockedByExtId,
+            pendingCount, submittedCount, skippedCount, failedCount, invalidCount,
+            hasFailed, canStart, canReplace,
+            loadLibs, loadDocs, triggerFileSelect, onFileChange,
+            onDragOver, onDragLeave, onDrop,
+            onReplaceFileChange, onReplaceDrop,
+            addFiles, removeItem, clearQueue, runQueue,
+            handleReplace, clearReplace,
+            ST_LABEL, ST_TAG, OP_LABEL, OP_TAG, uploadEmpty,
+            formatSize, fileTypeIcon, MAX_BATCH_SIZE,
         };
     },
     template: `
-    <div>
-        <div class="page-header">
-            <h2>导入数据</h2>
-        </div>
-
-        <el-row :gutter="20">
-            <el-col :span="13">
-                <el-card>
-                    <template #header>
-                        <div class="card-header"><span>文件导入</span></div>
-                    </template>
-
-                    <el-form label-position="top">
-                        <el-form-item label="选择目标库" required>
-                            <el-select v-model="slug" placeholder="请选择库" style="width: 100%">
-                                <el-option v-for="l in libs" :key="l.slug" :label="l.name + ' (' + l.slug + ')'" :value="l.slug" />
-                            </el-select>
-                        </el-form-item>
-
-                        <el-form-item label="上传方式" required>
-                            <el-radio-group v-model="mode" :disabled="uploading || loading">
-                                <el-radio-button label="add">新增文档</el-radio-button>
-                                <el-radio-button label="replace">替换已有文档</el-radio-button>
-                            </el-radio-group>
-                            <div style="font-size: 12px; color: #909399; margin-top: 6px;">
-                                <span v-if="mode === 'add'">新增：可一次选择多个文件，按顺序逐个上传；按内容/external_id 去重。</span>
-                                <span v-else>替换：选中一篇已有文档，用<b>单个</b>新文件覆盖它（revision +1，旧内容立即停止检索）。</span>
-                            </div>
-                        </el-form-item>
-
-                        <el-form-item v-if="mode === 'replace'" label="选择要替换的文档" required>
-                            <el-select v-model="replaceDocId" filterable :loading="docsLoading"
-                                       :filter-method="filterDocs" @visible-change="onReplaceVisible"
-                                       popper-class="replace-doc-popper" :fit-input-width="true"
-                                       no-data-text="当前知识库暂无可替换文档"
-                                       placeholder="按文件名 / external_id / 文档ID 搜索选择" style="width: 100%">
-                                <el-option v-for="d in displayDocs" :key="d.id"
-                                           :label="d.title || '(无标题)'" :value="d.id">
-                                    <div class="rdoc">
-                                        <div class="rdoc-l1">
-                                            <span class="rdoc-name">{{ d.title || '(无标题)' }}</span>
-                                            <span class="rdoc-meta">
-                                                <el-tag size="small" type="info">{{ d.status }}</el-tag>
-                                                <el-tag size="small">rev {{ d.current_revision }}</el-tag>
-                                            </span>
-                                        </div>
-                                        <div class="rdoc-l2">
-                                            <span class="rdoc-ext">external_id: {{ d.external_id || '（无）' }}</span>
-                                            <span class="rdoc-time">更新于 {{ fmtTime(d.updated_at) }}</span>
-                                        </div>
-                                    </div>
-                                </el-option>
-                            </el-select>
-                            <div style="font-size: 12px; color: #909399; margin-top: 4px;">
-                                没有 external_id 的文档也能选择替换（按 document ID 定位）。
-                            </div>
-                        </el-form-item>
-
-                        <el-form-item :label="mode === 'replace' ? '选择用于替换的新文件' : '选择要导入的文件（可多选）'" required>
-                            <input type="file" ref="fileInput" style="display:none" :multiple="mode === 'add'" @change="onFileChange" accept=".txt,.md,.markdown,.json,.csv,.docx,.xlsx,.pdf" />
-                            <div style="display: flex; flex-direction: column; gap: 8px;">
-                                <div>
-                                    <el-button type="primary" @click="triggerFileSelect" :disabled="uploading || loading">
-                                        {{ mode === 'add' ? '选择本地文件（可多选）' : '选择本地文件' }}
-                                    </el-button>
+    <div class="import-workspace">
+        <!-- Config card -->
+        <section class="import-config-card">
+            <el-form :inline="true">
+                <el-form-item label="目标库">
+                    <el-select v-model="slug" placeholder="选择知识库" class="import-lib-select">
+                        <el-option v-for="l in libs" :key="l.slug"
+                                   :label="l.name + ' (' + l.slug + ')'" :value="l.slug" />
+                    </el-select>
+                </el-form-item>
+                <el-form-item label="模式">
+                    <el-radio-group v-model="mode">
+                        <el-radio value="add">新增数据</el-radio>
+                        <el-radio value="replace">替换已有文档</el-radio>
+                    </el-radio-group>
+                </el-form-item>
+                <el-form-item v-if="mode === 'replace'" label="目标文档">
+                    <el-select v-model="replaceDocId" filterable
+                               :filter-method="(v) => docQuery = v"
+                               :loading="docsLoading" clearable
+                               placeholder="搜索并选择要替换的文档"
+                               class="import-replace-select"
+                               popper-class="replace-doc-popper">
+                        <el-option v-for="d in displayDocs" :key="d.id"
+                                   :label="d.title || d.id.slice(0,8)" :value="d.id">
+                            <div class="rdoc">
+                                <div class="rdoc-l1">
+                                    <span class="rdoc-name">{{ d.title || '(无标题)' }}</span>
+                                    <span class="rdoc-meta">
+                                        <el-tag size="small" :type="d.status === 'ready' ? 'success' : d.status === 'failed' ? 'danger' : 'info'">{{ d.status }}</el-tag>
+                                    </span>
                                 </div>
-                                <div v-if="mode === 'replace' && selectedFile" style="background:#f5f7fa; padding: 10px; border-radius:4px; font-size:13px; line-height: 1.5;">
-                                    文件名: <b>{{ selectedFile.name }}</b> <br/>
-                                    大小: {{ formatSize(selectedFile.size) }}
-                                </div>
-                                <div style="font-size: 12px; color: #909399; margin-top: 4px;">
-                                    支持: <b>.txt, .md, .markdown, .json, .csv, .docx, .xlsx, .pdf</b><br/>
-                                    - .txt/.md/.markdown：单篇文档，自动分片；<br/>
-                                    - .json：文档对象或对象数组 (需含 text 字段)；<br/>
-                                    - .csv：每行一篇文档 (首列或 text/content 列作正文)；<br/>
-                                    - .docx：Word 段落 + 表格 (开启「图片 OCR」时内嵌图片也识别)；<br/>
-                                    - .xlsx：每工作表表格切分 (旧版 .xls 请另存为 .xlsx)；<br/>
-                                    - .pdf：提取文字层；该库开启「图片 OCR」后，扫描页/图片页逐页渲染并 OCR (带【第 N 页】标记)。<br/>
-                                    <span style="color:#e6a23c;">.doc / .xls 旧格式暂不支持，请在 Word / Excel 中『另存为』.docx / .xlsx 后再上传。</span><br/>
-                                    <span v-if="mode === 'replace'" style="color:#e6a23c;">替换仅支持解析为单篇文档的文件 (JSON 数组 / CSV 多行不可用于替换)。</span>
+                                <div class="rdoc-l2">
+                                    <span class="rdoc-ext">{{ d.external_id || '—' }}</span>
+                                    <span class="rdoc-time">{{ d.updated_at ? new Date(d.updated_at).toLocaleString('zh-CN') : '' }}</span>
                                 </div>
                             </div>
-                        </el-form-item>
+                        </el-option>
+                    </el-select>
+                </el-form-item>
+            </el-form>
+            <div v-if="stats" class="import-stats-row">
+                <span class="import-stat">文档总数 <b>{{ stats.document_count || 0 }}</b></span>
+                <span class="import-stat">待处理任务 <b>{{ (stats.pending_jobs || 0) + (stats.processing_jobs || 0) }}</b></span>
+            </div>
+        </section>
 
-                        <el-collapse v-if="mode === 'add'" style="margin-bottom: 16px;">
-                            <el-collapse-item title="高级设置">
-                                <el-form-item label="外部 ID (external_id)">
-                                    <el-input v-model="externalId" placeholder="留空即可；主要供外部系统同步使用" clearable :disabled="uploading" />
-                                    <div style="font-size: 12px; color: #909399; margin-top: 4px;">
-                                        <b>仅适用于单文件 upsert</b>：重复上传同一 external_id 会覆盖更新对应文档。
-                                        多文件上传时请留空——填了 external_id 将禁止多文件上传。
-                                    </div>
-                                    <div v-if="multiBlockedByExtId" style="font-size: 12px; color: #f56c6c; margin-top: 4px;">
-                                        external_id 只适用于单文件 upsert，已禁止多文件上传。请清空 external_id 或仅保留 1 个文件。
-                                    </div>
-                                </el-form-item>
-                            </el-collapse-item>
-                        </el-collapse>
+        <!-- Two-column body: add mode -->
+        <div v-if="mode === 'add'" class="import-body">
+            <!-- Left: upload zone -->
+            <section class="import-upload-card">
+                <div class="import-dropzone"
+                     :class="{ 'is-dragover': dragOver }"
+                     @dragover="onDragOver"
+                     @dragleave="onDragLeave"
+                     @drop="onDrop"
+                     @click="triggerFileSelect">
+                    <img :src="uploadEmpty" class="illustration-upload-empty" alt="" aria-hidden="true" />
+                    <div class="import-dropzone-title">点击选择文件或拖拽文件到此处</div>
+                    <div class="import-dropzone-hint">支持 txt、md、markdown、json、csv、docx、xlsx、pdf</div>
+                    <div class="import-dropzone-hint">单文件最大 50 MB，每批最多 {{ MAX_BATCH_SIZE }} 个</div>
+                </div>
+                <input ref="fileInput" type="file" multiple
+                       accept=".txt,.md,.markdown,.json,.csv,.docx,.xlsx,.pdf"
+                       class="import-file-input-hidden"
+                       @change="onFileChange" />
+                <div v-if="showExtId" class="import-extid-row">
+                    <el-input v-model="externalId" placeholder="external_id" clearable />
+                </div>
+                <el-button class="import-extid-toggle" text @click="showExtId = !showExtId; if (!showExtId) externalId = ''">
+                    {{ showExtId ? '移除 external_id' : '设置 external_id' }}
+                </el-button>
+            </section>
 
-                        <!-- 新增模式：多文件队列操作 -->
-                        <template v-if="mode === 'add'">
-                            <el-form-item style="margin-top: 10px;">
-                                <div style="display:flex; gap:8px; width:100%;">
-                                    <el-button type="success" :disabled="!canStart" :loading="uploading" @click="runQueue(false)" style="flex:1;">
-                                        开始上传<span v-if="pendingCount"> ({{ pendingCount }})</span>
-                                    </el-button>
-                                    <el-button :disabled="!hasFailed || uploading" @click="runQueue(true)">仅重试失败</el-button>
-                                    <el-button :disabled="!queue.length || uploading" @click="clearQueue">清空列表</el-button>
+            <!-- Right: file list -->
+            <section class="import-file-card">
+                <div class="import-file-table-shell">
+                    <el-table :data="queue" empty-text="暂无文件，请从左侧添加">
+                        <el-table-column label="文件" min-width="180">
+                            <template #default="{row}">
+                                <div class="import-file-name-cell">
+                                    <img v-if="fileTypeIcon(row)" class="import-file-icon"
+                                         :src="fileTypeIcon(row)" alt="" aria-hidden="true" />
+                                    <local-icon v-else class="import-file-icon"
+                                                icon="mdi:file-document-outline" />
+                                    <span class="import-file-name" :title="row.name">{{ row.name }}</span>
                                 </div>
-                            </el-form-item>
-                        </template>
-
-                        <!-- 替换模式：单文件按钮 -->
-                        <el-form-item v-else style="margin-top: 10px;">
-                            <el-button type="warning"
-                                       :disabled="!selectedFile || !replaceDocId"
-                                       @click="handleReplace" :loading="loading" style="width: 100%">
-                                替换该文档
-                            </el-button>
-                        </el-form-item>
-                    </el-form>
-                </el-card>
-            </el-col>
-
-            <el-col :span="11">
-                <!-- 新增模式：上传队列 -->
-                <el-card v-if="mode === 'add'">
-                    <template #header>
-                        <div class="card-header">
-                            <span>上传队列</span>
-                            <span style="font-size:12px; color:#909399;">共 {{ queue.length }} 个文件</span>
-                        </div>
-                    </template>
-
-                    <el-alert v-if="ranOnce && !uploading" type="success" :closable="false" style="margin-bottom:12px"
-                              :title="'上传结束：成功 ' + summary.submitted + '，跳过 ' + summary.skipped + '，失败 ' + summary.failed + '。可到「文档」或「任务监控」查看向量化状态。'" />
-
-                    <el-table v-if="queue.length" :data="queue" border size="small" style="width: 100%">
-                        <el-table-column type="index" label="#" width="44" align="center" />
-                        <el-table-column prop="name" label="文件名" min-width="180" show-overflow-tooltip />
+                            </template>
+                        </el-table-column>
                         <el-table-column label="大小" width="90" align="right">
                             <template #default="{row}">{{ formatSize(row.size) }}</template>
                         </el-table-column>
-                        <el-table-column label="状态" width="92" align="center">
+                        <el-table-column label="格式校验" width="80" align="center">
                             <template #default="{row}">
-                                <el-tag size="small" :type="ST_TAG[row.status]">{{ ST_LABEL[row.status] }}</el-tag>
+                                <span v-if="row._failType === 'format'" class="import-check-fail">✗</span>
+                                <span v-else class="import-check-ok">✓</span>
                             </template>
                         </el-table-column>
-                        <el-table-column prop="error" label="错误原因" min-width="160" show-overflow-tooltip>
-                            <template #default="{row}"><span style="color:#f56c6c;">{{ row.error }}</span></template>
-                        </el-table-column>
-                    </el-table>
-
-                    <div v-else style="text-align:center; color:#909399; padding: 40px 0;">
-                        <p style="font-size: 15px;">队列为空</p>
-                        <p style="font-size: 13px;">点击左侧「选择本地文件（可多选）」添加文件，再点「开始上传」。</p>
-                    </div>
-                </el-card>
-
-                <!-- 替换模式：单文件结果 -->
-                <el-card v-else-if="importResult">
-                    <template #header>
-                        <div class="card-header"><span>导入结果反馈</span></div>
-                    </template>
-
-                    <el-alert title="已完成！后台 Worker 正在异步生成向量，可在「任务监控」页查看进度。" type="success" :closable="false" style="margin-bottom:16px" />
-
-                    <div style="margin-bottom: 12px; font-size: 14px;">
-                        成功处理文档数: <b>{{ importResult.imported_count }}</b>
-                    </div>
-
-                    <el-table :data="importResult.documents" border size="small" style="width: 100%">
-                        <el-table-column prop="title" label="文档标题" min-width="160" show-overflow-tooltip />
-                        <el-table-column label="操作" width="90" align="center">
+                        <el-table-column label="大小校验" width="80" align="center">
                             <template #default="{row}">
-                                <el-tag size="small" :type="OP_TAG[row.operation] || 'info'">
-                                    {{ OP_LABEL[row.operation] || row.operation || '—' }}
-                                </el-tag>
+                                <span v-if="row._failType === 'size'" class="import-check-fail">✗</span>
+                                <span v-else class="import-check-ok">✓</span>
                             </template>
                         </el-table-column>
-                        <el-table-column prop="chunk_count" label="分片数" width="80" align="center" />
-                        <el-table-column prop="status" label="状态" width="90" align="center">
-                            <template #default="{row}"><el-tag size="small" type="info">{{ row.status }}</el-tag></template>
+                        <el-table-column label="状态" width="90" align="center">
+                            <template #default="{row}">
+                                <el-tag :type="ST_TAG[row.status]" size="small">{{ ST_LABEL[row.status] }}</el-tag>
+                            </template>
                         </el-table-column>
-                        <el-table-column prop="document_id" label="文档 ID" width="110">
-                            <template #default="{row}"><span class="mono">{{ row.document_id.slice(0, 8) }}…</span></template>
+                        <el-table-column label="错误原因" min-width="120">
+                            <template #default="{row}">
+                                <span class="import-error-text">{{ row.error || '—' }}</span>
+                            </template>
+                        </el-table-column>
+                        <el-table-column label="操作" width="70" align="center">
+                            <template #default="{row}">
+                                <el-button v-if="row.status === 'pending' || row.status === 'invalid'"
+                                           link type="danger" @click="removeItem(row)">移除</el-button>
+                            </template>
                         </el-table-column>
                     </el-table>
-                </el-card>
+                </div>
 
-                <el-card v-else style="height: 100%; display: flex; align-items: center; justify-content: center; text-align: center; color: #909399; min-height: 300px;">
-                    <div>
-                        <p style="font-size: 16px;">暂无导入记录</p>
-                        <p style="font-size: 13px;">选择目标库与上传方式，然后上传文件。</p>
+                <!-- Summary bar -->
+                <div class="import-summary-bar">
+                    <div class="import-summary-stats">
+                        <span>总数 <b>{{ queue.length }}</b></span>
+                        <span class="import-stat-pending">待上传 <b>{{ pendingCount }}</b></span>
+                        <span class="import-stat-ok">成功 <b>{{ submittedCount }}</b></span>
+                        <span class="import-stat-skip">跳过 <b>{{ skippedCount }}</b></span>
+                        <span class="import-stat-fail">失败 <b>{{ failedCount }}</b></span>
+                        <span v-if="invalidCount" class="import-stat-invalid">无效 <b>{{ invalidCount }}</b></span>
                     </div>
-                </el-card>
-            </el-col>
-        </el-row>
+                    <div class="import-summary-actions">
+                        <el-button type="primary" :disabled="!canStart" :loading="uploading"
+                                   @click="runQueue(false)">开始上传</el-button>
+                        <el-button :disabled="!hasFailed || uploading"
+                                   @click="runQueue(true)">仅重试失败</el-button>
+                        <el-button :disabled="uploading" @click="clearQueue">清空列表</el-button>
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <!-- Replace mode -->
+        <div v-if="mode === 'replace'" class="import-body">
+            <section class="import-upload-card">
+                <div class="import-dropzone"
+                     :class="{ 'is-dragover': dragOver }"
+                     @dragover="onDragOver"
+                     @dragleave="onDragLeave"
+                     @drop="onReplaceDrop"
+                     @click="triggerFileSelect">
+                    <img :src="uploadEmpty" class="illustration-upload-empty" alt="" aria-hidden="true" />
+                    <div class="import-dropzone-title">点击选择文件或拖拽文件到此处</div>
+                    <div class="import-dropzone-hint">支持 txt、md、markdown、json、csv、docx、xlsx、pdf</div>
+                    <div class="import-dropzone-hint">单文件最大 50 MB</div>
+                </div>
+                <input ref="fileInput" type="file"
+                       accept=".txt,.md,.markdown,.json,.csv,.docx,.xlsx,.pdf"
+                       class="import-file-input-hidden"
+                       @change="onReplaceFileChange" />
+                <div v-if="replaceFile" class="import-replace-file-info">
+                    <div class="import-replace-file-name">
+                        <img v-if="fileTypeIcon(replaceFile)" class="import-file-icon"
+                             :src="fileTypeIcon(replaceFile)" alt="" aria-hidden="true" />
+                        <local-icon v-else class="import-file-icon"
+                                    icon="mdi:file-document-outline" />
+                        <span>{{ replaceFile.name }}</span>
+                        <span class="import-replace-file-size">({{ formatSize(replaceFile.size) }})</span>
+                    </div>
+                    <div v-if="replaceFileError" class="import-error-text">{{ replaceFileError }}</div>
+                </div>
+                <el-button type="primary" :loading="loading"
+                           :disabled="!canReplace"
+                           class="import-replace-btn"
+                           @click="handleReplace">替换文档</el-button>
+                <el-button v-if="importResult" class="import-replace-clear" @click="clearReplace">清除结果</el-button>
+            </section>
+
+            <section v-if="importResult" class="import-file-card">
+                <div class="import-replace-result">
+                    <span class="import-replace-count">导入 {{ importResult.imported_count || 0 }} 个文档</span>
+                </div>
+                <div class="import-file-table-shell">
+                    <el-table :data="importResult.documents || []">
+                        <el-table-column label="标题" min-width="150">
+                            <template #default="{row}">{{ row.title || row.document_id?.slice(0,8) || '—' }}</template>
+                        </el-table-column>
+                        <el-table-column label="操作" width="100" align="center">
+                            <template #default="{row}">
+                                <el-tag :type="OP_TAG[row.operation]" size="small">{{ OP_LABEL[row.operation] || row.operation }}</el-tag>
+                            </template>
+                        </el-table-column>
+                        <el-table-column label="分片数" width="80" align="center">
+                            <template #default="{row}">{{ row.chunk_count ?? '—' }}</template>
+                        </el-table-column>
+                    </el-table>
+                </div>
+            </section>
+        </div>
     </div>
-    `
+    `,
 };

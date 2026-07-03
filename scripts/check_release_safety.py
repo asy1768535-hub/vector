@@ -31,6 +31,12 @@ SECRET_PATTERNS = [
     ("bearer-token", re.compile(r"\bBearer\s+[A-Za-z0-9._\-]{20,}")),
 ]
 
+# 公网 CDN 引用：确保发布产物不自带外部依赖（admin-ui 本地化后的安全网）。
+# 匹配 unpkg、jsdelivr、code.iconify.design、cdnjs 等常见 CDN；http:// 纯文本允许。
+CDN_PATTERNS = [
+    ("cdn-url", re.compile(r"""https?://(?:unpkg\.com|cdn\.jsdelivr\.net|code\.iconify\.design|cdnjs\.cloudflare\.com|api\.iconify\.design|api\.simplesvg\.com|api\.unisvg\.com)(?:/|$)""")),
+]
+
 # 个人主目录绝对路径：要求 /home|/Users 前是边界字符（避免 "views/home/" 之类相对路径误报）。
 PATH_PATTERNS = [
     ("personal-path", re.compile(r"""(?:^|[\s"'`=(,>])(?:/home|/Users)/[A-Za-z0-9._-]+/""")),
@@ -63,6 +69,15 @@ def tracked_files() -> list[str]:
     return [ln for ln in out.stdout.splitlines() if ln]
 
 
+def untracked_files() -> list[str]:
+    """返回未跟踪但未被 .gitignore 排除的文件（本轮新增，需要扫描）。"""
+    out = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard"],
+        capture_output=True, text=True, check=True,
+    )
+    return [ln for ln in out.stdout.splitlines() if ln]
+
+
 def _default_read(path: str) -> str | None:
     try:
         with open(path, encoding="utf-8") as fh:
@@ -82,6 +97,10 @@ def scan_text(path: str, text: str) -> list[Finding]:
             if m:
                 findings.append(Finding(path, lineno, kind, _mask(m.group(0))))
         for kind, pat in PATH_PATTERNS:
+            m = pat.search(line)
+            if m:
+                findings.append(Finding(path, lineno, kind, _mask(m.group(0))))
+        for kind, pat in CDN_PATTERNS:
             m = pat.search(line)
             if m:
                 findings.append(Finding(path, lineno, kind, _mask(m.group(0))))
@@ -113,14 +132,18 @@ def collect_findings(files: list[str], read_text=_default_read) -> list[Finding]
 
 def main() -> int:
     files = tracked_files()
-    findings = collect_findings(files)
+    untracked = untracked_files()
+    all_files = files + untracked
+    findings = collect_findings(all_files)
     if not findings:
-        print(f"[OK] 发布安全检查通过（扫描 {len(files)} 个已跟踪文件，无问题）")
+        extra = f" + {len(untracked)} 未跟踪" if untracked else ""
+        print(f"[OK] 发布安全检查通过（扫描 {len(files)} 已跟踪{extra}文件，无问题）")
         return 0
     print(f"发布安全检查发现 {len(findings)} 个问题：")
     for fd in findings:
         loc = f"{fd.path}:{fd.line}" if fd.line else fd.path
-        print(f"  [{fd.kind}] {loc}  → {fd.snippet}")
+        tag = " [NEW]" if fd.path in untracked else ""
+        print(f"  [{fd.kind}]{tag} {loc}  → {fd.snippet}")
     return 1
 
 

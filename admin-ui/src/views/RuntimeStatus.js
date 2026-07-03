@@ -1,55 +1,84 @@
-import { onMounted, ref, computed } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import * as api from '../api.js';
+import {
+    SERVICE_LABELS, STATUS_TAG, STATUS_TEXT, relTime,
+    computeRuntimeSummary, formatOperationTime, rebuildStatusMeta,
+} from '../operations_ui.js';
+import { serviceError } from '../illustrations.js';
 
-// 进程类型 → 中文显示名（固定三类，按设计顺序）。
-const SERVICE_LABELS = {
-    api: 'API',
-    embedding_worker: 'Embedding Worker',
-    cleanup_worker: 'Cleanup Worker',
+const SERVICE_ICON = {
+    api: 'service:api',
+    embedding_worker: 'service:embedding-worker',
+    cleanup_worker: 'service:cleanup-worker',
 };
-const STATUS_TAG = { online: 'success', degraded: 'warning', offline: 'info' };
-const STATUS_TEXT = { online: '在线', degraded: '降级', offline: '离线' };
-
-function relTime(seconds) {
-    if (seconds == null) return '—';
-    if (seconds < 60) return `${seconds} 秒前`;
-    if (seconds < 3600) return `${Math.floor(seconds / 60)} 分前`;
-    return `${Math.floor(seconds / 3600)} 小时前`;
-}
+const REFRESH_SECONDS = 30;
 
 export default {
     setup() {
-        const loading = ref(false);
         const data = ref(null);
+        const loading = ref(false);
+        const loadError = ref(false);
+        const autoRefresh = ref(true);
+        const dataFetchedAt = ref(null);
+        let refreshTimer = null;
+        let loadingSeq = 0;
 
-        async function load() {
+        async function load(forceRefresh = false) {
+            if (loading.value) return;
+            const seq = ++loadingSeq;
             loading.value = true;
             try {
-                data.value = await api.operationsStatus();
+                const d = await api.operationsStatus(forceRefresh);
+                if (seq !== loadingSeq) return;
+                data.value = d;
+                dataFetchedAt.value = d.now || new Date().toISOString();
+                loadError.value = false;
             } catch (e) {
+                if (seq !== loadingSeq) return;
+                if (!data.value) loadError.value = true;
                 ElMessage.error(e.message);
             } finally {
-                loading.value = false;
+                if (seq === loadingSeq) loading.value = false;
             }
         }
 
-        // 三类进程恒定渲染，附中文名与展示字段。
+        function startAutoRefresh() {
+            if (refreshTimer) return;
+            refreshTimer = setInterval(() => {
+                if (!autoRefresh.value || loading.value) return;
+                if (typeof document !== 'undefined' && document.hidden) return;
+                load(true);
+            }, REFRESH_SECONDS * 1000);
+        }
+
+        function stopAutoRefresh() {
+            if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+        }
+
+        watch(autoRefresh, (on) => { if (on) startAutoRefresh(); else stopAutoRefresh(); });
+
+        onMounted(() => { load(false); startAutoRefresh(); });
+        onBeforeUnmount(() => { stopAutoRefresh(); });
+
+        const summary = computed(() => computeRuntimeSummary(data.value));
+
         const services = computed(() => {
             const list = (data.value && data.value.services) || [];
             return list.map((s) => {
                 const latest = s.latest;
-                const degradedFlag = !!(latest && latest.heartbeat_metadata && latest.heartbeat_metadata.degraded);
                 return {
                     ...s,
                     label: SERVICE_LABELS[s.service_type] || s.service_type,
+                    icon: SERVICE_ICON[s.service_type] || null,
                     tagType: STATUS_TAG[s.status] || 'info',
                     statusText: STATUS_TEXT[s.status] || s.status,
-                    counts: `${s.online_instances}/${s.known_instances}`,
-                    lastBeat: latest
-                        ? relTime(latest.seconds_since_last_seen) + (degradedFlag ? '（降级）' : '')
-                        : '—',
-                    hostPid: latest ? `${latest.hostname} / ${latest.pid}` : '—',
+                    onlineInstances: s.online_instances != null ? s.online_instances : '—',
+                    knownInstances: s.known_instances != null ? s.known_instances : '—',
+                    lastSeenAt: latest && latest.last_seen_at ? formatOperationTime(latest.last_seen_at) : '—',
+                    lastSeenRel: latest ? relTime(latest.seconds_since_last_seen) : '—',
+                    hostname: latest ? latest.hostname : '—',
+                    pid: latest ? String(latest.pid) : '—',
                 };
             });
         });
@@ -59,76 +88,190 @@ export default {
         const libraries = computed(() => (data.value && data.value.libraries) || {});
         const rebuilds = computed(() => (data.value && data.value.rebuild_operations) || []);
 
-        onMounted(load);
-        return { loading, data, services, jobs, outbox, libraries, rebuilds, load };
+        return {
+            data, loading, loadError, autoRefresh, dataFetchedAt,
+            summary, services, jobs, outbox, libraries, rebuilds,
+            load, serviceError, formatOperationTime, rebuildStatusMeta,
+        };
     },
     template: `
-    <div>
-        <div class="page-header">
-            <h2>运行状态</h2>
-            <el-button @click="load" :loading="loading">刷新</el-button>
+    <div class="runtime-workspace">
+      <header class="runtime-header">
+        <div>
+          <h2 class="runtime-title"><local-icon icon="sidebar:runtime" class="runtime-title-icon" />运行状态</h2>
+          <p class="runtime-desc">监控服务进程和后台任务的运行情况</p>
         </div>
+      </header>
 
-        <el-card shadow="never" style="margin-bottom:16px">
-            <template #header>服务状态</template>
-            <el-table :data="services" border v-loading="loading">
-                <el-table-column label="服务" min-width="180">
-                    <template #default="{row}"><strong>{{ row.label }}</strong></template>
-                </el-table-column>
-                <el-table-column label="状态" width="120">
-                    <template #default="{row}">
-                        <el-tag :type="row.tagType" size="small" effect="light">{{ row.statusText }}</el-tag>
-                    </template>
-                </el-table-column>
-                <el-table-column prop="counts" label="在线/已知" width="120" />
-                <el-table-column prop="lastBeat" label="最后心跳" min-width="160" />
-                <el-table-column prop="hostPid" label="主机 / PID" min-width="200" show-overflow-tooltip />
-            </el-table>
-        </el-card>
-
-        <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:16px">
-            <el-card shadow="never" style="flex:1;min-width:300px">
-                <template #header>Embedding 任务</template>
-                <div style="display:flex;gap:10px;flex-wrap:wrap">
-                    <el-tag type="info" size="large">总计 {{ jobs.total || 0 }}</el-tag>
-                    <el-tag type="warning" size="large">pending {{ jobs.pending || 0 }}</el-tag>
-                    <el-tag size="large">processing {{ jobs.processing || 0 }}</el-tag>
-                    <el-tag type="success" size="large">done {{ jobs.done || 0 }}</el-tag>
-                    <el-tag type="danger" size="large" :effect="jobs.failed ? 'dark' : 'light'">failed {{ jobs.failed || 0 }}</el-tag>
-                </div>
-            </el-card>
-            <el-card shadow="never" style="flex:1;min-width:300px">
-                <template #header>Cleanup Outbox</template>
-                <div style="display:flex;gap:10px;flex-wrap:wrap">
-                    <el-tag type="info" size="large">总计 {{ outbox.total || 0 }}</el-tag>
-                    <el-tag type="warning" size="large">pending {{ outbox.pending || 0 }}</el-tag>
-                    <el-tag size="large">processing {{ outbox.processing || 0 }}</el-tag>
-                    <el-tag type="success" size="large">done {{ outbox.done || 0 }}</el-tag>
-                    <el-tag type="danger" size="large" :effect="outbox.dead_letter ? 'dark' : 'light'">失败/死信 {{ outbox.dead_letter || 0 }}</el-tag>
-                </div>
-            </el-card>
+      <!-- ═══ 顶部总览 ═══ -->
+      <section class="runtime-overview">
+        <div class="runtime-overview-item">
+          <local-icon icon="service:api" class="runtime-overview-icon runtime-overview-icon--online" />
+          <div class="runtime-overview-body">
+            <b>{{ summary.onlineServices != null ? summary.onlineServices : '—' }}</b>
+            <span>在线服务</span>
+          </div>
         </div>
+        <div class="runtime-overview-item">
+          <local-icon icon="status:failed" class="runtime-overview-icon runtime-overview-icon--abnormal" />
+          <div class="runtime-overview-body">
+            <b>{{ summary.abnormalServices != null ? summary.abnormalServices : '—' }}</b>
+            <span>异常服务</span>
+          </div>
+        </div>
+        <div class="runtime-overview-item">
+          <local-icon icon="service:embedding-worker" class="runtime-overview-icon runtime-overview-icon--embedding" />
+          <div class="runtime-overview-body">
+            <b>{{ summary.embeddingPending != null ? summary.embeddingPending : '—' }}</b>
+            <span>Embedding 队列</span>
+          </div>
+        </div>
+        <div class="runtime-overview-item">
+          <local-icon icon="service:cleanup-worker" class="runtime-overview-icon runtime-overview-icon--cleanup" />
+          <div class="runtime-overview-body">
+            <b>{{ summary.cleanupPending != null ? summary.cleanupPending : '—' }}</b>
+            <span>Cleanup 待处理</span>
+          </div>
+        </div>
+        <div class="runtime-overview-item">
+          <local-icon icon="status:processing" class="runtime-overview-icon runtime-overview-icon--rebuilding" />
+          <div class="runtime-overview-body">
+            <b>{{ summary.rebuilding != null ? summary.rebuilding : '—' }}</b>
+            <span>重建中</span>
+          </div>
+        </div>
+      </section>
 
-        <el-card shadow="never">
-            <template #header>
-                重建
-                <el-tag v-if="libraries.failed" type="danger" size="small" effect="light" style="margin-left:8px">失败库 {{ libraries.failed }}</el-tag>
+      <!-- ═══ 首次加载失败 ═══ -->
+      <section class="runtime-error-state" v-if="!data && loadError">
+        <div class="illustration-empty-wrapper">
+          <img :src="serviceError" class="illustration-service-error" alt="" aria-hidden="true" />
+          <p>服务状态暂不可用</p>
+          <el-button type="primary" size="small" @click="load(false)" :loading="loading">重新加载</el-button>
+        </div>
+      </section>
+
+      <!-- ═══ 服务在线状态 ═══ -->
+      <section class="runtime-card" v-if="data">
+        <div class="runtime-card-header">
+          <span class="runtime-card-title">服务在线状态</span>
+          <div class="runtime-card-header-actions">
+            <el-button size="small" @click="load(true)" :loading="loading">刷新</el-button>
+            <span class="runtime-auto-label">自动刷新</span>
+            <el-switch v-model="autoRefresh" size="small" />
+          </div>
+        </div>
+        <div class="runtime-table-shell">
+          <el-table :data="services" v-loading="loading" border>
+            <template #empty>
+              <div class="illustration-empty-wrapper">
+                <img :src="serviceError" class="illustration-service-error" alt="" aria-hidden="true" />
+                <p>服务状态暂不可用</p>
+              </div>
             </template>
-            <div v-if="!rebuilds.length" style="color:var(--el-text-color-secondary)">当前没有进行中的重建。</div>
-            <el-table v-else :data="rebuilds" border>
-                <el-table-column prop="library_slug" label="库" min-width="160" />
-                <el-table-column prop="status" label="状态" width="120">
-                    <template #default="{row}"><el-tag size="small" effect="light">{{ row.status }}</el-tag></template>
-                </el-table-column>
-                <el-table-column label="进度" min-width="220">
-                    <template #default="{row}">
-                        <el-progress :percentage="row.progress_pct"
-                            :format="() => row.done_job_count + '/' + row.expected_job_count + ' (' + row.progress_pct + '%)'" />
-                    </template>
-                </el-table-column>
-                <el-table-column prop="last_error" label="最后错误" min-width="200" show-overflow-tooltip />
-            </el-table>
-        </el-card>
+            <el-table-column label="服务" min-width="200">
+              <template #default="{row}">
+                <local-icon v-if="row.icon" :icon="row.icon" class="runtime-service-icon" />
+                <span class="runtime-service-name">{{ row.label }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="在线状态" width="120" align="center">
+              <template #default="{row}">
+                <el-tag :type="row.tagType" size="small" effect="light">{{ row.statusText }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="在线实例数" width="120" align="center">
+              <template #default="{row}">{{ row.onlineInstances }}</template>
+            </el-table-column>
+            <el-table-column label="最后心跳" min-width="180">
+              <template #default="{row}">
+                <div>{{ row.lastSeenAt }}</div>
+                <div class="runtime-heartbeat-rel">{{ row.lastSeenRel }}</div>
+              </template>
+            </el-table-column>
+            <el-table-column label="主机" min-width="140" show-overflow-tooltip>
+              <template #default="{row}">{{ row.hostname }}</template>
+            </el-table-column>
+            <el-table-column label="PID" width="90" align="center">
+              <template #default="{row}">{{ row.pid }}</template>
+            </el-table-column>
+          </el-table>
+        </div>
+        <div class="runtime-table-footer">
+          <span>共 {{ services.length }} 条</span>
+          <span class="runtime-table-time">数据时间：{{ dataFetchedAt ? formatOperationTime(dataFetchedAt) : '—' }}</span>
+        </div>
+      </section>
+
+      <!-- ═══ 底部三列卡片 ═══ -->
+      <section class="runtime-bottom-grid" v-if="data">
+        <!-- Embedding 任务 -->
+        <div class="runtime-card">
+          <div class="runtime-card-header">
+            <span class="runtime-card-title">Embedding 任务</span>
+          </div>
+          <div class="runtime-card-body">
+            <div class="runtime-metrics">
+              <div class="runtime-metric"><span class="runtime-metric-label">总计</span><b>{{ jobs.total != null ? jobs.total : '—' }}</b></div>
+              <div class="runtime-metric"><span class="runtime-metric-label">待处理</span><b class="runtime-metric--pending">{{ jobs.pending != null ? jobs.pending : '—' }}</b></div>
+              <div class="runtime-metric"><span class="runtime-metric-label">处理中</span><b>{{ jobs.processing != null ? jobs.processing : '—' }}</b></div>
+              <div class="runtime-metric"><span class="runtime-metric-label">已完成</span><b class="runtime-metric--done">{{ jobs.done != null ? jobs.done : '—' }}</b></div>
+              <div class="runtime-metric"><span class="runtime-metric-label">失败</span><b class="runtime-metric--failed">{{ jobs.failed != null ? jobs.failed : '—' }}</b></div>
+            </div>
+            <router-link to="/jobs" class="runtime-card-link">查看任务监控</router-link>
+          </div>
+        </div>
+
+        <!-- Cleanup Outbox -->
+        <div class="runtime-card">
+          <div class="runtime-card-header">
+            <span class="runtime-card-title">Cleanup Outbox</span>
+          </div>
+          <div class="runtime-card-body">
+            <div class="runtime-metrics">
+              <div class="runtime-metric"><span class="runtime-metric-label">总计</span><b>{{ outbox.total != null ? outbox.total : '—' }}</b></div>
+              <div class="runtime-metric"><span class="runtime-metric-label">待处理</span><b class="runtime-metric--pending">{{ outbox.pending != null ? outbox.pending : '—' }}</b></div>
+              <div class="runtime-metric"><span class="runtime-metric-label">处理中</span><b>{{ outbox.processing != null ? outbox.processing : '—' }}</b></div>
+              <div class="runtime-metric"><span class="runtime-metric-label">已完成</span><b class="runtime-metric--done">{{ outbox.done != null ? outbox.done : '—' }}</b></div>
+              <div class="runtime-metric"><span class="runtime-metric-label">失败</span><b class="runtime-metric--failed">{{ outbox.failed != null ? outbox.failed : '—' }}</b></div>
+              <div class="runtime-metric"><span class="runtime-metric-label">死信</span><b class="runtime-metric--dead">{{ outbox.dead_letter != null ? outbox.dead_letter : '—' }}</b></div>
+            </div>
+            <div class="runtime-card-note">
+              该队列异步清理已删除文档的向量数据，确保资源及时释放。
+            </div>
+          </div>
+        </div>
+
+        <!-- 重建状态 -->
+        <div class="runtime-card">
+          <div class="runtime-card-header">
+            <span class="runtime-card-title">重建状态</span>
+            <el-tag v-if="libraries.failed" type="danger" size="small" effect="light" class="runtime-rebuild-failed-tag">失败库 {{ libraries.failed }}</el-tag>
+          </div>
+          <div class="runtime-card-body">
+            <div class="runtime-metrics" v-if="libraries.rebuilding != null || libraries.failed">
+              <div class="runtime-metric"><span class="runtime-metric-label">重建中</span><b class="runtime-metric--rebuilding">{{ libraries.rebuilding != null ? libraries.rebuilding : '—' }}</b></div>
+              <div class="runtime-metric" v-if="libraries.failed"><span class="runtime-metric-label">失败库</span><b class="runtime-metric--failed">{{ libraries.failed }}</b></div>
+            </div>
+            <template v-if="rebuilds.length">
+              <div class="runtime-rebuild-list">
+                <div class="runtime-rebuild-row" v-for="r in rebuilds" :key="r.library_slug">
+                  <span class="runtime-rebuild-slug">{{ r.library_slug }}</span>
+                  <el-tag :type="rebuildStatusMeta(r.status).type" size="small" effect="light">{{ rebuildStatusMeta(r.status).label }}</el-tag>
+                  <div class="runtime-rebuild-progress">
+                    <el-progress :percentage="r.progress_pct"
+                      :format="function(){return r.done_job_count + '/' + r.expected_job_count + ' (' + r.progress_pct + '%)'}" />
+                  </div>
+                  <span class="runtime-rebuild-error" v-if="r.last_error">{{ r.last_error }}</span>
+                </div>
+              </div>
+            </template>
+            <div v-else-if="!libraries.rebuilding && !libraries.failed" class="runtime-empty-compact">
+              当前没有进行中的重建。
+            </div>
+          </div>
+        </div>
+      </section>
     </div>
     `,
 };

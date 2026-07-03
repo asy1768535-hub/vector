@@ -1,10 +1,12 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
+import { useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import * as api from '../api.js';
 import { marked } from '../../vendor/marked.esm.js';
 import DOMPurify from '../../vendor/dompurify.es.mjs';
 import { createStreamQueue } from '../stream_queue.js';
 import { copyTextToClipboard } from '../copy_text.js';
+import { chatWelcome } from '../illustrations.js';
 
 // ── Markdown → safe HTML ──
 function renderMarkdown(text) {
@@ -35,10 +37,18 @@ function fmtTime(iso) {
 
 function fmtScore(s) { return (Number(s || 0) * 100).toFixed(1) + '%'; }
 
+function scoreClass(s) {
+    const v = Number(s || 0);
+    if (v >= 0.7) return 'high';
+    if (v >= 0.5) return 'mid';
+    return 'low';
+}
+
 function nowISO() { return new Date().toISOString(); }
 
 export default {
     setup() {
+        const router = useRouter();
         const libs = ref([]);
         const currentSlug = ref(null);
         const conversations = ref([]);
@@ -84,9 +94,9 @@ export default {
         const convsForLib = computed(() =>
             conversations.value.filter((c) => c.library_slug === currentSlug.value));
 
-        async function loadLibs() {
+        async function loadLibs(forceRefresh = false) {
             try {
-                libs.value = await api.listChatLibraries();
+                libs.value = await api.listChatLibraries(forceRefresh);
                 if (libs.value.length && !currentSlug.value) currentSlug.value = libs.value[0].slug;
             } catch (e) { ElMessage.error(e.message); }
         }
@@ -166,10 +176,10 @@ export default {
             if (!source) return;
             const slug = currentSlug.value;
             if (!slug) { ElMessage.warning('请先选择知识库'); return; }
-            const docId = source.document_id || source.chunk_id;
+            const docId = source.document_id;
             if (docId) {
-                const url = `/console/#/documents?slug=${encodeURIComponent(slug)}&open=${encodeURIComponent(docId)}`;
-                window.open(url, '_blank');
+                const resolved = router.resolve({ path: '/documents', query: { slug, open: docId } });
+                window.open(resolved.href, '_blank', 'noopener');
             } else {
                 ElMessage.warning('该来源缺少文档标识');
             }
@@ -184,7 +194,7 @@ export default {
             const userTime = nowISO();
             messages.value.push({ role: 'user', text: q, time: userTime });
             input.value = '';
-            const aiMsg = { role: 'ai', text: '', sources: [], loading: true, error: false, cursor: false, statusText: '正在检索资料…', time: null };
+            const aiMsg = { role: 'ai', text: '', sources: [], error: false, cursor: false, statusText: '正在检索资料…', time: null };
             messages.value.push(aiMsg);
             _aiMsgRef = aiMsg;
             loading.value = true;
@@ -203,13 +213,11 @@ export default {
                         scrollToBottom();
                     },
                     onDelta: (t) => {
-                        aiMsg.loading = false;
                         _enqueueDelta(t);
                     },
                     onError: (msg) => {
                         _flushPending();
                         _cleanupStream();
-                        aiMsg.loading = false;
                         aiMsg.error = true;
                         aiMsg.cursor = false;
                         aiMsg.statusText = '';
@@ -218,7 +226,6 @@ export default {
                     onDone: () => {
                         _flushPending();
                         _aiMsgRef = null;
-                        aiMsg.loading = false;
                         aiMsg.cursor = false;
                         aiMsg.statusText = '';
                         aiMsg.time = nowISO();
@@ -250,21 +257,20 @@ export default {
                     aiMsg.text = '生成答案失败：' + (e.message || '未知错误');
                 }
             } finally {
-                aiMsg.loading = false;
                 loading.value = false;
                 scrollToBottom();
             }
         }
 
-        onMounted(async () => { await loadLibs(); await loadConversations(); });
+        onMounted(() => { Promise.all([loadLibs(), loadConversations()]); });
         onBeforeUnmount(() => { _cleanupStream(); });
 
         return {
             libs, currentSlug, conversations, convsForLib, currentConvId, messages, input,
             loading, chatDisabled, streamRef, mobileHistoryOpen, topK,
             onLibChange, newChat, selectConversation, archiveConv, deleteConv, send, copyAnswer,
-            openDocDetail, loadLibs,
-            fmtScore, fmtTime, renderMarkdown,
+            openDocDetail, loadLibs, chatWelcome,
+            fmtScore, scoreClass, fmtTime, renderMarkdown,
         };
     },
     template: `
@@ -314,9 +320,7 @@ export default {
                                class="chat-library-select" @change="onLibChange">
                         <el-option v-for="l in libs" :key="l.slug" :label="l.name" :value="l.slug" />
                     </el-select>
-                    <el-button class="chat-refresh-btn" text title="刷新" @click="loadLibs">
-                        <local-icon icon="mdi:database-import-outline"></local-icon>
-                    </el-button>
+                    <el-button class="chat-refresh-btn" text @click="loadLibs(true)">刷新</el-button>
                 </div>
             </div>
 
@@ -326,7 +330,7 @@ export default {
             <!-- Messages -->
             <div ref="streamRef" class="chat-messages">
                 <div v-if="!messages.length" class="chat-empty">
-                    <local-icon icon="carbon:chart-relationship" style="font-size:48px;color:var(--app-border);margin-bottom:16px"></local-icon>
+                    <img :src="chatWelcome" class="illustration-chat-welcome" alt="" aria-hidden="true" />
                     <div class="chat-empty-title">智能知识问答</div>
                     <div class="chat-empty-desc">基于知识库内容，AI 将检索相关资料并生成答案</div>
                 </div>
@@ -349,26 +353,29 @@ export default {
                             <div v-if="m.role === 'ai' && m.text" class="chat-answer-actions">
                                 <el-button class="chat-copy-answer" text aria-label="复制回答" title="复制回答" @click="copyAnswer(m.text)">
                                     <local-icon icon="mdi:content-copy"></local-icon>
-                                    复制
                                 </el-button>
                             </div>
                         </div>
 
-                        <!-- Compact sources -->
-                        <div v-if="m.role === 'ai' && m.sources && m.sources.length" class="chat-sources">
-                            <div class="chat-sources-label">引用来源（{{ m.sources.length }}）</div>
-                            <div v-for="(s, si) in m.sources" :key="si" class="chat-source-item">
-                                <div class="chat-source-left">
-                                    <span class="chat-source-num">{{ si + 1 }}.</span>
-                                    <span class="chat-source-title" :title="s.title || '(无标题)'">{{ s.title || '(无标题)' }}</span>
-                                    <span class="chat-source-score">{{ fmtScore(s.score) }}</span>
-                                    <div class="chat-source-summary">{{ s.content || '' }}</div>
+                        <!-- Collapsible sources -->
+                        <el-collapse v-if="m.role === 'ai' && m.sources && m.sources.length" class="chat-sources">
+                            <el-collapse-item>
+                                <template #title>
+                                    <span class="chat-sources-label">引用来源（{{ m.sources.length }}）</span>
+                                </template>
+                                <div v-for="(s, si) in m.sources" :key="si" class="chat-source-item">
+                                    <div class="chat-source-left">
+                                        <span class="chat-source-num">{{ si + 1 }}.</span>
+                                        <span class="chat-source-title" :title="s.title || '(无标题)'">{{ s.title || '(无标题)' }}</span>
+                                        <span class="chat-source-score" :class="'score--' + scoreClass(s.score)">{{ fmtScore(s.score) }}</span>
+                                        <div class="chat-source-summary">{{ s.content || '' }}</div>
+                                    </div>
+                                    <div class="chat-source-right">
+                                        <el-button class="chat-source-detail" link type="primary" @click="openDocDetail(s)">文档详情</el-button>
+                                    </div>
                                 </div>
-                                <div class="chat-source-right">
-                                    <el-button class="chat-source-detail" link type="primary" @click="openDocDetail(s)">文档详情</el-button>
-                                </div>
-                            </div>
-                        </div>
+                            </el-collapse-item>
+                        </el-collapse>
                     </div>
 
                     <div v-if="m.role === 'user'" class="chat-user-right">
@@ -381,7 +388,7 @@ export default {
             <!-- Input area: unified editor -->
             <div class="chat-input-bar">
                 <div class="chat-input-shell">
-                    <el-input v-model="input" type="textarea" :rows="3" resize="none"
+                    <el-input v-model="input" type="textarea" :rows="2" resize="none"
                               placeholder="继续提问，或输入问题..."
                               :maxlength="2000"
                               @keydown.enter.exact.prevent="send"

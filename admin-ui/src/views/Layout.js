@@ -82,57 +82,57 @@ export default {
             </div>
             <el-menu :default-active="currentPath" :collapse="effectiveCollapsed" :collapse-transition="false" router>
                 <el-menu-item v-if="access.chat" index="/chat">
-                    <el-icon><local-icon icon="mdi:chat-question-outline"></local-icon></el-icon>
+                    <el-icon><local-icon icon="sidebar:chat"></local-icon></el-icon>
                     <template #title>智能问答</template>
                 </el-menu-item>
                 <el-menu-item v-if="access.documents" index="/documents">
-                    <el-icon><local-icon icon="mdi:file-document-outline"></local-icon></el-icon>
+                    <el-icon><local-icon icon="sidebar:document"></local-icon></el-icon>
                     <template #title>文档</template>
                 </el-menu-item>
                 <el-menu-item v-if="access.search" index="/search">
-                    <el-icon><local-icon icon="mdi:text-search"></local-icon></el-icon>
+                    <el-icon><local-icon icon="sidebar:search"></local-icon></el-icon>
                     <template #title>数据检索</template>
                 </el-menu-item>
                 <el-menu-item v-if="access.import" index="/import">
-                    <el-icon><local-icon icon="mdi:database-import-outline"></local-icon></el-icon>
+                    <el-icon><local-icon icon="sidebar:import"></local-icon></el-icon>
                     <template #title>导入数据</template>
                 </el-menu-item>
                 <el-menu-item index="/api-keys">
-                    <el-icon><local-icon icon="mdi:key-variant"></local-icon></el-icon>
+                    <el-icon><local-icon icon="sidebar:api-key"></local-icon></el-icon>
                     <template #title>我的 API Key</template>
                 </el-menu-item>
 
                 <el-menu-item-group v-if="isSuper" title="管理员">
                     <el-menu-item index="/dashboard">
-                        <el-icon><local-icon icon="mdi:view-dashboard-outline"></local-icon></el-icon>
+                        <el-icon><local-icon icon="sidebar:overview"></local-icon></el-icon>
                         <template #title>概览</template>
                     </el-menu-item>
                     <el-menu-item index="/users">
-                        <el-icon><local-icon icon="mdi:account-group-outline"></local-icon></el-icon>
+                        <el-icon><local-icon icon="sidebar:user"></local-icon></el-icon>
                         <template #title>用户管理</template>
                     </el-menu-item>
                     <el-menu-item index="/libraries">
-                        <el-icon><local-icon icon="mdi:bookshelf"></local-icon></el-icon>
+                        <el-icon><local-icon icon="sidebar:library"></local-icon></el-icon>
                         <template #title>库管理</template>
                     </el-menu-item>
                     <el-menu-item index="/permissions">
-                        <el-icon><local-icon icon="mdi:shield-key-outline"></local-icon></el-icon>
+                        <el-icon><local-icon icon="sidebar:permission"></local-icon></el-icon>
                         <template #title>权限矩阵</template>
                     </el-menu-item>
                     <el-menu-item index="/jobs">
-                        <el-icon><local-icon icon="mdi:cog-sync-outline"></local-icon></el-icon>
+                        <el-icon><local-icon icon="sidebar:task"></local-icon></el-icon>
                         <template #title>任务监控</template>
                     </el-menu-item>
                     <el-menu-item index="/operations">
-                        <el-icon><local-icon icon="mdi:heart-pulse"></local-icon></el-icon>
+                        <el-icon><local-icon icon="sidebar:runtime"></local-icon></el-icon>
                         <template #title>运行状态</template>
                     </el-menu-item>
                     <el-menu-item index="/audit">
-                        <el-icon><local-icon icon="mdi:history"></local-icon></el-icon>
+                        <el-icon><local-icon icon="sidebar:audit"></local-icon></el-icon>
                         <template #title>审计日志</template>
                     </el-menu-item>
                     <el-menu-item index="/chat-logs">
-                        <el-icon><local-icon icon="mdi:comment-text-multiple-outline"></local-icon></el-icon>
+                        <el-icon><local-icon icon="sidebar:qa-log"></local-icon></el-icon>
                         <template #title>问答日志</template>
                     </el-menu-item>
                 </el-menu-item-group>

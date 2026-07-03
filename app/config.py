@@ -119,6 +119,7 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8100
     app_debug: bool = False
+    console_ui_dir: str = "admin-ui"
 
     # ---- Auth ----
     jwt_secret: str = Field(default="please-change-me-in-env", min_length=16)

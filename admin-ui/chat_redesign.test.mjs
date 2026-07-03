@@ -36,7 +36,7 @@ test('allows top_k selector and refresh; rejects forbidden features', () => {
 test('refresh button is in toolbar, not using mdi:history', () => {
     assert.ok(chat.includes('chat-toolbar-right'), 'toolbar right section exists');
     // Refresh icon in toolbar (not mdi:history for refresh purpose)
-    assert.ok(chat.includes('database-import-outline'), 'uses database-import-outline for refresh icon');
+    assert.ok(chat.includes('刷新'), 'uses text 刷新 for refresh button');
     // No separate chat-input-footer-right (unified in shell)
     assert.ok(!chat.includes('chat-input-footer-right'), 'old footer-right class removed');
 });
@@ -55,8 +55,8 @@ test('replaces expanded source boxes with two-column compact rows', () => {
     assert.ok(chat.includes('chat-source-summary'), 'missing compact source summary');
     assert.ok(chat.includes('chat-source-detail'), 'missing source detail link');
     assert.ok(chat.includes('openDocDetail'), 'missing openDocDetail');
-    assert.ok(!chat.includes('el-collapse'), 'old el-collapse still present');
-    assert.ok(!chat.includes('el-collapse-item'), 'old el-collapse-item still present');
+    assert.ok(chat.includes('el-collapse'), 'sources use collapsible panel');
+    assert.ok(chat.includes('el-collapse-item'), 'sources are collapsible');
 });
 
 // ── Input area: unified editor ──
@@ -79,10 +79,10 @@ test('CSS defines two independent cards with 12px gap', () => {
 });
 
 // ── CSS: history panel ──
-test('history panel ~310px, items 84-92px with box-sizing', () => {
+test('history panel ~310px, items 62-68px with box-sizing', () => {
     assert.match(css, /\.chat-history-panel\s*\{[\s\S]*?width:\s*310px/);
-    assert.match(css, /\.chat-history-item\s*\{[\s\S]*?min-height:\s*84px/);
-    assert.match(css, /\.chat-history-item\s*\{[\s\S]*?max-height:\s*92px/);
+    assert.match(css, /\.chat-history-item\s*\{[\s\S]*?min-height:\s*62px/);
+    assert.match(css, /\.chat-history-item\s*\{[\s\S]*?max-height:\s*68px/);
     assert.match(css, /\.chat-history-item\s*\{[\s\S]*?box-sizing:\s*border-box/);
     assert.match(css, /\.chat-history-item-time\s*\{/);
     assert.match(css, /\.chat-history-item\.is-active\s*\{[\s\S]*?border-left-color:\s*var\(--app-primary\)/);
@@ -110,13 +110,14 @@ test('input area unified shell with footer inside', () => {
     // footer inside shell
     assert.match(css, /\.chat-input-footer\s*\{/);
     // textarea height
-    assert.match(css, /\.chat-input\s+\.el-textarea__inner\s*\{[\s\S]*?min-height:\s*68px/);
+    assert.match(css, /\.chat-input\s+\.el-textarea__inner\s*\{[\s\S]*?min-height:\s*34px/);
     assert.match(css, /\.chat-topk-select\s*\{/);
 });
 
-// ── CSS: toolbar height ~68px ──
-test('toolbar height ~68px', () => {
-    assert.match(css, /\.chat-toolbar\s*\{[\s\S]*?min-height:\s*68px/);
+// ── CSS: history and toolbar headers share the same height ──
+test('history and toolbar headers share a fixed 64px border-box height', () => {
+    assert.match(css, /\.chat-history-title-row,\s*\.chat-toolbar\s*\{[\s\S]*?height:\s*64px/);
+    assert.match(css, /\.chat-history-title-row,\s*\.chat-toolbar\s*\{[\s\S]*?box-sizing:\s*border-box/);
 });
 
 // ── CSS: font sizes ──
@@ -136,6 +137,11 @@ test('sources use two-column flex layout with min-width:0', () => {
     assert.match(css, /\.chat-source-summary\s*\{[\s\S]*?overflow-wrap:\s*anywhere/);
     assert.match(css, /\.chat-source-title\s*\{[\s\S]*?min-width:\s*0/);
     assert.match(css, /\.chat-source-detail\s*\{/);
+});
+
+test('document detail link is blue and becomes light blue on hover', () => {
+    assert.match(css, /\.chat-source-detail\s*\{[\s\S]*?color:\s*#3976C5\s*!important/);
+    assert.match(css, /\.chat-source-detail:hover\s*\{[\s\S]*?color:\s*#7EB8E0\s*!important/);
 });
 
 // ── CSS: no horizontal overflow in source items ──

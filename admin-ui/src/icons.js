@@ -60,6 +60,82 @@ const ICONS = {
     // ── Carbon Icons ──
     'carbon:chart-relationship':
         '<path fill="currentColor" d="M26 6a3.996 3.996 0 0 0-3.858 3H17.93A4.98 4.98 0 0 0 14 5a4.99 4.99 0 0 0-3.93 2H6a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h4.07A4.98 4.98 0 0 0 14 17a4.99 4.99 0 0 0 3.93-2h4.21A3.993 3.993 0 1 0 26 16h-4.21a4.97 4.97 0 0 0-5.86-2H6v-4h9.93a4.98 4.98 0 0 0 5.86-2H26V6ZM6 9h4v4H6Zm8 7a3 3 0 1 1 3-3 3.003 3.003 0 0 1-3 3Zm12-7a2 2 0 1 1 2-2 2.002 2.002 0 0 1-2 2Z"/>',
+
+    // ── Sidebar Icons (stroke-based, viewBox 0 0 24 24) ──
+    'sidebar:chat':
+        '<g stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5.5 5.5h13a2.5 2.5 0 0 1 2.5 2.5v6.6a2.5 2.5 0 0 1-2.5 2.5H11l-4.8 3.1v-3.1h-.7A2.5 2.5 0 0 1 3 14.6V8a2.5 2.5 0 0 1 2.5-2.5z"/><path d="M8 11h.01"/><path d="M12 11h.01"/><path d="M16 11h.01"/></g>',
+    'sidebar:document':
+        '<g stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3.5h7l4 4v13H7a2 2 0 0 1-2-2v-13a2 2 0 0 1 2-2z"/><path d="M14 3.5v4h4"/><path d="M8.5 12h7"/><path d="M8.5 16h5"/></g>',
+    'sidebar:search':
+        '<g stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6.8 4.5h6.4l3.3 3.3v2.3"/><path d="M13.2 4.5v3.3h3.3"/><path d="M6.8 4.5a1.8 1.8 0 0 0-1.8 1.8v11.4a1.8 1.8 0 0 0 1.8 1.8h4.1"/><path d="M8 11h4.2"/><circle cx="15.2" cy="15.2" r="3.4"/><path d="M17.7 17.7l2.8 2.8"/></g>',
+    'sidebar:import':
+        '<g stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15.5v2.2A2.3 2.3 0 0 0 6.3 20h11.4a2.3 2.3 0 0 0 2.3-2.3v-2.2"/><path d="M8 10l4-4 4 4"/><path d="M12 6v10"/><path d="M7 15.5h10"/></g>',
+    'sidebar:api-key':
+        '<g stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="12" r="3.2"/><path d="M11.2 12h8.3"/><path d="M15.5 12v2.2"/><path d="M18 12v1.6"/></g>',
+    'sidebar:overview':
+        '<g stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="6" height="6" rx="1.5"/><rect x="14" y="4" width="6" height="6" rx="1.5"/><rect x="4" y="14" width="6" height="6" rx="1.5"/><rect x="14" y="14" width="6" height="6" rx="1.5"/></g>',
+    'sidebar:user':
+        '<g stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="3.2"/><path d="M5.5 20a6.5 6.5 0 0 1 13 0"/></g>',
+    'sidebar:library':
+        '<g stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5.5" rx="6.5" ry="2.5"/><path d="M5.5 5.5v5c0 1.4 2.9 2.5 6.5 2.5s6.5-1.1 6.5-2.5v-5"/><path d="M5.5 10.5v5c0 1.4 2.9 2.5 6.5 2.5s6.5-1.1 6.5-2.5v-5"/><path d="M5.5 15.5v3c0 1.4 2.9 2.5 6.5 2.5s6.5-1.1 6.5-2.5v-3"/></g>',
+    'sidebar:permission':
+        '<g stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5 19 6v5.5c0 4.5-2.9 7.7-7 9-4.1-1.3-7-4.5-7-9V6l7-2.5z"/><path d="m8.8 12.2 2.1 2.1 4.4-4.7"/></g>',
+    'sidebar:task':
+        '<g stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2.2"/><path d="m8 8.5 1 1 2-2"/><path d="M13.5 8.5H17"/><path d="m8 13 1 1 2-2"/><path d="M13.5 13H17"/><circle cx="9" cy="17" r="1"/><path d="M13.5 17H17"/></g>',
+    'sidebar:runtime':
+        '<g stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="5.5" rx="1.4"/><rect x="5" y="13.5" width="14" height="5.5" rx="1.4"/><path d="M8 7.75h.01"/><path d="M8 16.25h.01"/><path d="M11 7.75h5"/><path d="M11 16.25h5"/></g>',
+    'sidebar:audit':
+        '<g stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4.8 12a7.2 7.2 0 1 0 2.1-5.1"/><path d="M4.8 6.2v3.5h3.5"/><path d="M12 8.2v4.1l2.8 1.7"/><path d="M17.5 19.2h2.2"/></g>',
+    'sidebar:qa-log':
+        '<g stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 6.5h10.5a2.2 2.2 0 0 1 2.2 2.2v6.1a2.2 2.2 0 0 1-2.2 2.2h-5.5l-3.8 2.4V17H6.5a2.2 2.2 0 0 1-2.2-2.2V8.7a2.2 2.2 0 0 1 2.2-2.2z"/><path d="M8 10h7"/><path d="M8 13h5"/><path d="M6.5 6.5V5.2A2.2 2.2 0 0 1 8.7 3h8.2"/></g>',
+
+    // ── Overview (Dashboard) Icons (stroke-based) ──
+    'overview:kb-count':
+        '<g stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5.5 7.5 12 4l6.5 3.5-6.5 3.5-6.5-3.5z"/><path d="M5.5 12 12 15.5 18.5 12"/><path d="M5.5 16.5 12 20l6.5-3.5"/></g>',
+    'overview:pending-jobs':
+        '<g stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="7.5"/><path d="M12 7.5v5l3.2 1.8"/><path d="M5.4 5.4 4 4"/><path d="M18.6 5.4 20 4"/></g>',
+    'overview:processing-jobs':
+        '<g stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 0 1-13.6 5.7"/><path d="M4 12A8 8 0 0 1 17.6 6.3"/><path d="M17.5 3.8v3h-3"/><path d="M6.5 20.2v-3h3"/></g>',
+    'overview:failed-jobs':
+        '<g stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4.2 20 18.5H4L12 4.2z"/><path d="M12 9v4"/><path d="M12 16h.01"/></g>',
+    'overview:online-services':
+        '<g stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.8 19 6.2v5.6c0 4.4-2.9 7.4-7 8.6-4.1-1.2-7-4.2-7-8.6V6.2l7-2.4z"/><path d="M9 12.2 11.1 14.3 15.4 9.7"/></g>',
+    'overview:service-status':
+        '<g stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="5.5" rx="1.4"/><rect x="4" y="13.5" width="16" height="5.5" rx="1.4"/><path d="M7.2 7.75h.01"/><path d="M7.2 16.25h.01"/><path d="M10.2 7.75h6"/><path d="M10.2 16.25h6"/></g>',
+    'overview:recent-activity':
+        '<g stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6.5h9"/><path d="M5 12h6"/><path d="M5 17.5h7"/><path d="M16 14.5 18 16.5 21 12.5"/></g>',
+    'overview:rebuild':
+        '<g stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19.5 12a7.5 7.5 0 0 1-12.7 5.4"/><path d="M4.5 12A7.5 7.5 0 0 1 17.2 6.6"/><path d="M17 3.5v3.2h-3.2"/><path d="M7 20.5v-3.2h3.2"/><path d="M12 8.5v7"/><path d="M8.5 12h7"/></g>',
+
+    // ── Status Icons (stroke-based, fixed semantic colors, viewBox 0 0 24 24) ──
+    'status:pending':
+        '<circle cx="12" cy="12" r="8.2" stroke="#8A98A8" stroke-width="1.9"/><path d="M12 7.8V12l3 1.9" stroke="#8A98A8" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>',
+    'status:processing':
+        '<path d="M18.4 12A6.4 6.4 0 1 1 12 5.6" stroke="#3976C5" stroke-width="2" stroke-linecap="round"/><path d="M15.7 5.6H18.8V8.7" stroke="#3976C5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
+    'status:success':
+        '<circle cx="12" cy="12" r="8.2" stroke="#176B57" stroke-width="1.9"/><path d="M8.2 12.2l2.4 2.4 5.2-5.3" stroke="#176B57" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
+    'status:failed':
+        '<circle cx="12" cy="12" r="8.2" stroke="#D92D20" stroke-width="1.9"/><path d="M12 7.6v5.2" stroke="#D92D20" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="16.6" r="1" fill="#D92D20"/>',
+    'status:skipped':
+        '<circle cx="12" cy="12" r="8.2" stroke="#8A98A8" stroke-width="1.9"/><path d="M8.7 15.3l6.6-6.6" stroke="#8A98A8" stroke-width="1.9" stroke-linecap="round"/>',
+    'status:retry':
+        '<path d="M18.4 12A6.4 6.4 0 1 1 7.2 7.6" stroke="#C89B3C" stroke-width="2" stroke-linecap="round"/><path d="M8.3 5.5H5.2v3.1" stroke="#C89B3C" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
+    'status:partial-failed':
+        '<path d="M12 4.5 20 18.5H4L12 4.5Z" stroke="#C89B3C" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 9v4.1" stroke="#C89B3C" stroke-width="1.9" stroke-linecap="round"/><circle cx="12" cy="15.6" r="1" fill="#C89B3C"/>',
+
+    // ── Service Icons (stroke-based, fixed semantic colors, viewBox 0 0 24 24) ──
+    'service:api':
+        '<path d="M7.2 16.5h9.6a3.2 3.2 0 0 0 .2-6.4 4.8 4.8 0 0 0-9-1.5A3.6 3.6 0 0 0 7.2 16.5Z" stroke="#8A98A8" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><text x="12" y="14.1" font-size="4.1" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" fill="#8A98A8" font-weight="700">API</text>',
+    'service:embedding-worker':
+        '<rect x="6" y="6" width="12" height="12" rx="2" stroke="#176B57" stroke-width="1.8"/><path d="M9.2 9.2h5.6v5.6H9.2z" stroke="#176B57" stroke-width="1.6"/><path d="M12 3.8v2M12 18.2v2M3.8 12h2M18.2 12h2M6.4 6.4l1.2 1.2M16.4 16.4l1.2 1.2M16.4 7.6l1.2-1.2M6.4 17.6l1.2-1.2" stroke="#176B57" stroke-width="1.6" stroke-linecap="round"/>',
+    'service:cleanup-worker':
+        '<path d="M8.5 7.5h7M6.9 7.5h10.2" stroke="#176B57" stroke-width="1.8" stroke-linecap="round"/><path d="M9.2 5.6h5.6" stroke="#176B57" stroke-width="1.8" stroke-linecap="round"/><path d="M7.8 7.5l.7 10a1.5 1.5 0 0 0 1.5 1.4h4a1.5 1.5 0 0 0 1.5-1.4l.7-10" stroke="#176B57" stroke-width="1.8" stroke-linejoin="round"/><path d="M10.2 10.1v5.3M13.8 10.1v5.3" stroke="#176B57" stroke-width="1.7" stroke-linecap="round"/>',
+    'service:qdrant':
+        '<path d="M12 4.8 18 8.1v7.8L12 19.2 6 15.9V8.1L12 4.8Z" stroke="#3976C5" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 9.4 15.4 11.3v4l-3.4 1.9-3.4-1.9v-4L12 9.4Z" stroke="#D92D20" stroke-width="1.6" stroke-linejoin="round"/>',
+    'service:postgresql':
+        '<path d="M9.5 6.2c-1.9 0-3.3 1.3-3.3 3v5c0 1.8 1.4 3.1 3.2 3.1 1.2 0 1.8-.4 2.6-1.2.9-.9 1.7-2 2.6-2.8 1.1-1 2-1.3 3.2-1.3" stroke="#8A98A8" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M10.7 8.1c1.2 0 2.4.5 3.1 1.4.7.8 1 1.8 1 2.9v5.2" stroke="#8A98A8" stroke-width="1.8" stroke-linecap="round"/><circle cx="9.7" cy="10.1" r=".95" fill="#8A98A8"/>',
+    'service:embedding-service':
+        '<circle cx="8" cy="12" r="2" stroke="#176B57" stroke-width="1.7"/><circle cx="16" cy="7.8" r="2" stroke="#3976C5" stroke-width="1.7"/><circle cx="16" cy="16.2" r="2" stroke="#176B57" stroke-width="1.7"/><path d="M9.8 11 14.1 8.8M9.8 13l4.3 2.2" stroke="#8A98A8" stroke-width="1.7" stroke-linecap="round"/>',
 };
 
 // 备选回退图标（问号）

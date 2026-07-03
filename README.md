@@ -65,7 +65,7 @@
 - Dense 检索 + 可选 Rerank + score_threshold + metadata 过滤；跨库**源库正文补全**。
 - 检索效果**评测尺子**（hit@k / MRR / Recall）与**六步闭环验收**脚本。
 - Casbin 细粒度权限、API Key 双通道、审计日志、`/health` 五维自检。
-- 零构建管理后台 console（建库/授权/摄入/任务/审计）；默认通过 CDN（unpkg / Iconify）加载前端依赖，离线内网部署需将依赖本地化。见 [docs/12](./docs/12-admin-ui.md)。
+- 零构建管理后台 console（建库/授权/摄入/任务/审计/问答/运行状态）；前端依赖和图标均本地化，页面运行时零公网 CDN 请求。见 [docs/12](./docs/12-admin-ui.md)。
 
 ## 5. 支持的文件格式
 

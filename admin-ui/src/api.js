@@ -1,31 +1,40 @@
 // 后端 REST 客户端。所有调用走同源 + cookie；自动处理 401 跳登录。
 
+import { humanizeApiError } from './api_errors.js';
+import { cachedRequest, clearCache, invalidateByPrefix } from './request_cache.js';
+
 const BASE = '';  // 同源
 
 let onUnauthorized = null;
 export function setUnauthorizedHandler(fn) { onUnauthorized = fn; }
 
 async function request(path, options = {}) {
+    const method = (options.method || 'GET').toUpperCase();
     const resp = await fetch(BASE + path, {
         credentials: 'include',
         ...options,
     });
     if (resp.status === 401) {
+        clearCache();
         if (onUnauthorized) onUnauthorized();
         const err = new Error('登录已过期，请重新登录');
         err.status = 401;
         throw err;
     }
-    if (resp.status === 204) return null;
+    if (resp.status === 204) {
+        if (method !== 'GET') clearCache();
+        return null;
+    }
     const ct = resp.headers.get('content-type') || '';
     const body = ct.includes('application/json') ? await resp.json() : await resp.text();
     if (!resp.ok) {
-        const msg = (body && body.detail) ? body.detail : (typeof body === 'string' ? body : JSON.stringify(body));
-        const err = new Error(msg || `HTTP ${resp.status}`);
+        const msg = humanizeApiError(body, resp.status, `请求失败（HTTP ${resp.status}）`);
+        const err = new Error(msg);
         err.status = resp.status;
         err.body = body;
         throw err;
     }
+    if (method !== 'GET') clearCache();
     return body;
 }
 
@@ -60,15 +69,17 @@ export async function login(email, password) {
         throw new Error(CN[code] || '邮箱或密码错误');
     }
     if (!resp.ok) throw new Error(`登录失败: HTTP ${resp.status}`);
+    clearCache();
     return resp.status === 204 ? null : resp.json();
 }
 
 export async function logout() {
-    await fetch(BASE + '/auth/jwt/logout', { method: 'POST', credentials: 'include' });
+    try { await fetch(BASE + '/auth/jwt/logout', { method: 'POST', credentials: 'include' }); }
+    finally { clearCache(); }
 }
 
-export const me = () => request('/users/me');
-export const myPermissions = () => request('/me/permissions');
+export const me = (forceRefresh) => cachedRequest('me', () => request('/users/me'), 30000, forceRefresh);
+export const myPermissions = (forceRefresh) => cachedRequest('myPermissions', () => request('/me/permissions'), 30000, forceRefresh);
 // 修改自己的资料/密码（复用 fastapi-users PATCH /users/me，不新建更新逻辑）
 export const updateMe = (data) => request('/users/me', jsonBody('PATCH', data));
 // 管理员重置某用户密码（专用端点；password 不混入普通 PATCH）
@@ -76,25 +87,21 @@ export const adminResetUserPassword = (userId, password) =>
     request(`/admin/users/${userId}/reset-password`, jsonBody('POST', { password }));
 
 // ── API Keys 自助 ────────────────────────────────────────────
-export const listApiKeys = () => request('/me/api-keys');
+export const listApiKeys = (forceRefresh) => cachedRequest('listApiKeys', () => request('/me/api-keys'), 15000, forceRefresh);
 export const createApiKey = (name, expiresAt = null) =>
     request('/me/api-keys', jsonBody('POST', { name, expires_at: expiresAt }));
 export const revokeApiKey = (id) => request(`/me/api-keys/${id}`, { method: 'DELETE' });
 
 // ── Admin: Users ─────────────────────────────────────────────
-export const listUsers = (params = {}) => {
-    const qs = new URLSearchParams(params).toString();
-    return request('/admin/users' + (qs ? '?' + qs : ''));
-};
+const _listUsersKey = (params) => 'listUsers:' + new URLSearchParams(params).toString();
+export const listUsers = (params = {}, forceRefresh) => cachedRequest(_listUsersKey(params), () => request('/admin/users?' + new URLSearchParams(params).toString()), 30000, forceRefresh);
 export const createUser = (data) => request('/admin/users', jsonBody('POST', data));
 export const updateUser = (id, data) => request(`/admin/users/${id}`, jsonBody('PATCH', data));
 export const disableUser = (id) => request(`/admin/users/${id}`, { method: 'DELETE' });
 
 // ── Admin: Libraries ─────────────────────────────────────────
-export const listLibraries = (params = {}) => {
-    const qs = new URLSearchParams(params).toString();
-    return request('/admin/libraries' + (qs ? '?' + qs : ''));
-};
+const _listLibsKey = (params) => 'listLibraries:' + new URLSearchParams(params).toString();
+export const listLibraries = (params = {}, forceRefresh) => cachedRequest(_listLibsKey(params), () => request('/admin/libraries?' + new URLSearchParams(params).toString()), 30000, forceRefresh);
 export const createLibrary = (data) => request('/admin/libraries', jsonBody('POST', data));
 export const updateLibrary = (slug, data) => request(`/admin/libraries/${slug}`, jsonBody('PATCH', data));
 export const deleteLibrary = (slug) => request(`/admin/libraries/${slug}`, { method: 'DELETE' });
@@ -105,9 +112,10 @@ export const testLibraryEmbedding = (slug) =>
 
 // ── Admin: Library FAQ（常用问题） ───────────────────────────
 // options.includeInactive=true 时附带停用项（仅 admin/superuser 生效）
-export const listLibraryFaqs = (slug, options = {}) => {
+const _faqKey = (slug, opts) => `listLibraryFaqs:${slug}:${opts.includeInactive ? '1' : '0'}`;
+export const listLibraryFaqs = (slug, options = {}, forceRefresh) => {
     const qs = options.includeInactive ? '?include_inactive=true' : '';
-    return request(`/admin/libraries/${slug}/faqs${qs}`);
+    return cachedRequest(_faqKey(slug, options), () => request(`/admin/libraries/${slug}/faqs${qs}`), 30000, forceRefresh);
 };
 export const createLibraryFaq = (slug, payload) =>
     request(`/admin/libraries/${slug}/faqs`, jsonBody('POST', payload));
@@ -117,7 +125,7 @@ export const deleteLibraryFaq = (slug, faqId) =>
     request(`/admin/libraries/${slug}/faqs/${faqId}`, { method: 'DELETE' });
 
 // ── Admin: Permissions ───────────────────────────────────────
-export const listUserPerms = (user_id) => request(`/admin/permissions?user_id=${user_id}`);
+export const listUserPerms = (user_id, forceRefresh) => cachedRequest(`listUserPerms:${user_id}`, () => request(`/admin/permissions?user_id=${user_id}`), 30000, forceRefresh);
 export const grantPerms = (data) => request('/admin/permissions', jsonBody('PUT', data));
 export const revokePerms = (data) => request('/admin/permissions', jsonBody('DELETE', data));
 
@@ -126,95 +134,83 @@ export const ingestDocument = (slug, data) =>
     request(`/libraries/${slug}/documents`, jsonBody('POST', data));
 export const updateDocument = (slug, id, data) =>
     request(`/libraries/${slug}/documents/${id}`, jsonBody('PUT', data));
-export const listDocuments = (slug, params = {}) => {
-    const qs = new URLSearchParams(params).toString();
-    return request(`/libraries/${slug}/documents` + (qs ? '?' + qs : ''));
-};
+const _docsKey = (slug, params) => `listDocuments:${slug}:${new URLSearchParams(params).toString()}`;
+export const listDocuments = (slug, params = {}, forceRefresh) => cachedRequest(_docsKey(slug, params), () => request(`/libraries/${slug}/documents?${new URLSearchParams(params).toString()}`), 15000, forceRefresh);
 export const deleteDocument = (slug, id) =>
     request(`/libraries/${slug}/documents/${id}`, { method: 'DELETE' });
-export const libraryStats = (slug) => request(`/libraries/${slug}/stats`);
+export const libraryStats = (slug, forceRefresh) => cachedRequest(`libraryStats:${slug}`, () => request(`/libraries/${slug}/stats`), 15000, forceRefresh);
 export const queryLibrary = (slug, data) =>
     request(`/libraries/${slug}/query`, jsonBody('POST', data));
 export const importFile = (slug, file, { externalId = null, replaceDocumentId = null } = {}) => {
     const formData = new FormData();
     formData.append('file', file);
-    // 选填：带 external_id 时，库内同键文档会被覆盖更新（upsert），而非新建
     if (externalId) formData.append('external_id', externalId);
-    // 选填：替换模式——按 document ID 覆盖目标文档（不依赖 external_id）
     if (replaceDocumentId) formData.append('replace_document_id', replaceDocumentId);
-    return request(`/libraries/${slug}/import-file`, {
-        method: 'POST',
-        body: formData,
-    });
+    return request(`/libraries/${slug}/import-file`, { method: 'POST', body: formData });
 };
-// 任务状态（库级，普通用户可查）：单查 + 按文档列出
-export const getLibraryJob = (slug, jobId) =>
-    request(`/libraries/${slug}/jobs/${jobId}`);
-export const listDocumentJobs = (slug, documentId) =>
-    request(`/libraries/${slug}/documents/${documentId}/jobs`);
+// 任务状态（库级，普通用户可查）：按文档列出
+export const listDocumentJobs = (slug, documentId, forceRefresh) => cachedRequest(`listDocumentJobs:${slug}:${documentId}`, () => request(`/libraries/${slug}/documents/${documentId}/jobs`), 15000, forceRefresh);
 
 // ── Admin: Jobs ──────────────────────────────────────────────
-export const listJobs = (params = {}) => {
-    const qs = new URLSearchParams(params).toString();
-    return request('/admin/jobs' + (qs ? '?' + qs : ''));
-};
+const _jobsKey = (params) => 'listJobs:' + new URLSearchParams(params).toString();
+export const listJobs = (params = {}, forceRefresh) => cachedRequest(_jobsKey(params), () => request('/admin/jobs?' + new URLSearchParams(params).toString()), 10000, forceRefresh);
 export const retryJob = (id) => request(`/admin/jobs/${id}/retry`, { method: 'POST' });
-export const jobStats = () => request('/admin/jobs/stats');
+export const jobStats = (forceRefresh) => cachedRequest('jobStats', () => request('/admin/jobs/stats'), 10000, forceRefresh);
 export const resetFailedJobs = (libraryId = null) =>
     request('/admin/jobs/reset-failed' + (libraryId ? `?library_id=${libraryId}` : ''), { method: 'POST' });
 
 // ── Admin: Operations status（运行状态监控，docs/26） ─────────
-export const operationsStatus = () => request('/admin/operations/status');
+export const operationsStatus = (forceRefresh) => cachedRequest('operationsStatus', () => request('/admin/operations/status'), 10000, forceRefresh);
 
 // ── Admin: Audit log ─────────────────────────────────────────
-export const listAudit = (params = {}) => {
-    const qs = new URLSearchParams(params).toString();
-    return request('/admin/audit-log' + (qs ? '?' + qs : ''));
-};
+const _auditKey = (params) => 'listAudit:' + new URLSearchParams(params).toString();
+export const listAudit = (params = {}, forceRefresh) => cachedRequest(_auditKey(params), () => request('/admin/audit-log?' + new URLSearchParams(params).toString()), 15000, forceRefresh);
 
 // ── Chat 用户端（轻量问答 v1） ───────────────────────────────
-export const listChatLibraries = () => request('/chat/libraries');
-export const sendChatMessage = (payload) => request('/chat/messages', jsonBody('POST', payload));
+export const listChatLibraries = (forceRefresh) => cachedRequest('listChatLibraries', () => request('/chat/libraries'), 30000, forceRefresh);
 
 // 会话历史
-export const listChatConversations = (includeArchived = false) =>
-    request('/chat/conversations' + (includeArchived ? '?include_archived=true' : ''));
-export const getChatConversationMessages = (id) =>
-    request(`/chat/conversations/${id}/messages`);
+export const listChatConversations = (includeArchived = false, forceRefresh) => cachedRequest(`listChatConversations:${includeArchived ? '1' : '0'}`, () => request('/chat/conversations' + (includeArchived ? '?include_archived=true' : '')), 15000, forceRefresh);
+export const getChatConversationMessages = (id) => request(`/chat/conversations/${id}/messages`); // not cached — real-time
 export const archiveChatConversation = (id) =>
     request(`/chat/conversations/${id}/archive`, { method: 'POST' });
 export const deleteChatConversation = (id) =>
     request(`/chat/conversations/${id}`, { method: 'DELETE' });
 
 // 管理后台：问答日志
-export const adminListChatLogs = (params = {}) => {
-    const qs = new URLSearchParams(params).toString();
-    return request('/admin/chat-logs' + (qs ? '?' + qs : ''));
-};
+const _chatLogsKey = (params) => 'adminListChatLogs:' + new URLSearchParams(params).toString();
+export const adminListChatLogs = (params = {}, forceRefresh) => cachedRequest(_chatLogsKey(params), () => request('/admin/chat-logs?' + new URLSearchParams(params).toString()), 15000, forceRefresh);
 
 // 流式问答（SSE over fetch）。handlers: { onSources, onDelta, onError, onDone }
 // 非 2xx（503/403/401 等）按普通错误抛出，由调用方处理；流内 error 走 onError。
-export async function streamChatMessage(payload, handlers = {}) {
+export async function streamChatMessage(payload, handlers = {}, signal = null) {
     const { onSources, onDelta, onError, onDone } = handlers;
     const resp = await fetch(BASE + '/chat/stream', {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
+        signal,
     });
     if (resp.status === 401) {
+        clearCache();
         if (onUnauthorized) onUnauthorized();
         const err = new Error('登录已过期，请重新登录');
         err.status = 401;
         throw err;
     }
     if (!resp.ok) {
-        let detail = `HTTP ${resp.status}`;
-        try { const j = await resp.json(); if (j && j.detail) detail = j.detail; } catch (_) { /* ignore */ }
-        const err = new Error(detail);
+        let body = null;
+        try { body = await resp.json(); } catch (_) { /* ignore */ }
+        const msg = humanizeApiError(body, resp.status, `请求失败（HTTP ${resp.status}）`);
+        const err = new Error(msg);
         err.status = resp.status;
+        err.body = body;
         throw err;
     }
+    // Invalidate chat caches immediately, before reading stream
+    invalidateByPrefix('listChatConversations');
+    invalidateByPrefix('listChatLibraries');
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buf = '';
@@ -243,4 +239,4 @@ export async function streamChatMessage(payload, handlers = {}) {
 }
 
 // ── Health ───────────────────────────────────────────────────
-export const health = () => request('/health');
+export const health = (forceRefresh) => cachedRequest('health', () => request('/health'), 60000, forceRefresh);

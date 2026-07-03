@@ -77,6 +77,13 @@ def assert_startup_security() -> None:
             raise RuntimeError(f"[安全] 拒绝启动：{msg}")
 
 
+def resolve_console_ui_dir(root: Path) -> Path | None:
+    """Resolve the configured console UI directory without implicit frontend fallback."""
+    configured = Path(settings.console_ui_dir)
+    ui_dir = configured if configured.is_absolute() else root / configured
+    return ui_dir if ui_dir.is_dir() else None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # noqa: ARG001
     """FastAPI lifespan：startup → yield → shutdown。"""
@@ -143,11 +150,10 @@ def create_app() -> FastAPI:
         await ws.close(code=1001)  # 1001 Going Away，立即关闭
 
     # 管理后台 SPA：挂到 /console/，避免与 /admin/* API 命名空间冲突。
-    # 优先用 Soybean 构建产物（frontend/dist）；未构建时回退到零构建的 admin-ui。
+    # 默认固定使用零构建 admin-ui；备用构建产物需通过 CONSOLE_UI_DIR 显式指定。
     root = Path(__file__).resolve().parent.parent
-    ui_dist = root / "frontend" / "dist"
-    ui_dir = ui_dist if ui_dist.is_dir() else (root / "admin-ui")
-    if ui_dir.is_dir():
+    ui_dir = resolve_console_ui_dir(root)
+    if ui_dir is not None:
         app.mount("/console", NoCacheStaticFiles(directory=str(ui_dir), html=True), name="console")
 
         @app.get("/", include_in_schema=False)

@@ -8,21 +8,21 @@ import { dirname, join } from 'node:path';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ── documentTypeIcon mapping ──────────────────────────────
-import { documentType, documentTypeIcon } from './src/documents_ui.js';
+import { documentTypeIcon } from './src/documents_ui.js';
 
 const EXPECTED_MAPPING = [
-    { row: { title: 'report.pdf' },       type: 'pdf',  asset: './assets/file-types/pdf.svg' },
-    { row: { title: 'memo.docx' },        type: 'word', asset: './assets/file-types/docx.svg' },
-    { row: { title: 'sheet.xlsx' },       type: 'excel', asset: './assets/file-types/xlsx.svg' },
-    { row: { title: 'readme.md' },        type: 'markdown', asset: './assets/file-types/md.svg' },
-    { row: { title: 'notes.txt' },        type: 'text', asset: './assets/file-types/txt.svg' },
-    { row: { title: 'data.json' },        type: 'json', asset: './assets/file-types/json.svg' },
-    { row: { title: 'export.csv' },       type: 'csv',  asset: './assets/file-types/csv.svg' },
-    { row: { title: 'unknown.bin' },      type: 'other', asset: null },
-    { row: { title: 'noext' },            type: 'other', asset: null },
-    { row: { title: 'old.doc' },          type: 'word', asset: './assets/file-types/docx.svg' },
-    { row: { title: 'legacy.xls' },       type: 'excel', asset: './assets/file-types/xlsx.svg' },
-    { row: { title: 'README.MARKDOWN' },  type: 'markdown', asset: './assets/file-types/md.svg' },
+    { row: { title: 'report.pdf' },       asset: './assets/file-types/pdf.svg' },
+    { row: { title: 'memo.docx' },        asset: './assets/file-types/docx.svg' },
+    { row: { title: 'sheet.xlsx' },       asset: './assets/file-types/xlsx.svg' },
+    { row: { title: 'readme.md' },        asset: './assets/file-types/md.svg' },
+    { row: { title: 'notes.txt' },        asset: './assets/file-types/txt.svg' },
+    { row: { title: 'data.json' },        asset: './assets/file-types/json.svg' },
+    { row: { title: 'export.csv' },       asset: './assets/file-types/csv.svg' },
+    { row: { title: 'unknown.bin' },      asset: null },
+    { row: { title: 'noext' },            asset: null },
+    { row: { title: 'old.doc' },          asset: './assets/file-types/docx.svg' },
+    { row: { title: 'legacy.xls' },       asset: './assets/file-types/xlsx.svg' },
+    { row: { title: 'README.MARKDOWN' },  asset: './assets/file-types/md.svg' },
 ];
 
 test('documentTypeIcon returns asset path or null for all types', () => {

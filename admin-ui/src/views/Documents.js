@@ -1,14 +1,14 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue';
-import { useRouter } from 'vue-router';
+import { useRouter, useRoute } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import * as api from '../api.js';
 import { store, hasPermission } from '../store.js';
+import { dataEmpty } from '../illustrations.js';
 import { readableLibraries, resolveSelectedSlug } from '../menu_access.js';
 import {
     documentDisplayName,
     documentStatusLabel,
     documentStatusTag,
-    documentType,
     documentTypeIcon,
     filterDocuments,
     formatDocumentTime,
@@ -18,6 +18,7 @@ import {
 export default {
     setup() {
         const router = useRouter();
+        const route = useRoute();
         const libs = ref([]);
         const slug = ref(null);
         const docs = ref([]);
@@ -25,7 +26,7 @@ export default {
         const loading = ref(false);
         const filters = reactive({ keyword: '', status: '', type: '', dateRange: [] });
         const page = ref(1);
-        const pageSize = ref(10);
+        const pageSize = ref(5);
         const detail = reactive({ open: false, row: null, jobs: [], loading: false });
         const dialog = reactive({
             open: false,
@@ -66,24 +67,22 @@ export default {
                 } else {
                     libs.value = readableLibraries(store.permissions);
                 }
-                // 选中库必须是当前可读库之一：当前 slug 失效 → 切到第一个；无可读库 → null（不发文档请求）。
-                const nextSlug = resolveSelectedSlug(slug.value, libs.value);
-                if (nextSlug === slug.value) {
-                    slug.value = nextSlug;
-                    await loadDocs();
-                } else {
-                    slug.value = nextSlug;
-                }
+                // 选中库：优先 URL 参数 ?slug=，其次当前值，最后第一个可读库
+                const urlSlug = route.query.slug;
+                const candidate = (urlSlug && libs.value.some((l) => l.slug === urlSlug)) ? urlSlug : slug.value;
+                const nextSlug = resolveSelectedSlug(candidate, libs.value);
+                slug.value = nextSlug;
+                await loadDocs();
             } catch (e) { ElMessage.error(e.message); }
         }
 
-        async function loadDocs() {
+        async function loadDocs(forceRefresh = false) {
             if (!slug.value) { docs.value = []; stats.value = null; return; }
             loading.value = true;
             try {
                 const [d, s] = await Promise.all([
-                    api.listDocuments(slug.value, { limit: 500 }),
-                    api.libraryStats(slug.value),
+                    api.listDocuments(slug.value, { limit: 500 }, forceRefresh),
+                    api.libraryStats(slug.value, forceRefresh),
                 ]);
                 docs.value = d;
                 stats.value = s;
@@ -97,7 +96,7 @@ export default {
             filters.type = '';
             filters.dateRange = [];
             page.value = 1;
-            pageSize.value = 10;
+            pageSize.value = 5;
         }
 
         function openFileImport() {
@@ -241,15 +240,23 @@ export default {
             if (page.value !== validPage) page.value = validPage;
         });
 
-        onMounted(loadLibs);
+        onMounted(async () => {
+            await loadLibs();
+            // Auto-open document detail if linked from chat page (?open=<document_id>)
+            const openId = route.query.open;
+            if (openId && slug.value) {
+                const row = docs.value.find((d) => String(d.id) === String(openId));
+                if (row) await openDetail(row);
+            }
+        });
 
         return {
             myLibs, slug, docs, stats, loading, canInsert, canDelete, isSuperuser,
             processingCount, filters, page, pageSize, pagination, visibleDocs, partialList,
             detail, dialog, loadDocs, resetFilters, openFileImport, openIngest, openEdit,
             openDetail, retryJob, retryDocument, submitIngest, del, metadataText,
-            documentDisplayName, documentStatusLabel, documentStatusTag, documentType, documentTypeIcon,
-            formatDocumentTime,
+            documentDisplayName, documentStatusLabel, documentStatusTag, documentTypeIcon,
+            formatDocumentTime, dataEmpty,
         };
     },
     template: `
@@ -299,7 +306,7 @@ export default {
                         start-placeholder="开始日期" end-placeholder="结束日期" style="width: 100%" />
         <div class="documents-filter-actions">
           <el-button @click="resetFilters">重置</el-button>
-          <el-button :loading="loading" @click="loadDocs">刷新</el-button>
+          <el-button :loading="loading" @click="loadDocs(true)">刷新</el-button>
         </div>
       </section>
 
@@ -308,7 +315,8 @@ export default {
           当前加载 {{ docs.length }} / 总计 {{ stats.document_count }}，筛选与分页仅作用于已加载文档
         </div>
         <div class="documents-table-shell">
-          <el-table :data="visibleDocs" v-loading="loading" empty-text="当前条件下暂无文档">
+          <el-table :data="visibleDocs" v-loading="loading">
+            <template #empty><div class="illustration-empty-wrapper"><img :src="dataEmpty" class="illustration-data-empty" alt="" aria-hidden="true" /><p>当前条件下暂无文档</p></div></template>
             <el-table-column label="文件名" min-width="250">
               <template #default="{row}">
                 <div class="documents-file">
@@ -319,7 +327,7 @@ export default {
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="状态" width="110">
+            <el-table-column label="状态" width="90">
               <template #default="{row}">
                 <el-tag :type="documentStatusTag(row.status)" size="small">{{ documentStatusLabel(row.status) }}</el-tag>
               </template>
@@ -327,13 +335,13 @@ export default {
             <el-table-column label="版本" width="80">
               <template #default="{row}">v{{ row.current_revision || 0 }}</template>
             </el-table-column>
-            <el-table-column label="external_id" min-width="150" show-overflow-tooltip>
+            <el-table-column label="external_id" min-width="120" show-overflow-tooltip>
               <template #default="{row}">{{ row.external_id || '—' }}</template>
             </el-table-column>
-            <el-table-column label="更新时间" width="180">
+            <el-table-column label="更新时间" width="155">
               <template #default="{row}">{{ formatDocumentTime(row.updated_at) }}</template>
             </el-table-column>
-            <el-table-column label="操作" width="250" fixed="right">
+            <el-table-column label="操作" width="220">
               <template #default="{row}">
                 <el-button link class="doc-link-btn" @click="openDetail(row)">详情</el-button>
                 <el-button link class="doc-link-btn" :disabled="!canInsert" @click="openEdit(row)">编辑</el-button>
@@ -346,7 +354,7 @@ export default {
         </div>
         <div class="documents-pagination">
           <el-pagination v-model:current-page="page" v-model:page-size="pageSize"
-                         :page-sizes="[10, 20, 50]" :total="pagination.total"
+                         :page-sizes="[5, 20, 50]" :total="pagination.total"
                          layout="total, sizes, prev, pager, next" />
         </div>
       </section>

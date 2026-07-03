@@ -1,3 +1,5 @@
+import { formatTime, paginate } from './common_ui.js';
+
 const STATUS_LABEL = {
     pending: '等待中',
     processing: '处理中',
@@ -83,17 +85,9 @@ export function filterDocuments(rows, filters = {}) {
 }
 
 export function paginateDocuments(rows, requestedPage = 1, requestedSize = 10) {
-    const total = rows.length;
-    const size = Number(requestedSize) > 0 ? Number(requestedSize) : 10;
-    const pageCount = Math.max(1, Math.ceil(total / size));
-    const page = Math.min(Math.max(1, Number(requestedPage) || 1), pageCount);
-    const start = (page - 1) * size;
-    return { items: rows.slice(start, start + size), total, page, pageCount };
+    return paginate(rows, requestedPage, requestedSize);
 }
 
 export function formatDocumentTime(value) {
-    if (!value) return '—';
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return '—';
-    return date.toLocaleString('zh-CN', { hour12: false });
+    return formatTime(value);
 }
