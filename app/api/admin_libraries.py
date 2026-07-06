@@ -88,7 +88,7 @@ async def create_library(
         await db.flush()
     except IntegrityError as exc:
         await db.rollback()
-        raise HTTPException(status.HTTP_409_CONFLICT, "slug already exists") from exc
+        raise HTTPException(status.HTTP_409_CONFLICT, "库唯一ID已存在，请更换后重试") from exc
 
     # 建 Qdrant collection（失败回滚库记录）
     try:

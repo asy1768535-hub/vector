@@ -21,6 +21,7 @@ export default {
 
         const create = reactive({
             open: false,
+            submitting: false,
             form: { slug: '', name: '', description: '', embedding_model: '', embedding_dim: null,
                 vector_distance: 'cosine', embedding_base_url: '', embed_batch_size: null,
                 rerank_enabled: null, ocr_enabled: null, docx_table_aware: null,
@@ -77,12 +78,15 @@ export default {
         }
 
         async function submitCreate() {
+            if (create.submitting) return;
             const body = { ...create.form };
             for (const k of ['embedding_model', 'embedding_base_url']) if (!body[k]) body[k] = null;
             if (!body.embedding_dim) body.embedding_dim = null;
             if (!body.embed_batch_size) body.embed_batch_size = null;
+            create.submitting = true;
             try { await api.createLibrary(body); ElMessage.success('库已创建并已建 Qdrant collection'); create.open = false; await load(true); }
             catch (e) { ElMessage.error(e.message); }
+            finally { create.submitting = false; }
         }
 
         function openEdit(row) {
@@ -322,7 +326,7 @@ export default {
           </div>
           <el-alert type="info" :closable="false" class="libraries-form-alert">PGSQL 全文源按<b>约定</b>自动配置：源表 = <code>{{ create.form.slug || '<库唯一ID>' }}</code>（本库唯一ID）· 外键 <code>text_id</code> → 正文列 <code>content</code> · <code>bigint</code> · 源库取 <code>.env</code> 配置。</el-alert>
         </el-form>
-        <template #footer><el-button @click="create.open = false">取消</el-button><el-button type="primary" @click="submitCreate">创建</el-button></template>
+        <template #footer><el-button @click="create.open = false" :disabled="create.submitting">取消</el-button><el-button type="primary" :loading="create.submitting" @click="submitCreate">创建</el-button></template>
       </el-dialog>
 
       <!-- Edit dialog -->

@@ -164,6 +164,15 @@ test('Embedding column uses embedDisplay to avoid —d', () => {
     assert.ok(source.includes("embedDisplay(selectedLibrary)"));
 });
 
+test('create dialog prevents duplicate submissions while request is pending', () => {
+    assert.match(source, /submitting:\s*false/);
+    assert.match(source, /if \(create\.submitting\) return/);
+    assert.match(source, /create\.submitting = true/);
+    assert.match(source, /finally \{ create\.submitting = false; \}/);
+    assert.match(source, /<el-button @click="create\.open = false" :disabled="create\.submitting">取消<\/el-button>/);
+    assert.match(source, /<el-button type="primary" :loading="create\.submitting" @click="submitCreate">创建<\/el-button>/);
+});
+
 test('CSS: libraries-header has flex-direction:column responsive rule', () => {
     const idx = css.indexOf('libraries-header');
     assert.ok(idx > 0, 'libraries-header exists in CSS');
