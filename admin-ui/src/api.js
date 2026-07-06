@@ -150,6 +150,8 @@ export const importFile = (slug, file, { externalId = null, replaceDocumentId = 
 };
 // 任务状态（库级，普通用户可查）：按文档列出
 export const listDocumentJobs = (slug, documentId, forceRefresh) => cachedRequest(`listDocumentJobs:${slug}:${documentId}`, () => request(`/libraries/${slug}/documents/${documentId}/jobs`), 15000, forceRefresh);
+export const getDocumentSource = (slug, documentId, chunkId) =>
+    request(`/libraries/${slug}/documents/${documentId}/source?` + new URLSearchParams({ chunk_id: chunkId }).toString());
 
 // ── Admin: Jobs ──────────────────────────────────────────────
 const _jobsKey = (params) => 'listJobs:' + new URLSearchParams(params).toString();

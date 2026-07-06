@@ -72,12 +72,13 @@ test('blocks write actions when no library is selected', () => {
     assert.ok(source.includes("Boolean(slug.value) && (store.user?.is_superuser || hasPermission(slug.value, 'delete'))"), 'canDelete requires slug');
     for (const guard of [
         "if (!slug.value || !canInsert.value) return;",
-        "if (!slug.value) {\n                ElMessage.warning('请先选择知识库');",
+        "if (!slug.value) {",
         "if (!slug.value || !canInsert.value) return;",
         "if (!slug.value) return;",
         "if (!slug.value || !isSuperuser.value || row.status !== 'failed') return;",
     ]) {
         assert.ok(source.includes(guard), `missing slug guard: ${guard}`);
     }
+    assert.ok(source.includes("ElMessage.warning('请先选择知识库');"), 'missing no-library warning');
     assert.ok(source.includes("slug ? ('向 ' + slug + ' 提交文档') : '提交文档'"), 'dialog title avoids null');
 });
