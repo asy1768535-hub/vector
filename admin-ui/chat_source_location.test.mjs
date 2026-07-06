@@ -11,9 +11,17 @@ test('chat source API and dialogs are wired in page', () => {
     assert.ok(chat.includes('openCitationChunk'));
     assert.ok(chat.includes('sourceLocationDialog'));
     assert.ok(chat.includes('recalledChunkDialog'));
+    assert.ok(chat.includes('sourceLocationRequestSeq'));
     assert.ok(chat.includes('@click="openDocDetail(s)"'));
     assert.ok(!chat.includes('window.open(resolved.href'));
     assert.ok(!chat.includes("router.resolve({ path: '/documents'"));
+});
+
+test('source actions use source wording and show chunk sequence', () => {
+    assert.ok(chat.includes('查看出处'));
+    assert.ok(!chat.includes('title="文档详情"'));
+    assert.ok(chat.includes('sourceLocationDialog.source?.seq'));
+    assert.ok(chat.includes('recalledChunkDialog.source.seq'));
 });
 
 test('source location modal and citation styles exist', () => {

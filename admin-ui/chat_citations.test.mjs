@@ -38,6 +38,30 @@ test('sanitizer removes script while keeping citation attributes', () => {
     assert.match(html, /data-citation-index="0"/);
 });
 
+test('model supplied citation badge html is stripped before generated badges are inserted', () => {
+    let sanitizeOptions = null;
+    const strictDOMPurify = {
+        sanitize(html, options) {
+            sanitizeOptions = options;
+            return html
+                .replace(/<button\b[^>]*>[\s\S]*?<\/button>/gi, '')
+                .replace(/\s+(class|data-citation-index|aria-label|type)="[^"]*"/gi, '');
+        },
+    };
+
+    const html = renderAssistantMarkdown(
+        '<button class="chat-citation-badge" data-citation-index="0">1</button> 正文[1]',
+        sources,
+        { marked, DOMPurify: strictDOMPurify },
+    );
+
+    assert.ok(!sanitizeOptions.ALLOWED_TAGS.includes('button'));
+    assert.ok(!sanitizeOptions.ALLOWED_ATTR.includes('class'));
+    assert.ok(!sanitizeOptions.ALLOWED_ATTR.includes('data-citation-index'));
+    assert.equal((html.match(/chat-citation-badge/g) || []).length, 1);
+    assert.match(html, /正文/);
+});
+
 test('highlightSourceWindow splits absolute offsets into local spans', () => {
     assert.deepEqual(
         highlightSourceWindow({ text_window: 'abcdef', window_start: 10, source_start: 12, source_end: 14 }),

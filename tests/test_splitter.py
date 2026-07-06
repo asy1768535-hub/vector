@@ -42,11 +42,25 @@ def test_splitter_empty_returns_empty():
 def test_split_structured_text_offsets_match_source_slices():
     text = "第一行\n第二行很长" * 30
     chunks = split_structured_text(text, chunk_size=80, chunk_overlap=10, splitter="text")
+    assert [chunk["text"] for chunk in chunks] == split_text(
+        text, chunk_size=80, chunk_overlap=10, splitter="text"
+    )
     assert chunks
     for chunk in chunks:
         assert text[chunk["source_start"]:chunk["source_end"]] == chunk["text"]
         assert chunk["location"]["type"] == "line"
         assert chunk["location"]["start_line"] >= 1
+
+
+def test_split_structured_text_markdown_preserves_split_text_output():
+    text = "# A\n\n" + ("alpha beta gamma\n" * 20) + "\n## B\n\n" + ("delta epsilon\n" * 20)
+    chunks = split_structured_text(text, chunk_size=80, chunk_overlap=10, splitter="markdown")
+
+    assert [chunk["text"] for chunk in chunks] == split_text(
+        text, chunk_size=80, chunk_overlap=10, splitter="markdown"
+    )
+    for chunk in chunks:
+        assert text[chunk["source_start"]:chunk["source_end"]] == chunk["text"]
 
 
 def test_split_structured_text_none_returns_full_span():

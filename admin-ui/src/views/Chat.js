@@ -53,6 +53,7 @@ export default {
         const topK = ref(5);
         const recalledChunkDialog = ref({ open: false, source: null });
         const sourceLocationDialog = ref({ open: false, loading: false, source: null, data: null, error: '' });
+        let sourceLocationRequestSeq = 0;
         let _abortController = null;
 
         const _queue = createStreamQueue();
@@ -203,11 +204,14 @@ export default {
                 ElMessage.warning('该来源缺少文档标识');
                 return;
             }
+            const requestSeq = ++sourceLocationRequestSeq;
             sourceLocationDialog.value = { open: true, loading: true, source, data: null, error: '' };
             try {
                 const data = await api.getDocumentSource(slug, docId, chunkId);
+                if (requestSeq !== sourceLocationRequestSeq) return;
                 sourceLocationDialog.value = { open: true, loading: false, source, data, error: '' };
             } catch (e) {
+                if (requestSeq !== sourceLocationRequestSeq) return;
                 sourceLocationDialog.value = {
                     open: true,
                     loading: false,
@@ -423,7 +427,7 @@ export default {
                                         <div class="chat-source-summary">{{ s.content || '' }}</div>
                                     </div>
                                     <div class="chat-source-right">
-                                        <el-button class="chat-source-detail" link type="primary" @click="openDocDetail(s)">文档详情</el-button>
+                                        <el-button class="chat-source-detail" link type="primary" @click="openDocDetail(s)">查看出处</el-button>
                                     </div>
                                 </div>
                             </el-collapse-item>
@@ -451,7 +455,7 @@ export default {
                 </template>
             </el-dialog>
 
-            <el-dialog v-model="sourceLocationDialog.open" title="文档详情" width="900px" class="chat-source-location-dialog">
+            <el-dialog v-model="sourceLocationDialog.open" title="查看出处" width="900px" class="chat-source-location-dialog">
                 <div v-if="sourceLocationDialog.loading" class="chat-source-loading">正在定位来源...</div>
                 <template v-else>
                     <div class="chat-source-dialog-meta">
@@ -459,7 +463,8 @@ export default {
                         <span v-if="sourceLocationDialog.data?.file_type">{{ sourceLocationDialog.data.file_type }}</span>
                         <span v-if="sourceLocationDialog.data?.location">{{ formatLocation(sourceLocationDialog.data.location) }}</span>
                         <span v-if="sourceLocationDialog.source">相似度 {{ fmtScore(sourceLocationDialog.source.score) }}</span>
-                        <span v-if="sourceLocationDialog.data?.chunk_seq !== undefined">分片 {{ sourceLocationDialog.data.chunk_seq }}</span>
+                        <span v-if="sourceLocationDialog.source?.seq !== undefined">分片 {{ sourceLocationDialog.source?.seq }}</span>
+                        <span v-else-if="sourceLocationDialog.data?.chunk_seq !== undefined">分片 {{ sourceLocationDialog.data.chunk_seq }}</span>
                     </div>
                     <el-alert v-if="sourceLocationDialog.error" type="warning" :closable="false" :title="sourceLocationDialog.error" />
                     <el-alert v-if="sourceLocationDialog.data?.legacy" type="info" :closable="false" title="该文档需重新导入后才能精确定位" />

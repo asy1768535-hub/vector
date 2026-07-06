@@ -71,10 +71,17 @@ def _to_source(record) -> ChatSource:
     def _s(v):
         return None if v is None else str(v)
 
+    def _i(v):
+        try:
+            return None if v is None else int(v)
+        except (TypeError, ValueError):
+            return None
+
     return ChatSource(
         title=record.title or "",
         document_id=_s(md.get("document_id")),
         chunk_id=_s(md.get("chunk_id")),
+        seq=_i(md.get("seq")),
         score=float(record.score or 0.0),
         content=record.content or "",
     )

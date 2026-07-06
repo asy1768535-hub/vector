@@ -8,27 +8,30 @@ from __future__ import annotations
 import io
 
 
-def _rows_to_lines(rows) -> list[str]:
-    """二维单元格 → ['a | b | c', ...]，去掉行尾空单元格、跳过空行。"""
-    out: list[str] = []
-    for cells in rows:
+def _rows_to_numbered_lines(rows) -> list[tuple[int, str]]:
+    """二维单元格 → [(row_number, 'a | b | c'), ...]，去行尾空单元格、跳过空行。"""
+    out: list[tuple[int, str]] = []
+    for row_number, cells in rows:
         vals = [("" if c is None else str(c)).strip() for c in cells]
         while vals and vals[-1] == "":
             vals.pop()
         line = " | ".join(vals).strip(" |")
         if line:
-            out.append(line)
+            out.append((row_number, line))
     return out
 
 
-def _seg(name: str, rows: list[str]) -> dict:
+def _seg(name: str, numbered_rows: list[tuple[int, str]]) -> dict:
+    row_numbers = [n for n, _line in numbered_rows]
+    rows = [line for _n, line in numbered_rows]
     return {
         "kind": "table",
         "heading": name,
         "caption": name,
         "header": rows[0],
         "rows": rows,
-        "location": {"type": "sheet_row", "sheet": name, "start_row": 1, "end_row": len(rows)},
+        "row_numbers": row_numbers,
+        "location": {"type": "sheet", "sheet": name},
     }
 
 
@@ -39,7 +42,7 @@ def _read_xlsx(data: bytes) -> list[dict]:
     try:
         segs: list[dict] = []
         for ws in wb.worksheets:
-            rows = _rows_to_lines(ws.iter_rows(values_only=True))
+            rows = _rows_to_numbered_lines(enumerate(ws.iter_rows(values_only=True), start=1))
             if rows:
                 segs.append(_seg(ws.title, rows))
         return segs
@@ -57,7 +60,7 @@ def _read_xls(data: bytes) -> list[dict]:
     book = xlrd.open_workbook(file_contents=data)
     segs: list[dict] = []
     for sh in book.sheets():
-        rows = _rows_to_lines([sh.row_values(r) for r in range(sh.nrows)])
+        rows = _rows_to_numbered_lines((r + 1, sh.row_values(r)) for r in range(sh.nrows))
         if rows:
             segs.append(_seg(sh.name, rows))
     return segs

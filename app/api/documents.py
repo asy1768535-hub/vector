@@ -726,8 +726,10 @@ async def import_file(
         eff_ocr = lib.ocr_enabled if lib.ocr_enabled is not None else settings.ocr_enabled
         ocr_cb = ocr_svc.ocr_image if (eff_ocr and ocr_svc.is_available()) else None
         try:
-            text = pdf_extract.extract_pdf_text(
+            source = pdf_extract.build_pdf_source(
                 content,
+                chunk_size=lib.chunk_size,
+                chunk_overlap=lib.chunk_overlap,
                 ocr_enabled=bool(eff_ocr),
                 ocr=ocr_cb,
                 min_text_chars=settings.pdf_ocr_min_text_chars,
@@ -737,7 +739,15 @@ async def import_file(
         except pdf_extract.PdfExtractError as exc:
             # 含 PdfOcrUnavailableError（需 OCR 但依赖缺）——消息已是用户可读的提示
             raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
-        documents_to_ingest.append(_structured_doc_data(text, filename, suffix, "text", lib))
+        documents_to_ingest.append({
+            "text": source["normalized_text"],
+            "title": filename,
+            "external_id": None,
+            "metadata": None,
+            "splitter": "text",
+            "chunks": source["chunks"],
+            "source": _source_data(source["normalized_text"], filename, suffix),
+        })
 
     elif suffix == ".docx":
         # Word 文档：抽段落 + 表格（表格内容也入库）；库开了 OCR 则连内嵌图片一起识别。

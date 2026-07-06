@@ -606,10 +606,18 @@ from app.services.pdf_extract import PdfExtractError, PdfOcrUnavailableError  # 
 
 
 @patch("app.services.ingest.ingest_text", new_callable=AsyncMock)
-@patch("app.services.pdf_extract.extract_pdf_text")
+@patch("app.services.pdf_extract.build_pdf_source")
 def test_import_text_pdf_ocr_off_ingests(mock_extract, mock_ingest, client):
     """OCR 关 + 文字 PDF：提取出的带页码正文照常入库，splitter=text，ocr_enabled=False。"""
-    mock_extract.return_value = "【第 1 页】\n文字版PDF内容"
+    mock_extract.return_value = {
+        "normalized_text": "【第 1 页】\n文字版PDF内容",
+        "chunks": [{
+            "text": "【第 1 页】\n文字版PDF内容",
+            "source_start": 0,
+            "source_end": 16,
+            "location": {"type": "page", "page": 1},
+        }],
+    }
     doc = MagicMock()
     doc.id = uuid.uuid4()
     doc.status = "pending"
@@ -623,10 +631,11 @@ def test_import_text_pdf_ocr_off_ingests(mock_extract, mock_ingest, client):
     kw = mock_ingest.call_args[1]
     assert kw["text"] == "【第 1 页】\n文字版PDF内容"
     assert kw["splitter"] == "text"
+    assert kw["chunks"][0]["location"] == {"type": "page", "page": 1}
     assert mock_extract.call_args.kwargs["ocr_enabled"] is False   # 库未开 + 全局默认关
 
 
-@patch("app.services.pdf_extract.extract_pdf_text")
+@patch("app.services.pdf_extract.build_pdf_source")
 def test_import_scanned_pdf_ocr_off_returns_enable_hint(mock_extract, client):
     """OCR 关 + 扫描 PDF：服务抛 PdfExtractError → 400，提示去开启 OCR。"""
     mock_extract.side_effect = PdfExtractError(
@@ -641,7 +650,7 @@ def test_import_scanned_pdf_ocr_off_returns_enable_hint(mock_extract, client):
 
 
 @patch("app.services.ingest.ingest_text", new_callable=AsyncMock)
-@patch("app.services.pdf_extract.extract_pdf_text")
+@patch("app.services.pdf_extract.build_pdf_source")
 def test_import_pdf_ocr_on_passes_flag_and_params(mock_extract, mock_ingest, client, monkeypatch):
     """库开 ocr_enabled：把库级开关、ocr_image 回调与三个 pdf_ocr_* 参数传给服务。"""
     monkeypatch.setattr(mock_library, "ocr_enabled", True)
@@ -651,7 +660,10 @@ def test_import_pdf_ocr_on_passes_flag_and_params(mock_extract, mock_ingest, cli
     monkeypatch.setattr(settings, "pdf_ocr_min_text_chars", 20)
     monkeypatch.setattr(settings, "pdf_ocr_render_dpi", 200)
     monkeypatch.setattr(settings, "pdf_ocr_max_pages", 50)
-    mock_extract.return_value = "【第 1 页】\nx"
+    mock_extract.return_value = {
+        "normalized_text": "【第 1 页】\nx",
+        "chunks": [{"text": "【第 1 页】\nx", "source_start": 0, "source_end": 9, "location": {"type": "page", "page": 1}}],
+    }
     doc = MagicMock()
     doc.id = uuid.uuid4()
     doc.status = "pending"
@@ -670,7 +682,7 @@ def test_import_pdf_ocr_on_passes_flag_and_params(mock_extract, mock_ingest, cli
     assert kw["max_ocr_pages"] == 50
 
 
-@patch("app.services.pdf_extract.extract_pdf_text")
+@patch("app.services.pdf_extract.build_pdf_source")
 def test_import_pdf_ocr_unavailable_returns_install_hint(mock_extract, client, monkeypatch):
     """OCR 开但引擎缺：服务抛 PdfOcrUnavailableError → 400，提示安装 .[ocr]。"""
     monkeypatch.setattr(mock_library, "ocr_enabled", True)

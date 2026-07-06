@@ -1,8 +1,8 @@
 const ALLOWED_TAGS = ['h1','h2','h3','h4','h5','h6','p','br','strong','em','del','a',
     'ul','ol','li','table','thead','tbody','tr','th','td','blockquote','pre','code','hr',
-    'sup','sub','span','button'];
+    'sup','sub','span'];
 
-const ALLOWED_ATTR = ['href','title','target','rel','class','type','data-citation-index','aria-label'];
+const ALLOWED_ATTR = ['href','title','target','rel'];
 
 function protectedRanges(text) {
     const ranges = [];
@@ -35,15 +35,42 @@ function replaceCitations(text, sources) {
     });
 }
 
+
+function injectCitationBadges(html, sources) {
+    const tags = [];
+    return String(html).split(/(<[^>]+>)/g).map((token) => {
+        if (!token) return '';
+        if (token.startsWith('<')) {
+            const close = token.match(/^<\s*\/\s*([a-z0-9-]+)/i);
+            if (close) {
+                const name = close[1].toLowerCase();
+                const idx = tags.lastIndexOf(name);
+                if (idx >= 0) tags.splice(idx, 1);
+                return token;
+            }
+            const open = token.match(/^<\s*([a-z0-9-]+)/i);
+            if (open && !/\/\s*>$/.test(token)) {
+                tags.push(open[1].toLowerCase());
+            }
+            return token;
+        }
+        if (tags.some((name) => name === 'a' || name === 'code' || name === 'pre')) {
+            return token;
+        }
+        return replaceCitations(token, sources);
+    }).join('');
+}
+
 export function renderAssistantMarkdown(text, sources = [], { marked, DOMPurify }) {
     if (!text) return '';
-    const withCitations = replaceCitations(String(text), Array.isArray(sources) ? sources : []);
-    const raw = marked.parse(withCitations, { breaks: true, gfm: true });
-    return DOMPurify.sanitize(raw, {
+    const sourceList = Array.isArray(sources) ? sources : [];
+    const raw = marked.parse(String(text), { breaks: true, gfm: true });
+    const sanitized = DOMPurify.sanitize(raw, {
         ALLOWED_TAGS,
         ALLOWED_ATTR,
         ALLOW_DATA_ATTR: false,
     });
+    return injectCitationBadges(sanitized, sourceList);
 }
 
 export function extractCitationIndex(el) {

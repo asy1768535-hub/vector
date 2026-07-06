@@ -13,6 +13,7 @@ from app.services import pdf_extract
 from app.services.pdf_extract import (
     PdfExtractError,
     PdfOcrUnavailableError,
+    build_pdf_source,
     extract_pdf_text,
 )
 
@@ -57,6 +58,22 @@ def test_text_pages_do_not_call_ocr(patch_reader, render_spy):
     assert render_spy == []            # 没有渲染
     assert ocr_calls == []             # 没有 OCR
     assert "第一页" in out and "第二页" in out
+
+
+def test_build_pdf_source_records_page_locations(patch_reader, render_spy):
+    patch_reader(["第一页足够长的正文内容用于定位", "第二页足够长的正文内容用于定位"])
+
+    source = build_pdf_source(
+        b"x", chunk_size=20, chunk_overlap=0, **_kw(ocr_enabled=False)
+    )
+
+    assert source["normalized_text"].strip()
+    assert source["chunks"]
+    pages = {chunk["location"]["page"] for chunk in source["chunks"]}
+    assert pages == {1, 2}
+    for chunk in source["chunks"]:
+        assert chunk["location"]["type"] == "page"
+        assert source["normalized_text"][chunk["source_start"]:chunk["source_end"]] == chunk["text"]
 
 
 def test_scanned_page_uses_ocr_when_enabled(patch_reader, render_spy):

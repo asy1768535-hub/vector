@@ -1,7 +1,7 @@
 """表格感知组块 chunk_segments 单测（纯函数，不连服务）。"""
 from __future__ import annotations
 
-from app.services.splitter import chunk_segments
+from app.services.splitter import build_structured_source_from_segments, chunk_segments
 
 
 def test_prose_gets_heading_prefix():
@@ -32,6 +32,20 @@ def test_big_table_splits_by_rows_repeating_header():
     assert len(out) > 1                       # 超长表被拆成多块
     for c in out:                             # 每块都重复 章节/表名/表头
         assert "【章节】H" in c and "【表格】T" in c and "h | v" in c
+
+
+def test_structured_segments_preserve_table_aware_chunks_and_offsets():
+    rows = ["h | v"] + [f"r{i} | " + ("x" * 40) for i in range(20)]
+    segs = [{"kind": "table", "heading": "H", "caption": "T", "header": "h | v", "rows": rows}]
+
+    source = build_structured_source_from_segments(segs, chunk_size=200, chunk_overlap=0)
+
+    assert [chunk["text"] for chunk in source["chunks"]] == chunk_segments(
+        segs, chunk_size=200, chunk_overlap=0
+    )
+    for chunk in source["chunks"]:
+        assert source["normalized_text"][chunk["source_start"]:chunk["source_end"]] == chunk["text"]
+        assert chunk["location"]["type"] == "table"
 
 
 def test_caption_equal_heading_not_duplicated():

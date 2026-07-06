@@ -77,39 +77,43 @@ def _structured_location(text: str, start: int, end: int, base_location: dict | 
     return _line_location(text, start, end)
 
 
-def split_structured_text(
-    text: str, *, chunk_size: int, chunk_overlap: int, splitter: str = "text", base_location: dict | None = None
+def _scan_piece(text: str, piece: str, cursor: int) -> tuple[int, int]:
+    if not piece:
+        raise ValueError("structured splitter received an empty chunk")
+    max_start = len(text) - len(piece)
+    start = max(0, min(cursor, len(text)))
+    while start <= max_start:
+        pos = 0
+        while pos < len(piece) and text[start + pos] == piece[pos]:
+            pos += 1
+        if pos == len(piece):
+            return start, start + len(piece)
+        start += 1
+    raise ValueError("structured splitter could not map chunk to source text")
+
+
+def _structured_from_pieces(
+    text: str, pieces: list[str], *, chunk_overlap: int, base_location: dict | None = None
 ) -> list[dict]:
-    if not text or not text.strip():
-        return []
-    _check_params(chunk_size, chunk_overlap)
-    if splitter == "none" or len(text) <= chunk_size:
-        start, end = _trim_span(text, 0, len(text))
-        if start >= end:
-            return []
-        return [{
-            "text": text[start:end],
+    out: list[dict] = []
+    cursor = 0
+    for piece in pieces:
+        start, end = _scan_piece(text, piece, cursor)
+        out.append({
+            "text": piece,
             "source_start": start,
             "source_end": end,
             "location": _structured_location(text, start, end, base_location),
-        }]
-
-    out: list[dict] = []
-    start = 0
-    while start < len(text):
-        end = min(start + chunk_size, len(text))
-        trim_start, trim_end = _trim_span(text, start, end)
-        if trim_start < trim_end:
-            out.append({
-                "text": text[trim_start:trim_end],
-                "source_start": trim_start,
-                "source_end": trim_end,
-                "location": _structured_location(text, trim_start, trim_end, base_location),
-            })
-        if end >= len(text):
-            break
-        start = max(start + 1, end - chunk_overlap)
+        })
+        cursor = max(start + 1, end - chunk_overlap)
     return out
+
+
+def split_structured_text(
+    text: str, *, chunk_size: int, chunk_overlap: int, splitter: str = "text", base_location: dict | None = None
+) -> list[dict]:
+    pieces = split_text(text, chunk_size=chunk_size, chunk_overlap=chunk_overlap, splitter=splitter)
+    return _structured_from_pieces(text, pieces, chunk_overlap=chunk_overlap, base_location=base_location)
 
 
 def _segment_text_and_location(seg: dict) -> tuple[str, dict]:
@@ -134,6 +138,38 @@ def _segment_text_and_location(seg: dict) -> tuple[str, dict]:
     return text, dict(seg.get("location") or {"type": "paragraph", "heading": heading})
 
 
+def _table_chunk_location(seg: dict, chunk: str) -> dict:
+    location = dict(seg.get("location") or {})
+    row_numbers = list(seg.get("row_numbers") or [])
+    rows = list(seg.get("rows") or [])
+    if location.get("type") == "sheet" and row_numbers and rows:
+        present = [
+            row_numbers[i]
+            for i, row in enumerate(rows)
+            if i > 0 and row in chunk and i < len(row_numbers)
+        ]
+        if not present and rows[0] in chunk:
+            present = [row_numbers[0]]
+        return {
+            "type": "sheet_row",
+            "sheet": location.get("sheet"),
+            "start_row": min(present),
+            "end_row": max(present),
+        }
+    if location:
+        return location
+    return {"type": "table", "heading": seg.get("heading") or seg.get("caption") or ""}
+
+
+def _segment_chunk_location(seg: dict, chunk: str) -> dict:
+    if seg.get("kind") == "table":
+        return _table_chunk_location(seg, chunk)
+    location = dict(seg.get("location") or {})
+    if location:
+        return location
+    return {"type": "paragraph", "heading": seg.get("heading") or ""}
+
+
 def build_structured_source_from_segments(
     segments: list[dict], *, chunk_size: int, chunk_overlap: int
 ) -> dict:
@@ -141,26 +177,19 @@ def build_structured_source_from_segments(
     chunks: list[dict] = []
     cursor = 0
     for seg in segments:
-        segment_text, location = _segment_text_and_location(seg)
-        if not segment_text.strip():
-            continue
-        if parts:
-            parts.append("\n\n")
-            cursor += 2
-        base_offset = cursor
-        parts.append(segment_text)
-        cursor += len(segment_text)
-        for chunk in split_structured_text(
-            segment_text,
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            splitter="text",
-            base_location=location,
-        ):
+        segment_chunks = chunk_segments([seg], chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        for piece in segment_chunks:
+            if parts:
+                parts.append("\n\n")
+                cursor += 2
+            start = cursor
+            parts.append(piece)
+            cursor += len(piece)
             chunks.append({
-                **chunk,
-                "source_start": base_offset + chunk["source_start"],
-                "source_end": base_offset + chunk["source_end"],
+                "text": piece,
+                "source_start": start,
+                "source_end": cursor,
+                "location": _segment_chunk_location(seg, piece),
             })
     return {"normalized_text": "".join(parts), "chunks": chunks}
 
