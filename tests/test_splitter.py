@@ -218,6 +218,78 @@ def test_markdown_random_inputs_do_not_raise_and_match_reference():
         )
 
 
+def _assert_markdown_ranges(text: str, *, chunk_size: int = 40) -> list[dict]:
+    chunks = split_structured_text(text, chunk_size=chunk_size, chunk_overlap=0, splitter="markdown")
+    assert [c["text"] for c in chunks] == _reference_chunks(
+        text, chunk_size=chunk_size, chunk_overlap=0, splitter="markdown"
+    )
+    for chunk in chunks:
+        previous_end = -1
+        for r in chunk["source_ranges"]:
+            assert r["start"] >= previous_end
+            assert r["end"] > r["start"]
+            assert hashlib.sha256(text[r["start"]:r["end"]].encode("utf-8")).hexdigest()[:16] == r["hash"]
+            previous_end = r["end"]
+    return chunks
+
+
+def test_markdown_tab_inside_line_maps_printable_runs_only():
+    text = "# A\n\na\tb"
+    chunk = _assert_markdown_ranges(text)[0]
+
+    assert chunk["text"] == "ab"
+    assert [text[r["start"]:r["end"]] for r in chunk["source_ranges"]] == ["a", "b"]
+
+
+def test_markdown_multiple_tabs_map_each_printable_run():
+    text = "# A\n\na\tb\tc"
+    chunk = _assert_markdown_ranges(text)[0]
+
+    assert chunk["text"] == "abc"
+    assert [text[r["start"]:r["end"]] for r in chunk["source_ranges"]] == ["a", "b", "c"]
+
+
+def test_markdown_tabs_and_spaces_around_content_are_trimmed_but_inner_spaces_map():
+    text = "# A\n\n\t  a b \t"
+    chunk = _assert_markdown_ranges(text)[0]
+
+    assert chunk["text"] == "a b"
+    assert [text[r["start"]:r["end"]] for r in chunk["source_ranges"]] == ["a b"]
+
+
+def test_markdown_zero_width_and_control_chars_are_removed_from_ranges():
+    text = "# A\n\na\u200bb\x01c"
+    chunk = _assert_markdown_ranges(text)[0]
+
+    assert chunk["text"] == "abc"
+    assert [text[r["start"]:r["end"]] for r in chunk["source_ranges"]] == ["a", "b", "c"]
+
+
+def test_markdown_code_block_tabs_use_same_printable_mapping_as_reference():
+    text = "# A\n\n```\na\tb\n```"
+    chunks = _assert_markdown_ranges(text)
+
+    assert chunks[0]["text"] == _reference_chunks(text, chunk_size=40, chunk_overlap=0, splitter="markdown")[0]
+    assert "\t" not in chunks[0]["text"]
+    assert "a\t" not in [text[r["start"]:r["end"]] for r in chunks[0]["source_ranges"]]
+
+
+def test_markdown_random_inputs_with_tabs_do_not_raise_and_have_valid_ranges():
+    rng = random.Random(20260707)
+    headings = ["# A", "## B", "### C", "#### D"]
+    chars = list("abc xyz") + ["\t", "\u200b", "\x02"]
+    for _ in range(1000):
+        parts = []
+        for _i in range(rng.randint(1, 8)):
+            if rng.random() < 0.4 or not parts:
+                parts.append(rng.choice(headings))
+            line = "".join(rng.choice(chars) for _ in range(rng.randint(1, 20)))
+            if not line.strip():
+                line += "x"
+            parts.append(line)
+        _assert_markdown_ranges("\n\n".join(parts), chunk_size=24)
+
+
 def test_split_structured_text_none_returns_full_span():
     text = "alpha\nbeta"
     chunks = split_structured_text(text, chunk_size=100, chunk_overlap=0, splitter="none")

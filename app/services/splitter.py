@@ -107,12 +107,39 @@ def _iter_lines_with_offsets(text: str) -> list[tuple[str, int, int]]:
     return lines
 
 
-def _stripped_line_and_range(line: str, start: int) -> tuple[str, int, int]:
+def _stripped_line_and_segments(line: str, start: int) -> tuple[str, list[dict]]:
     left = len(line) - len(line.lstrip())
     right = len(line.rstrip())
-    stripped = line.strip()
-    stripped = "".join(filter(str.isprintable, stripped))
-    return stripped, start + left, start + right
+    chars: list[str] = []
+    positions: list[int] = []
+    for offset, ch in enumerate(line[left:right], start=left):
+        if ch.isprintable():
+            chars.append(ch)
+            positions.append(start + offset)
+
+    segments: list[dict] = []
+    if positions:
+        content_start = 0
+        source_start = positions[0]
+        previous = positions[0]
+        for content_index, source_pos in enumerate(positions[1:], start=1):
+            if source_pos != previous + 1:
+                segments.append({
+                    "content_start": content_start,
+                    "content_end": content_index,
+                    "start": source_start,
+                    "end": previous + 1,
+                })
+                content_start = content_index
+                source_start = source_pos
+            previous = source_pos
+        segments.append({
+            "content_start": content_start,
+            "content_end": len(positions),
+            "start": source_start,
+            "end": previous + 1,
+        })
+    return "".join(chars), segments
 
 
 def _header_match(stripped_line: str) -> tuple[str, str] | None:
@@ -122,18 +149,18 @@ def _header_match(stripped_line: str) -> tuple[str, str] | None:
     return None
 
 
-def _content_record(content: list[str], ranges: list[dict], metadata: dict) -> dict:
+def _content_record(content: list[str], ranges: list[list[dict]], metadata: dict) -> dict:
     text = "\n".join(content)
     segments: list[dict] = []
     cursor = 0
     for i, item in enumerate(content):
-        source = ranges[i]
-        segments.append({
-            "content_start": cursor,
-            "content_end": cursor + len(item),
-            "start": source["start"],
-            "end": source["end"],
-        })
+        for source in ranges[i]:
+            segments.append({
+                "content_start": cursor + source["content_start"],
+                "content_end": cursor + source["content_end"],
+                "start": source["start"],
+                "end": source["end"],
+            })
         cursor += len(item)
         if i < len(content) - 1:
             cursor += 1
@@ -143,7 +170,7 @@ def _content_record(content: list[str], ranges: list[dict], metadata: dict) -> d
 def _markdown_line_records(text: str) -> list[dict]:
     records: list[dict] = []
     current_content: list[str] = []
-    current_ranges: list[dict] = []
+    current_ranges: list[list[dict]] = []
     current_metadata: dict[str, str] = {}
     initial_metadata: dict[str, str] = {}
     header_stack: list[dict] = []
@@ -158,7 +185,7 @@ def _markdown_line_records(text: str) -> list[dict]:
             current_ranges = []
 
     for raw_line, line_start, _line_end in _iter_lines_with_offsets(text):
-        stripped_line, content_start, content_end = _stripped_line_and_range(raw_line, line_start)
+        stripped_line, line_segments = _stripped_line_and_segments(raw_line, line_start)
         if not in_code_block:
             if stripped_line.startswith("```") and stripped_line.count("```") == 1:
                 in_code_block = True
@@ -172,7 +199,7 @@ def _markdown_line_records(text: str) -> list[dict]:
 
         if in_code_block:
             current_content.append(stripped_line)
-            current_ranges.append({"start": content_start, "end": content_end})
+            current_ranges.append(line_segments)
             continue
 
         header = _header_match(stripped_line)
@@ -189,7 +216,7 @@ def _markdown_line_records(text: str) -> list[dict]:
         else:
             if stripped_line:
                 current_content.append(stripped_line)
-                current_ranges.append({"start": content_start, "end": content_end})
+                current_ranges.append(line_segments)
             elif current_content:
                 flush()
 
@@ -221,7 +248,7 @@ def _aggregate_markdown_records(records: list[dict]) -> list[dict]:
 
 
 def _source_ranges_for_content_span(text: str, segments: list[dict], start: int, end: int) -> list[dict]:
-    ranges: list[dict] = []
+    merged: list[dict] = []
     for segment in segments:
         overlap_start = max(start, segment["content_start"])
         overlap_end = min(end, segment["content_end"])
@@ -229,8 +256,11 @@ def _source_ranges_for_content_span(text: str, segments: list[dict], start: int,
             continue
         source_start = segment["start"] + (overlap_start - segment["content_start"])
         source_end = segment["start"] + (overlap_end - segment["content_start"])
-        ranges.append({"start": source_start, "end": source_end, "hash": _span_hash(text[source_start:source_end])})
-    return ranges
+        if merged and merged[-1]["end"] == source_start:
+            merged[-1]["end"] = source_end
+        else:
+            merged.append({"start": source_start, "end": source_end})
+    return [{"start": r["start"], "end": r["end"], "hash": _span_hash(text[r["start"]:r["end"]])} for r in merged]
 
 
 def _split_markdown_record(text: str, record: dict, *, chunk_size: int, chunk_overlap: int) -> list[dict]:
