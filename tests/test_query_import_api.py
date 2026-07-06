@@ -18,6 +18,7 @@ from app.models.library import Library
 from app.models.document import Document
 from app.models.embedding_job import EmbeddingJob
 from app.schemas.documents import QueryRequest
+from app.services import ingest as ingest_service
 
 # Mock user and library
 mock_user = User(
@@ -39,6 +40,37 @@ mock_library = Library(
     lifecycle_mode="managed",
     index_state="ready",
 )
+
+
+def test_structured_chunk_metadata_includes_source_offsets():
+    text, metadata = ingest_service._chunk_text_and_metadata(
+        {"text": "第二行", "source_start": 4, "source_end": 7, "location": {"type": "line", "start_line": 2, "end_line": 2}},
+        title="demo.txt",
+        external_id="ext-1",
+        revision=3,
+    )
+
+    assert text == "第二行"
+    assert metadata == {
+        "title": "demo.txt",
+        "external_id": "ext-1",
+        "source_start": 4,
+        "source_end": 7,
+        "location": {"type": "line", "start_line": 2, "end_line": 2},
+        "source_revision": 3,
+    }
+
+
+def test_string_chunk_metadata_does_not_fabricate_offsets():
+    text, metadata = ingest_service._chunk_text_and_metadata(
+        "legacy chunk",
+        title=None,
+        external_id=None,
+        revision=1,
+    )
+
+    assert text == "legacy chunk"
+    assert metadata is None
 
 async def override_user():
     return mock_user

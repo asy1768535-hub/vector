@@ -1,7 +1,7 @@
 """文本切分单元测试。"""
 from __future__ import annotations
 
-from app.services.splitter import split_text
+from app.services.splitter import split_structured_text, split_text
 
 
 def test_splitter_text_returns_chunks_around_size():
@@ -34,3 +34,19 @@ def test_splitter_markdown_respects_headers():
 def test_splitter_empty_returns_empty():
     assert split_text("", chunk_size=100, chunk_overlap=10) == []
     assert split_text("   \n  ", chunk_size=100, chunk_overlap=10) == []
+
+
+def test_split_structured_text_offsets_match_source_slices():
+    text = "第一行\n第二行很长" * 30
+    chunks = split_structured_text(text, chunk_size=80, chunk_overlap=10, splitter="text")
+    assert chunks
+    for chunk in chunks:
+        assert text[chunk["source_start"]:chunk["source_end"]] == chunk["text"]
+        assert chunk["location"]["type"] == "line"
+        assert chunk["location"]["start_line"] >= 1
+
+
+def test_split_structured_text_none_returns_full_span():
+    text = "alpha\nbeta"
+    chunks = split_structured_text(text, chunk_size=100, chunk_overlap=0, splitter="none")
+    assert chunks == [{"text": text, "source_start": 0, "source_end": len(text), "location": {"type": "line", "start_line": 1, "end_line": 2}}]

@@ -19,6 +19,7 @@ from app.db import get_db
 from app.deps import require_lib
 from app.models.chunk import Chunk
 from app.models.document import Document
+from app.models.document_source import DocumentSource
 from app.models.embedding_job import EmbeddingJob
 from app.models.library import Library
 from app.models.user import User
@@ -113,6 +114,27 @@ async def _apply_reingest(db: AsyncSession, lib: Library, doc: Document, body: "
     return job, chunk_count
 
 
+async def _upsert_document_source(db, document_id, revision: int, source: dict | None) -> None:
+    if not source:
+        return
+    existing = await db.get(DocumentSource, document_id)
+    values = {
+        "revision": revision,
+        "file_name": source.get("file_name"),
+        "file_type": source.get("file_type"),
+        "normalized_text": source["normalized_text"],
+    }
+    if existing is None:
+        db.add(DocumentSource(document_id=document_id, **values))
+    else:
+        for key, value in values.items():
+            setattr(existing, key, value)
+
+
+def _source_data(text: str, filename: str, suffix: str) -> dict:
+    return {"normalized_text": text, "file_name": filename, "file_type": suffix or None}
+
+
 async def _ingest_or_upsert(db: AsyncSession, lib: Library, user: User, doc_data: dict) -> dict:
     """单条文档摄入：有 external_id 且库内已存在同键未删文档 → reingest 覆盖更新；否则新建。
 
@@ -137,6 +159,8 @@ async def _ingest_or_upsert(db: AsyncSession, lib: Library, user: User, doc_data
                 metadata=doc_data["metadata"], splitter=doc_data["splitter"],
                 force=False, chunks=doc_data.get("chunks"),
             )
+            if changed:
+                await _upsert_document_source(db, existing.id, existing.current_revision, doc_data.get("source"))
             return {
                 "document_id": str(existing.id), "title": doc_data["title"],
                 "chunk_count": chunk_count, "status": existing.status,
@@ -149,6 +173,8 @@ async def _ingest_or_upsert(db: AsyncSession, lib: Library, user: User, doc_data
         external_id=ext, metadata=doc_data["metadata"], splitter=doc_data["splitter"],
         created_by=user.id, chunks=doc_data.get("chunks"),
     )
+    if not was_existing:
+        await _upsert_document_source(db, doc.id, doc.current_revision, doc_data.get("source"))
     # 去重命中（was_existing）：回显数据库里真实保留的旧文件名/external_id，
     # 而非本次上传的文件名——否则前端会显示一个其实没入库的名字。
     return {
@@ -183,6 +209,7 @@ async def _replace_document(db: AsyncSession, lib: Library, target_id: uuid.UUID
             metadata=meta, splitter=doc_data["splitter"],
             force=True, chunks=doc_data.get("chunks"),
         )
+        await _upsert_document_source(db, target.id, target.current_revision, doc_data.get("source"))
     except IntegrityError as exc:
         # 无 external_id 文档受 (library_id, content_hash) 活动行唯一约束保护：
         # 替换成与同库另一篇文档完全相同的内容会撞约束 → 回滚并转 409（而非 500）。
@@ -531,7 +558,8 @@ async def import_file(
                         "title": item.get("title") or filename,
                         "external_id": item.get("external_id"),
                         "metadata": item.get("metadata"),
-                        "splitter": item.get("splitter", "text")
+                        "splitter": item.get("splitter", "text"),
+                        "source": _source_data(text, filename, suffix),
                     })
             elif isinstance(data, dict):
                 text = data.get("text")
@@ -541,7 +569,8 @@ async def import_file(
                         "title": data.get("title") or filename,
                         "external_id": data.get("external_id"),
                         "metadata": data.get("metadata"),
-                        "splitter": data.get("splitter", "text")
+                        "splitter": data.get("splitter", "text"),
+                        "source": _source_data(text, filename, suffix),
                     })
         except Exception as e:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid JSON format: {str(e)}")
@@ -574,7 +603,8 @@ async def import_file(
                     "title": title,
                     "external_id": ext_id,
                     "metadata": None,
-                    "splitter": "text"
+                    "splitter": "text",
+                    "source": _source_data(text, filename, suffix),
                 })
         except Exception as e:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid CSV format: {str(e)}")
@@ -605,6 +635,7 @@ async def import_file(
             "external_id": None,
             "metadata": None,
             "splitter": "text",
+            "source": _source_data(text, filename, suffix),
         })
 
     elif suffix == ".docx":
@@ -633,6 +664,7 @@ async def import_file(
                 documents_to_ingest.append({
                     "text": text, "title": filename, "external_id": None,
                     "metadata": None, "splitter": "docx", "chunks": chunks,
+                    "source": _source_data(text, filename, suffix),
                 })
             else:
                 text = extract_docx_text(content, ocr=ocr_cb)
@@ -641,6 +673,7 @@ async def import_file(
                 documents_to_ingest.append({
                     "text": text, "title": filename, "external_id": None,
                     "metadata": None, "splitter": "text",
+                    "source": _source_data(text, filename, suffix),
                 })
         except HTTPException:
             raise
@@ -676,6 +709,7 @@ async def import_file(
             documents_to_ingest.append({
                 "text": text, "title": filename, "external_id": None,
                 "metadata": None, "splitter": "docx", "chunks": chunks,
+                "source": _source_data(text, filename, suffix),
             })
         except HTTPException:
             raise
@@ -693,7 +727,8 @@ async def import_file(
                 "title": filename,
                 "external_id": None,
                 "metadata": None,
-                "splitter": "text"
+                "splitter": "text",
+                "source": _source_data(text, filename, suffix),
             })
         except Exception as e:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid text encoding: {str(e)}")

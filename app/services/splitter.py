@@ -55,6 +55,39 @@ def split_text(text: str, *, chunk_size: int, chunk_overlap: int, splitter: str 
     return [c for c in _recursive(chunk_size, chunk_overlap).split_text(text) if c.strip()]
 
 
+def _line_location(text: str, start: int, end: int) -> dict:
+    return {
+        "type": "line",
+        "start_line": text.count("\n", 0, start) + 1,
+        "end_line": text.count("\n", 0, max(start, end - 1)) + 1,
+    }
+
+
+def _find_from(text: str, piece: str, cursor: int) -> tuple[int, int]:
+    idx = text.find(piece, cursor)
+    if idx < 0:
+        idx = text.find(piece)
+    if idx < 0:
+        raise ValueError("structured splitter could not map chunk to source text")
+    return idx, idx + len(piece)
+
+
+def split_structured_text(
+    text: str, *, chunk_size: int, chunk_overlap: int, splitter: str = "text", base_location: dict | None = None
+) -> list[dict]:
+    pieces = split_text(text, chunk_size=chunk_size, chunk_overlap=chunk_overlap, splitter=splitter)
+    out: list[dict] = []
+    cursor = 0
+    for piece in pieces:
+        start, end = _find_from(text, piece, cursor)
+        cursor = max(start + 1, end - chunk_overlap)
+        location = dict(base_location or _line_location(text, start, end))
+        if not base_location:
+            location = _line_location(text, start, end)
+        out.append({"text": piece, "source_start": start, "source_end": end, "location": location})
+    return out
+
+
 def _table_chunks(seg: dict, chunk_size: int) -> list[str]:
     """表格 segment → chunk：整表一块，头部带【章节】【表格】+表头行；超长按行分组重复表头。"""
     rows = seg.get("rows") or []
