@@ -1,6 +1,9 @@
 """文本切分单元测试。"""
 from __future__ import annotations
 
+import inspect
+
+import app.services.splitter as splitter_module
 from app.services.splitter import split_structured_text, split_text
 
 
@@ -50,3 +53,9 @@ def test_split_structured_text_none_returns_full_span():
     text = "alpha\nbeta"
     chunks = split_structured_text(text, chunk_size=100, chunk_overlap=0, splitter="none")
     assert chunks == [{"text": text, "source_start": 0, "source_end": len(text), "location": {"type": "line", "start_line": 1, "end_line": 2}}]
+
+
+def test_structured_splitter_does_not_map_offsets_with_text_find():
+    source = inspect.getsource(splitter_module)
+
+    assert ".find(" not in source

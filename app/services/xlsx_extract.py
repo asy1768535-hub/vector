@@ -22,7 +22,14 @@ def _rows_to_lines(rows) -> list[str]:
 
 
 def _seg(name: str, rows: list[str]) -> dict:
-    return {"kind": "table", "heading": name, "caption": name, "header": rows[0], "rows": rows}
+    return {
+        "kind": "table",
+        "heading": name,
+        "caption": name,
+        "header": rows[0],
+        "rows": rows,
+        "location": {"type": "sheet_row", "sheet": name, "start_row": 1, "end_row": len(rows)},
+    }
 
 
 def _read_xlsx(data: bytes) -> list[dict]:

@@ -736,7 +736,7 @@ git commit -m "fix: stabilize chat source location verification"
 
 ## Baseline Notes
 
-- Worktree path: `C:\Users\Alice\Desktop\vectorDatabase\.worktrees\chat-citation-source-location`.
+- Worktree path: `.worktrees/chat-citation-source-location` under the repository root.
 - Branch: `feature/chat-citation-source-location`.
 - Dependency setup attempted with `py -m pip install -r requirements-dev.txt`; it failed on PyPI SSL while fetching Alembic metadata.
 - Existing Node baseline passed: `node --test admin-ui/chat_redesign.test.mjs admin-ui/markdown.test.mjs admin-ui/copy_answer.test.mjs`.
