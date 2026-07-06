@@ -26,6 +26,8 @@ def test_xlsx_sheet_becomes_table_segment():
     assert s["header"] == "类别 | 方案"         # 首行作表头
     assert "数据库 | MySQL" in s["rows"]
     assert "缓存 | Redis" in s["rows"]
+    assert s["row_numbers"] == [1, 2, 3]
+    assert s["location"] == {"type": "sheet", "sheet": "技术选型"}
 
 
 def test_xlsx_empty_sheet_skipped():

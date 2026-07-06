@@ -1,5 +1,4 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
-import { useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import * as api from '../api.js';
 import { marked } from '../../vendor/marked.esm.js';
@@ -7,18 +6,11 @@ import DOMPurify from '../../vendor/dompurify.es.mjs';
 import { createStreamQueue } from '../stream_queue.js';
 import { copyTextToClipboard } from '../copy_text.js';
 import { chatWelcome } from '../illustrations.js';
+import { extractCitationIndex, highlightSourceWindow, renderAssistantMarkdown } from '../chat_citations.js';
 
 // ── Markdown → safe HTML ──
-function renderMarkdown(text) {
-    if (!text) return '';
-    const raw = marked.parse(text, { breaks: true, gfm: true });
-    return DOMPurify.sanitize(raw, {
-        ALLOWED_TAGS: ['h1','h2','h3','h4','h5','h6','p','br','strong','em','del','a',
-                        'ul','ol','li','table','thead','tbody','tr','th','td',
-                        'blockquote','pre','code','hr','sup','sub','span'],
-        ALLOWED_ATTR: ['href','title','target','rel'],
-        ALLOW_DATA_ATTR: false,
-    });
+function renderMarkdown(text, sources = []) {
+    return renderAssistantMarkdown(text, sources, { marked, DOMPurify });
 }
 
 function fmtTime(iso) {
@@ -48,7 +40,6 @@ function nowISO() { return new Date().toISOString(); }
 
 export default {
     setup() {
-        const router = useRouter();
         const libs = ref([]);
         const currentSlug = ref(null);
         const conversations = ref([]);
@@ -60,6 +51,9 @@ export default {
         const streamRef = ref(null);
         const mobileHistoryOpen = ref(false);
         const topK = ref(5);
+        const recalledChunkDialog = ref({ open: false, source: null });
+        const sourceLocationDialog = ref({ open: false, loading: false, source: null, data: null, error: '' });
+        let sourceLocationRequestSeq = 0;
         let _abortController = null;
 
         const _queue = createStreamQueue();
@@ -107,14 +101,21 @@ export default {
             } catch (e) { /* no-op */ }
         }
 
+        function _closeAndInvalidateSourceDialog() {
+            ++sourceLocationRequestSeq;
+            sourceLocationDialog.value = { open: false, loading: false, source: null, data: null, error: '' };
+        }
+
         function onLibChange() {
             _cleanupStream();
+            _closeAndInvalidateSourceDialog();
             currentConvId.value = null;
             messages.value = [];
         }
 
         function newChat() {
             _cleanupStream();
+            _closeAndInvalidateSourceDialog();
             currentConvId.value = null;
             messages.value = [];
         }
@@ -128,6 +129,7 @@ export default {
         async function selectConversation(conv) {
             if (conv.id === currentConvId.value) return;
             _cleanupStream();
+            _closeAndInvalidateSourceDialog();
             currentSlug.value = conv.library_slug;
             currentConvId.value = conv.id;
             messages.value = [];
@@ -172,17 +174,75 @@ export default {
             } catch (e) { ElMessage.error(e.message || '复制失败，请手动选择内容'); }
         }
 
-        function openDocDetail(source) {
+        async function copySourceText(text) {
+            const value = String(text || '').trim();
+            if (!value) { ElMessage.warning('暂无可复制内容'); return; }
+            try {
+                await copyTextToClipboard(value);
+                ElMessage.success('引用内容已复制');
+            } catch (e) { ElMessage.error(e.message || '复制失败，请手动选择内容'); }
+        }
+
+        function openCitationChunk(source) {
+            if (!source) return;
+            recalledChunkDialog.value = { open: true, source };
+        }
+
+        function handleCitationClick(message, event) {
+            const index = extractCitationIndex(event.target);
+            if (index === null) return;
+            openCitationChunk(message.sources?.[index]);
+        }
+
+        function handleCitationKeydown(message, event) {
+            if (event.key !== 'Enter' && event.key !== ' ') return;
+            const index = extractCitationIndex(event.target);
+            if (index === null) return;
+            event.preventDefault();
+            openCitationChunk(message.sources?.[index]);
+        }
+
+        async function openDocDetail(source) {
             if (!source) return;
             const slug = currentSlug.value;
             if (!slug) { ElMessage.warning('请先选择知识库'); return; }
             const docId = source.document_id;
-            if (docId) {
-                const resolved = router.resolve({ path: '/documents', query: { slug, open: docId } });
-                window.open(resolved.href, '_blank', 'noopener');
-            } else {
+            const chunkId = source.chunk_id;
+            if (!docId || !chunkId) {
                 ElMessage.warning('该来源缺少文档标识');
+                return;
             }
+            const requestSeq = ++sourceLocationRequestSeq;
+            sourceLocationDialog.value = { open: true, loading: true, source, data: null, error: '' };
+            try {
+                const data = await api.getDocumentSource(slug, docId, chunkId);
+                if (requestSeq !== sourceLocationRequestSeq) return;
+                sourceLocationDialog.value = { open: true, loading: false, source, data, error: '' };
+            } catch (e) {
+                if (requestSeq !== sourceLocationRequestSeq) return;
+                sourceLocationDialog.value = {
+                    open: true,
+                    loading: false,
+                    source,
+                    data: { legacy: true, fallback_chunk: source.content || '' },
+                    error: e.message || '来源定位失败',
+                };
+            }
+        }
+
+        function sourceWindowParts() {
+            return highlightSourceWindow(sourceLocationDialog.value.data || {});
+        }
+
+        function formatLocation(location) {
+            if (!location) return '未记录位置';
+            if (location.type === 'page') return `第 ${location.page} 页`;
+            if (location.type === 'sheet_row') return `${location.sheet || 'Sheet'} 第 ${location.start_row || '?'}-${location.end_row || '?'} 行`;
+            if (location.type === 'csv_row') return `CSV 第 ${location.row} 行`;
+            if (location.type === 'line') return `第 ${location.start_line || '?'}-${location.end_line || '?'} 行`;
+            if (location.type === 'table') return location.heading ? `表格：${location.heading}` : '表格';
+            if (location.type === 'paragraph') return location.heading ? `段落：${location.heading}` : '段落';
+            return Object.entries(location).map(([k, v]) => `${k}: ${v}`).join('，');
         }
 
         async function send() {
@@ -269,7 +329,10 @@ export default {
             libs, currentSlug, conversations, convsForLib, currentConvId, messages, input,
             loading, chatDisabled, streamRef, mobileHistoryOpen, topK,
             onLibChange, newChat, selectConversation, archiveConv, deleteConv, send, copyAnswer,
-            openDocDetail, loadLibs, chatWelcome,
+            copySourceText, openCitationChunk, handleCitationClick, handleCitationKeydown,
+            openDocDetail, loadLibs, chatWelcome, recalledChunkDialog, sourceLocationDialog,
+            _closeAndInvalidateSourceDialog,
+            sourceWindowParts, formatLocation,
             fmtScore, scoreClass, fmtTime, renderMarkdown,
         };
     },
@@ -348,7 +411,9 @@ export default {
                             <div v-if="m.role === 'ai'" class="chat-ai-label">智能助手</div>
                             <div v-if="m.role === 'user'" class="chat-user-text">{{ m.text }}</div>
                             <div v-if="m.role === 'ai'" class="chat-markdown"
-                                 v-html="renderMarkdown(m.text) + (m.cursor ? '<span class=\\'chat-cursor\\'>|</span>' : '')"></div>
+                                 @click="handleCitationClick(m, $event)"
+                                 @keydown="handleCitationKeydown(m, $event)"
+                                 v-html="renderMarkdown(m.text, m.sources) + (m.cursor ? '<span class=\\'chat-cursor\\'>|</span>' : '')"></div>
                             <div v-if="m.role === 'ai' && m.time" class="chat-msg-time">{{ fmtTime(m.time) }}</div>
                             <div v-if="m.role === 'ai' && m.text" class="chat-answer-actions">
                                 <el-button class="chat-copy-answer" text aria-label="复制回答" title="复制回答" @click="copyAnswer(m.text)">
@@ -371,7 +436,7 @@ export default {
                                         <div class="chat-source-summary">{{ s.content || '' }}</div>
                                     </div>
                                     <div class="chat-source-right">
-                                        <el-button class="chat-source-detail" link type="primary" @click="openDocDetail(s)">文档详情</el-button>
+                                        <el-button class="chat-source-detail" link type="primary" @click="openDocDetail(s)">查看出处</el-button>
                                     </div>
                                 </div>
                             </el-collapse-item>
@@ -384,6 +449,38 @@ export default {
                     </div>
                 </div>
             </div>
+
+            <el-dialog v-model="recalledChunkDialog.open" title="引用片段" width="620px" class="chat-recalled-dialog">
+                <template v-if="recalledChunkDialog.source">
+                    <div class="chat-source-dialog-meta">
+                        <span>{{ recalledChunkDialog.source.title || '(无标题)' }}</span>
+                        <span>相似度 {{ fmtScore(recalledChunkDialog.source.score) }}</span>
+                        <span v-if="recalledChunkDialog.source.seq !== undefined">分片 {{ recalledChunkDialog.source.seq }}</span>
+                    </div>
+                    <pre class="chat-recalled-text">{{ recalledChunkDialog.source.content || '暂无引用内容' }}</pre>
+                    <div class="chat-dialog-actions">
+                        <el-button type="primary" plain @click="copySourceText(recalledChunkDialog.source.content)">复制片段</el-button>
+                    </div>
+                </template>
+            </el-dialog>
+
+            <el-dialog v-model="sourceLocationDialog.open" title="查看出处" width="900px" class="chat-source-location-dialog" @closed="_closeAndInvalidateSourceDialog">
+                <div v-if="sourceLocationDialog.loading" class="chat-source-loading">正在定位来源...</div>
+                <template v-else>
+                    <div class="chat-source-dialog-meta">
+                        <span>{{ sourceLocationDialog.data?.document_title || sourceLocationDialog.source?.title || '(无标题)' }}</span>
+                        <span v-if="sourceLocationDialog.data?.file_type">{{ sourceLocationDialog.data.file_type }}</span>
+                        <span v-if="sourceLocationDialog.data?.location">{{ formatLocation(sourceLocationDialog.data.location) }}</span>
+                        <span v-if="sourceLocationDialog.source">相似度 {{ fmtScore(sourceLocationDialog.source.score) }}</span>
+                        <span v-if="sourceLocationDialog.source?.seq !== undefined">分片 {{ sourceLocationDialog.source?.seq }}</span>
+                        <span v-else-if="sourceLocationDialog.data?.chunk_seq !== undefined">分片 {{ sourceLocationDialog.data.chunk_seq }}</span>
+                    </div>
+                    <el-alert v-if="sourceLocationDialog.error" type="warning" :closable="false" :title="sourceLocationDialog.error" />
+                    <el-alert v-if="sourceLocationDialog.data?.legacy" type="info" :closable="false" title="该文档需重新导入后才能精确定位" />
+                    <pre v-if="sourceLocationDialog.data?.legacy" class="chat-recalled-text">{{ sourceLocationDialog.data?.fallback_chunk || sourceLocationDialog.source?.content || '暂无引用内容' }}</pre>
+                    <pre v-else class="chat-source-window"><template v-for="(part, pi) in sourceWindowParts().segments" :key="pi"><mark v-if="part.highlight" class="chat-source-highlight">{{ part.text }}</mark><span v-else>{{ part.text }}</span></template></pre>
+                </template>
+            </el-dialog>
 
             <!-- Input area: unified editor -->
             <div class="chat-input-bar">

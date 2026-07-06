@@ -71,6 +71,22 @@ class QueryResponse(BaseModel):
     results: list[QueryResultItem]
 
 
+class DocumentSourceLocationResponse(BaseModel):
+    document_title: Optional[str] = None
+    file_type: Optional[str] = None
+    text_window: str = ""
+    window_start: Optional[int] = None
+    window_end: Optional[int] = None
+    source_start: Optional[int] = None
+    source_end: Optional[int] = None
+    source_ranges: list[dict[str, Any]] = Field(default_factory=list)
+    location: Optional[dict[str, Any]] = None
+    chunk_id: str
+    chunk_seq: int
+    legacy: bool
+    fallback_chunk: str = ""
+
+
 # ── 文件导入 ──────────────────────────────────────────────────────────
 
 class ImportFileDocResult(BaseModel):

@@ -88,9 +88,16 @@ def test_segments_track_heading_and_split_table():
     tbl = next(s for s in segs if s["kind"] == "table")
     assert "2 技术" in tbl["heading"]           # 表归属第 2 节
     assert tbl["header"] == "类别 | 方案"
+    assert tbl["location"] == {"type": "table", "table_index": 1, "heading": "2 技术"}
     # 第二段散文挂在第 2 节标题下
     prose2 = next(s for s in segs if s["kind"] == "prose" and "技术正文" in s["text"])
     assert "2 技术" in prose2["heading"]
+    assert prose2["location"] == {
+        "type": "paragraph",
+        "start_paragraph": 2,
+        "end_paragraph": 2,
+        "heading": "2 技术",
+    }
 
 
 def test_table_dedups_merged_cells():

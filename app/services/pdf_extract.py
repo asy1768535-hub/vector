@@ -71,7 +71,7 @@ def _render_page_png(data: bytes, page_index: int, dpi: int) -> bytes:
         raise PdfExtractError(f"PDF 第 {page_index + 1} 页渲染失败") from None
 
 
-def extract_pdf_text(
+def _extract_pdf_parts(
     data: bytes,
     *,
     ocr_enabled: bool,
@@ -80,10 +80,6 @@ def extract_pdf_text(
     render_dpi: int,
     max_ocr_pages: int,
 ) -> str:
-    """逐页提取并合并 PDF 文本。返回带 `【第 N 页】` 标记的正文。
-
-    抛 PdfOcrUnavailableError（需 OCR 但引擎缺）/ PdfExtractError（损坏、超限、最终无文本）。
-    """
     try:
         reader = _open_reader(data)
         pages = list(reader.pages)
@@ -133,4 +129,76 @@ def extract_pdf_text(
             raise PdfExtractError("PDF OCR 后仍无可识别文本")
         raise PdfExtractError("PDF 无可提取文本；如为扫描件，请在知识库开启图片 OCR")
 
+    return parts
+
+
+def extract_pdf_text(
+    data: bytes,
+    *,
+    ocr_enabled: bool,
+    ocr: Callable[[bytes], str] | None,
+    min_text_chars: int,
+    render_dpi: int,
+    max_ocr_pages: int,
+) -> str:
+    """逐页提取并合并 PDF 文本。返回带 `【第 N 页】` 标记的正文。
+
+    抛 PdfOcrUnavailableError（需 OCR 但引擎缺）/ PdfExtractError（损坏、超限、最终无文本）。
+    """
+    parts = _extract_pdf_parts(
+        data,
+        ocr_enabled=ocr_enabled,
+        ocr=ocr,
+        min_text_chars=min_text_chars,
+        render_dpi=render_dpi,
+        max_ocr_pages=max_ocr_pages,
+    )
+
     return "\n\n".join(f"【第 {idx + 1} 页】\n{text}" for idx, text in parts)
+
+
+def build_pdf_source(
+    data: bytes,
+    *,
+    chunk_size: int,
+    chunk_overlap: int,
+    ocr_enabled: bool,
+    ocr: Callable[[bytes], str] | None,
+    min_text_chars: int,
+    render_dpi: int,
+    max_ocr_pages: int,
+) -> dict:
+    from app.services.splitter import split_structured_text
+
+    parts = _extract_pdf_parts(
+        data,
+        ocr_enabled=ocr_enabled,
+        ocr=ocr,
+        min_text_chars=min_text_chars,
+        render_dpi=render_dpi,
+        max_ocr_pages=max_ocr_pages,
+    )
+    text_parts: list[str] = []
+    chunks: list[dict] = []
+    cursor = 0
+    for page_index, page_text in parts:
+        segment = f"【第 {page_index + 1} 页】\n{page_text}"
+        if text_parts:
+            text_parts.append("\n\n")
+            cursor += 2
+        base_offset = cursor
+        text_parts.append(segment)
+        cursor += len(segment)
+        for chunk in split_structured_text(
+            segment,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            splitter="text",
+            base_location={"type": "page", "page": page_index + 1},
+        ):
+            chunks.append({
+                **chunk,
+                "source_start": base_offset + chunk["source_start"],
+                "source_end": base_offset + chunk["source_end"],
+            })
+    return {"normalized_text": "".join(text_parts), "chunks": chunks}

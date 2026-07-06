@@ -966,6 +966,85 @@ local-icon { display: inline-block; vertical-align: -0.125em; }
     color: #7EB8E0 !important;
 }
 
+.chat-citation-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    margin: 0 1px;
+    border: 1px solid rgba(57, 118, 197, 0.28);
+    border-radius: 999px;
+    background: #EEF5FF;
+    color: #3976C5;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.chat-citation-badge:hover,
+.chat-citation-badge:focus-visible {
+    background: #DDEEFF;
+    border-color: rgba(57, 118, 197, 0.44);
+    outline: none;
+}
+
+.chat-recalled-dialog .el-dialog {
+    max-width: calc(100vw - 24px);
+}
+
+.chat-source-location-dialog .el-dialog {
+    width: 900px;
+    max-width: calc(100vw - 24px);
+}
+
+.chat-source-dialog-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 14px;
+    margin-bottom: 12px;
+    color: var(--app-text-secondary);
+    font-size: 12px;
+}
+
+.chat-recalled-text,
+.chat-source-window {
+    max-height: 58vh;
+    overflow: auto;
+    margin: 0;
+    padding: 12px 14px;
+    border: 1px solid var(--app-border-light);
+    border-radius: 8px;
+    background: var(--app-page-bg);
+    color: var(--app-text);
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", "Microsoft YaHei", monospace;
+    font-size: 13px;
+    line-height: 1.75;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.chat-source-highlight {
+    padding: 1px 2px;
+    border-radius: 4px;
+    background: #FFF2B8;
+    color: inherit;
+}
+
+.chat-source-loading {
+    padding: 24px 0;
+    color: var(--app-text-secondary);
+    text-align: center;
+}
+
+.chat-dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 12px;
+}
+
 /* ── Input area (unified editor) ── */
 .chat-input-bar {
     padding: 8px 20px 12px;
@@ -2380,6 +2459,24 @@ local-icon { display: inline-block; vertical-align: -0.125em; }
     .libraries-stats { grid-template-columns:repeat(4,minmax(120px,1fr)); overflow-x:auto; }
     .dashboard-stat-card { min-width: 80px; padding: 12px; }
     .dashboard-stat-num { font-size: 22px; }
+}
+
+@media (max-width: 899px) {
+    .chat-source-location-dialog .el-dialog,
+    .chat-recalled-dialog .el-dialog {
+        width: calc(100vw - 24px) !important;
+        margin: 12px auto;
+    }
+
+    .chat-source-dialog-meta {
+        gap: 6px 10px;
+    }
+
+    .chat-recalled-text,
+    .chat-source-window {
+        max-height: 54vh;
+        font-size: 12px;
+    }
 }
 
 

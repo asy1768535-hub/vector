@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import uuid
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -16,8 +17,11 @@ from app.db import get_db
 from app.models.user import User
 from app.models.library import Library
 from app.models.document import Document
+from app.models.chunk import Chunk
+from app.models.document_source import DocumentSource
 from app.models.embedding_job import EmbeddingJob
 from app.schemas.documents import QueryRequest
+from app.services import ingest as ingest_service
 
 # Mock user and library
 mock_user = User(
@@ -39,6 +43,37 @@ mock_library = Library(
     lifecycle_mode="managed",
     index_state="ready",
 )
+
+
+def test_structured_chunk_metadata_includes_source_offsets():
+    text, metadata = ingest_service._chunk_text_and_metadata(
+        {"text": "第二行", "source_start": 4, "source_end": 7, "location": {"type": "line", "start_line": 2, "end_line": 2}},
+        title="demo.txt",
+        external_id="ext-1",
+        revision=3,
+    )
+
+    assert text == "第二行"
+    assert metadata == {
+        "title": "demo.txt",
+        "external_id": "ext-1",
+        "source_start": 4,
+        "source_end": 7,
+        "location": {"type": "line", "start_line": 2, "end_line": 2},
+        "source_revision": 3,
+    }
+
+
+def test_string_chunk_metadata_does_not_fabricate_offsets():
+    text, metadata = ingest_service._chunk_text_and_metadata(
+        "legacy chunk",
+        title=None,
+        external_id=None,
+        revision=1,
+    )
+
+    assert text == "legacy chunk"
+    assert metadata is None
 
 async def override_user():
     return mock_user
@@ -222,7 +257,11 @@ def test_import_txt_file(mock_ingest, client):
     kwargs = mock_ingest.call_args[1]
     assert kwargs["text"] == "This is plain text content."
     assert kwargs["title"] == "test.txt"
-    assert kwargs.get("chunks") is None          # 纯文本不预切，chunks 不传
+    chunks = kwargs.get("chunks")
+    assert chunks and all(isinstance(chunk, dict) for chunk in chunks)
+    assert chunks[0]["text"] == "This is plain text content."
+    assert kwargs["text"][chunks[0]["source_start"]:chunks[0]["source_end"]] == chunks[0]["text"]
+    assert chunks[0]["location"]["type"] == "line"
 
 @patch("app.services.ingest.ingest_text", new_callable=AsyncMock)
 def test_import_xlsx_passes_table_aware_chunks(mock_ingest, client):
@@ -254,7 +293,13 @@ def test_import_xlsx_passes_table_aware_chunks(mock_ingest, client):
     kwargs = mock_ingest.call_args[1]
     chunks = kwargs.get("chunks")
     assert chunks is not None and len(chunks) >= 1        # 关键：chunks 真传进去了
-    joined = "\n".join(chunks)
+    assert all(isinstance(chunk, dict) for chunk in chunks)
+    text = kwargs["text"]
+    for chunk in chunks:
+        assert text[chunk["source_start"]:chunk["source_end"]] == chunk["text"]
+        assert chunk["location"]["type"] == "sheet_row"
+        assert chunk["location"]["sheet"] == "技术选型"
+    joined = "\n".join(chunk["text"] for chunk in chunks)
     assert "【章节】技术选型" in joined                     # 工作表名作上下文（caption==heading 不重复）
     assert "类别 | 方案" in joined                          # 首行作表头
     assert "数据库 | MySQL" in joined and "缓存 | Redis" in joined
@@ -500,8 +545,8 @@ def test_library_stats_includes_done_and_total():
 
 # ── #3：docx 表格感知开关接入上传 ─────────────────────────────────────────
 
-def test_import_docx_table_aware_passes_segment_chunks():
-    """库开 docx_table_aware → docx 走 segments + chunk_segments，chunks 传进 ingest_text。"""
+def test_import_docx_table_aware_passes_structured_segment_chunks():
+    """库开 docx_table_aware → docx 走 segments，structured chunks 传进 ingest_text。"""
     mock_user.is_superuser = True
     app.dependency_overrides[current_active_user] = override_user
     app.dependency_overrides[get_db] = override_db
@@ -513,10 +558,8 @@ def test_import_docx_table_aware_passes_segment_chunks():
              "header": "类别 | 方案", "rows": ["类别 | 方案", "数据库 | MySQL"]}]
     try:
         with patch("app.deps.load_active_library", new_callable=AsyncMock) as ml, \
-             patch("app.services.docx_extract.extract_docx_segments", return_value=segs) as seg, \
-             patch("app.services.splitter.chunk_segments",
-                   return_value=["【章节】技术选型\n类别 | 方案\n数据库 | MySQL"]) as ck, \
-             patch("app.services.ingest.ingest_text", new_callable=AsyncMock) as mi:
+              patch("app.services.docx_extract.extract_docx_segments", return_value=segs) as seg, \
+              patch("app.services.ingest.ingest_text", new_callable=AsyncMock) as mi:
             ml.return_value = mock_library
             mi.return_value = (doc, MagicMock(id=uuid.uuid4()), 1, False)
             client = TestClient(app)
@@ -527,9 +570,12 @@ def test_import_docx_table_aware_passes_segment_chunks():
             )
             assert resp.status_code == status.HTTP_201_CREATED
             seg.assert_called_once()
-            ck.assert_called_once()
             chunks = mi.call_args.kwargs.get("chunks")
-            assert chunks is not None and "数据库 | MySQL" in "\n".join(chunks)
+            assert chunks is not None and all(isinstance(chunk, dict) for chunk in chunks)
+            text = mi.call_args.kwargs["text"]
+            assert "数据库 | MySQL" in "\n".join(chunk["text"] for chunk in chunks)
+            for chunk in chunks:
+                assert text[chunk["source_start"]:chunk["source_end"]] == chunk["text"]
     finally:
         mock_library.docx_table_aware = None
         app.dependency_overrides.clear()
@@ -561,10 +607,18 @@ from app.services.pdf_extract import PdfExtractError, PdfOcrUnavailableError  # 
 
 
 @patch("app.services.ingest.ingest_text", new_callable=AsyncMock)
-@patch("app.services.pdf_extract.extract_pdf_text")
+@patch("app.services.pdf_extract.build_pdf_source")
 def test_import_text_pdf_ocr_off_ingests(mock_extract, mock_ingest, client):
     """OCR 关 + 文字 PDF：提取出的带页码正文照常入库，splitter=text，ocr_enabled=False。"""
-    mock_extract.return_value = "【第 1 页】\n文字版PDF内容"
+    mock_extract.return_value = {
+        "normalized_text": "【第 1 页】\n文字版PDF内容",
+        "chunks": [{
+            "text": "【第 1 页】\n文字版PDF内容",
+            "source_start": 0,
+            "source_end": 16,
+            "location": {"type": "page", "page": 1},
+        }],
+    }
     doc = MagicMock()
     doc.id = uuid.uuid4()
     doc.status = "pending"
@@ -578,10 +632,11 @@ def test_import_text_pdf_ocr_off_ingests(mock_extract, mock_ingest, client):
     kw = mock_ingest.call_args[1]
     assert kw["text"] == "【第 1 页】\n文字版PDF内容"
     assert kw["splitter"] == "text"
+    assert kw["chunks"][0]["location"] == {"type": "page", "page": 1}
     assert mock_extract.call_args.kwargs["ocr_enabled"] is False   # 库未开 + 全局默认关
 
 
-@patch("app.services.pdf_extract.extract_pdf_text")
+@patch("app.services.pdf_extract.build_pdf_source")
 def test_import_scanned_pdf_ocr_off_returns_enable_hint(mock_extract, client):
     """OCR 关 + 扫描 PDF：服务抛 PdfExtractError → 400，提示去开启 OCR。"""
     mock_extract.side_effect = PdfExtractError(
@@ -596,7 +651,7 @@ def test_import_scanned_pdf_ocr_off_returns_enable_hint(mock_extract, client):
 
 
 @patch("app.services.ingest.ingest_text", new_callable=AsyncMock)
-@patch("app.services.pdf_extract.extract_pdf_text")
+@patch("app.services.pdf_extract.build_pdf_source")
 def test_import_pdf_ocr_on_passes_flag_and_params(mock_extract, mock_ingest, client, monkeypatch):
     """库开 ocr_enabled：把库级开关、ocr_image 回调与三个 pdf_ocr_* 参数传给服务。"""
     monkeypatch.setattr(mock_library, "ocr_enabled", True)
@@ -606,7 +661,10 @@ def test_import_pdf_ocr_on_passes_flag_and_params(mock_extract, mock_ingest, cli
     monkeypatch.setattr(settings, "pdf_ocr_min_text_chars", 20)
     monkeypatch.setattr(settings, "pdf_ocr_render_dpi", 200)
     monkeypatch.setattr(settings, "pdf_ocr_max_pages", 50)
-    mock_extract.return_value = "【第 1 页】\nx"
+    mock_extract.return_value = {
+        "normalized_text": "【第 1 页】\nx",
+        "chunks": [{"text": "【第 1 页】\nx", "source_start": 0, "source_end": 9, "location": {"type": "page", "page": 1}}],
+    }
     doc = MagicMock()
     doc.id = uuid.uuid4()
     doc.status = "pending"
@@ -625,7 +683,7 @@ def test_import_pdf_ocr_on_passes_flag_and_params(mock_extract, mock_ingest, cli
     assert kw["max_ocr_pages"] == 50
 
 
-@patch("app.services.pdf_extract.extract_pdf_text")
+@patch("app.services.pdf_extract.build_pdf_source")
 def test_import_pdf_ocr_unavailable_returns_install_hint(mock_extract, client, monkeypatch):
     """OCR 开但引擎缺：服务抛 PdfOcrUnavailableError → 400，提示安装 .[ocr]。"""
     monkeypatch.setattr(mock_library, "ocr_enabled", True)
@@ -829,3 +887,254 @@ def test_replace_on_rebuilding_library_rejected(client):
         data={"replace_document_id": str(target.id)},
     )
     assert resp.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+
+
+def _get_source_response_with_span_hash(stored_hash):
+    mock_user.is_superuser = True
+    doc = Document(
+        id=uuid.uuid4(),
+        library_id=mock_library.id,
+        title="source.txt",
+        content_hash="h",
+        current_revision=2,
+        status="ready",
+    )
+    chunk = Chunk(
+        id=uuid.uuid4(),
+        document_id=doc.id,
+        library_id=mock_library.id,
+        seq=1,
+        text="needle text",
+        token_count=11,
+        chunk_metadata={
+            "source_start": 7,
+            "source_end": 18,
+            "location": {"type": "line", "start_line": 2, "end_line": 2},
+            "source_revision": 2,
+            **({} if stored_hash is None else {"source_span_hash": stored_hash}),
+        },
+    )
+    source = DocumentSource(
+        document_id=doc.id,
+        revision=2,
+        file_name="source.txt",
+        file_type="txt",
+        normalized_text="before needle text after",
+    )
+    db = AsyncMock()
+
+    async def _get(model, ident):
+        if model is Document:
+            return doc
+        if model is Chunk:
+            return chunk
+        if model is DocumentSource:
+            return source
+        return None
+
+    db.get = _get
+    with patch("app.deps.load_active_library", new_callable=AsyncMock) as ml:
+        ml.return_value = mock_library
+        resp = _client_with_db(db).get(f"/libraries/testlib/documents/{doc.id}/source?chunk_id={chunk.id}")
+        assert resp.status_code == status.HTTP_200_OK
+        return resp.json(), chunk
+
+
+def test_get_document_source_legacy_when_span_hash_missing():
+    try:
+        data, chunk = _get_source_response_with_span_hash(None)
+        assert data["legacy"] is True
+        assert data["fallback_chunk"] == chunk.text
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_get_document_source_legacy_when_span_hash_wrong():
+    try:
+        data, chunk = _get_source_response_with_span_hash("0" * 16)
+        assert data["legacy"] is True
+        assert data["fallback_chunk"] == chunk.text
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_get_document_source_precise_window_when_span_hash_matches():
+    span_hash = hashlib.sha256("needle text".encode("utf-8")).hexdigest()[:16]
+    try:
+        data, chunk = _get_source_response_with_span_hash(span_hash)
+        assert data["legacy"] is False
+        assert data["document_title"] == "source.txt"
+        assert data["file_type"] == "txt"
+        assert data["chunk_seq"] == 1
+        local_start = data["source_start"] - data["window_start"]
+        local_end = data["source_end"] - data["window_start"]
+        assert data["text_window"][local_start:local_end] == chunk.text
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_get_document_source_legacy_when_any_source_range_hash_wrong():
+    mock_user.is_superuser = True
+    source_text = "first middle second"
+    doc = Document(
+        id=uuid.uuid4(),
+        library_id=mock_library.id,
+        title="source.md",
+        content_hash="h",
+        current_revision=2,
+        status="ready",
+    )
+    ranges = [
+        {"start": 0, "end": 5, "hash": hashlib.sha256(b"first").hexdigest()[:16]},
+        {"start": 13, "end": 19, "hash": "0" * 16},
+    ]
+    chunk = Chunk(
+        id=uuid.uuid4(),
+        document_id=doc.id,
+        library_id=mock_library.id,
+        seq=1,
+        text="first  \nsecond",
+        token_count=14,
+        chunk_metadata={
+            "source_start": 0,
+            "source_end": 19,
+            "source_ranges": ranges,
+            "location": {"type": "line", "start_line": 1, "end_line": 1},
+            "source_revision": 2,
+        },
+    )
+    source = DocumentSource(
+        document_id=doc.id,
+        revision=2,
+        file_name="source.md",
+        file_type="md",
+        normalized_text=source_text,
+    )
+    db = AsyncMock()
+
+    async def _get(model, ident):
+        if model is Document:
+            return doc
+        if model is Chunk:
+            return chunk
+        if model is DocumentSource:
+            return source
+        return None
+
+    db.get = _get
+    try:
+        with patch("app.deps.load_active_library", new_callable=AsyncMock) as ml:
+            ml.return_value = mock_library
+            resp = _client_with_db(db).get(f"/libraries/testlib/documents/{doc.id}/source?chunk_id={chunk.id}")
+            assert resp.status_code == status.HTTP_200_OK
+            data = resp.json()
+            assert data["legacy"] is True
+            assert data["fallback_chunk"] == "first  \nsecond"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_get_document_source_precise_returns_source_ranges_when_hashes_match():
+    mock_user.is_superuser = True
+    source_text = "first middle second"
+    doc = Document(
+        id=uuid.uuid4(),
+        library_id=mock_library.id,
+        title="source.md",
+        content_hash="h",
+        current_revision=2,
+        status="ready",
+    )
+    ranges = [
+        {"start": 0, "end": 5, "hash": hashlib.sha256(b"first").hexdigest()[:16]},
+        {"start": 13, "end": 19, "hash": hashlib.sha256(b"second").hexdigest()[:16]},
+    ]
+    chunk = Chunk(
+        id=uuid.uuid4(),
+        document_id=doc.id,
+        library_id=mock_library.id,
+        seq=1,
+        text="first  \nsecond",
+        token_count=14,
+        chunk_metadata={
+            "source_start": 0,
+            "source_end": 19,
+            "source_ranges": ranges,
+            "location": {"type": "line", "start_line": 1, "end_line": 1},
+            "source_revision": 2,
+        },
+    )
+    source = DocumentSource(
+        document_id=doc.id,
+        revision=2,
+        file_name="source.md",
+        file_type="md",
+        normalized_text=source_text,
+    )
+    db = AsyncMock()
+
+    async def _get(model, ident):
+        if model is Document:
+            return doc
+        if model is Chunk:
+            return chunk
+        if model is DocumentSource:
+            return source
+        return None
+
+    db.get = _get
+    try:
+        with patch("app.deps.load_active_library", new_callable=AsyncMock) as ml:
+            ml.return_value = mock_library
+            resp = _client_with_db(db).get(f"/libraries/testlib/documents/{doc.id}/source?chunk_id={chunk.id}")
+            assert resp.status_code == status.HTTP_200_OK
+            data = resp.json()
+            assert data["legacy"] is False
+            assert [(r["start"], r["end"]) for r in data["source_ranges"]] == [(0, 5), (13, 19)]
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_get_document_source_legacy_without_source_does_not_fabricate_offsets():
+    mock_user.is_superuser = True
+    doc = Document(
+        id=uuid.uuid4(),
+        library_id=mock_library.id,
+        title="legacy.txt",
+        content_hash="h",
+        current_revision=1,
+        status="ready",
+    )
+    chunk = Chunk(
+        id=uuid.uuid4(),
+        document_id=doc.id,
+        library_id=mock_library.id,
+        seq=0,
+        text="legacy chunk",
+        token_count=12,
+        chunk_metadata=None,
+    )
+    db = AsyncMock()
+
+    async def _get(model, ident):
+        if model is Document:
+            return doc
+        if model is Chunk:
+            return chunk
+        if model is DocumentSource:
+            return None
+        return None
+
+    db.get = _get
+    try:
+        with patch("app.deps.load_active_library", new_callable=AsyncMock) as ml:
+            ml.return_value = mock_library
+            resp = _client_with_db(db).get(f"/libraries/testlib/documents/{doc.id}/source?chunk_id={chunk.id}")
+            assert resp.status_code == status.HTTP_200_OK
+            data = resp.json()
+            assert data["legacy"] is True
+            assert data["fallback_chunk"] == "legacy chunk"
+            assert data["source_start"] is None
+            assert data["source_end"] is None
+    finally:
+        app.dependency_overrides.clear()

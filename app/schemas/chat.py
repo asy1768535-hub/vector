@@ -37,6 +37,7 @@ class ChatSource(BaseModel):
     title: str = ""
     document_id: Optional[str] = None
     chunk_id: Optional[str] = None
+    seq: Optional[int] = None
     score: float = 0.0
     content: str = ""
 

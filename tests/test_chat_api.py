@@ -197,7 +197,7 @@ def _patch_pipeline(records, *, answer="答案"):
 
 
 def test_messages_calls_retrieval_and_returns_sources():
-    records = [_rec("片段A", doc="d1", chunk="c1", score=0.91)]
+    records = [_rec("片段A", doc="d1", chunk="c1", score=0.91, md={"seq": 7})]
     _override(mock_user, AsyncMock())
     patches, retr, gen = _patch_pipeline(records, answer="根据[1]作答")
     for p in patches:
@@ -214,6 +214,7 @@ def test_messages_calls_retrieval_and_returns_sources():
     assert len(body["sources"]) == 1
     s = body["sources"][0]
     assert s["document_id"] == "d1" and s["chunk_id"] == "c1"
+    assert s["seq"] == 7
     assert s["score"] == 0.91 and s["content"] == "片段A"
     assert body["debug"] is None                 # 默认不返回调试
     retr.assert_awaited_once()                   # 确实复用了检索

@@ -31,6 +31,28 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _chunk_text_and_metadata(
+    chunk: str | dict, *, title: str | None, external_id: str | None, revision: int
+) -> tuple[str, dict | None]:
+    base = {"title": title, "external_id": external_id} if (title or external_id) else {}
+    if isinstance(chunk, str):
+        return chunk, (base or None)
+    text = str(chunk.get("text") or "")
+    metadata = dict(base)
+    metadata.update({
+        "source_start": int(chunk["source_start"]),
+        "source_end": int(chunk["source_end"]),
+        "location": chunk.get("location") or {},
+        "source_revision": revision,
+    })
+    # span hash 用于后续验证原文完整性（不硬依赖 chunk.text == text[start:end]）
+    if chunk.get("source_span_hash"):
+        metadata["source_span_hash"] = str(chunk["source_span_hash"])
+    if chunk.get("source_ranges"):
+        metadata["source_ranges"] = list(chunk["source_ranges"])
+    return text, metadata
+
+
 async def _find_active(
     db: AsyncSession, library_id: uuid.UUID, external_id: str | None, content_hash: str
 ) -> Document | None:
@@ -104,7 +126,7 @@ async def ingest_text(
     metadata: dict[str, Any] | None,
     splitter: str,
     created_by: uuid.UUID | None,
-    chunks: list[str] | None = None,
+    chunks: list[str | dict] | None = None,
 ) -> tuple[Document, EmbeddingJob, int, bool]:
     """返回 (document, job, chunk_count, was_existing)。
 
@@ -161,7 +183,10 @@ async def ingest_text(
         return winner, job, chunk_count, True
 
     chunk_objs: list[Chunk] = []
-    for seq, txt in enumerate(chunks_text):
+    for seq, chunk in enumerate(chunks_text):
+        txt, chunk_metadata = _chunk_text_and_metadata(
+            chunk, title=title, external_id=external_id, revision=doc.current_revision
+        )
         chunk_objs.append(
             Chunk(
                 document_id=doc.id,
@@ -169,7 +194,7 @@ async def ingest_text(
                 seq=seq,
                 text=txt,
                 token_count=len(txt),  # 用字符数代替；真要 token 再接 tiktoken
-                chunk_metadata={"title": title, "external_id": external_id} if (title or external_id) else None,
+                chunk_metadata=chunk_metadata,
             )
         )
     db.add_all(chunk_objs)
@@ -198,7 +223,7 @@ async def reingest_document(
     metadata: dict[str, Any] | None,
     splitter: str,
     force: bool = False,
-    chunks: list[str] | None = None,
+    chunks: list[str | dict] | None = None,
 ) -> tuple[EmbeddingJob | None, int, bool]:
     """更新已存在文档：删旧 chunk → 用新文本重切 → 更新 doc → 新建 pending job。
 
@@ -243,19 +268,22 @@ async def reingest_document(
     document.status = "pending"
     document.last_error = None
 
-    for seq, txt in enumerate(chunks_text):
+    # 开新代际：current_revision+=1 + supersede 旧 job + 建带新 revision 的 job
+    job = await _new_generation(db, library, document)
+
+    for seq, chunk in enumerate(chunks_text):
+        txt, chunk_metadata = _chunk_text_and_metadata(
+            chunk, title=title, external_id=document.external_id, revision=document.current_revision
+        )
         db.add(Chunk(
             document_id=document.id,
             library_id=library.id,
             seq=seq,
             text=txt,
             token_count=len(txt),
-            chunk_metadata={"title": title, "external_id": document.external_id}
-            if (title or document.external_id) else None,
+            chunk_metadata=chunk_metadata,
         ))
 
-    # 开新代际：current_revision+=1 + supersede 旧 job + 建带新 revision 的 job
-    job = await _new_generation(db, library, document)
     # #7：入 cleanup outbox 删旧 revision points（target=新 current_revision，删 < target 与缺 revision）
     from app.services import cleanup as cleanup_service
     await cleanup_service.enqueue_delete_before_revision(

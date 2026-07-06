@@ -97,17 +97,33 @@ def extract_docx_segments(
     segs: list[dict] = []
     heading_stack: list[str] = []          # heading_stack[i] = 第 i+1 级标题
     prose_buf: list[str] = []
+    prose_start: int | None = None
+    prose_end: int | None = None
+    paragraph_index = 0
+    table_index = 0
 
     def cur_heading() -> str:
         return " / ".join(h for h in heading_stack if h)
 
     def flush_prose() -> None:
-        nonlocal prose_buf
+        nonlocal prose_buf, prose_start, prose_end
         if prose_buf:
             text = "\n".join(prose_buf).strip()
             if text:
-                segs.append({"kind": "prose", "heading": cur_heading(), "text": text})
+                segs.append({
+                    "kind": "prose",
+                    "heading": cur_heading(),
+                    "text": text,
+                    "location": {
+                        "type": "paragraph",
+                        "start_paragraph": prose_start,
+                        "end_paragraph": prose_end,
+                        "heading": cur_heading(),
+                    },
+                })
         prose_buf = []
+        prose_start = None
+        prose_end = None
 
     for block in _iter_block_items(doc):
         if isinstance(block, Paragraph):
@@ -122,6 +138,10 @@ def extract_docx_segments(
                 continue
             t = block.text.strip()
             if t:
+                paragraph_index += 1
+                if prose_start is None:
+                    prose_start = paragraph_index
+                prose_end = paragraph_index
                 prose_buf.append(t)
             if ocr is not None:
                 for blob in _paragraph_image_blobs(block):
@@ -136,9 +156,11 @@ def extract_docx_segments(
             flush_prose()
             rows = _table_rows(block)
             if rows:
+                table_index += 1
                 segs.append({
                     "kind": "table", "heading": cur_heading(),
                     "caption": caption, "header": rows[0], "rows": rows,
+                    "location": {"type": "table", "table_index": table_index, "heading": cur_heading()},
                 })
     flush_prose()
     return segs

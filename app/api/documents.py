@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import csv
+import hashlib
+import re
 import io
 import json
 import logging
@@ -19,6 +21,7 @@ from app.db import get_db
 from app.deps import require_lib
 from app.models.chunk import Chunk
 from app.models.document import Document
+from app.models.document_source import DocumentSource
 from app.models.embedding_job import EmbeddingJob
 from app.models.library import Library
 from app.models.user import User
@@ -27,6 +30,7 @@ from app.schemas.documents import (
     DocumentIngestRequest,
     DocumentIngestResponse,
     DocumentRead,
+    DocumentSourceLocationResponse,
     ImportFileResponse,
     LibraryStats,
     QueryRequest,
@@ -41,6 +45,7 @@ from app.services import retrieval as retrieval_svc
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/libraries/{slug}", tags=["documents"])
+SOURCE_CONTEXT_CHARS = 3000
 
 # #13：导入文件后缀白名单（小写）。不在表内 → 415；旧二进制格式 .xls/.doc 在表内，
 # 但会给出「另存为 .xlsx / .docx」的专门 400 提示（无纯 Python 解析库，不引系统依赖）。
@@ -113,6 +118,100 @@ async def _apply_reingest(db: AsyncSession, lib: Library, doc: Document, body: "
     return job, chunk_count
 
 
+async def _upsert_document_source(db, document_id, revision: int, source: dict | None) -> None:
+    if not source:
+        return
+    existing = await db.get(DocumentSource, document_id)
+    values = {
+        "revision": revision,
+        "file_name": source.get("file_name"),
+        "file_type": source.get("file_type"),
+        "normalized_text": source["normalized_text"],
+    }
+    if existing is None:
+        db.add(DocumentSource(document_id=document_id, **values))
+    else:
+        for key, value in values.items():
+            setattr(existing, key, value)
+
+
+def _legacy_source_response(
+    doc: Document, chunk: Chunk, file_type: str | None = None
+) -> DocumentSourceLocationResponse:
+    return DocumentSourceLocationResponse(
+        document_title=doc.title,
+        file_type=file_type,
+        chunk_id=str(chunk.id),
+        chunk_seq=chunk.seq,
+        legacy=True,
+        fallback_chunk=chunk.text,
+    )
+
+
+def _bounded_source_window(text: str, start: int, end: int) -> tuple[str, int, int]:
+    span = max(0, end - start)
+    remaining = max(0, SOURCE_CONTEXT_CHARS - span)
+    before = remaining // 2
+    after = remaining - before
+    window_start = max(0, start - before)
+    window_end = min(len(text), end + after)
+    return text[window_start:window_end], window_start, window_end
+
+
+def _valid_source_ranges(raw_ranges, normalized_text: str) -> list[dict] | None:
+    if raw_ranges is None:
+        return None
+    if not isinstance(raw_ranges, list) or not raw_ranges:
+        return []
+    out: list[dict] = []
+    for item in raw_ranges:
+        if not isinstance(item, dict):
+            return []
+        try:
+            start = int(item["start"])
+            end = int(item["end"])
+        except (KeyError, TypeError, ValueError):
+            return []
+        stored_hash = item.get("hash")
+        if start < 0 or end < start or end > len(normalized_text):
+            return []
+        if not isinstance(stored_hash, str) or not re.fullmatch(r"[0-9a-f]{16}", stored_hash):
+            return []
+        actual_hash = hashlib.sha256(normalized_text[start:end].encode("utf-8")).hexdigest()[:16]
+        if stored_hash != actual_hash:
+            return []
+        out.append({"start": start, "end": end, "hash": stored_hash})
+    return out
+
+
+def _source_data(text: str, filename: str, suffix: str) -> dict:
+    return {"normalized_text": text, "file_name": filename, "file_type": suffix or None}
+
+
+def _structured_chunks(text: str, splitter: str, lib: Library, base_location: dict | None = None) -> list[dict]:
+    from app.services.splitter import split_structured_text
+
+    return split_structured_text(
+        text,
+        chunk_size=lib.chunk_size,
+        chunk_overlap=lib.chunk_overlap,
+        splitter=splitter,
+        base_location=base_location,
+    )
+
+
+def _structured_doc_data(text: str, filename: str, suffix: str, splitter: str, lib: Library) -> dict:
+    return {
+        "text": text,
+        "title": filename,
+        "external_id": None,
+        "metadata": None,
+        "splitter": splitter,
+        "chunks": _structured_chunks(text, splitter, lib),
+        "source": _source_data(text, filename, suffix),
+    }
+
+
 async def _ingest_or_upsert(db: AsyncSession, lib: Library, user: User, doc_data: dict) -> dict:
     """单条文档摄入：有 external_id 且库内已存在同键未删文档 → reingest 覆盖更新；否则新建。
 
@@ -137,6 +236,8 @@ async def _ingest_or_upsert(db: AsyncSession, lib: Library, user: User, doc_data
                 metadata=doc_data["metadata"], splitter=doc_data["splitter"],
                 force=False, chunks=doc_data.get("chunks"),
             )
+            if changed:
+                await _upsert_document_source(db, existing.id, existing.current_revision, doc_data.get("source"))
             return {
                 "document_id": str(existing.id), "title": doc_data["title"],
                 "chunk_count": chunk_count, "status": existing.status,
@@ -149,6 +250,8 @@ async def _ingest_or_upsert(db: AsyncSession, lib: Library, user: User, doc_data
         external_id=ext, metadata=doc_data["metadata"], splitter=doc_data["splitter"],
         created_by=user.id, chunks=doc_data.get("chunks"),
     )
+    if not was_existing:
+        await _upsert_document_source(db, doc.id, doc.current_revision, doc_data.get("source"))
     # 去重命中（was_existing）：回显数据库里真实保留的旧文件名/external_id，
     # 而非本次上传的文件名——否则前端会显示一个其实没入库的名字。
     return {
@@ -183,6 +286,7 @@ async def _replace_document(db: AsyncSession, lib: Library, target_id: uuid.UUID
             metadata=meta, splitter=doc_data["splitter"],
             force=True, chunks=doc_data.get("chunks"),
         )
+        await _upsert_document_source(db, target.id, target.current_revision, doc_data.get("source"))
     except IntegrityError as exc:
         # 无 external_id 文档受 (library_id, content_hash) 活动行唯一约束保护：
         # 替换成与同库另一篇文档完全相同的内容会撞约束 → 回滚并转 409（而非 500）。
@@ -300,6 +404,76 @@ async def list_documents(
         stmt = stmt.where(Document.external_id == external_id)
     rows = await db.execute(stmt)
     return list(rows.scalars().all())
+
+
+@router.get("/documents/{document_id}/source", response_model=DocumentSourceLocationResponse)
+async def get_document_source(
+    document_id: uuid.UUID,
+    chunk_id: uuid.UUID = Query(...),
+    lib: Library = Depends(require_lib("read")),
+    db: AsyncSession = Depends(get_db),
+) -> DocumentSourceLocationResponse:
+    doc = await db.get(Document, document_id)
+    if doc is None or doc.library_id != lib.id or doc.deleted_at is not None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "document not found")
+
+    chunk = await db.get(Chunk, chunk_id)
+    if chunk is None or chunk.document_id != doc.id or chunk.library_id != lib.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "chunk not found")
+
+    source = await db.get(DocumentSource, document_id)
+    if source is None:
+        return _legacy_source_response(doc, chunk)
+
+    metadata = chunk.chunk_metadata or {}
+    try:
+        source_start = int(metadata["source_start"])
+        source_end = int(metadata["source_end"])
+        source_revision = int(metadata["source_revision"])
+    except (KeyError, TypeError, ValueError):
+        return _legacy_source_response(doc, chunk, source.file_type)
+
+    location = metadata.get("location")
+    if not isinstance(location, dict):
+        return _legacy_source_response(doc, chunk, source.file_type)
+    if source_revision != source.revision or source.revision != doc.current_revision:
+        return _legacy_source_response(doc, chunk, source.file_type)
+    if source_start < 0 or source_end < source_start or source_end > len(source.normalized_text):
+        return _legacy_source_response(doc, chunk, source.file_type)
+    validated_ranges = _valid_source_ranges(metadata.get("source_ranges"), source.normalized_text)
+    if validated_ranges == []:
+        return _legacy_source_response(doc, chunk, source.file_type)
+    if validated_ranges is None:
+        # 校验原文 span 完整性（span hash + revision，不再强求 == chunk.text，
+        # 因为表格 chunk.text 可能含检索用的重复表头/前缀）。
+        stored_hash = metadata.get("source_span_hash")
+        if not isinstance(stored_hash, str) or not re.fullmatch(r"[0-9a-f]{16}", stored_hash):
+            return _legacy_source_response(doc, chunk, source.file_type)
+        actual_hash = hashlib.sha256(
+            source.normalized_text[source_start:source_end].encode("utf-8")
+        ).hexdigest()[:16]
+        if stored_hash != actual_hash:
+            return _legacy_source_response(doc, chunk, source.file_type)
+        validated_ranges = [{"start": source_start, "end": source_end, "hash": stored_hash}]
+
+    text_window, window_start, window_end = _bounded_source_window(
+        source.normalized_text, source_start, source_end
+    )
+    return DocumentSourceLocationResponse(
+        document_title=doc.title or source.file_name,
+        file_type=source.file_type,
+        text_window=text_window,
+        window_start=window_start,
+        window_end=window_end,
+        source_start=source_start,
+        source_end=source_end,
+        source_ranges=validated_ranges,
+        location=location,
+        chunk_id=str(chunk.id),
+        chunk_seq=chunk.seq,
+        legacy=False,
+        fallback_chunk=chunk.text,
+    )
 
 
 @router.get("/documents/{document_id}", response_model=DocumentRead)
@@ -531,7 +705,9 @@ async def import_file(
                         "title": item.get("title") or filename,
                         "external_id": item.get("external_id"),
                         "metadata": item.get("metadata"),
-                        "splitter": item.get("splitter", "text")
+                        "splitter": item.get("splitter", "text"),
+                        "chunks": _structured_chunks(text, item.get("splitter", "text"), lib),
+                        "source": _source_data(text, filename, suffix),
                     })
             elif isinstance(data, dict):
                 text = data.get("text")
@@ -541,7 +717,9 @@ async def import_file(
                         "title": data.get("title") or filename,
                         "external_id": data.get("external_id"),
                         "metadata": data.get("metadata"),
-                        "splitter": data.get("splitter", "text")
+                        "splitter": data.get("splitter", "text"),
+                        "chunks": _structured_chunks(text, data.get("splitter", "text"), lib),
+                        "source": _source_data(text, filename, suffix),
                     })
         except Exception as e:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid JSON format: {str(e)}")
@@ -574,7 +752,9 @@ async def import_file(
                     "title": title,
                     "external_id": ext_id,
                     "metadata": None,
-                    "splitter": "text"
+                    "splitter": "text",
+                    "chunks": _structured_chunks(text, "text", lib, {"type": "csv_row", "row": reader.line_num}),
+                    "source": _source_data(text, filename, suffix),
                 })
         except Exception as e:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid CSV format: {str(e)}")
@@ -588,8 +768,10 @@ async def import_file(
         eff_ocr = lib.ocr_enabled if lib.ocr_enabled is not None else settings.ocr_enabled
         ocr_cb = ocr_svc.ocr_image if (eff_ocr and ocr_svc.is_available()) else None
         try:
-            text = pdf_extract.extract_pdf_text(
+            source = pdf_extract.build_pdf_source(
                 content,
+                chunk_size=lib.chunk_size,
+                chunk_overlap=lib.chunk_overlap,
                 ocr_enabled=bool(eff_ocr),
                 ocr=ocr_cb,
                 min_text_chars=settings.pdf_ocr_min_text_chars,
@@ -600,11 +782,13 @@ async def import_file(
             # 含 PdfOcrUnavailableError（需 OCR 但依赖缺）——消息已是用户可读的提示
             raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
         documents_to_ingest.append({
-            "text": text,
+            "text": source["normalized_text"],
             "title": filename,
             "external_id": None,
             "metadata": None,
             "splitter": "text",
+            "chunks": source["chunks"],
+            "source": _source_data(source["normalized_text"], filename, suffix),
         })
 
     elif suffix == ".docx":
@@ -614,7 +798,6 @@ async def import_file(
         #   开：表格感知切块（每表单独成块带表头/章节上下文）——表格召回更稳但 chunk 数/成本上升。
         try:
             from app.services.docx_extract import extract_docx_segments, extract_docx_text
-            from app.services.splitter import chunk_segments
             from app.services import ocr as ocr_svc
 
             eff_ocr = lib.ocr_enabled if lib.ocr_enabled is not None else settings.ocr_enabled
@@ -625,23 +808,24 @@ async def import_file(
 
             if eff_table_aware:
                 segs = extract_docx_segments(content, ocr=ocr_cb)
-                # text 仅用于 content_hash / 去重，仍取扁平正文（与开关无关，保证幂等稳定）
-                text = "\n".join(s["text"] if s["kind"] == "prose" else "\n".join(s["rows"]) for s in segs)
+                from app.services.splitter import build_structured_source_from_segments
+
+                source = build_structured_source_from_segments(
+                    segs, chunk_size=lib.chunk_size, chunk_overlap=lib.chunk_overlap
+                )
+                text = source["normalized_text"]
                 if not text.strip():
                     raise HTTPException(status.HTTP_400_BAD_REQUEST, "DOCX 无可提取的文本")
-                chunks = chunk_segments(segs, chunk_size=lib.chunk_size, chunk_overlap=lib.chunk_overlap)
                 documents_to_ingest.append({
                     "text": text, "title": filename, "external_id": None,
-                    "metadata": None, "splitter": "docx", "chunks": chunks,
+                    "metadata": None, "splitter": "docx", "chunks": source["chunks"],
+                    "source": _source_data(source["normalized_text"], filename, suffix),
                 })
             else:
                 text = extract_docx_text(content, ocr=ocr_cb)
                 if not text.strip():
                     raise HTTPException(status.HTTP_400_BAD_REQUEST, "DOCX 无可提取的文本")
-                documents_to_ingest.append({
-                    "text": text, "title": filename, "external_id": None,
-                    "metadata": None, "splitter": "text",
-                })
+                documents_to_ingest.append(_structured_doc_data(text, filename, suffix, "text", lib))
         except HTTPException:
             raise
         except Exception as e:
@@ -666,16 +850,20 @@ async def import_file(
         # 电子表格：每个工作表按表格感知切分入库
         try:
             from app.services.xlsx_extract import extract_xlsx_segments
-            from app.services.splitter import chunk_segments
+            from app.services.splitter import build_structured_source_from_segments
 
             segs = extract_xlsx_segments(content)
-            text = "\n".join("\n".join(s["rows"]) for s in segs)
-            chunks = chunk_segments(segs, chunk_size=lib.chunk_size, chunk_overlap=lib.chunk_overlap)
+            source = build_structured_source_from_segments(
+                segs, chunk_size=lib.chunk_size, chunk_overlap=lib.chunk_overlap
+            )
+            text = source["normalized_text"]
+            chunks = source["chunks"]
             if not chunks:
                 raise HTTPException(status.HTTP_400_BAD_REQUEST, "表格无可提取内容")
             documents_to_ingest.append({
                 "text": text, "title": filename, "external_id": None,
                 "metadata": None, "splitter": "docx", "chunks": chunks,
+                "source": _source_data(source["normalized_text"], filename, suffix),
             })
         except HTTPException:
             raise
@@ -688,13 +876,7 @@ async def import_file(
             text = content.decode("utf-8")
             if not text.strip():
                 raise HTTPException(status.HTTP_400_BAD_REQUEST, "File is empty")
-            documents_to_ingest.append({
-                "text": text,
-                "title": filename,
-                "external_id": None,
-                "metadata": None,
-                "splitter": "text"
-            })
+            documents_to_ingest.append(_structured_doc_data(text, filename, suffix, "text", lib))
         except Exception as e:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid text encoding: {str(e)}")
 

@@ -118,13 +118,15 @@ test('Documents: loadLibs calls loadDocs exactly once (no duplicate branch)', ()
     assert.equal(matches.length, 1, `loadLibs calls loadDocs ${matches.length} times, expected 1`);
 });
 
-test('Chat: uses router.resolve instead of /console/', () => {
-    assert.ok(chatSrc.includes('router.resolve'), 'Chat uses router.resolve');
+test('Chat: opens document source details in page', () => {
+    assert.ok(chatSrc.includes('getDocumentSource'), 'Chat uses source location API');
+    assert.ok(chatSrc.includes('sourceLocationDialog'), 'Chat has source location dialog state');
+    assert.ok(!chatSrc.includes('router.resolve'), 'Chat no longer routes to Documents for source details');
     assert.ok(!chatSrc.includes('/console/'), 'Chat no longer hardcodes /console/');
 });
 
-test('Chat: window.open uses noopener', () => {
-    assert.ok(chatSrc.includes('noopener'), 'Chat window.open has noopener');
+test('Chat: source details do not open a new window', () => {
+    assert.ok(!chatSrc.includes('window.open'), 'Chat source detail stays in page');
 });
 
 test('Chat: listChatLibraries accepts forceRefresh', () => {
