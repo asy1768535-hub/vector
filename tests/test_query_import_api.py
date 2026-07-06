@@ -973,6 +973,128 @@ def test_get_document_source_precise_window_when_span_hash_matches():
         app.dependency_overrides.clear()
 
 
+def test_get_document_source_legacy_when_any_source_range_hash_wrong():
+    mock_user.is_superuser = True
+    source_text = "first middle second"
+    doc = Document(
+        id=uuid.uuid4(),
+        library_id=mock_library.id,
+        title="source.md",
+        content_hash="h",
+        current_revision=2,
+        status="ready",
+    )
+    ranges = [
+        {"start": 0, "end": 5, "hash": hashlib.sha256(b"first").hexdigest()[:16]},
+        {"start": 13, "end": 19, "hash": "0" * 16},
+    ]
+    chunk = Chunk(
+        id=uuid.uuid4(),
+        document_id=doc.id,
+        library_id=mock_library.id,
+        seq=1,
+        text="first  \nsecond",
+        token_count=14,
+        chunk_metadata={
+            "source_start": 0,
+            "source_end": 19,
+            "source_ranges": ranges,
+            "location": {"type": "line", "start_line": 1, "end_line": 1},
+            "source_revision": 2,
+        },
+    )
+    source = DocumentSource(
+        document_id=doc.id,
+        revision=2,
+        file_name="source.md",
+        file_type="md",
+        normalized_text=source_text,
+    )
+    db = AsyncMock()
+
+    async def _get(model, ident):
+        if model is Document:
+            return doc
+        if model is Chunk:
+            return chunk
+        if model is DocumentSource:
+            return source
+        return None
+
+    db.get = _get
+    try:
+        with patch("app.deps.load_active_library", new_callable=AsyncMock) as ml:
+            ml.return_value = mock_library
+            resp = _client_with_db(db).get(f"/libraries/testlib/documents/{doc.id}/source?chunk_id={chunk.id}")
+            assert resp.status_code == status.HTTP_200_OK
+            data = resp.json()
+            assert data["legacy"] is True
+            assert data["fallback_chunk"] == "first  \nsecond"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_get_document_source_precise_returns_source_ranges_when_hashes_match():
+    mock_user.is_superuser = True
+    source_text = "first middle second"
+    doc = Document(
+        id=uuid.uuid4(),
+        library_id=mock_library.id,
+        title="source.md",
+        content_hash="h",
+        current_revision=2,
+        status="ready",
+    )
+    ranges = [
+        {"start": 0, "end": 5, "hash": hashlib.sha256(b"first").hexdigest()[:16]},
+        {"start": 13, "end": 19, "hash": hashlib.sha256(b"second").hexdigest()[:16]},
+    ]
+    chunk = Chunk(
+        id=uuid.uuid4(),
+        document_id=doc.id,
+        library_id=mock_library.id,
+        seq=1,
+        text="first  \nsecond",
+        token_count=14,
+        chunk_metadata={
+            "source_start": 0,
+            "source_end": 19,
+            "source_ranges": ranges,
+            "location": {"type": "line", "start_line": 1, "end_line": 1},
+            "source_revision": 2,
+        },
+    )
+    source = DocumentSource(
+        document_id=doc.id,
+        revision=2,
+        file_name="source.md",
+        file_type="md",
+        normalized_text=source_text,
+    )
+    db = AsyncMock()
+
+    async def _get(model, ident):
+        if model is Document:
+            return doc
+        if model is Chunk:
+            return chunk
+        if model is DocumentSource:
+            return source
+        return None
+
+    db.get = _get
+    try:
+        with patch("app.deps.load_active_library", new_callable=AsyncMock) as ml:
+            ml.return_value = mock_library
+            resp = _client_with_db(db).get(f"/libraries/testlib/documents/{doc.id}/source?chunk_id={chunk.id}")
+            assert resp.status_code == status.HTTP_200_OK
+            data = resp.json()
+            assert data["legacy"] is False
+            assert [(r["start"], r["end"]) for r in data["source_ranges"]] == [(0, 5), (13, 19)]
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_get_document_source_legacy_without_source_does_not_fabricate_offsets():
     mock_user.is_superuser = True
     doc = Document(

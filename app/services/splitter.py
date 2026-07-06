@@ -12,6 +12,7 @@ from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharac
 
 _SEPARATORS = ["\n\n", "\n", "。", "！", "？", ". ", "? ", "! ", " ", ""]
 _HEADERS_TO_SPLIT_ON = [("#", "h1"), ("##", "h2"), ("###", "h3"), ("####", "h4")]
+_SORTED_HEADERS = sorted(_HEADERS_TO_SPLIT_ON, key=lambda split: len(split[0]), reverse=True)
 
 
 def _check_params(chunk_size: int, chunk_overlap: int) -> None:
@@ -83,6 +84,8 @@ def _scan_piece(text: str, piece: str, cursor: int) -> tuple[int, int]:
 
 
 def _split_spans(text: str, *, chunk_size: int, chunk_overlap: int, splitter: str) -> list[dict]:
+    if splitter == "markdown":
+        return _split_markdown_spans(text, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
     pieces = _split_pieces(text, chunk_size=chunk_size, chunk_overlap=chunk_overlap, splitter=splitter)
     spans: list[dict] = []
     cursor = 0
@@ -91,6 +94,181 @@ def _split_spans(text: str, *, chunk_size: int, chunk_overlap: int, splitter: st
         spans.append({"text": piece, "start": start, "end": end})
         cursor = max(start + 1, end - chunk_overlap)
     return spans
+
+
+def _iter_lines_with_offsets(text: str) -> list[tuple[str, int, int]]:
+    lines: list[tuple[str, int, int]] = []
+    cursor = 0
+    for line in text.split("\n"):
+        start = cursor
+        end = start + len(line)
+        lines.append((line, start, end))
+        cursor = end + 1
+    return lines
+
+
+def _stripped_line_and_range(line: str, start: int) -> tuple[str, int, int]:
+    left = len(line) - len(line.lstrip())
+    right = len(line.rstrip())
+    stripped = line.strip()
+    stripped = "".join(filter(str.isprintable, stripped))
+    return stripped, start + left, start + right
+
+
+def _header_match(stripped_line: str) -> tuple[str, str] | None:
+    for sep, name in _SORTED_HEADERS:
+        if stripped_line.startswith(sep) and (len(stripped_line) == len(sep) or stripped_line[len(sep)] == " "):
+            return sep, name
+    return None
+
+
+def _content_record(content: list[str], ranges: list[dict], metadata: dict) -> dict:
+    text = "\n".join(content)
+    segments: list[dict] = []
+    cursor = 0
+    for i, item in enumerate(content):
+        source = ranges[i]
+        segments.append({
+            "content_start": cursor,
+            "content_end": cursor + len(item),
+            "start": source["start"],
+            "end": source["end"],
+        })
+        cursor += len(item)
+        if i < len(content) - 1:
+            cursor += 1
+    return {"content": text, "metadata": dict(metadata), "segments": segments}
+
+
+def _markdown_line_records(text: str) -> list[dict]:
+    records: list[dict] = []
+    current_content: list[str] = []
+    current_ranges: list[dict] = []
+    current_metadata: dict[str, str] = {}
+    initial_metadata: dict[str, str] = {}
+    header_stack: list[dict] = []
+    in_code_block = False
+    opening_fence = ""
+
+    def flush() -> None:
+        nonlocal current_content, current_ranges
+        if current_content:
+            records.append(_content_record(current_content, current_ranges, current_metadata))
+            current_content = []
+            current_ranges = []
+
+    for raw_line, line_start, _line_end in _iter_lines_with_offsets(text):
+        stripped_line, content_start, content_end = _stripped_line_and_range(raw_line, line_start)
+        if not in_code_block:
+            if stripped_line.startswith("```") and stripped_line.count("```") == 1:
+                in_code_block = True
+                opening_fence = "```"
+            elif stripped_line.startswith("~~~"):
+                in_code_block = True
+                opening_fence = "~~~"
+        elif stripped_line.startswith(opening_fence):
+            in_code_block = False
+            opening_fence = ""
+
+        if in_code_block:
+            current_content.append(stripped_line)
+            current_ranges.append({"start": content_start, "end": content_end})
+            continue
+
+        header = _header_match(stripped_line)
+        if header:
+            sep, name = header
+            current_header_level = sep.count("#")
+            while header_stack and header_stack[-1]["level"] >= current_header_level:
+                popped = header_stack.pop()
+                initial_metadata.pop(popped["name"], None)
+            header_text = stripped_line[len(sep):].strip()
+            header_stack.append({"level": current_header_level, "name": name, "data": header_text})
+            initial_metadata[name] = header_text
+            flush()
+        else:
+            if stripped_line:
+                current_content.append(stripped_line)
+                current_ranges.append({"start": content_start, "end": content_end})
+            elif current_content:
+                flush()
+
+        current_metadata = initial_metadata.copy()
+
+    flush()
+    return records
+
+
+def _aggregate_markdown_records(records: list[dict]) -> list[dict]:
+    aggregated: list[dict] = []
+    for record in records:
+        if aggregated and aggregated[-1]["metadata"] == record["metadata"]:
+            base = len(aggregated[-1]["content"])
+            aggregated[-1]["content"] += "  \n" + record["content"]
+            for segment in record["segments"]:
+                aggregated[-1]["segments"].append({
+                    **segment,
+                    "content_start": base + 3 + segment["content_start"],
+                    "content_end": base + 3 + segment["content_end"],
+                })
+        else:
+            aggregated.append({
+                "content": record["content"],
+                "metadata": dict(record["metadata"]),
+                "segments": [dict(s) for s in record["segments"]],
+            })
+    return aggregated
+
+
+def _source_ranges_for_content_span(text: str, segments: list[dict], start: int, end: int) -> list[dict]:
+    ranges: list[dict] = []
+    for segment in segments:
+        overlap_start = max(start, segment["content_start"])
+        overlap_end = min(end, segment["content_end"])
+        if overlap_start >= overlap_end:
+            continue
+        source_start = segment["start"] + (overlap_start - segment["content_start"])
+        source_end = segment["start"] + (overlap_end - segment["content_start"])
+        ranges.append({"start": source_start, "end": source_end, "hash": _span_hash(text[source_start:source_end])})
+    return ranges
+
+
+def _split_markdown_record(text: str, record: dict, *, chunk_size: int, chunk_overlap: int) -> list[dict]:
+    content = record["content"]
+    if len(content) <= chunk_size:
+        content_spans = [{"text": content, "start": 0, "end": len(content)}]
+    else:
+        recursive = RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            separators=_SEPARATORS,
+            keep_separator=True,
+            add_start_index=True,
+        )
+        content_spans = [
+            {"text": doc.page_content, "start": int(doc.metadata["start_index"]), "end": int(doc.metadata["start_index"]) + len(doc.page_content)}
+            for doc in recursive.create_documents([content])
+            if doc.page_content.strip()
+        ]
+    out: list[dict] = []
+    for span in content_spans:
+        ranges = _source_ranges_for_content_span(text, record["segments"], span["start"], span["end"])
+        if not ranges:
+            continue
+        out.append({
+            "text": span["text"],
+            "start": min(r["start"] for r in ranges),
+            "end": max(r["end"] for r in ranges),
+            "source_ranges": ranges,
+        })
+    return out
+
+
+def _split_markdown_spans(text: str, *, chunk_size: int, chunk_overlap: int) -> list[dict]:
+    out: list[dict] = []
+    for record in _aggregate_markdown_records(_markdown_line_records(text)):
+        out.extend(_split_markdown_record(text, record, chunk_size=chunk_size, chunk_overlap=chunk_overlap))
+    return out
 
 
 def split_text(text: str, *, chunk_size: int, chunk_overlap: int, splitter: str = "text") -> list[str]:
@@ -127,17 +305,25 @@ def split_structured_text(
 
     spans = _split_spans(text, chunk_size=chunk_size, chunk_overlap=chunk_overlap, splitter=splitter)
 
-    return [
-        {
+    chunks: list[dict] = []
+    for s in spans:
+        if not s["text"].strip():
+            continue
+        ranges = s.get("source_ranges") or [{
+            "start": s["start"],
+            "end": s["end"],
+            "hash": _span_hash(text[s["start"]:s["end"]]),
+        }]
+        item = {
             "text": s["text"],
             "source_start": s["start"],
             "source_end": s["end"],
             "location": _structured_location(text, s["start"], s["end"], base_location),
             "source_span_hash": _span_hash(text[s["start"]:s["end"]]),
+            "source_ranges": ranges,
         }
-        for s in spans
-        if s["text"].strip()
-    ]
+        chunks.append(item)
+    return chunks
 
 
 # ═══════════════════════════════════════════════════════════════

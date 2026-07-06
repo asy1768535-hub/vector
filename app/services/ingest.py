@@ -48,6 +48,8 @@ def _chunk_text_and_metadata(
     # span hash 用于后续验证原文完整性（不硬依赖 chunk.text == text[start:end]）
     if chunk.get("source_span_hash"):
         metadata["source_span_hash"] = str(chunk["source_span_hash"])
+    if chunk.get("source_ranges"):
+        metadata["source_ranges"] = list(chunk["source_ranges"])
     return text, metadata
 
 

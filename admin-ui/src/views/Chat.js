@@ -478,7 +478,7 @@ export default {
                     <el-alert v-if="sourceLocationDialog.error" type="warning" :closable="false" :title="sourceLocationDialog.error" />
                     <el-alert v-if="sourceLocationDialog.data?.legacy" type="info" :closable="false" title="该文档需重新导入后才能精确定位" />
                     <pre v-if="sourceLocationDialog.data?.legacy" class="chat-recalled-text">{{ sourceLocationDialog.data?.fallback_chunk || sourceLocationDialog.source?.content || '暂无引用内容' }}</pre>
-                    <pre v-else class="chat-source-window"><span>{{ sourceWindowParts().before }}</span><mark class="chat-source-highlight">{{ sourceWindowParts().match }}</mark><span>{{ sourceWindowParts().after }}</span></pre>
+                    <pre v-else class="chat-source-window"><template v-for="(part, pi) in sourceWindowParts().segments" :key="pi"><mark v-if="part.highlight" class="chat-source-highlight">{{ part.text }}</mark><span v-else>{{ part.text }}</span></template></pre>
                 </template>
             </el-dialog>
 

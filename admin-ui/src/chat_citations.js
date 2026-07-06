@@ -83,6 +83,37 @@ export function extractCitationIndex(el) {
 export function highlightSourceWindow(source) {
     const text = String(source?.text_window || '');
     const windowStart = Number(source?.window_start ?? 0);
+    const rawRanges = Array.isArray(source?.source_ranges) ? source.source_ranges : [];
+    const ranges = rawRanges
+        .map((range) => ({
+            start: Number(range?.start ?? windowStart) - windowStart,
+            end: Number(range?.end ?? windowStart) - windowStart,
+        }))
+        .filter((range) => Number.isFinite(range.start) && Number.isFinite(range.end))
+        .map((range) => ({
+            start: Math.max(0, Math.min(text.length, range.start)),
+            end: Math.max(0, Math.min(text.length, range.end)),
+        }))
+        .filter((range) => range.end > range.start)
+        .sort((a, b) => a.start - b.start);
+    if (ranges.length) {
+        const segments = [];
+        let cursor = 0;
+        for (const range of ranges) {
+            const start = Math.max(cursor, range.start);
+            const end = Math.max(start, range.end);
+            if (start > cursor) segments.push({ text: text.slice(cursor, start), highlight: false });
+            if (end > start) segments.push({ text: text.slice(start, end), highlight: true });
+            cursor = end;
+        }
+        if (cursor < text.length) segments.push({ text: text.slice(cursor), highlight: false });
+        return {
+            before: text.slice(0, ranges[0].start),
+            match: text.slice(ranges[0].start, ranges[0].end),
+            after: text.slice(ranges[0].end),
+            segments,
+        };
+    }
     const start = Number(source?.source_start ?? windowStart) - windowStart;
     const end = Number(source?.source_end ?? windowStart) - windowStart;
     const safeStart = Math.max(0, Math.min(text.length, start));
@@ -91,5 +122,10 @@ export function highlightSourceWindow(source) {
         before: text.slice(0, safeStart),
         match: text.slice(safeStart, safeEnd),
         after: text.slice(safeEnd),
+        segments: [
+            { text: text.slice(0, safeStart), highlight: false },
+            { text: text.slice(safeStart, safeEnd), highlight: true },
+            { text: text.slice(safeEnd), highlight: false },
+        ].filter((part) => part.text),
     };
 }

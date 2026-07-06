@@ -63,8 +63,27 @@ test('model supplied citation badge html is stripped before generated badges are
 });
 
 test('highlightSourceWindow splits absolute offsets into local spans', () => {
-    assert.deepEqual(
-        highlightSourceWindow({ text_window: 'abcdef', window_start: 10, source_start: 12, source_end: 14 }),
-        { before: 'ab', match: 'cd', after: 'ef' },
-    );
+    const parts = highlightSourceWindow({ text_window: 'abcdef', window_start: 10, source_start: 12, source_end: 14 });
+    assert.equal(parts.before, 'ab');
+    assert.equal(parts.match, 'cd');
+    assert.equal(parts.after, 'ef');
+});
+
+test('highlightSourceWindow returns ordered non-overlapping parts for multiple ranges', () => {
+    const parts = highlightSourceWindow({
+        text_window: 'first middle second',
+        window_start: 10,
+        source_start: 10,
+        source_end: 29,
+        source_ranges: [
+            { start: 10, end: 15 },
+            { start: 23, end: 29 },
+        ],
+    });
+
+    assert.deepEqual(parts.segments, [
+        { text: 'first', highlight: true },
+        { text: ' middle ', highlight: false },
+        { text: 'second', highlight: true },
+    ]);
 });

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import random
+import hashlib
 
 from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 
@@ -105,7 +106,14 @@ def _assert_matches_reference(text: str, *, chunk_size: int, chunk_overlap: int,
     assert split_text(text, chunk_size=chunk_size, chunk_overlap=chunk_overlap, splitter=splitter) == expected
     assert [chunk["text"] for chunk in structured] == expected
     for chunk in structured:
-        assert text[chunk["source_start"]:chunk["source_end"]] == chunk["text"]
+        ranges = chunk.get("source_ranges") or []
+        if splitter == "markdown":
+            assert ranges
+            for r in ranges:
+                assert 0 <= r["start"] < r["end"] <= len(text)
+                assert hashlib.sha256(text[r["start"]:r["end"]].encode("utf-8")).hexdigest()[:16] == r["hash"]
+        else:
+            assert text[chunk["source_start"]:chunk["source_end"]] == chunk["text"]
 
 
 def test_split_text_matches_langchain_reference_for_chinese_punctuation():
@@ -142,6 +150,72 @@ def test_random_texts_match_langchain_reference_and_source_slices():
         if not text.strip():
             continue
         _assert_matches_reference(text, chunk_size=18, chunk_overlap=5)
+
+
+def test_markdown_repeated_heading_non_contiguous_body_uses_source_ranges():
+    text = "### C\n\n## B\n\nx\n\n## B\n\nx"
+    chunks = split_structured_text(text, chunk_size=12, chunk_overlap=0, splitter="markdown")
+
+    assert [c["text"] for c in chunks] == _reference_chunks(text, chunk_size=12, chunk_overlap=0, splitter="markdown")
+    assert chunks == [chunks[0]]
+    assert chunks[0]["text"] == "x  \nx"
+    ranges = chunks[0]["source_ranges"]
+    assert [text[r["start"]:r["end"]] for r in ranges] == ["x", "x"]
+    assert ranges[0]["start"] != ranges[1]["start"]
+
+
+def test_markdown_same_heading_repeated_three_times_merges_three_ranges():
+    text = "## B\n\na\n\n## B\n\nb\n\n## B\n\nc"
+    chunks = split_structured_text(text, chunk_size=20, chunk_overlap=0, splitter="markdown")
+
+    assert [c["text"] for c in chunks] == _reference_chunks(text, chunk_size=20, chunk_overlap=0, splitter="markdown")
+    assert chunks[0]["text"] == "a  \nb  \nc"
+    assert [text[r["start"]:r["end"]] for r in chunks[0]["source_ranges"]] == ["a", "b", "c"]
+
+
+def test_markdown_heading_upgrade_and_downgrade_ranges_match_reference():
+    text = "# A\n\na\n\n## B\n\nb\n\n### C\n\nc\n\n## B\n\nd\n\n# A\n\ne"
+    chunks = split_structured_text(text, chunk_size=20, chunk_overlap=0, splitter="markdown")
+
+    assert [c["text"] for c in chunks] == _reference_chunks(text, chunk_size=20, chunk_overlap=0, splitter="markdown")
+    for chunk in chunks:
+        assert chunk["source_ranges"]
+
+
+def test_markdown_continuous_same_heading_different_body_keeps_ordered_ranges():
+    text = "## B\n\na\n\nb\n\n## B\n\nc"
+    chunks = split_structured_text(text, chunk_size=20, chunk_overlap=0, splitter="markdown")
+
+    assert [c["text"] for c in chunks] == _reference_chunks(text, chunk_size=20, chunk_overlap=0, splitter="markdown")
+    ranges = chunks[0]["source_ranges"]
+    assert [text[r["start"]:r["end"]] for r in ranges] == ["a", "b", "c"]
+    assert ranges == sorted(ranges, key=lambda r: r["start"])
+
+
+def test_markdown_chunk_crossing_non_contiguous_bodies_returns_two_ranges():
+    text = "## B\n\nleft\n\n## B\n\nright"
+    chunk = split_structured_text(text, chunk_size=20, chunk_overlap=0, splitter="markdown")[0]
+
+    assert chunk["text"] == "left  \nright"
+    assert len(chunk["source_ranges"]) == 2
+    assert [text[r["start"]:r["end"]] for r in chunk["source_ranges"]] == ["left", "right"]
+
+
+def test_markdown_random_inputs_do_not_raise_and_match_reference():
+    rng = random.Random(20260706)
+    headings = ["# A", "## B", "### C", "#### D"]
+    words = ["alpha", "beta", "gamma", "x", "y", "z"]
+    for _ in range(1000):
+        parts = []
+        for _i in range(rng.randint(1, 8)):
+            if rng.random() < 0.45 or not parts:
+                parts.append(rng.choice(headings))
+            parts.append(" ".join(rng.choice(words) for _ in range(rng.randint(1, 5))))
+        text = "\n\n".join(parts)
+        structured = split_structured_text(text, chunk_size=24, chunk_overlap=0, splitter="markdown")
+        assert [c["text"] for c in structured] == _reference_chunks(
+            text, chunk_size=24, chunk_overlap=0, splitter="markdown"
+        )
 
 
 def test_split_structured_text_none_returns_full_span():

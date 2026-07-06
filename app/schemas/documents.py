@@ -79,6 +79,7 @@ class DocumentSourceLocationResponse(BaseModel):
     window_end: Optional[int] = None
     source_start: Optional[int] = None
     source_end: Optional[int] = None
+    source_ranges: list[dict[str, Any]] = Field(default_factory=list)
     location: Optional[dict[str, Any]] = None
     chunk_id: str
     chunk_seq: int

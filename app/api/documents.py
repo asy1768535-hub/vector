@@ -158,6 +158,32 @@ def _bounded_source_window(text: str, start: int, end: int) -> tuple[str, int, i
     return text[window_start:window_end], window_start, window_end
 
 
+def _valid_source_ranges(raw_ranges, normalized_text: str) -> list[dict] | None:
+    if raw_ranges is None:
+        return None
+    if not isinstance(raw_ranges, list) or not raw_ranges:
+        return []
+    out: list[dict] = []
+    for item in raw_ranges:
+        if not isinstance(item, dict):
+            return []
+        try:
+            start = int(item["start"])
+            end = int(item["end"])
+        except (KeyError, TypeError, ValueError):
+            return []
+        stored_hash = item.get("hash")
+        if start < 0 or end < start or end > len(normalized_text):
+            return []
+        if not isinstance(stored_hash, str) or not re.fullmatch(r"[0-9a-f]{16}", stored_hash):
+            return []
+        actual_hash = hashlib.sha256(normalized_text[start:end].encode("utf-8")).hexdigest()[:16]
+        if stored_hash != actual_hash:
+            return []
+        out.append({"start": start, "end": end, "hash": stored_hash})
+    return out
+
+
 def _source_data(text: str, filename: str, suffix: str) -> dict:
     return {"normalized_text": text, "file_name": filename, "file_type": suffix or None}
 
@@ -414,16 +440,21 @@ async def get_document_source(
         return _legacy_source_response(doc, chunk, source.file_type)
     if source_start < 0 or source_end < source_start or source_end > len(source.normalized_text):
         return _legacy_source_response(doc, chunk, source.file_type)
-    # 校验原文 span 完整性（span hash + revision，不再强求 == chunk.text，
-    # 因为表格 chunk.text 可能含检索用的重复表头/前缀）。
-    stored_hash = metadata.get("source_span_hash")
-    if not isinstance(stored_hash, str) or not re.fullmatch(r"[0-9a-f]{16}", stored_hash):
+    validated_ranges = _valid_source_ranges(metadata.get("source_ranges"), source.normalized_text)
+    if validated_ranges == []:
         return _legacy_source_response(doc, chunk, source.file_type)
-    actual_hash = hashlib.sha256(
-        source.normalized_text[source_start:source_end].encode("utf-8")
-    ).hexdigest()[:16]
-    if stored_hash != actual_hash:
-        return _legacy_source_response(doc, chunk, source.file_type)
+    if validated_ranges is None:
+        # 校验原文 span 完整性（span hash + revision，不再强求 == chunk.text，
+        # 因为表格 chunk.text 可能含检索用的重复表头/前缀）。
+        stored_hash = metadata.get("source_span_hash")
+        if not isinstance(stored_hash, str) or not re.fullmatch(r"[0-9a-f]{16}", stored_hash):
+            return _legacy_source_response(doc, chunk, source.file_type)
+        actual_hash = hashlib.sha256(
+            source.normalized_text[source_start:source_end].encode("utf-8")
+        ).hexdigest()[:16]
+        if stored_hash != actual_hash:
+            return _legacy_source_response(doc, chunk, source.file_type)
+        validated_ranges = [{"start": source_start, "end": source_end, "hash": stored_hash}]
 
     text_window, window_start, window_end = _bounded_source_window(
         source.normalized_text, source_start, source_end
@@ -436,6 +467,7 @@ async def get_document_source(
         window_end=window_end,
         source_start=source_start,
         source_end=source_end,
+        source_ranges=validated_ranges,
         location=location,
         chunk_id=str(chunk.id),
         chunk_seq=chunk.seq,
