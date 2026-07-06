@@ -45,22 +45,23 @@ test('source location modal and citation styles exist', () => {
 // ── Task 4: 关闭弹窗后禁止重开 ──
 
 test('dialog closed event calls a returned source invalidation function', () => {
-    assert.ok(chat.includes('@closed="_closeAndInvalidateSourceDialog"'));
+    assert.ok(chat.includes('@closed="closeAndInvalidateSourceDialog"'));
     assert.ok(!chat.includes('@closed="++sourceLocationRequestSeq"'));
     assert.ok(!chat.includes('@closed="sourceLocationRequestSeq++"'));
 });
 
-test('_closeAndInvalidateSourceDialog is returned from setup for template access', () => {
+test('source dialog close handler avoids Vue-reserved underscore prefix', () => {
     const returned = setupReturnBlock();
-    assert.match(returned, /\b_closeAndInvalidateSourceDialog\b/);
+    assert.match(returned, /\bcloseAndInvalidateSourceDialog\b/);
+    assert.doesNotMatch(returned, /\b_closeAndInvalidateSourceDialog\b/);
 });
 
 test('onLibChange closes and invalidates source dialog', () => {
-    // onLibChange 函数体内调用了 _closeAndInvalidateSourceDialog
+    // onLibChange 函数体内调用了 closeAndInvalidateSourceDialog
     const onLibFn = chat.match(/function onLibChange\s*\(\)\s*\{([^}]+)\}/s);
     assert.ok(onLibFn, 'onLibChange should exist');
     const body = onLibFn[1];
-    assert.ok(body.includes('_closeAndInvalidateSourceDialog') ||
+    assert.ok(body.includes('closeAndInvalidateSourceDialog') ||
               (body.includes('++sourceLocationRequestSeq') && body.includes('sourceLocationDialog')),
         'onLibChange must invalidate source location request');
 });
@@ -69,16 +70,16 @@ test('newChat closes and invalidates source dialog', () => {
     const newChatFn = chat.match(/function newChat\s*\(\)\s*\{([^}]+)\}/s);
     assert.ok(newChatFn, 'newChat should exist');
     const body = newChatFn[1];
-    assert.ok(body.includes('_closeAndInvalidateSourceDialog') ||
+    assert.ok(body.includes('closeAndInvalidateSourceDialog') ||
               (body.includes('++sourceLocationRequestSeq') && body.includes('sourceLocationDialog')),
         'newChat must invalidate source location request');
 });
 
 test('selectConversation closes and invalidates source dialog', () => {
     const selFn = chat.match(/async function selectConversation\s*\([^)]*\)\s*\{([^}]*\}[^}]*\})/s);
-    // Just verify the function calls _closeAndInvalidateSourceDialog or increments the seq + closes dialog
+    // Just verify the function calls closeAndInvalidateSourceDialog or increments the seq + closes dialog
     assert.ok(
-        chat.includes('_closeAndInvalidateSourceDialog') ||
+        chat.includes('closeAndInvalidateSourceDialog') ||
         chat.match(/selectConversation[\s\S]*?sourceLocationRequestSeq/),
         'selectConversation must invalidate source location request'
     );
@@ -90,9 +91,9 @@ test('openDocDetail uses requestSeq guard for async response', () => {
 });
 
 test('sourceLocationDialog cleans loading when closed', () => {
-    // _closeAndInvalidateSourceDialog resets loading + open to false
-    const closeFn = chat.match(/function _closeAndInvalidateSourceDialog\s*\(\)\s*\{([^}]+)\}/s);
-    assert.ok(closeFn, '_closeAndInvalidateSourceDialog should exist');
+    // closeAndInvalidateSourceDialog resets loading + open to false
+    const closeFn = chat.match(/function closeAndInvalidateSourceDialog\s*\(\)\s*\{([^}]+)\}/s);
+    assert.ok(closeFn, 'closeAndInvalidateSourceDialog should exist');
     const body = closeFn[1];
     assert.ok(body.includes('sourceLocationRequestSeq'));
     assert.ok(body.includes('open: false') || body.includes("open:!1") || body.includes('false'));
