@@ -101,14 +101,21 @@ export default {
             } catch (e) { /* no-op */ }
         }
 
+        function _closeAndInvalidateSourceDialog() {
+            ++sourceLocationRequestSeq;
+            sourceLocationDialog.value = { open: false, loading: false, source: null, data: null, error: '' };
+        }
+
         function onLibChange() {
             _cleanupStream();
+            _closeAndInvalidateSourceDialog();
             currentConvId.value = null;
             messages.value = [];
         }
 
         function newChat() {
             _cleanupStream();
+            _closeAndInvalidateSourceDialog();
             currentConvId.value = null;
             messages.value = [];
         }
@@ -122,6 +129,7 @@ export default {
         async function selectConversation(conv) {
             if (conv.id === currentConvId.value) return;
             _cleanupStream();
+            _closeAndInvalidateSourceDialog();
             currentSlug.value = conv.library_slug;
             currentConvId.value = conv.id;
             messages.value = [];
@@ -323,6 +331,7 @@ export default {
             onLibChange, newChat, selectConversation, archiveConv, deleteConv, send, copyAnswer,
             copySourceText, openCitationChunk, handleCitationClick, handleCitationKeydown,
             openDocDetail, loadLibs, chatWelcome, recalledChunkDialog, sourceLocationDialog,
+            _closeAndInvalidateSourceDialog,
             sourceWindowParts, formatLocation,
             fmtScore, scoreClass, fmtTime, renderMarkdown,
         };
@@ -455,7 +464,7 @@ export default {
                 </template>
             </el-dialog>
 
-            <el-dialog v-model="sourceLocationDialog.open" title="查看出处" width="900px" class="chat-source-location-dialog">
+            <el-dialog v-model="sourceLocationDialog.open" title="查看出处" width="900px" class="chat-source-location-dialog" @closed="_closeAndInvalidateSourceDialog">
                 <div v-if="sourceLocationDialog.loading" class="chat-source-loading">正在定位来源...</div>
                 <template v-else>
                     <div class="chat-source-dialog-meta">

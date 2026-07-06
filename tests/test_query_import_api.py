@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import uuid
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -888,7 +889,7 @@ def test_replace_on_rebuilding_library_rejected(client):
     assert resp.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
 
 
-def test_get_document_source_precise_window():
+def _get_source_response_with_span_hash(stored_hash):
     mock_user.is_superuser = True
     doc = Document(
         id=uuid.uuid4(),
@@ -910,6 +911,7 @@ def test_get_document_source_precise_window():
             "source_end": 18,
             "location": {"type": "line", "start_line": 2, "end_line": 2},
             "source_revision": 2,
+            **({} if stored_hash is None else {"source_span_hash": stored_hash}),
         },
     )
     source = DocumentSource(
@@ -931,19 +933,42 @@ def test_get_document_source_precise_window():
         return None
 
     db.get = _get
+    with patch("app.deps.load_active_library", new_callable=AsyncMock) as ml:
+        ml.return_value = mock_library
+        resp = _client_with_db(db).get(f"/libraries/testlib/documents/{doc.id}/source?chunk_id={chunk.id}")
+        assert resp.status_code == status.HTTP_200_OK
+        return resp.json(), chunk
+
+
+def test_get_document_source_legacy_when_span_hash_missing():
     try:
-        with patch("app.deps.load_active_library", new_callable=AsyncMock) as ml:
-            ml.return_value = mock_library
-            resp = _client_with_db(db).get(f"/libraries/testlib/documents/{doc.id}/source?chunk_id={chunk.id}")
-            assert resp.status_code == status.HTTP_200_OK
-            data = resp.json()
-            assert data["legacy"] is False
-            assert data["document_title"] == "source.txt"
-            assert data["file_type"] == "txt"
-            assert data["chunk_seq"] == 1
-            local_start = data["source_start"] - data["window_start"]
-            local_end = data["source_end"] - data["window_start"]
-            assert data["text_window"][local_start:local_end] == chunk.text
+        data, chunk = _get_source_response_with_span_hash(None)
+        assert data["legacy"] is True
+        assert data["fallback_chunk"] == chunk.text
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_get_document_source_legacy_when_span_hash_wrong():
+    try:
+        data, chunk = _get_source_response_with_span_hash("0" * 16)
+        assert data["legacy"] is True
+        assert data["fallback_chunk"] == chunk.text
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_get_document_source_precise_window_when_span_hash_matches():
+    span_hash = hashlib.sha256("needle text".encode("utf-8")).hexdigest()[:16]
+    try:
+        data, chunk = _get_source_response_with_span_hash(span_hash)
+        assert data["legacy"] is False
+        assert data["document_title"] == "source.txt"
+        assert data["file_type"] == "txt"
+        assert data["chunk_seq"] == 1
+        local_start = data["source_start"] - data["window_start"]
+        local_end = data["source_end"] - data["window_start"]
+        assert data["text_window"][local_start:local_end] == chunk.text
     finally:
         app.dependency_overrides.clear()
 

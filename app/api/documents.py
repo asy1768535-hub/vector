@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import csv
+import hashlib
+import re
 import io
 import json
 import logging
@@ -412,7 +414,15 @@ async def get_document_source(
         return _legacy_source_response(doc, chunk, source.file_type)
     if source_start < 0 or source_end < source_start or source_end > len(source.normalized_text):
         return _legacy_source_response(doc, chunk, source.file_type)
-    if source.normalized_text[source_start:source_end] != chunk.text:
+    # 校验原文 span 完整性（span hash + revision，不再强求 == chunk.text，
+    # 因为表格 chunk.text 可能含检索用的重复表头/前缀）。
+    stored_hash = metadata.get("source_span_hash")
+    if not isinstance(stored_hash, str) or not re.fullmatch(r"[0-9a-f]{16}", stored_hash):
+        return _legacy_source_response(doc, chunk, source.file_type)
+    actual_hash = hashlib.sha256(
+        source.normalized_text[source_start:source_end].encode("utf-8")
+    ).hexdigest()[:16]
+    if stored_hash != actual_hash:
         return _legacy_source_response(doc, chunk, source.file_type)
 
     text_window, window_start, window_end = _bounded_source_window(

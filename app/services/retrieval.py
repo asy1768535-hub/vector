@@ -431,6 +431,7 @@ async def run_retrieval(
         metadata = {k: v for k, v in payload.items() if k not in internal_keys}
         metadata.setdefault("document_id", payload.get("document_id"))
         metadata.setdefault("chunk_id", payload.get("chunk_id"))
+        metadata.setdefault("seq", payload.get("seq"))
         if src_row:
             for col in extra_columns:
                 metadata.setdefault(col, src_row.get(col))

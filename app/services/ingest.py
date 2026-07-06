@@ -45,6 +45,9 @@ def _chunk_text_and_metadata(
         "location": chunk.get("location") or {},
         "source_revision": revision,
     })
+    # span hash 用于后续验证原文完整性（不硬依赖 chunk.text == text[start:end]）
+    if chunk.get("source_span_hash"):
+        metadata["source_span_hash"] = str(chunk["source_span_hash"])
     return text, metadata
 
 
