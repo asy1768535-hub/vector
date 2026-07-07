@@ -68,5 +68,9 @@ fastapi_users = FastAPIUsers[User, uuid.UUID](
 
 # 通用 Depends
 current_active_user = fastapi_users.current_user(active=True)
+current_cookie_user = fastapi_users.current_user(
+    active=True,
+    get_enabled_backends=lambda: [cookie_backend],
+)
 current_superuser = fastapi_users.current_user(active=True, superuser=True)
 optional_current_user = fastapi_users.current_user(active=True, optional=True)

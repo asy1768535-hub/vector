@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import re
+import os
 import subprocess
 from dataclasses import dataclass
 
@@ -48,6 +49,9 @@ PLACEHOLDER = re.compile(r"<[^>]+>|your-[a-z-]*-key|xxxx+|change-me|placeholder"
 
 ENV_TRACKED = re.compile(r"^\.env(?:\.local|\.bak.*)?$")  # 根级后端 .env，排除 .env.example / 前端 .env
 BAD_TRACKED = re.compile(r"(?:^|/)node_modules/|^samples/|^\.run_logs/|\.output$|(?:^|/)\.pytest_tmp/")
+PROD_ENV_KEYS = ("APP_ENV", "ENV", "ENVIRONMENT", "RELEASE_ENV")
+PROD_ENV_VALUES = {"prod", "production"}
+DEFAULT_JWT_SECRET = "please-change-me-in-env"
 
 
 @dataclass
@@ -130,11 +134,40 @@ def collect_findings(files: list[str], read_text=_default_read) -> list[Finding]
     return findings
 
 
+def _is_truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_falsey(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"0", "false", "no", "off"}
+
+
+def _is_production_env(env: dict[str, str] | os._Environ[str]) -> bool:
+    return any((env.get(k) or "").strip().lower() in PROD_ENV_VALUES for k in PROD_ENV_KEYS)
+
+
+def scan_release_config(env: dict[str, str] | os._Environ[str]) -> list[Finding]:
+    """Production-only runtime gates. Local/dev runs are ignored unless env explicitly says production."""
+    if not _is_production_env(env):
+        return []
+    findings: list[Finding] = []
+    if _is_truthy(env.get("APP_DEBUG")):
+        findings.append(Finding("<environment>", 0, "unsafe-config", "APP_DEBUG must be false in production"))
+    if not _is_truthy(env.get("COOKIE_SECURE")):
+        findings.append(Finding("<environment>", 0, "unsafe-config", "COOKIE_SECURE must be true in production"))
+    if _is_falsey(env.get("RETRIEVAL_CONSISTENCY_FILTER")):
+        findings.append(Finding("<environment>", 0, "unsafe-config", "RETRIEVAL_CONSISTENCY_FILTER must be true in production"))
+    if (env.get("JWT_SECRET") or "").strip() == DEFAULT_JWT_SECRET:
+        findings.append(Finding("<environment>", 0, "unsafe-config", "JWT_SECRET must not use the default value"))
+    return findings
+
+
 def main() -> int:
     files = tracked_files()
     untracked = untracked_files()
     all_files = files + untracked
     findings = collect_findings(all_files)
+    findings.extend(scan_release_config(os.environ))
     if not findings:
         extra = f" + {len(untracked)} 未跟踪" if untracked else ""
         print(f"[OK] 发布安全检查通过（扫描 {len(files)} 已跟踪{extra}文件，无问题）")

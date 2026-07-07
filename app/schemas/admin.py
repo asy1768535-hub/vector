@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 # 库唯一ID：只允许大小写英文字母和下划线（其它一律不允许）。
 # 同时它也是 Dify knowledge_id、URL 路径段、Qdrant collection 名、约定全文源表名，
@@ -14,8 +14,12 @@ from pydantic import BaseModel, EmailStr, Field, field_validator, model_validato
 _SLUG_RE = re.compile(r"^[A-Za-z_]{2,80}$")
 
 
+class StrictBaseModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
 # ── Users ────────────────────────────────────────────────────────────────
-class AdminUserCreate(BaseModel):
+class AdminUserCreate(StrictBaseModel):
     email: EmailStr
     password: str = Field(..., min_length=8, max_length=128)
     username: Optional[str] = Field(default=None, max_length=64)
@@ -23,14 +27,14 @@ class AdminUserCreate(BaseModel):
     is_superuser: bool = False
 
 
-class AdminUserUpdate(BaseModel):
+class AdminUserUpdate(StrictBaseModel):
     username: Optional[str] = Field(default=None, max_length=64)
     display_name: Optional[str] = Field(default=None, max_length=128)
     is_active: Optional[bool] = None
     is_superuser: Optional[bool] = None
 
 
-class AdminResetPassword(BaseModel):
+class AdminResetPassword(StrictBaseModel):
     # 专用重置密码入参：与 AdminUserUpdate 分开，避免 password 混入普通字段更新。
     password: str = Field(..., min_length=8, max_length=128)
 
@@ -207,13 +211,13 @@ class LibraryFAQRead(BaseModel):
 
 
 # ── Permissions ──────────────────────────────────────────────────────────
-class PermissionGrant(BaseModel):
+class PermissionGrant(StrictBaseModel):
     user_id: uuid.UUID
     library_slug: str
     actions: list[str] = Field(..., min_length=1, description="Subset of {read, insert, delete, admin}.")
 
 
-class PermissionRevoke(BaseModel):
+class PermissionRevoke(StrictBaseModel):
     user_id: uuid.UUID
     library_slug: str
     actions: Optional[list[str]] = Field(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
-import shutil
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -242,11 +242,7 @@ def test_query_library_unauthorized(mock_has_perm, client):
     assert response.status_code == status.HTTP_403_FORBIDDEN
 
 def _safe_tmp_dir(name: str) -> Path:
-    root = (Path(".pytest-tmp") / name).resolve()
-    if root.exists():
-        shutil.rmtree(root)
-    root.mkdir(parents=True)
-    return root
+    return Path(tempfile.mkdtemp(prefix=f"vector-db-{name}-")).resolve()
 
 
 @patch("app.services.ingest.ingest_text", new_callable=AsyncMock)
@@ -635,25 +631,22 @@ def test_import_docx_table_aware_passes_structured_segment_chunks():
         app.dependency_overrides.clear()
 
 
-# ── #4：.xls 明确拒绝 ─────────────────────────────────────────────────────
+# ── #4：旧 Office 格式不在严格白名单内 ─────────────────────────────────────
 
 def test_import_xls_rejected(client):
     resp = client.post(
         "/libraries/testlib/import-file",
         files={"file": ("旧台账.xls", b"\xd0\xcf\x11\xe0fake-xls", "application/vnd.ms-excel")},
     )
-    assert resp.status_code == status.HTTP_400_BAD_REQUEST
-    assert "xlsx" in resp.json()["detail"]
+    assert resp.status_code == status.HTTP_415_UNSUPPORTED_MEDIA_TYPE
 
 
 def test_import_doc_rejected(client):
-    # 老式 .doc：在白名单内但优雅拒绝，明确提示另存为 .docx（不引系统依赖）
     resp = client.post(
         "/libraries/testlib/import-file",
         files={"file": ("旧合同.doc", b"\xd0\xcf\x11\xe0fake-doc", "application/msword")},
     )
-    assert resp.status_code == status.HTTP_400_BAD_REQUEST
-    assert "docx" in resp.json()["detail"]
+    assert resp.status_code == status.HTTP_415_UNSUPPORTED_MEDIA_TYPE
 
 
 # ── docs/23：PDF 文字层 / 扫描页 OCR 接入上传 ─────────────────────────────────
@@ -908,6 +901,27 @@ def test_replace_target_other_library_404(client):
     assert resp.status_code == status.HTTP_404_NOT_FOUND
 
 
+def test_replace_target_deleted_404(client):
+    """替换：目标已删除 → 404，不能复活 tombstone 文档。"""
+    target = _doc(deleted_at=datetime.now(timezone.utc))
+    app.dependency_overrides[get_db] = lambda: make_db_mock(existing=target)
+    resp = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("x.txt", b"abc def", "text/plain")},
+        data={"replace_document_id": str(target.id)},
+    )
+    assert resp.status_code == status.HTTP_404_NOT_FOUND
+
+
+def test_replace_invalid_document_id_returns_422(client):
+    resp = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("x.txt", b"abc def", "text/plain")},
+        data={"replace_document_id": "not-a-uuid"},
+    )
+    assert resp.status_code == 422
+
+
 def test_replace_multi_doc_file_returns_400(client):
     """替换：多文档文件（JSON 数组）→ 400，不允许一对多。"""
     payload = json.dumps([{"text": "doc one"}, {"text": "doc two"}]).encode("utf-8")
@@ -941,6 +955,41 @@ def test_replace_on_rebuilding_library_rejected(client):
         data={"replace_document_id": str(target.id)},
     )
     assert resp.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+
+
+@patch("app.deps.has_permission")
+def test_import_file_requires_insert_permission(mock_has_perm):
+    mock_user.is_superuser = False
+    mock_has_perm.return_value = False
+    try:
+        with patch("app.deps.load_active_library", new_callable=AsyncMock) as ml:
+            ml.return_value = mock_library
+            resp = _client_with_db(make_db_mock()).post(
+                "/libraries/testlib/import-file",
+                files={"file": ("x.txt", b"abc def", "text/plain")},
+            )
+            assert resp.status_code == status.HTTP_403_FORBIDDEN
+    finally:
+        mock_user.is_superuser = True
+        app.dependency_overrides.clear()
+
+
+@patch("app.deps.has_permission")
+def test_replace_document_requires_insert_permission(mock_has_perm):
+    mock_user.is_superuser = False
+    mock_has_perm.return_value = False
+    try:
+        with patch("app.deps.load_active_library", new_callable=AsyncMock) as ml:
+            ml.return_value = mock_library
+            resp = _client_with_db(make_db_mock()).post(
+                "/libraries/testlib/import-file",
+                files={"file": ("x.txt", b"abc def", "text/plain")},
+                data={"replace_document_id": str(uuid.uuid4())},
+            )
+            assert resp.status_code == status.HTTP_403_FORBIDDEN
+    finally:
+        mock_user.is_superuser = True
+        app.dependency_overrides.clear()
 
 
 def _get_source_response_with_span_hash(stored_hash):
@@ -1362,6 +1411,90 @@ def test_download_document_file_missing_original_returns_clear_404():
         app.dependency_overrides.clear()
 
 
+def test_download_document_file_rejects_relative_escape(monkeypatch):
+    tmp_path = _safe_tmp_dir("document-file-relative-escape")
+    outside = tmp_path.parent / f"outside-{uuid.uuid4().hex}.txt"
+    outside.write_bytes(b"outside")
+    mock_user.is_superuser = True
+    monkeypatch.setattr(settings, "document_files_dir", str(tmp_path))
+    doc = Document(
+        id=uuid.uuid4(),
+        library_id=mock_library.id,
+        title="escape.txt",
+        content_hash="h",
+        current_revision=1,
+        status="ready",
+    )
+    row = DocumentFile(
+        document_id=doc.id,
+        revision=1,
+        file_name="escape.txt",
+        content_type="text/plain",
+        storage_path=f"../{outside.name}",
+        size_bytes=len(b"outside"),
+        sha256=hashlib.sha256(b"outside").hexdigest(),
+    )
+    db = AsyncMock()
+
+    async def _get(model, ident):
+        if model is Document:
+            return doc
+        if model is DocumentFile:
+            return row
+        return None
+
+    db.get = _get
+    try:
+        with patch("app.deps.load_active_library", new_callable=AsyncMock) as ml:
+            ml.return_value = mock_library
+            resp = _client_with_db(db).get(f"/libraries/testlib/documents/{doc.id}/file")
+            assert resp.status_code == status.HTTP_404_NOT_FOUND
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_download_document_file_rejects_absolute_path_outside_root(monkeypatch):
+    tmp_path = _safe_tmp_dir("document-file-absolute-escape")
+    outside = tmp_path.parent / f"absolute-{uuid.uuid4().hex}.txt"
+    outside.write_bytes(b"outside")
+    mock_user.is_superuser = True
+    monkeypatch.setattr(settings, "document_files_dir", str(tmp_path))
+    doc = Document(
+        id=uuid.uuid4(),
+        library_id=mock_library.id,
+        title="absolute.txt",
+        content_hash="h",
+        current_revision=1,
+        status="ready",
+    )
+    row = DocumentFile(
+        document_id=doc.id,
+        revision=1,
+        file_name="absolute.txt",
+        content_type="text/plain",
+        storage_path=str(outside),
+        size_bytes=len(b"outside"),
+        sha256=hashlib.sha256(b"outside").hexdigest(),
+    )
+    db = AsyncMock()
+
+    async def _get(model, ident):
+        if model is Document:
+            return doc
+        if model is DocumentFile:
+            return row
+        return None
+
+    db.get = _get
+    try:
+        with patch("app.deps.load_active_library", new_callable=AsyncMock) as ml:
+            ml.return_value = mock_library
+            resp = _client_with_db(db).get(f"/libraries/testlib/documents/{doc.id}/file")
+            assert resp.status_code == status.HTTP_404_NOT_FOUND
+    finally:
+        app.dependency_overrides.clear()
+
+
 @patch("app.deps.has_permission")
 def test_download_document_file_requires_read_permission(mock_has_perm):
     mock_user.is_superuser = False
@@ -1372,6 +1505,53 @@ def test_download_document_file_requires_read_permission(mock_has_perm):
         with patch("app.deps.load_active_library", new_callable=AsyncMock) as ml:
             ml.return_value = mock_library
             resp = _client_with_db(db).get(f"/libraries/testlib/documents/{doc_id}/file")
+            assert resp.status_code == status.HTTP_403_FORBIDDEN
+    finally:
+        mock_user.is_superuser = True
+        app.dependency_overrides.clear()
+
+
+@patch("app.services.cleanup.enqueue_delete_document", new_callable=AsyncMock)
+def test_delete_document_tombstones_supersedes_jobs_and_enqueues_cleanup(mock_enqueue):
+    mock_user.is_superuser = True
+    doc = Document(
+        id=uuid.uuid4(),
+        library_id=mock_library.id,
+        title="delete-me.txt",
+        content_hash="h",
+        current_revision=2,
+        status="ready",
+    )
+    db = make_db_mock(existing=doc)
+    statements = []
+    original_execute = db.execute
+
+    async def _execute(stmt, *args, **kwargs):
+        statements.append(str(stmt))
+        return await original_execute(stmt, *args, **kwargs)
+
+    db.execute = _execute
+    try:
+        with patch("app.deps.load_active_library", new_callable=AsyncMock) as ml:
+            ml.return_value = mock_library
+            resp = _client_with_db(db).delete(f"/libraries/testlib/documents/{doc.id}")
+            assert resp.status_code == status.HTTP_204_NO_CONTENT
+            assert any("UPDATE documents" in stmt and "deleted_at" in stmt and "status" in stmt for stmt in statements)
+            assert any("UPDATE embedding_jobs" in stmt and "status" in stmt and "finished_at" in stmt for stmt in statements)
+            mock_enqueue.assert_awaited_once_with(db, mock_library, doc.id)
+            db.commit.assert_awaited_once()
+    finally:
+        app.dependency_overrides.clear()
+
+
+@patch("app.deps.has_permission")
+def test_delete_document_requires_delete_permission(mock_has_perm):
+    mock_user.is_superuser = False
+    mock_has_perm.return_value = False
+    try:
+        with patch("app.deps.load_active_library", new_callable=AsyncMock) as ml:
+            ml.return_value = mock_library
+            resp = _client_with_db(make_db_mock()).delete(f"/libraries/testlib/documents/{uuid.uuid4()}")
             assert resp.status_code == status.HTTP_403_FORBIDDEN
     finally:
         mock_user.is_superuser = True

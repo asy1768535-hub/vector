@@ -130,28 +130,16 @@ export default {
         <section class="api-keys-doc-card">
             <div class="api-keys-doc-main">
                 <h3>API 接入说明：检索知识库切片</h3>
-                <p>外部系统、脚本或 AI Agent 可以使用 API Key 调用知识库检索接口。系统会对 query 做向量化、检索并可经过 rerank 重排，返回相关文本切片；调用方可自行把切片交给自己的 LLM 生成回答。</p>
+                <p><code>/query</code> 返回召回切片，不是最终回答；如需最终回答，请调用方将切片交给自己的 LLM。</p>
+                <p class="api-keys-doc-note">推荐把 <code>BASE_URL</code> / <code>LIBRARY_ID</code> / <code>API_KEY</code> 放到 <code>.env</code>，不要写死在前端或脚本源码里。</p>
                 <ol class="api-keys-doc-steps">
                     <li>创建并保存 API Key</li>
-                    <li>请求头添加 <code>Authorization: Bearer &lt;API_KEY&gt;</code></li>
-                    <li>调用 <code>POST /libraries/{LIBRARY_ID}/query</code></li>
+                    <li>在 <code>.env</code> 配置 <code>VECTOR_KB_BASE_URL</code>、<code>VECTOR_KB_LIBRARY_ID</code>、<code>VECTOR_KB_API_KEY</code></li>
+                    <li>调用 <code>POST /libraries/{LIBRARY_ID}/query</code> 获取 <code>results</code> 切片</li>
                 </ol>
-                <pre class="api-keys-doc-code">curl -X POST "BASE_URL/libraries/LIBRARY_ID/query"
-  -H "Authorization: Bearer API_KEY"
-  -H "Content-Type: application/json"
-  -d '{"query":"你的问题","limit":5}'</pre>
-                <div class="api-keys-doc-fields">
-                    <span><code>results[].text</code>：召回切片正文</span>
-                    <span><code>results[].similarity</code>：相似度/相关性分数</span>
-                    <span><code>results[].document_id</code>：来源文档</span>
-                    <span><code>results[].chunk_id</code>：来源切片</span>
-                    <span><code>results[].title</code>：来源文档标题</span>
-                </div>
-                <p class="api-keys-doc-note">该接口返回的是检索切片，不是大模型最终回答。</p>
             </div>
             <div class="api-keys-doc-actions">
-                <el-button plain @click="openApiDoc">查看完整 API 文档</el-button>
-                <span>docs/29-api-key-api-usage.md</span>
+                <el-button class="api-keys-doc-template-button" @click="openApiDoc">快速接入模板</el-button>
             </div>
         </section>
 
@@ -216,31 +204,164 @@ export default {
         </section>
 
 
-        <el-dialog v-model="docDialog.open" title="完整 API 文档：检索知识库切片" width="760px" class="api-keys-doc-dialog">
+        <el-dialog v-model="docDialog.open" title="完整接入模板" width="860px" class="api-keys-doc-dialog">
             <div class="api-keys-doc-dialog-body">
                 <section>
-                    <h4>1. 认证方式</h4>
-                    <p>在请求头中携带 API Key，不要放到 URL 参数中。</p>
-                    <pre class="api-keys-doc-code">Authorization: Bearer &lt;API_KEY&gt;</pre>
+                    <h4>1. .env 配置示例</h4>
+                    <p>普通用户可直接在这里复制接入模板；推荐把地址、知识库 ID 和 API Key 放在调用脚本同目录的 <code>.env</code>，不要写死在代码里。</p>
+                    <pre class="api-keys-doc-code">VECTOR_KB_BASE_URL=http://10.0.10.2:8100
+VECTOR_KB_LIBRARY_ID=deploy_acceptance_server
+VECTOR_KB_API_KEY=你的完整API_KEY
+LOCAL_LLM_BASE_URL=可选
+LOCAL_LLM_API_KEY=可选
+LOCAL_LLM_MODEL=可选</pre>
                 </section>
                 <section>
-                    <h4>2. 检索切片接口</h4>
-                    <p>系统会对 query 做向量化、检索并可经过 rerank 重排，返回相关文本切片。</p>
-                    <pre class="api-keys-doc-code">POST BASE_URL/libraries/LIBRARY_ID/query</pre>
-                    <pre class="api-keys-doc-code">{
-  "query": "你的问题",
-  "limit": 5
+                    <h4>2. Python 完整接入脚本</h4>
+                    <pre class="api-keys-doc-code">from pathlib import Path
+from typing import Any
+import os
+
+import requests
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).with_name(".env"))
+
+VECTOR_KB_BASE_URL = os.getenv("VECTOR_KB_BASE_URL", "").rstrip("/")
+VECTOR_KB_LIBRARY_ID = os.getenv("VECTOR_KB_LIBRARY_ID", "")
+VECTOR_KB_API_KEY = os.getenv("VECTOR_KB_API_KEY", "")
+
+LOCAL_LLM_BASE_URL = os.getenv("LOCAL_LLM_BASE_URL", "")
+LOCAL_LLM_API_KEY = os.getenv("LOCAL_LLM_API_KEY", "")
+LOCAL_LLM_MODEL = os.getenv("LOCAL_LLM_MODEL", "")
+
+
+def require_env(name: str, value: str) -> str:
+    if not value:
+        raise RuntimeError(f"请在 .env 中配置 {name}")
+    return value
+
+
+def search_kb(question: str, limit: int = 5) -> list[dict[str, Any]]:
+    base_url = require_env("VECTOR_KB_BASE_URL", VECTOR_KB_BASE_URL)
+    library_id = require_env("VECTOR_KB_LIBRARY_ID", VECTOR_KB_LIBRARY_ID)
+    api_key = require_env("VECTOR_KB_API_KEY", VECTOR_KB_API_KEY)
+
+    resp = requests.post(
+        f"{base_url}/libraries/{library_id}/query",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={"query": question, "limit": limit},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json().get("results", [])
+
+
+def build_context(chunks: list[dict[str, Any]]) -> str:
+    parts = []
+    for index, chunk in enumerate(chunks, start=1):
+        parts.append(
+            f"[来源 {index}]\n"
+            f"标题：{chunk.get('title') or '未知来源'}\n"
+            f"相关性：{chunk.get('similarity')}\n"
+            f"document_id：{chunk.get('document_id')}\n"
+            f"chunk_id：{chunk.get('chunk_id')}\n"
+            f"正文：\n{chunk.get('text') or ''}"
+        )
+    return "\n\n---\n\n".join(parts)
+
+
+def call_your_llm(prompt: str) -> str:
+    # 占位函数：请替换为你自己的大模型调用。
+    # 建议从 .env 读取 LOCAL_LLM_BASE_URL / LOCAL_LLM_API_KEY / LOCAL_LLM_MODEL。
+    # 不要把大模型 API Key 写死在代码里。
+    raise NotImplementedError("请将 call_your_llm(prompt) 替换为自己的模型调用")
+
+
+def ask(question: str, limit: int = 5, use_llm: bool = False):
+    chunks = search_kb(question, limit=limit)
+
+    if not use_llm:
+        return chunks
+
+    context = build_context(chunks)
+    prompt = f"""请只根据以下知识库切片回答问题。若切片中没有答案，请说明无法从已给资料确认。
+
+问题：{question}
+
+知识库切片：
+{context}
+"""
+    answer = call_your_llm(prompt)
+    sources = [
+        {
+            "title": chunk.get("title"),
+            "document_id": chunk.get("document_id"),
+            "chunk_id": chunk.get("chunk_id"),
+            "similarity": chunk.get("similarity"),
+        }
+        for chunk in chunks
+    ]
+    return {"answer": answer, "sources": sources}
+
+
+if __name__ == "__main__":
+    question = "你的问题"
+
+    print("=== use_llm=False：只返回 results 切片 ===")
+    chunks = ask(question, limit=5, use_llm=False)
+    for item in chunks:
+        print("来源文档：", item.get("title"))
+        print("相关性：", item.get("similarity"))
+        print("切片正文：", item.get("text"))
+        print()
+
+    # 替换 call_your_llm(prompt) 后，再打开下面两行：
+    # print("=== use_llm=True：返回 answer + sources ===")
+    # print(ask(question, limit=5, use_llm=True))</pre>
+                </section>
+                <section>
+                    <h4>3. use_llm 两种模式</h4>
+                    <ul class="api-keys-doc-list">
+                        <li><code>use_llm=False</code>：只调用 <code>/query</code>，直接返回 <code>results</code> 切片。</li>
+                        <li><code>use_llm=True</code>：先检索切片，再调用方自己执行 <code>call_your_llm(prompt)</code>，返回 <code>answer + sources</code>。</li>
+                    </ul>
+                    <p class="api-keys-doc-note"><code>call_your_llm</code> 是占位函数，需要用户替换为自己的大模型调用。</p>
+                </section>
+                <section>
+                    <h4>4. JavaScript/Node 简版</h4>
+                    <pre class="api-keys-doc-code">const VECTOR_KB_BASE_URL = process.env.VECTOR_KB_BASE_URL;
+const VECTOR_KB_LIBRARY_ID = process.env.VECTOR_KB_LIBRARY_ID;
+const VECTOR_KB_API_KEY = process.env.VECTOR_KB_API_KEY;
+
+async function searchKb(question, limit = 5) {
+  const response = await fetch(
+    VECTOR_KB_BASE_URL + "/libraries/" + VECTOR_KB_LIBRARY_ID + "/query",
+    {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + VECTOR_KB_API_KEY,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ query: question, limit })
+    }
+  );
+  if (!response.ok) throw new Error("知识库请求失败：" + response.status);
+  return (await response.json()).results || [];
 }</pre>
                 </section>
                 <section>
-                    <h4>3. curl 示例</h4>
-                    <pre class="api-keys-doc-code">curl -X POST "BASE_URL/libraries/LIBRARY_ID/query"
-  -H "Authorization: Bearer API_KEY"
-  -H "Content-Type: application/json"
+                    <h4>5. curl 仅用于临时测试</h4>
+                    <pre class="api-keys-doc-code">curl -X POST "$VECTOR_KB_BASE_URL/libraries/$VECTOR_KB_LIBRARY_ID/query" \
+  -H "Authorization: Bearer $VECTOR_KB_API_KEY" \
+  -H "Content-Type: application/json" \
   -d '{"query":"你的问题","limit":5}'</pre>
                 </section>
                 <section>
-                    <h4>4. 响应字段</h4>
+                    <h4>6. 响应字段说明</h4>
                     <ul class="api-keys-doc-list">
                         <li><code>results[].text</code>：召回切片正文</li>
                         <li><code>results[].similarity</code>：相似度/相关性分数</li>
@@ -248,11 +369,6 @@ export default {
                         <li><code>results[].chunk_id</code>：来源切片</li>
                         <li><code>results[].title</code>：来源文档标题</li>
                     </ul>
-                    <p class="api-keys-doc-note">该接口返回的是检索切片，不是大模型最终回答。</p>
-                </section>
-                <section>
-                    <h4>5. 可选：具备 insert 权限时上传文件</h4>
-                    <p>文件上传不是检索切片的必要步骤。具备 insert 权限时，可参考项目文档 <code>docs/29-api-key-api-usage.md</code> 使用导入接口。</p>
                 </section>
             </div>
         </el-dialog>

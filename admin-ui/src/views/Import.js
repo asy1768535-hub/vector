@@ -10,6 +10,12 @@ import {
     validateBatch, fileKey, formatSize, fileTypeIcon,
     MAX_BATCH_SIZE, validateFile,
 } from '../import_ui.js';
+import {
+    BATCH_REPLACE_MATCH_LABEL, BATCH_REPLACE_MATCH_TAG,
+    BATCH_REPLACE_STATUS_LABEL, BATCH_REPLACE_STATUS_TAG,
+    createBatchReplaceItems, setBatchReplaceTarget,
+    submittableBatchReplaceItems, submitBatchReplaceItems,
+} from '../batch_replace.js';
 import { uploadEmpty } from '../illustrations.js';
 
 export default {
@@ -20,6 +26,7 @@ export default {
         const slug = ref(null);
         const mode = ref('add');
         const fileInput = ref(null);
+        const batchReplaceFileInput = ref(null);
         const externalId = ref('');
         const replaceDocId = ref(null);
         const replaceFile = ref(null);
@@ -38,6 +45,8 @@ export default {
         const routeReplaceTitle = ref('');
         const routeReplaceError = ref('');
         const applyingRouteReplace = ref(false);
+        const batchReplaceItems = ref([]);
+        const batchReplacing = ref(false);
 
         // ── Computed ─────────────────────────────────────────
         const displayDocs = computed(() => {
@@ -90,7 +99,15 @@ export default {
         const canReplace = computed(() =>
             mode.value === 'replace' && slug.value && replaceDocId.value &&
             replaceFile.value && !replaceFileError.value && !loading.value &&
-            !docsLoading.value && !routeReplaceError.value
+            !docsLoading.value && !routeReplaceError.value && !batchReplacing.value
+        );
+
+        const batchReplaceReadyItems = computed(() =>
+            submittableBatchReplaceItems(batchReplaceItems.value)
+        );
+        const canBatchReplace = computed(() =>
+            mode.value === 'replace' && slug.value && batchReplaceReadyItems.value.length > 0 &&
+            !batchReplacing.value && !loading.value && !docsLoading.value
         );
 
         // ── Library loading ──────────────────────────────────
@@ -244,6 +261,71 @@ export default {
             }
         }
 
+        function triggerBatchReplaceFileSelect() {
+            if (batchReplaceFileInput.value) batchReplaceFileInput.value.click();
+        }
+
+        function addBatchReplaceFiles(files) {
+            if (!files || !files.length) return;
+            const existingKeys = batchReplaceItems.value.map((it) => it._key);
+            const items = createBatchReplaceItems(files, docs.value, existingKeys);
+            batchReplaceItems.value.push(...items);
+            if (items.length < files.length) ElMessage.warning('重复文件已跳过');
+        }
+
+        function onBatchReplaceFileChange(e) {
+            addBatchReplaceFiles(e.target.files);
+            if (batchReplaceFileInput.value) batchReplaceFileInput.value.value = '';
+        }
+
+        function onBatchReplaceDrop(e) {
+            e.preventDefault();
+            dragOver.value = false;
+            addBatchReplaceFiles(e.dataTransfer.files);
+        }
+
+        function removeBatchReplaceItem(item) {
+            const idx = batchReplaceItems.value.indexOf(item);
+            if (idx >= 0) batchReplaceItems.value.splice(idx, 1);
+        }
+
+        function onBatchReplaceTargetChange(item, documentId) {
+            setBatchReplaceTarget(item, documentId, docs.value);
+        }
+
+        function targetDocTitle(documentId) {
+            const doc = docs.value.find((d) => String(d.id) === String(documentId));
+            return doc?.title || documentId || '—';
+        }
+
+        function batchReplaceValidationText(item) {
+            return item.validationStatus === 'valid' ? '通过' : (item.validationError || '未通过');
+        }
+
+        async function handleBatchReplace() {
+            const ready = batchReplaceReadyItems.value;
+            if (!slug.value || !ready.length) return;
+            try {
+                await ElMessageBox.confirm(
+                    `将覆盖 ${ready.length} 个已有文档；覆盖后会重新切分、重新向量化；历史问答引用不会自动更新。`,
+                    '确认批量替换', { type: 'warning' }
+                );
+            } catch (_) { return; }
+
+            batchReplacing.value = true;
+            try {
+                const result = await submitBatchReplaceItems(
+                    batchReplaceItems.value,
+                    slug.value,
+                    api.importFile,
+                    humanizeError
+                );
+                ElMessage.success(`批量替换完成：${result.submitted} 已提交，${result.skipped} 跳过${result.failed > 0 ? `，${result.failed} 失败` : ''}`);
+                await loadDocs();
+                await loadStats();
+            } finally { batchReplacing.value = false; }
+        }
+
         // ── Upload ───────────────────────────────────────────
         async function runQueue(onlyFailed) {
             if (!slug.value) return;
@@ -331,6 +413,7 @@ export default {
         // ── Watchers ─────────────────────────────────────────
         watch(slug, () => {
             queue.value = [];
+            batchReplaceItems.value = [];
             importResult.value = null;
             if (!routeReplaceActive.value) replaceDocId.value = null;
             replaceFile.value = null;
@@ -343,6 +426,7 @@ export default {
         watch(mode, () => {
             importResult.value = null;
             clearQueue();
+            batchReplaceItems.value = [];
             replaceFile.value = null;
             replaceFileError.value = '';
             if (mode.value !== 'replace') {
@@ -360,21 +444,26 @@ export default {
         onMounted(loadLibs);
 
         return {
-            libs, slug, mode, fileInput, externalId, showExtId, replaceDocId,
+            libs, slug, mode, fileInput, batchReplaceFileInput, externalId, showExtId, replaceDocId,
             replaceFile, replaceFileError, routeReplaceDocumentId, routeReplaceTitle,
             routeReplaceError, routeReplaceActive, replaceTargetTitle, selectedReplaceDoc,
-            applyingRouteReplace,
+            applyingRouteReplace, batchReplaceItems, batchReplacing, batchReplaceReadyItems,
             docs, docsLoading, loading, importResult, docQuery,
             queue, uploading, stats, dragOver,
             displayDocs, extIdSet, multiBlockedByExtId,
             pendingCount, submittedCount, skippedCount, failedCount, invalidCount,
-            hasFailed, canStart, canReplace,
-            loadLibs, loadDocs, triggerFileSelect, onFileChange,
+            hasFailed, canStart, canReplace, canBatchReplace,
+            loadLibs, loadDocs, triggerFileSelect, triggerBatchReplaceFileSelect, onFileChange,
             onDragOver, onDragLeave, onDrop,
             addFiles, removeItem, clearQueue, runQueue,
             onReplaceFileChange, onReplaceDrop,
+            onBatchReplaceFileChange, onBatchReplaceDrop, removeBatchReplaceItem,
+            onBatchReplaceTargetChange, targetDocTitle, batchReplaceValidationText, handleBatchReplace,
             handleReplace, clearReplace, backToDocuments,
-            ST_LABEL, ST_TAG, OP_LABEL, OP_TAG, uploadEmpty,
+            ST_LABEL, ST_TAG, OP_LABEL, OP_TAG,
+            BATCH_REPLACE_MATCH_LABEL, BATCH_REPLACE_MATCH_TAG,
+            BATCH_REPLACE_STATUS_LABEL, BATCH_REPLACE_STATUS_TAG,
+            uploadEmpty,
             formatSize, fileTypeIcon, MAX_BATCH_SIZE,
         };
     },
@@ -390,13 +479,13 @@ export default {
         <section class="import-config-card">
             <el-form :inline="true">
                 <el-form-item label="目标库">
-                    <el-select v-model="slug" placeholder="选择知识库" class="import-lib-select" :disabled="routeReplaceActive">
+                    <el-select v-model="slug" placeholder="选择知识库" class="import-lib-select" :disabled="routeReplaceActive || batchReplacing">
                         <el-option v-for="l in libs" :key="l.slug"
                                    :label="l.name + ' (' + l.slug + ')'" :value="l.slug" />
                     </el-select>
                 </el-form-item>
                 <el-form-item label="模式">
-                    <el-radio-group v-model="mode" :disabled="routeReplaceActive">
+                    <el-radio-group v-model="mode" :disabled="routeReplaceActive || batchReplacing">
                         <el-radio value="add">新增数据</el-radio>
                         <el-radio value="replace">替换已有文档</el-radio>
                     </el-radio-group>
@@ -405,7 +494,7 @@ export default {
                     <el-select v-model="replaceDocId" filterable
                                :filter-method="(v) => docQuery = v"
                                :loading="docsLoading || applyingRouteReplace" clearable
-                               :disabled="routeReplaceActive"
+                               :disabled="routeReplaceActive || batchReplacing"
                                :placeholder="docsLoading || applyingRouteReplace ? '正在加载目标文档...' : '搜索并选择要替换的文档'"
                                class="import-replace-select"
                                popper-class="replace-doc-popper">
@@ -534,7 +623,7 @@ export default {
         </div>
 
         <!-- Replace mode -->
-        <div v-if="mode === 'replace'" class="import-body">
+        <div v-if="mode === 'replace'" class="import-body import-replace-body">
             <section class="import-upload-card">
                 <div class="import-dropzone"
                      :class="{ 'is-dragover': dragOver }"
@@ -543,9 +632,9 @@ export default {
                      @drop="onReplaceDrop"
                      @click="triggerFileSelect">
                     <img :src="uploadEmpty" class="illustration-upload-empty" alt="" aria-hidden="true" />
-                    <div class="import-dropzone-title">点击选择文件或拖拽文件到此处</div>
+                    <div class="import-dropzone-title">单文件替换</div>
+                    <div class="import-dropzone-hint">选择 1 个文件替换上方目标文档</div>
                     <div class="import-dropzone-hint">支持 txt、md、markdown、json、csv、docx、xlsx、pdf</div>
-                    <div class="import-dropzone-hint">单文件最大 50 MB</div>
                 </div>
                 <input ref="fileInput" type="file"
                        accept=".txt,.md,.markdown,.json,.csv,.docx,.xlsx,.pdf"
@@ -567,6 +656,90 @@ export default {
                            class="import-replace-btn"
                            @click="handleReplace">替换文档</el-button>
                 <el-button v-if="importResult" class="import-replace-clear" @click="clearReplace">清除结果</el-button>
+            </section>
+
+            <section class="import-file-card import-batch-replace-card">
+                <div class="import-batch-replace-head">
+                    <div>
+                        <h3>批量替换已有文档</h3>
+                        <p>拖入多个文件，按文件名自动匹配目标文档；未匹配和多候选必须手动选择，不会静默新增。</p>
+                    </div>
+                    <el-button type="primary" :loading="batchReplacing" :disabled="!canBatchReplace"
+                               @click="handleBatchReplace">批量提交 {{ batchReplaceReadyItems.length }} 个</el-button>
+                </div>
+                <div class="import-batch-replace-dropzone"
+                     :class="{ 'is-dragover': dragOver }"
+                     @dragover="onDragOver"
+                     @dragleave="onDragLeave"
+                     @drop="onBatchReplaceDrop"
+                     @click="triggerBatchReplaceFileSelect">
+                    <div class="import-dropzone-title">拖入多个文件批量替换</div>
+                    <div class="import-dropzone-hint">只提交唯一匹配且文件校验通过的项；多候选不会自动选第一个</div>
+                </div>
+                <input ref="batchReplaceFileInput" type="file" multiple
+                       accept=".txt,.md,.markdown,.json,.csv,.docx,.xlsx,.pdf"
+                       class="import-file-input-hidden"
+                       @change="onBatchReplaceFileChange" />
+                <div class="import-file-table-shell import-batch-replace-table-shell">
+                    <el-table :data="batchReplaceItems" empty-text="暂无批量替换文件">
+                        <el-table-column label="新文件名" min-width="180">
+                            <template #default="{row}">
+                                <div class="import-file-name-cell">
+                                    <img v-if="fileTypeIcon(row.file)" class="import-file-icon"
+                                         :src="fileTypeIcon(row.file)" alt="" aria-hidden="true" />
+                                    <span class="import-file-name" :title="row.name">{{ row.name }}</span>
+                                </div>
+                            </template>
+                        </el-table-column>
+                        <el-table-column label="目标文档" min-width="220">
+                            <template #default="{row}">
+                                <el-select :model-value="row.matchedDocId"
+                                           filterable clearable
+                                           :disabled="batchReplacing"
+                                           placeholder="选择目标文档"
+                                           class="import-batch-target-select"
+                                           @change="(v) => onBatchReplaceTargetChange(row, v)">
+                                    <el-option v-for="d in docs" :key="d.id"
+                                               :label="d.title || d.id.slice(0,8)" :value="d.id" />
+                                </el-select>
+                                <div class="import-batch-target-title">{{ targetDocTitle(row.matchedDocId) }}</div>
+                            </template>
+                        </el-table-column>
+                        <el-table-column label="匹配状态" width="110" align="center">
+                            <template #default="{row}">
+                                <el-tag :type="BATCH_REPLACE_MATCH_TAG[row.matchStatus]" size="small">{{ BATCH_REPLACE_MATCH_LABEL[row.matchStatus] }}</el-tag>
+                            </template>
+                        </el-table-column>
+                        <el-table-column label="文件校验" width="120">
+                            <template #default="{row}">
+                                <span :class="row.validationStatus === 'valid' ? 'import-check-ok' : 'import-check-fail'">{{ batchReplaceValidationText(row) }}</span>
+                            </template>
+                        </el-table-column>
+                        <el-table-column label="提交状态" width="100" align="center">
+                            <template #default="{row}">
+                                <el-tag :type="BATCH_REPLACE_STATUS_TAG[row.status]" size="small">{{ BATCH_REPLACE_STATUS_LABEL[row.status] }}</el-tag>
+                            </template>
+                        </el-table-column>
+                        <el-table-column label="错误原因" min-width="140">
+                            <template #default="{row}">
+                                <span class="import-error-text">{{ row.error || '—' }}</span>
+                            </template>
+                        </el-table-column>
+                        <el-table-column label="操作" width="70" align="center">
+                            <template #default="{row}">
+                                <el-button link type="danger" :disabled="batchReplacing" @click="removeBatchReplaceItem(row)">移除</el-button>
+                            </template>
+                        </el-table-column>
+                    </el-table>
+                </div>
+                <div class="import-summary-bar">
+                    <div class="import-summary-stats">
+                        <span>总数 <b>{{ batchReplaceItems.length }}</b></span>
+                        <span class="import-stat-ok">可提交 <b>{{ batchReplaceReadyItems.length }}</b></span>
+                        <span class="import-stat-skip">已跳过 <b>{{ batchReplaceItems.filter((it) => it.status === 'skipped').length }}</b></span>
+                        <span class="import-stat-fail">失败 <b>{{ batchReplaceItems.filter((it) => it.status === 'failed').length }}</b></span>
+                    </div>
+                </div>
             </section>
 
             <section v-if="importResult" class="import-file-card">

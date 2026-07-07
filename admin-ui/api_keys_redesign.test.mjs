@@ -116,23 +116,37 @@ test('API usage card focuses on retrieval chunks without new backend behavior', 
         'API 接入说明：检索知识库切片',
         'Authorization: Bearer',
         '/libraries/{LIBRARY_ID}/query',
-        'BASE_URL/libraries/LIBRARY_ID/query',
-        '系统会对 query 做向量化、检索并可经过 rerank 重排',
-        '该接口返回的是检索切片，不是大模型最终回答',
+        '/query</code> 返回召回切片，不是最终回答',
+        'VECTOR_KB_BASE_URL',
+        'VECTOR_KB_LIBRARY_ID',
+        'VECTOR_KB_API_KEY',
+        'LOCAL_LLM_BASE_URL',
+        'use_llm=False',
+        'use_llm=True',
+        'search_kb(question',
+        'call_your_llm',
+        'results',
+        '完整接入模板',
+        'api-keys-doc-template-button',
+        'Python 完整接入脚本',
+        'build_context(chunks',
+        'ask(question',
+        'if __name__ == "__main__"',
+        'JavaScript/Node 简版',
+        'curl 仅用于临时测试',
         'results[].text',
-        'results[].similarity',
-        'results[].document_id',
-        'results[].chunk_id',
-        'results[].title',
-        '完整 API 文档：检索知识库切片',
         'docDialog.open',
         'api-keys-doc-dialog',
         'openApiDoc',
     ]) assert.ok(source.includes(token), `missing API usage token: ${token}`);
-    for (const forbidden of ['testConnection', 'onlineQuery', 'autoQuery', 'api.test', 'api.queryLibrary', 'copyApiDocPath', '文件上传接口。']) {
+    const allowedApiCalls = ['api.listApiKeys', 'api.createApiKey', 'api.revokeApiKey'];
+    const apiCalls = [...source.matchAll(/api\.[A-Za-z0-9_]+(?=\()/g)].map((m) => m[0]);
+    assert.deepEqual([...new Set(apiCalls)].sort(), allowedApiCalls.sort(), 'no new backend API calls');
+    for (const forbidden of ['testConnection', 'onlineQuery', 'autoQuery', 'api.test', 'api.queryLibrary', 'copyApiDocPath', '文件上传接口。', '在线测试', '测试连接', '完整版本见 docs/29-api-key-api-usage.md']) {
         assert.equal(source.includes(forbidden), false, `forbidden feature: ${forbidden}`);
     }
     assert.equal(/vk_[A-Za-z0-9_\-]{12,}/.test(source), false, 'no real-looking API key in source');
+    assert.equal(/VECTOR_KB_API_KEY=(vk_|sk-|ak-)[A-Za-z0-9_\-]{8,}/.test(source), false, 'no hard-coded env API key in source');
 });
 test('createApiKey converts local datetime to ISO string', () => {
     assert.ok(source.includes("api.createApiKey(name"), 'passes name');
@@ -172,7 +186,7 @@ test('no inline style attributes in template', () => {
 
 test('template uses api-keys-* CSS classes', () => {
     for (const c of ['api-keys-workspace', 'api-keys-header', 'api-keys-stats',
-                     'api-keys-doc-card', 'api-keys-doc-steps', 'api-keys-doc-code', 'api-keys-doc-fields', 'api-keys-doc-dialog',
+                     'api-keys-doc-card', 'api-keys-doc-steps', 'api-keys-doc-code', 'api-keys-doc-dialog', 'api-keys-doc-template-button',
                      'api-keys-table-card', 'api-keys-result-card']) {
         assert.ok(source.includes(c), `uses ${c}`);
     }
@@ -185,7 +199,7 @@ test('result card has close button that clears plaintext', () => {
 
 test('CSS defines api-keys-* classes', () => {
     for (const c of ['api-keys-workspace', 'api-keys-header', 'api-keys-stats',
-                     'api-keys-doc-card', 'api-keys-doc-steps', 'api-keys-doc-code', 'api-keys-doc-fields', 'api-keys-doc-dialog',
+                     'api-keys-doc-card', 'api-keys-doc-steps', 'api-keys-doc-code', 'api-keys-doc-dialog', 'api-keys-doc-template-button',
                      'api-keys-table-card', 'api-keys-result-card', 'api-keys-plaintext']) {
         const escaped = c.replace(/-/g, '\\-');
         assert.match(css, new RegExp('\\.' + escaped + '\\s*\\{'), `${c} defined`);

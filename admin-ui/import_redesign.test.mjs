@@ -6,6 +6,12 @@ import {
     validateFile, validateBatch, fileKey, formatSize, fileTypeIcon,
     ST_LABEL, ST_TAG, OP_LABEL, OP_TAG,
 } from './src/import_ui.js';
+import {
+    BATCH_REPLACE_MATCH_LABEL, BATCH_REPLACE_MATCH_TAG,
+    BATCH_REPLACE_STATUS_LABEL, BATCH_REPLACE_STATUS_TAG,
+    normalizeDocumentName, matchDocumentsForFile, createBatchReplaceItems,
+    setBatchReplaceTarget, submittableBatchReplaceItems, submitBatchReplaceItems,
+} from './src/batch_replace.js';
 
 const source = readFileSync(new URL('./src/views/Import.js', import.meta.url), 'utf8');
 const css = readFileSync(new URL('./style.css', import.meta.url), 'utf8');
@@ -159,9 +165,80 @@ test('constants have expected values', () => {
     assert.equal(ALLOWED_EXTENSIONS.has('.doc'), false);
 });
 
-// ════════════════════════════════════════════════════════════
-//  Source checks (Import.js structure)
-// ════════════════════════════════════════════════════════════
+
+// ── batch_replace helpers ──
+const docsForReplace = [
+    { id: 'd1', title: 'Alpha.pdf' },
+    { id: 'd2', title: '  beta （ final ）.DOCX ' },
+    { id: 'd3', title: 'Delta.PDF' },
+    { id: 'd4', title: ' delta.pdf ' },
+];
+
+test('batch replace filename exact match wins', () => {
+    const match = matchDocumentsForFile(mockFile('Alpha.pdf', 100), docsForReplace);
+    assert.equal(match.matchStatus, 'matched');
+    assert.equal(match.matchType, 'exact');
+    assert.equal(match.matchedDocId, 'd1');
+});
+
+test('batch replace filename normalized match handles trim case spaces and full-width parens', () => {
+    assert.equal(normalizeDocumentName('  beta （ final ）.DOCX '), 'beta ( final ).docx');
+    const match = matchDocumentsForFile(mockFile('Beta ( final ).docx', 100), docsForReplace);
+    assert.equal(match.matchStatus, 'matched');
+    assert.equal(match.matchType, 'normalized');
+    assert.equal(match.matchedDocId, 'd2');
+});
+
+test('batch replace marks unmatched files', () => {
+    const match = matchDocumentsForFile(mockFile('missing.pdf', 100), docsForReplace);
+    assert.equal(match.matchStatus, 'unmatched');
+    assert.equal(match.matchedDocId, null);
+});
+
+test('batch replace marks multi-candidate normalized matches', () => {
+    const match = matchDocumentsForFile(mockFile('delta.pdf', 100), docsForReplace);
+    assert.equal(match.matchStatus, 'multiple');
+    assert.equal(match.candidates.length, 2);
+    assert.equal(match.matchedDocId, null);
+});
+
+test('batch replace submits only matched and valid items', () => {
+    const items = createBatchReplaceItems([
+        mockFile('Alpha.pdf', 100, 1),
+        mockFile('missing.pdf', 100, 2),
+        mockFile('bad.exe', 100, 3),
+        mockFile('delta.pdf', 100, 4),
+    ], docsForReplace);
+    assert.equal(submittableBatchReplaceItems(items).length, 1);
+    setBatchReplaceTarget(items[3], 'd3', docsForReplace);
+    assert.equal(submittableBatchReplaceItems(items).length, 2);
+});
+
+test('batch replace failure of one item does not stop later items', async () => {
+    const items = createBatchReplaceItems([
+        mockFile('Alpha.pdf', 100, 1),
+        mockFile('Beta ( final ).docx', 100, 2),
+    ], docsForReplace);
+    const calls = [];
+    const result = await submitBatchReplaceItems(items, 'lib', async (slug, file, options) => {
+        calls.push({ slug, file, options });
+        if (file.name === 'Alpha.pdf') throw new Error('boom');
+        return { documents: [{ operation: 'updated' }] };
+    });
+    assert.equal(calls.length, 2);
+    assert.equal(items[0].status, 'failed');
+    assert.equal(items[1].status, 'submitted');
+    assert.equal(result.failed, 1);
+    assert.equal(result.submitted, 1);
+});
+
+test('batch replace never calls add upload path', async () => {
+    const items = createBatchReplaceItems([mockFile('Alpha.pdf', 100, 1)], docsForReplace);
+    await submitBatchReplaceItems(items, 'lib', async (_slug, _file, options) => {
+        assert.deepEqual(options, { replaceDocumentId: 'd1' });
+    });
+});
+
 
 test('Import.js uses resolveImportEntry return value', () => {
     // Should destructure the return value and assign to slug.value / mode.value
@@ -261,8 +338,8 @@ test('replace submission preserves target document id and never falls back to ad
 });
 
 test('replace route query locks library and mode controls', () => {
-    assert.ok(source.includes('class="import-lib-select" :disabled="routeReplaceActive"'), 'route replace locks library select');
-    assert.ok(source.includes('<el-radio-group v-model="mode" :disabled="routeReplaceActive">'), 'route replace locks mode switch');
+    assert.ok(source.includes('class="import-lib-select" :disabled="routeReplaceActive || batchReplacing"'), 'route replace locks library select');
+    assert.ok(source.includes('<el-radio-group v-model="mode" :disabled="routeReplaceActive || batchReplacing">'), 'route replace locks mode switch');
 });
 
 console.log('import redesign test passed');

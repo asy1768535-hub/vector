@@ -21,6 +21,7 @@ __all__ = [
     "ChatMessage",
     "ChatMessageSource",
     "Chunk",
+    "CleanupOutbox",
     "Document",
     "DocumentFile",
     "DocumentSource",

@@ -51,10 +51,9 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/libraries/{slug}", tags=["documents"])
 SOURCE_CONTEXT_CHARS = 3000
 
-# #13：导入文件后缀白名单（小写）。不在表内 → 415；旧二进制格式 .xls/.doc 在表内，
-# 但会给出「另存为 .xlsx / .docx」的专门 400 提示（无纯 Python 解析库，不引系统依赖）。
+# #13：导入文件后缀白名单（小写）。不在表内 → 415。
 _SUPPORTED_IMPORT_SUFFIXES = {
-    ".json", ".csv", ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".txt", ".md", ".markdown",
+    ".json", ".csv", ".pdf", ".docx", ".xlsx", ".txt", ".md", ".markdown",
 }
 
 _UPLOAD_READ_CHUNK = 1024 * 1024  # 1MiB 分块
@@ -600,9 +599,13 @@ async def download_document_file(
     row = await db.get(DocumentFile, document_id)
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "该文档缺少原始文件，请重新导入")
-    path = Path(row.storage_path)
-    if not path.is_absolute():
-        path = _document_files_root() / path
+    root = _document_files_root().resolve()
+    raw_path = Path(row.storage_path)
+    path = raw_path.resolve() if raw_path.is_absolute() else (root / raw_path).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "该文档缺少原始文件，请重新导入")
     if not path.is_file():
         raise HTTPException(status.HTTP_404_NOT_FOUND, "该文档缺少原始文件，请重新导入")
     return FileResponse(
@@ -966,21 +969,6 @@ async def import_file(
             raise
         except Exception as e:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid DOCX format: {str(e)}")
-
-    elif suffix == ".doc":
-        # 老式 .doc 是 OLE2 二进制（python-docx 只认 .docx），无纯 Python 解析库；
-        # 不引入系统依赖（LibreOffice/Word），明确提示另存为 .docx（与 .xls 一致）。
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            "暂不支持 .doc 旧格式，请在 Word 中『另存为』.docx 后再上传。",
-        )
-
-    elif suffix == ".xls":
-        # 老式 .xls 需要 xlrd（未列入依赖），短期不支持；明确提示另存为 .xlsx。
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            "暂不支持 .xls 旧格式，请在 Excel 中『另存为』.xlsx 后再上传。",
-        )
 
     elif suffix == ".xlsx":
         # 电子表格：每个工作表按表格感知切分入库

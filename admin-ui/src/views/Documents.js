@@ -300,6 +300,12 @@ export default {
             return text.length > size ? `${text.slice(0, size)}…` : text;
         }
 
+        function shortDocumentId(value) {
+            const text = String(value || '');
+            if (!text) return '—';
+            return text.length > 10 ? `${text.slice(0, 10)}…` : text;
+        }
+
         async function copyDocValue(value, label) {
             try {
                 await copyTextToClipboard(value);
@@ -392,7 +398,7 @@ export default {
             detail, detailLatestJob, sourceReader, sourceText, sourceMatchCount, highlightedSourceParts,
             dialog, loadDocs, resetFilters, openFileImport, openIngest, openEdit,
             openReplaceImport, openDetail, openFullSource, downloadOriginalFile, closeFullSource, retryJob, retryDocument, submitIngest, del, metadataText,
-            copyDocValue, deleteTitle, shortText,
+            copyDocValue, deleteTitle, shortText, shortDocumentId,
             documentDisplayName, documentStatusLabel, documentStatusTag, documentTypeIcon, documentTypeLabel,
             formatDocumentTime, dataEmpty,
         };
@@ -457,11 +463,17 @@ export default {
             <template #empty><div class="illustration-empty-wrapper"><img :src="dataEmpty" class="illustration-data-empty" alt="" aria-hidden="true" /><p>当前条件下暂无文档</p></div></template>
             <el-table-column label="文件名" min-width="250">
               <template #default="{row}">
-                <div class="documents-file">
-                  <img v-if="documentTypeIcon(row)" class="documents-file-icon"
-                       :src="documentTypeIcon(row)" alt="" aria-hidden="true" />
-                  <local-icon v-else class="documents-file-icon" icon="mdi:file-document-outline"></local-icon>
-                  <span class="documents-file-name" :title="documentDisplayName(row)">{{ documentDisplayName(row) }}</span>
+                <div class="documents-file-cell">
+                  <div class="documents-file">
+                    <img v-if="documentTypeIcon(row)" class="documents-file-icon"
+                         :src="documentTypeIcon(row)" alt="" aria-hidden="true" />
+                    <local-icon v-else class="documents-file-icon" icon="mdi:file-document-outline"></local-icon>
+                    <span class="documents-file-name" :title="documentDisplayName(row)">{{ documentDisplayName(row) }}</span>
+                  </div>
+                  <div class="documents-file-doc-id" :title="row.id">
+                    <span>ID: {{ shortDocumentId(row.id) }}</span>
+                    <el-button text class="documents-file-doc-id-copy" title="复制完整文档 ID" @click.stop="copyDocValue(row.id, '文档 ID')">复制</el-button>
+                  </div>
                 </div>
               </template>
             </el-table-column>

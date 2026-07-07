@@ -12,7 +12,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.api_key import generate_api_key
-from app.auth.backend import current_active_user
+from app.auth.backend import current_cookie_user
 from app.db import get_db
 from app.models.api_key import ApiKey
 from app.models.user import User
@@ -23,7 +23,7 @@ router = APIRouter(prefix="/me/api-keys", tags=["api-keys"])
 
 @router.get("", response_model=list[ApiKeyRead])
 async def list_keys(
-    user: User = Depends(current_active_user),
+    user: User = Depends(current_cookie_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[ApiKey]:
     rows = await db.execute(
@@ -35,7 +35,7 @@ async def list_keys(
 @router.post("", response_model=ApiKeyCreated, status_code=status.HTTP_201_CREATED)
 async def create_key(
     body: ApiKeyCreateRequest,
-    user: User = Depends(current_active_user),
+    user: User = Depends(current_cookie_user),
     db: AsyncSession = Depends(get_db),
 ) -> ApiKeyCreated:
     plain, prefix, hashed = generate_api_key()
@@ -64,7 +64,7 @@ async def create_key(
 @router.delete("/{key_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def revoke_key(
     key_id: uuid.UUID,
-    user: User = Depends(current_active_user),
+    user: User = Depends(current_cookie_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
     row = await db.execute(

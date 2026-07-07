@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi import status
@@ -86,5 +87,37 @@ def test_reset_failed_global_when_no_library():
             assert resp.status_code == status.HTTP_200_OK
             assert resp.json()["reset_count"] == 9
             assert rec.call_args.args[3]["library_id"] is None
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_retry_processing_job_rejected_to_avoid_duplicate_workers():
+    from app.models.embedding_job import EmbeddingJob
+
+    su = User(id=uuid.uuid4(), email="su@example.com", is_superuser=True, is_active=True)
+    job = EmbeddingJob(
+        id=uuid.uuid4(), library_id=uuid.uuid4(), document_id=uuid.uuid4(),
+        document_revision=1, status="processing", worker_id="worker-1",
+        attempt_count=1, created_at=datetime.now(timezone.utc),
+    )
+
+    async def _ov_su():
+        return su
+
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=job)
+
+    async def _ov_db():
+        return db
+
+    app.dependency_overrides[current_superuser] = _ov_su
+    app.dependency_overrides[get_db] = _ov_db
+    try:
+        with patch("app.services.audit_log.record", new_callable=AsyncMock):
+            client = TestClient(app)
+            resp = client.post(f"/admin/jobs/{job.id}/retry")
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        assert "processing" in resp.json()["detail"]
+        db.execute.assert_not_awaited()
     finally:
         app.dependency_overrides.clear()

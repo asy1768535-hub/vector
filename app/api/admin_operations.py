@@ -8,10 +8,11 @@ embedding_jobs / cleanup_outbox / 重建进度 / 库索引状态。
 """
 from __future__ import annotations
 
+import uuid
 from datetime import timedelta
 
-from fastapi import APIRouter, Depends
-from sqlalchemy import func, select
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.backend import current_superuser
@@ -32,6 +33,7 @@ from app.schemas.admin import (
     ServiceStatus,
 )
 from app.services import heartbeat
+from app.services import audit_log
 
 router = APIRouter(prefix="/admin/operations", tags=["admin"])
 
@@ -169,3 +171,32 @@ async def operations_status(
         libraries=libraries,
         rebuild_operations=rebuild_operations,
     )
+
+
+@router.post("/cleanup-outbox/requeue-failed")
+async def requeue_failed_cleanup_outbox(
+    library_id: uuid.UUID | None = Query(default=None),
+    actor: User = Depends(current_superuser),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, int]:
+    """把 failed cleanup outbox 重新放回 pending，供 cleanup worker 重试。"""
+    sql = """
+        UPDATE qdrant_cleanup_outbox
+        SET status='pending', worker_id=NULL, claimed_at=NULL, finished_at=NULL,
+            available_at=NOW(), attempt_count=0, last_error=NULL
+        WHERE status='failed'
+    """
+    params: dict[str, str] = {}
+    if library_id is not None:
+        sql += " AND library_id = :library_id"
+        params["library_id"] = str(library_id)
+    result = await db.execute(text(sql), params)
+    count = result.rowcount or 0
+    await audit_log.record(
+        db,
+        actor.id,
+        "cleanup_outbox.requeue_failed",
+        {"library_id": str(library_id) if library_id else None, "requeued_count": count},
+    )
+    await db.commit()
+    return {"requeued_count": count}

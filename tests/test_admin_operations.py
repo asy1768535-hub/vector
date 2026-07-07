@@ -134,3 +134,42 @@ def test_status_aggregates_counts_and_progress():
         assert op["progress_pct"] == 74.0
     finally:
         app.dependency_overrides.clear()
+
+
+def test_requeue_failed_cleanup_requires_superuser():
+    client = TestClient(app)
+    resp = client.post("/admin/operations/cleanup-outbox/requeue-failed")
+    assert resp.status_code in (401, 403)
+
+
+def test_requeue_failed_cleanup_accepts_library_filter():
+    su = User(id=uuid.uuid4(), email="su@example.com", is_superuser=True, is_active=True)
+    lib_id = uuid.uuid4()
+
+    async def _ov_su():
+        return su
+
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=MagicMock(rowcount=4))
+    db.commit = AsyncMock()
+    db.add = MagicMock()
+
+    async def _ov_db():
+        return db
+
+    app.dependency_overrides[current_superuser] = _ov_su
+    app.dependency_overrides[get_db] = _ov_db
+    try:
+        client = TestClient(app)
+        resp = client.post(f"/admin/operations/cleanup-outbox/requeue-failed?library_id={lib_id}")
+        assert resp.status_code == 200
+        assert resp.json() == {"requeued_count": 4}
+        sql = str(db.execute.await_args.args[0]).lower()
+        assert "qdrant_cleanup_outbox" in sql
+        assert "status='failed'" in sql or "status = 'failed'" in sql
+        assert "library_id" in sql
+        params = db.execute.await_args.args[1]
+        assert params["library_id"] == str(lib_id)
+        db.commit.assert_awaited_once()
+    finally:
+        app.dependency_overrides.clear()

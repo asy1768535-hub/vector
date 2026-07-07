@@ -168,8 +168,10 @@ async def chat_messages(
     db: AsyncSession = Depends(get_db),
 ) -> ChatMessageResponse:
     """非流式问答 + 落库。无 conversation_id 自动建会话，有则校验后续聊。"""
+    conv = await _resolve_conversation(db, user, body) if body.conversation_id is not None else None
     _lib, records = await _retrieve_for_chat(body, user, db)
-    conv = await _resolve_conversation(db, user, body)
+    if conv is None:
+        conv = await _resolve_conversation(db, user, body)
     history = await chat_history.recent_turns(db, conv.id, settings.chat_history_max_turns)
     user_msg = await chat_history.save_user_message(db, conv.id, body.query)
 
@@ -231,8 +233,10 @@ async def chat_stream(
 
     会话/用户消息在开流前用请求 session 落库并提交；assistant 消息在流结束后用独立 session 落库。
     """
+    conv = await _resolve_conversation(db, user, body) if body.conversation_id is not None else None
     _lib, records = await _retrieve_for_chat(body, user, db)
-    conv = await _resolve_conversation(db, user, body)
+    if conv is None:
+        conv = await _resolve_conversation(db, user, body)
     history = await chat_history.recent_turns(db, conv.id, settings.chat_history_max_turns)
     user_msg = await chat_history.save_user_message(db, conv.id, body.query)
     await db.commit()                                    # 会话 + user 消息先持久化

@@ -140,6 +140,56 @@ def test_continue_conversation_not_owned_403():
     assert r.status_code == 403
 
 
+def test_continue_conversation_not_owned_does_not_run_retrieval():
+    other = _Conv(user_id=OTHER_ID)
+    _override(AsyncMock())
+    retr = AsyncMock(return_value=DifyRetrievalResponse(records=[_rec()]))
+    patches = [
+        patch.object(chat_api.settings, "chat_enabled", True),
+        patch.object(chat_api, "load_active_library", new=AsyncMock(return_value=mock_library)),
+        patch.object(chat_api, "has_permission", return_value=True),
+        patch.object(chat_api, "run_retrieval", new=retr),
+        patch.object(chat_api.chat_history, "get_conversation", new=AsyncMock(return_value=other)),
+    ]
+    for p in patches:
+        p.start()
+    try:
+        r = TestClient(app).post(
+            "/chat/messages",
+            json={"library_slug": "medical", "query": "q", "conversation_id": str(other.id)},
+        )
+    finally:
+        for p in reversed(patches):
+            p.stop()
+    assert r.status_code == 403
+    retr.assert_not_awaited()
+
+
+def test_stream_conversation_not_owned_does_not_run_retrieval():
+    other = _Conv(user_id=OTHER_ID)
+    _override(AsyncMock())
+    retr = AsyncMock(return_value=DifyRetrievalResponse(records=[_rec()]))
+    patches = [
+        patch.object(chat_api.settings, "chat_enabled", True),
+        patch.object(chat_api, "load_active_library", new=AsyncMock(return_value=mock_library)),
+        patch.object(chat_api, "has_permission", return_value=True),
+        patch.object(chat_api, "run_retrieval", new=retr),
+        patch.object(chat_api.chat_history, "get_conversation", new=AsyncMock(return_value=other)),
+    ]
+    for p in patches:
+        p.start()
+    try:
+        r = TestClient(app).post(
+            "/chat/stream",
+            json={"library_slug": "medical", "query": "q", "conversation_id": str(other.id)},
+        )
+    finally:
+        for p in reversed(patches):
+            p.stop()
+    assert r.status_code == 403
+    retr.assert_not_awaited()
+
+
 def test_no_read_permission_cannot_create_conversation():
     _override(AsyncMock())
     with patch.object(chat_api.settings, "chat_enabled", True), \

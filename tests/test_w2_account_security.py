@@ -164,10 +164,13 @@ def test_reset_password_requires_superuser():
 
 
 def test_admin_user_update_schema_drops_password():
-    # 普通 PATCH 不能混入 password：AdminUserUpdate 无该字段，pydantic 直接丢弃
+    # 普通 PATCH 不能混入 password：上线口径要求额外字段直接拒绝，不能静默丢弃。
     from app.schemas.admin import AdminUserUpdate
-    m = AdminUserUpdate(username="x", password="should-be-ignored")  # type: ignore[call-arg]
-    assert "password" not in m.model_dump()
+    from pydantic import ValidationError
+    import pytest
+
+    with pytest.raises(ValidationError):
+        AdminUserUpdate(username="x", password="should-be-ignored")  # type: ignore[call-arg]
 
 
 # ── W2-5：/me/permissions 带 library_name 且过滤已删除库 ─────────────────────

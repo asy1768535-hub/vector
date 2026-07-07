@@ -9,6 +9,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from app.workers import embedder
 
 
+class _ExecResult:
+    def __init__(self, rowcount=0):
+        self.rowcount = rowcount
+
+
 def test_stale_revision_job_superseded_without_embedding():
     lib = NS(id=uuid.uuid4(), index_state="ready", active_rebuild_operation_id=None, deleted_at=None)
     doc = NS(id=uuid.uuid4(), current_revision=2, deleted_at=None)   # 当前已是 rev 2
@@ -30,3 +35,21 @@ def test_stale_revision_job_superseded_without_embedding():
     # 标了 superseded（一次 update + commit）
     assert db.execute.await_count >= 1
     db.commit.assert_awaited()
+
+
+def test_reset_stale_jobs_marks_max_attempts_failed_before_resetting_retryable():
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=[_ExecResult(1), _ExecResult(2)])
+    db.commit = AsyncMock()
+
+    reset = asyncio.run(embedder._reset_stale_jobs(db))
+
+    assert reset == 3
+    assert db.execute.await_count == 2
+    first_sql = str(db.execute.await_args_list[0].args[0]).lower()
+    second_sql = str(db.execute.await_args_list[1].args[0]).lower()
+    assert "set status = 'failed'" in first_sql
+    assert "attempt_count >= :max" in first_sql
+    assert "set status = 'pending'" in second_sql
+    assert "attempt_count < :max" in second_sql
+    db.commit.assert_awaited_once()

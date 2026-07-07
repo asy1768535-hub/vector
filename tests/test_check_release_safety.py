@@ -114,3 +114,28 @@ def test_clean_repo_no_findings():
     files = ["app/a.py", "docs/x.md", ".env.example"]
     contents = {"app/a.py": "x=1", "docs/x.md": "# hi", ".env.example": "KEY=<your-key>"}
     assert crs.collect_findings(files, read_text=lambda p: contents.get(p, "")) == []
+
+
+def test_production_config_gate_flags_unsafe_values():
+    findings = crs.scan_release_config({
+        "APP_ENV": "production",
+        "APP_DEBUG": "true",
+        "COOKIE_SECURE": "false",
+        "RETRIEVAL_CONSISTENCY_FILTER": "false",
+        "JWT_SECRET": "please-change-me-in-env",
+    })
+    kinds = [f.kind for f in findings]
+    assert kinds.count("unsafe-config") == 4
+    assert any("APP_DEBUG" in f.snippet for f in findings)
+    assert any("COOKIE_SECURE" in f.snippet for f in findings)
+    assert any("RETRIEVAL_CONSISTENCY_FILTER" in f.snippet for f in findings)
+    assert any("JWT_SECRET" in f.snippet for f in findings)
+
+
+def test_production_config_gate_ignores_dev_environment():
+    assert crs.scan_release_config({
+        "APP_ENV": "development",
+        "APP_DEBUG": "true",
+        "COOKIE_SECURE": "false",
+        "RETRIEVAL_CONSISTENCY_FILTER": "false",
+    }) == []

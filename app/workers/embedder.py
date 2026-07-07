@@ -94,19 +94,40 @@ def _build_payload(lib: Library, doc: Document, chunk: Chunk) -> dict:
 
 
 async def _reset_stale_jobs(db: AsyncSession) -> int:
-    """超时仍在 processing 的任务重置为 pending；返回被重置条数。"""
-    cutoff_sql = text(
+    """超时仍在 processing 的任务回收；达最大次数的直接 failed，其余重置为 pending。"""
+    params = {
+        "secs": str(settings.embed_worker_stale_seconds),
+        "max": settings.embed_worker_max_attempts,
+    }
+    failed = await db.execute(
+        text(
+            """
+            UPDATE embedding_jobs
+            SET status = 'failed', worker_id = NULL, claimed_at = NULL,
+                finished_at = NOW(), last_error = COALESCE(last_error, 'stale processing at max attempts')
+            WHERE status = 'processing'
+              AND claimed_at IS NOT NULL
+              AND claimed_at < NOW() - (:secs || ' seconds')::interval
+              AND attempt_count >= :max
+            """
+        ),
+        params,
+    )
+    reset = await db.execute(
+        text(
         """
         UPDATE embedding_jobs
         SET status = 'pending', worker_id = NULL, claimed_at = NULL
         WHERE status = 'processing'
           AND claimed_at IS NOT NULL
           AND claimed_at < NOW() - (:secs || ' seconds')::interval
+          AND attempt_count < :max
         """
+        ),
+        params,
     )
-    result = await db.execute(cutoff_sql, {"secs": str(settings.embed_worker_stale_seconds)})
     await db.commit()
-    return result.rowcount or 0
+    return (failed.rowcount or 0) + (reset.rowcount or 0)
 
 
 async def _claim_jobs(db: AsyncSession, worker_id: str, limit: int) -> list[EmbeddingJob]:

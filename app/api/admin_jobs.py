@@ -95,7 +95,9 @@ async def retry_job(
     job = await db.get(EmbeddingJob, job_id)
     if job is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "job not found")
-    if job.status not in ("failed", "processing", "pending"):
+    if job.status == "processing":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "cannot retry active processing job")
+    if job.status not in ("failed", "pending"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"cannot retry job in status={job.status}")
     await db.execute(
         update(EmbeddingJob)

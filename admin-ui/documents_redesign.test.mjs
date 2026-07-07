@@ -82,6 +82,18 @@ test('edit copy separates metadata from overwrite/reimport semantics', () => {
     assert.ok(source.includes('replaceTitle: documentDisplayName(row)'), 'reimport carries target title');
 });
 
+test('document list shows copyable short document id under filename', () => {
+    for (const token of [
+        'shortDocumentId',
+        'documents-file-doc-id',
+        ':title="row.id"',
+        'ID: {{ shortDocumentId(row.id) }}',
+        "@click.stop=\"copyDocValue(row.id, '文档 ID')\"",
+        'label="external_id"',
+        '{{ detail.row.id }}',
+    ]) assert.ok(source.includes(token), `missing document id list token: ${token}`);
+});
+
 test('delete remains permission-gated and explains risks', () => {
     assert.ok(source.includes("Boolean(slug.value) && (store.user?.is_superuser || hasPermission(slug.value, 'delete'))"), 'canDelete requires slug and delete permission/superuser');
     assert.ok(source.includes('if (!canDelete.value)'), 'delete handler guards canDelete');
