@@ -15,6 +15,7 @@ export default {
         const dialog = reactive({ open: false, name: '', expiresAt: '' });
         const submitting = ref(false);
         const result = reactive({ open: false, plaintext: '' });
+        const docDialog = reactive({ open: false });
         const page = ref(1);
         const pageSize = 10;
 
@@ -78,6 +79,10 @@ export default {
             } catch (e) { ElMessage.error(e.message || '复制失败，请手动选择内容'); }
         }
 
+        function openApiDoc() {
+            docDialog.open = true;
+        }
+
         // ── Revoke ───────────────────────────────────────────
         async function revoke(row) {
             try {
@@ -96,9 +101,9 @@ export default {
         onMounted(load);
 
         return {
-            keys, loading, dialog, submitting, result, page, pageSize,
+            keys, loading, dialog, submitting, result, docDialog, page, pageSize,
             stats, pagination, visibleKeys, showPagination,
-            load, openCreate, submit, closeResult, copyPlain, revoke, dataEmpty, apiKeySecurity,
+            load, openCreate, submit, closeResult, copyPlain, openApiDoc, revoke, dataEmpty, apiKeySecurity,
             formatKeyTime, keyStatus, STATUS_LABEL, STATUS_TAG,
         };
     },
@@ -120,6 +125,35 @@ export default {
         <el-alert type="warning" :closable="false" show-icon
                   title="安全提示"
                   description="API Key 拥有您账户的全部权限，请妥善保管。完整密钥仅在创建时显示一次，之后无法再次查看。" />
+
+        <!-- API usage doc -->
+        <section class="api-keys-doc-card">
+            <div class="api-keys-doc-main">
+                <h3>API 接入说明：检索知识库切片</h3>
+                <p>外部系统、脚本或 AI Agent 可以使用 API Key 调用知识库检索接口。系统会对 query 做向量化、检索并可经过 rerank 重排，返回相关文本切片；调用方可自行把切片交给自己的 LLM 生成回答。</p>
+                <ol class="api-keys-doc-steps">
+                    <li>创建并保存 API Key</li>
+                    <li>请求头添加 <code>Authorization: Bearer &lt;API_KEY&gt;</code></li>
+                    <li>调用 <code>POST /libraries/{LIBRARY_ID}/query</code></li>
+                </ol>
+                <pre class="api-keys-doc-code">curl -X POST "BASE_URL/libraries/LIBRARY_ID/query"
+  -H "Authorization: Bearer API_KEY"
+  -H "Content-Type: application/json"
+  -d '{"query":"你的问题","limit":5}'</pre>
+                <div class="api-keys-doc-fields">
+                    <span><code>results[].text</code>：召回切片正文</span>
+                    <span><code>results[].similarity</code>：相似度/相关性分数</span>
+                    <span><code>results[].document_id</code>：来源文档</span>
+                    <span><code>results[].chunk_id</code>：来源切片</span>
+                    <span><code>results[].title</code>：来源文档标题</span>
+                </div>
+                <p class="api-keys-doc-note">该接口返回的是检索切片，不是大模型最终回答。</p>
+            </div>
+            <div class="api-keys-doc-actions">
+                <el-button plain @click="openApiDoc">查看完整 API 文档</el-button>
+                <span>docs/29-api-key-api-usage.md</span>
+            </div>
+        </section>
 
         <!-- Stats cards -->
         <div class="api-keys-stats">
@@ -181,6 +215,48 @@ export default {
             </div>
         </section>
 
+
+        <el-dialog v-model="docDialog.open" title="完整 API 文档：检索知识库切片" width="760px" class="api-keys-doc-dialog">
+            <div class="api-keys-doc-dialog-body">
+                <section>
+                    <h4>1. 认证方式</h4>
+                    <p>在请求头中携带 API Key，不要放到 URL 参数中。</p>
+                    <pre class="api-keys-doc-code">Authorization: Bearer &lt;API_KEY&gt;</pre>
+                </section>
+                <section>
+                    <h4>2. 检索切片接口</h4>
+                    <p>系统会对 query 做向量化、检索并可经过 rerank 重排，返回相关文本切片。</p>
+                    <pre class="api-keys-doc-code">POST BASE_URL/libraries/LIBRARY_ID/query</pre>
+                    <pre class="api-keys-doc-code">{
+  "query": "你的问题",
+  "limit": 5
+}</pre>
+                </section>
+                <section>
+                    <h4>3. curl 示例</h4>
+                    <pre class="api-keys-doc-code">curl -X POST "BASE_URL/libraries/LIBRARY_ID/query"
+  -H "Authorization: Bearer API_KEY"
+  -H "Content-Type: application/json"
+  -d '{"query":"你的问题","limit":5}'</pre>
+                </section>
+                <section>
+                    <h4>4. 响应字段</h4>
+                    <ul class="api-keys-doc-list">
+                        <li><code>results[].text</code>：召回切片正文</li>
+                        <li><code>results[].similarity</code>：相似度/相关性分数</li>
+                        <li><code>results[].document_id</code>：来源文档</li>
+                        <li><code>results[].chunk_id</code>：来源切片</li>
+                        <li><code>results[].title</code>：来源文档标题</li>
+                    </ul>
+                    <p class="api-keys-doc-note">该接口返回的是检索切片，不是大模型最终回答。</p>
+                </section>
+                <section>
+                    <h4>5. 可选：具备 insert 权限时上传文件</h4>
+                    <p>文件上传不是检索切片的必要步骤。具备 insert 权限时，可参考项目文档 <code>docs/29-api-key-api-usage.md</code> 使用导入接口。</p>
+                </section>
+            </div>
+        </el-dialog>
+
         <!-- Create dialog -->
         <el-dialog v-model="dialog.open" title="新建 API Key" width="440px" :close-on-click-modal="false">
             <el-form @submit.prevent="submit">
@@ -219,8 +295,10 @@ export default {
                 <h4>使用方式</h4>
                 <p>在 API 请求中通过 <code>Authorization: Bearer &lt;API Key&gt;</code> 头传递密钥。</p>
                 <p>示例：</p>
-                <pre class="api-keys-usage-code">curl -H "Authorization: Bearer YOUR_KEY" \\
-     https://your-domain/api/...</pre>
+                <pre class="api-keys-usage-code">curl -H "Authorization: Bearer YOUR_KEY"
+     -H "Content-Type: application/json"
+     -d '{"query":"你的问题","limit":5}'
+     BASE_URL/libraries/LIBRARY_ID/query</pre>
             </div>
         </div>
     </div>

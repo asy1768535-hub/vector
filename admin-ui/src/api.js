@@ -152,6 +152,36 @@ export const importFile = (slug, file, { externalId = null, replaceDocumentId = 
 export const listDocumentJobs = (slug, documentId, forceRefresh) => cachedRequest(`listDocumentJobs:${slug}:${documentId}`, () => request(`/libraries/${slug}/documents/${documentId}/jobs`), 15000, forceRefresh);
 export const getDocumentSource = (slug, documentId, chunkId) =>
     request(`/libraries/${slug}/documents/${documentId}/source?` + new URLSearchParams({ chunk_id: chunkId }).toString());
+export const getDocumentFullSource = (slug, documentId) =>
+    request(`/libraries/${slug}/documents/${documentId}/source/full`);
+export async function downloadDocumentFile(slug, documentId) {
+    const resp = await fetch(BASE + `/libraries/${slug}/documents/${documentId}/file`, {
+        credentials: 'include',
+    });
+    if (resp.status === 401) {
+        clearCache();
+        if (onUnauthorized) onUnauthorized();
+        const err = new Error('登录已过期，请重新登录');
+        err.status = 401;
+        throw err;
+    }
+    if (!resp.ok) {
+        const ct = resp.headers.get('content-type') || '';
+        const body = ct.includes('application/json') ? await resp.json().catch(() => null) : await resp.text().catch(() => '');
+        const msg = humanizeApiError(body, resp.status, `请求失败（HTTP ${resp.status}）`);
+        const err = new Error(msg);
+        err.status = resp.status;
+        err.body = body;
+        throw err;
+    }
+    const disposition = resp.headers.get('content-disposition') || '';
+    let filename = '';
+    const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+    const asciiMatch = disposition.match(/filename="?([^";]+)"?/i);
+    if (utf8Match) filename = decodeURIComponent(utf8Match[1]);
+    else if (asciiMatch) filename = asciiMatch[1];
+    return { blob: await resp.blob(), filename: filename || 'document-file' };
+}
 
 // ── Admin: Jobs ──────────────────────────────────────────────
 const _jobsKey = (params) => 'listJobs:' + new URLSearchParams(params).toString();

@@ -8,10 +8,12 @@ import io
 import json
 import logging
 import uuid
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Query, status, File, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,12 +23,14 @@ from app.db import get_db
 from app.deps import require_lib
 from app.models.chunk import Chunk
 from app.models.document import Document
+from app.models.document_file import DocumentFile
 from app.models.document_source import DocumentSource
 from app.models.embedding_job import EmbeddingJob
 from app.models.library import Library
 from app.models.user import User
 from app.schemas.admin import EmbeddingJobRead
 from app.schemas.documents import (
+    DocumentFullSourceResponse,
     DocumentIngestRequest,
     DocumentIngestResponse,
     DocumentRead,
@@ -76,6 +80,82 @@ async def _read_capped(file: UploadFile, limit: int) -> bytes:
             )
         chunks.append(part)
     return b"".join(chunks)
+
+
+
+
+def _document_files_root() -> Path:
+    root = Path(settings.document_files_dir)
+    if not root.is_absolute():
+        root = Path(__file__).resolve().parents[2] / root
+    return root
+
+
+def _safe_suffix(filename: str) -> str:
+    suffix = Path(filename).suffix.lower()
+    if suffix and re.fullmatch(r"\.[a-z0-9][a-z0-9._-]{0,15}", suffix):
+        return suffix
+    return ""
+
+
+def _document_file_path(library_id: uuid.UUID, document_id: uuid.UUID, revision: int, digest: str, filename: str) -> Path:
+    return _document_files_root() / str(library_id) / str(document_id) / str(revision) / f"{digest}{_safe_suffix(filename)}"
+
+
+async def _upsert_document_file(
+    db: AsyncSession,
+    *,
+    lib: Library,
+    document_id: uuid.UUID,
+    revision: int,
+    filename: str,
+    content_type: str | None,
+    content: bytes,
+) -> None:
+    digest = hashlib.sha256(content).hexdigest()
+    path = _document_file_path(lib.id, document_id, revision, digest, filename)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+    rel_path = str(path.relative_to(_document_files_root()))
+    values = {
+        "revision": revision,
+        "file_name": filename,
+        "content_type": content_type,
+        "storage_path": rel_path,
+        "size_bytes": len(content),
+        "sha256": digest,
+    }
+    existing = await db.get(DocumentFile, document_id)
+    if existing is None:
+        db.add(DocumentFile(document_id=document_id, **values))
+    else:
+        for key, value in values.items():
+            setattr(existing, key, value)
+
+
+async def _store_original_file_for_result(
+    db: AsyncSession,
+    *,
+    lib: Library,
+    result: dict,
+    filename: str,
+    content_type: str | None,
+    content: bytes,
+) -> None:
+    document_id = uuid.UUID(str(result["document_id"]))
+    try:
+        revision = int(result.get("_revision") or 1)
+    except (TypeError, ValueError):
+        revision = 1
+    await _upsert_document_file(
+        db,
+        lib=lib,
+        document_id=document_id,
+        revision=revision,
+        filename=filename,
+        content_type=content_type,
+        content=content,
+    )
 
 
 async def _lock_writable(db: AsyncSession, lib: Library) -> Library:
@@ -243,6 +323,7 @@ async def _ingest_or_upsert(db: AsyncSession, lib: Library, user: User, doc_data
                 "chunk_count": chunk_count, "status": existing.status,
                 "job_id": str(job.id) if job is not None else None, "external_id": ext,
                 "operation": "updated" if changed else "unchanged",
+                "_revision": existing.current_revision,
             }
 
     doc, job, chunk_count, was_existing = await ingest_service.ingest_text(
@@ -261,6 +342,7 @@ async def _ingest_or_upsert(db: AsyncSession, lib: Library, user: User, doc_data
         "job_id": str(job.id) if job is not None else None,
         "external_id": doc.external_id if was_existing else ext,
         "operation": "unchanged" if was_existing else "created",
+        "_revision": doc.current_revision,
     }
 
 
@@ -298,6 +380,7 @@ async def _replace_document(db: AsyncSession, lib: Library, target_id: uuid.UUID
         "job_id": str(job.id) if job is not None else None,
         "external_id": target.external_id,   # 保留目标原 external_id（替换不改身份）
         "operation": "updated",              # force=True 必然走新代际
+        "_revision": target.current_revision,
     }
 
 
@@ -473,6 +556,59 @@ async def get_document_source(
         chunk_seq=chunk.seq,
         legacy=False,
         fallback_chunk=chunk.text,
+    )
+
+
+@router.get("/documents/{document_id}/source/full", response_model=DocumentFullSourceResponse)
+async def get_document_full_source(
+    document_id: uuid.UUID,
+    lib: Library = Depends(require_lib("read")),
+    db: AsyncSession = Depends(get_db),
+) -> DocumentFullSourceResponse:
+    doc = await db.get(Document, document_id)
+    if doc is None or doc.library_id != lib.id or doc.deleted_at is not None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "document not found")
+
+    source = await db.get(DocumentSource, document_id)
+    if source is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "该文档需重新导入后才能阅读原文")
+
+    text = source.normalized_text or ""
+    return DocumentFullSourceResponse(
+        document_id=doc.id,
+        document_title=doc.title or source.file_name,
+        file_name=source.file_name,
+        file_type=source.file_type,
+        revision=source.revision,
+        normalized_text=text,
+        text_length=len(text),
+        created_at=source.created_at,
+        updated_at=source.updated_at,
+    )
+
+
+@router.get("/documents/{document_id}/file")
+async def download_document_file(
+    document_id: uuid.UUID,
+    lib: Library = Depends(require_lib("read")),
+    db: AsyncSession = Depends(get_db),
+):
+    doc = await db.get(Document, document_id)
+    if doc is None or doc.library_id != lib.id or doc.deleted_at is not None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "document not found")
+
+    row = await db.get(DocumentFile, document_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "该文档缺少原始文件，请重新导入")
+    path = Path(row.storage_path)
+    if not path.is_absolute():
+        path = _document_files_root() / path
+    if not path.is_file():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "该文档缺少原始文件，请重新导入")
+    return FileResponse(
+        path,
+        media_type=row.content_type or "application/octet-stream",
+        filename=row.file_name,
     )
 
 
@@ -895,6 +1031,15 @@ async def import_file(
         doc_data["title"] = filename  # 标题更新为新文件名
         try:
             result = await _replace_document(db, lib, replace_document_id, doc_data)
+            await _store_original_file_for_result(
+                db,
+                lib=lib,
+                result=result,
+                filename=filename,
+                content_type=file.content_type,
+                content=content,
+            )
+            result.pop("_revision", None)
         except ValueError as exc:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
         await db.commit()
@@ -912,7 +1057,17 @@ async def import_file(
     errors = []
     for idx, doc_data in enumerate(documents_to_ingest):
         try:
-            ingested.append(await _ingest_or_upsert(db, lib, user, doc_data))
+            result = await _ingest_or_upsert(db, lib, user, doc_data)
+            await _store_original_file_for_result(
+                db,
+                lib=lib,
+                result=result,
+                filename=filename,
+                content_type=file.content_type,
+                content=content,
+            )
+            result.pop("_revision", None)
+            ingested.append(result)
         except ValueError as exc:
             log.warning("Import doc[%s] failed: %s", idx, str(exc))
             errors.append({

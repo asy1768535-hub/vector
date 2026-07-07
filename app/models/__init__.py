@@ -4,6 +4,7 @@ from app.models.audit import AuditLog
 from app.models.chat_history import ChatConversation, ChatMessage, ChatMessageSource
 from app.models.chunk import Chunk
 from app.models.cleanup_outbox import CleanupOutbox
+from app.models.document_file import DocumentFile
 from app.models.document_source import DocumentSource
 from app.models.document import Document
 from app.models.embedding_job import EmbeddingJob
@@ -20,8 +21,8 @@ __all__ = [
     "ChatMessage",
     "ChatMessageSource",
     "Chunk",
-    "CleanupOutbox",
     "Document",
+    "DocumentFile",
     "DocumentSource",
     "EmbeddingJob",
     "Library",

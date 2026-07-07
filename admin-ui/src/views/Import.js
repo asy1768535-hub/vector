@@ -1,5 +1,5 @@
 import { computed, onMounted, ref, watch } from 'vue';
-import { useRoute } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import * as api from '../api.js';
 import { store } from '../store.js';
@@ -15,6 +15,7 @@ import { uploadEmpty } from '../illustrations.js';
 export default {
     setup() {
         const route = useRoute();
+        const router = useRouter();
         const libs = ref([]);
         const slug = ref(null);
         const mode = ref('add');
@@ -33,6 +34,10 @@ export default {
         const stats = ref(null);
         const dragOver = ref(false);
         const showExtId = ref(false);
+        const routeReplaceDocumentId = ref('');
+        const routeReplaceTitle = ref('');
+        const routeReplaceError = ref('');
+        const applyingRouteReplace = ref(false);
 
         // ── Computed ─────────────────────────────────────────
         const displayDocs = computed(() => {
@@ -44,6 +49,16 @@ export default {
                 (d.id || '').toLowerCase().includes(q)
             );
         });
+
+        const selectedReplaceDoc = computed(() =>
+            docs.value.find((d) => String(d.id) === String(replaceDocId.value)) || null
+        );
+        const routeReplaceActive = computed(() =>
+            mode.value === 'replace' && Boolean(routeReplaceDocumentId.value)
+        );
+        const replaceTargetTitle = computed(() =>
+            selectedReplaceDoc.value?.title || routeReplaceTitle.value || replaceDocId.value || ''
+        );
 
         const extIdSet = computed(() => Boolean(externalId.value.trim()));
         const multiBlockedByExtId = computed(() =>
@@ -74,7 +89,8 @@ export default {
 
         const canReplace = computed(() =>
             mode.value === 'replace' && slug.value && replaceDocId.value &&
-            replaceFile.value && !replaceFileError.value && !loading.value
+            replaceFile.value && !replaceFileError.value && !loading.value &&
+            !docsLoading.value && !routeReplaceError.value
         );
 
         // ── Library loading ──────────────────────────────────
@@ -90,16 +106,40 @@ export default {
                 const entry = resolveImportEntry(route.query, libs.value, slug.value);
                 slug.value = entry.slug;
                 mode.value = entry.mode;
+                routeReplaceDocumentId.value = entry.replaceDocumentId || '';
+                routeReplaceTitle.value = entry.replaceTitle || '';
+                if (entry.mode === 'replace' && entry.replaceDocumentId) {
+                    replaceDocId.value = entry.replaceDocumentId;
+                    applyingRouteReplace.value = true;
+                }
             } catch (e) { ElMessage.error(e.message); }
         }
 
         async function loadDocs() {
             if (!slug.value) { docs.value = []; return; }
             docsLoading.value = true;
+            routeReplaceError.value = '';
             try {
                 docs.value = await api.listDocuments(slug.value, { limit: 500 });
-            } catch (_) { docs.value = []; }
-            finally { docsLoading.value = false; }
+                applyRouteReplaceTarget();
+            } catch (_) {
+                docs.value = [];
+                if (routeReplaceActive.value) routeReplaceError.value = '目标文档不存在或已被删除，请返回文档管理重新选择';
+            }
+            finally { docsLoading.value = false; applyingRouteReplace.value = false; }
+        }
+
+        function applyRouteReplaceTarget() {
+            if (!routeReplaceActive.value) return;
+            const target = docs.value.find((d) => String(d.id) === String(routeReplaceDocumentId.value));
+            if (target) {
+                replaceDocId.value = target.id;
+                routeReplaceTitle.value = target.title || routeReplaceTitle.value || target.id;
+                routeReplaceError.value = '';
+            } else {
+                replaceDocId.value = routeReplaceDocumentId.value;
+                routeReplaceError.value = '目标文档不存在或已被删除，请返回文档管理重新选择';
+            }
         }
 
         async function loadStats() {
@@ -241,6 +281,10 @@ export default {
         // ── Replace mode ─────────────────────────────────────
         async function handleReplace() {
             if (!slug.value || !replaceDocId.value || !replaceFile.value) return;
+            if (routeReplaceError.value) {
+                ElMessage.warning(routeReplaceError.value);
+                return;
+            }
             if (replaceFileError.value) {
                 ElMessage.warning('文件未通过校验：' + replaceFileError.value);
                 return;
@@ -248,7 +292,7 @@ export default {
             const file = replaceFile.value;
             try {
                 await ElMessageBox.confirm(
-                    `确认用 "${file.name}" 替换当前文档？文档内容将完全覆盖，revision 递增。`,
+                    `确认用 "${file.name}" 替换当前文档？文档内容将完全覆盖，revision 递增，并重新向量化。`,
                     '确认替换', { type: 'warning' }
                 );
             } catch (_) { return; }
@@ -265,7 +309,7 @@ export default {
                 }
                 replaceFile.value = null;
                 replaceFileError.value = '';
-                replaceDocId.value = null;
+                if (!routeReplaceActive.value) replaceDocId.value = null;
                 await loadDocs();
                 await loadStats();
             } catch (e) {
@@ -275,16 +319,20 @@ export default {
 
         function clearReplace() {
             importResult.value = null;
-            replaceDocId.value = null;
+            if (!routeReplaceActive.value) replaceDocId.value = null;
             replaceFile.value = null;
             replaceFileError.value = '';
+        }
+
+        function backToDocuments() {
+            router.push({ path: '/documents', query: slug.value ? { slug: slug.value } : {} });
         }
 
         // ── Watchers ─────────────────────────────────────────
         watch(slug, () => {
             queue.value = [];
             importResult.value = null;
-            replaceDocId.value = null;
+            if (!routeReplaceActive.value) replaceDocId.value = null;
             replaceFile.value = null;
             replaceFileError.value = '';
             showExtId.value = false;
@@ -297,8 +345,13 @@ export default {
             clearQueue();
             replaceFile.value = null;
             replaceFileError.value = '';
+            if (mode.value !== 'replace') {
+                routeReplaceDocumentId.value = '';
+                routeReplaceTitle.value = '';
+                routeReplaceError.value = '';
+            }
             if (mode.value === 'replace') {
-                replaceDocId.value = null;
+                if (!routeReplaceActive.value) replaceDocId.value = null;
                 loadDocs();
                 loadStats();
             }
@@ -308,7 +361,9 @@ export default {
 
         return {
             libs, slug, mode, fileInput, externalId, showExtId, replaceDocId,
-            replaceFile, replaceFileError,
+            replaceFile, replaceFileError, routeReplaceDocumentId, routeReplaceTitle,
+            routeReplaceError, routeReplaceActive, replaceTargetTitle, selectedReplaceDoc,
+            applyingRouteReplace,
             docs, docsLoading, loading, importResult, docQuery,
             queue, uploading, stats, dragOver,
             displayDocs, extIdSet, multiBlockedByExtId,
@@ -316,26 +371,32 @@ export default {
             hasFailed, canStart, canReplace,
             loadLibs, loadDocs, triggerFileSelect, onFileChange,
             onDragOver, onDragLeave, onDrop,
-            onReplaceFileChange, onReplaceDrop,
             addFiles, removeItem, clearQueue, runQueue,
-            handleReplace, clearReplace,
+            onReplaceFileChange, onReplaceDrop,
+            handleReplace, clearReplace, backToDocuments,
             ST_LABEL, ST_TAG, OP_LABEL, OP_TAG, uploadEmpty,
             formatSize, fileTypeIcon, MAX_BATCH_SIZE,
         };
     },
     template: `
     <div class="import-workspace">
+        <el-alert v-if="routeReplaceActive && !routeReplaceError" type="warning" :closable="false" show-icon
+                  class="import-replace-context"
+                  :title="'正在替换《' + (replaceTargetTitle || routeReplaceDocumentId) + '》，新文件导入后会覆盖该文档并重新向量化。'" />
+        <el-alert v-if="routeReplaceError" type="error" :closable="false" show-icon
+                  class="import-replace-context" :title="routeReplaceError" />
+
         <!-- Config card -->
         <section class="import-config-card">
             <el-form :inline="true">
                 <el-form-item label="目标库">
-                    <el-select v-model="slug" placeholder="选择知识库" class="import-lib-select">
+                    <el-select v-model="slug" placeholder="选择知识库" class="import-lib-select" :disabled="routeReplaceActive">
                         <el-option v-for="l in libs" :key="l.slug"
                                    :label="l.name + ' (' + l.slug + ')'" :value="l.slug" />
                     </el-select>
                 </el-form-item>
                 <el-form-item label="模式">
-                    <el-radio-group v-model="mode">
+                    <el-radio-group v-model="mode" :disabled="routeReplaceActive">
                         <el-radio value="add">新增数据</el-radio>
                         <el-radio value="replace">替换已有文档</el-radio>
                     </el-radio-group>
@@ -343,10 +404,13 @@ export default {
                 <el-form-item v-if="mode === 'replace'" label="目标文档">
                     <el-select v-model="replaceDocId" filterable
                                :filter-method="(v) => docQuery = v"
-                               :loading="docsLoading" clearable
-                               placeholder="搜索并选择要替换的文档"
+                               :loading="docsLoading || applyingRouteReplace" clearable
+                               :disabled="routeReplaceActive"
+                               :placeholder="docsLoading || applyingRouteReplace ? '正在加载目标文档...' : '搜索并选择要替换的文档'"
                                class="import-replace-select"
                                popper-class="replace-doc-popper">
+                        <el-option v-if="routeReplaceActive && replaceDocId && !selectedReplaceDoc"
+                                   :label="replaceTargetTitle || replaceDocId" :value="replaceDocId" />
                         <el-option v-for="d in displayDocs" :key="d.id"
                                    :label="d.title || d.id.slice(0,8)" :value="d.id">
                             <div class="rdoc">
@@ -363,6 +427,7 @@ export default {
                             </div>
                         </el-option>
                     </el-select>
+                    <el-button v-if="routeReplaceActive" text @click="backToDocuments">返回文档管理</el-button>
                 </el-form-item>
             </el-form>
             <div v-if="stats" class="import-stats-row">

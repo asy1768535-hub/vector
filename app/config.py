@@ -132,6 +132,8 @@ class Settings(BaseSettings):
     # ---- 文件导入 ----
     # /import-file 单次上传字节上限（默认 50MiB），超出 413，避免一次性 read 打爆内存。
     max_import_file_bytes: int = 50 * 1024 * 1024
+    # 原始上传文件持久化目录（相对路径基于仓库根目录）。
+    document_files_dir: str = "storage/document_files"
 
     # ---- 检索可见性过滤（#6 批次 A，revision 维度）----
     retrieval_consistency_filter: bool = True   # 总开关；关掉则不回查 PG（灰度/回滚用）

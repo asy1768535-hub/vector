@@ -87,6 +87,18 @@ class DocumentSourceLocationResponse(BaseModel):
     fallback_chunk: str = ""
 
 
+class DocumentFullSourceResponse(BaseModel):
+    document_id: uuid.UUID
+    document_title: Optional[str] = None
+    file_name: Optional[str] = None
+    file_type: Optional[str] = None
+    revision: int
+    normalized_text: str
+    text_length: int
+    created_at: datetime
+    updated_at: datetime
+
+
 # ── 文件导入 ──────────────────────────────────────────────────────────
 
 class ImportFileDocResult(BaseModel):

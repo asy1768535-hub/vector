@@ -5,13 +5,16 @@ import * as api from '../api.js';
 import { store, hasPermission } from '../store.js';
 import { dataEmpty } from '../illustrations.js';
 import { readableLibraries, resolveSelectedSlug } from '../menu_access.js';
+import { copyTextToClipboard } from '../copy_text.js';
 import {
     documentDisplayName,
     documentStatusLabel,
     documentStatusTag,
     documentTypeIcon,
+    documentTypeLabel,
     filterDocuments,
     formatDocumentTime,
+    latestDocumentJob,
     paginateDocuments,
 } from '../documents_ui.js';
 
@@ -28,10 +31,19 @@ export default {
         const page = ref(1);
         const pageSize = ref(5);
         const detail = reactive({ open: false, row: null, jobs: [], loading: false });
+        const sourceReader = reactive({
+            open: false,
+            loading: false,
+            row: null,
+            data: null,
+            error: '',
+            keyword: '',
+        });
         const dialog = reactive({
             open: false,
             mode: 'create',   // 'create' | 'edit'
             docId: null,
+            row: null,
             form: { title: '', external_id: '', text: '', splitter: 'text', metadata_json: '' },
         });
 
@@ -58,6 +70,40 @@ export default {
         const partialList = computed(() =>
             Number(stats.value?.document_count || 0) > docs.value.length
         );
+        const detailLatestJob = computed(() => latestDocumentJob(detail.jobs));
+        const sourceText = computed(() => String(sourceReader.data?.normalized_text || ''));
+        const sourceMatchCount = computed(() => {
+            const keyword = sourceReader.keyword.trim().toLowerCase();
+            if (!keyword) return 0;
+            const text = sourceText.value.toLowerCase();
+            let count = 0;
+            let pos = 0;
+            while (pos < text.length) {
+                const idx = text.indexOf(keyword, pos);
+                if (idx < 0) break;
+                count += 1;
+                pos = idx + keyword.length;
+            }
+            return count;
+        });
+        const highlightedSourceParts = computed(() => {
+            const text = sourceText.value;
+            const keyword = sourceReader.keyword.trim();
+            if (!keyword) return [{ text, match: false }];
+            const lowerText = text.toLowerCase();
+            const lowerKeyword = keyword.toLowerCase();
+            const parts = [];
+            let pos = 0;
+            while (pos < text.length) {
+                const idx = lowerText.indexOf(lowerKeyword, pos);
+                if (idx < 0) break;
+                if (idx > pos) parts.push({ text: text.slice(pos, idx), match: false });
+                parts.push({ text: text.slice(idx, idx + keyword.length), match: true });
+                pos = idx + keyword.length;
+            }
+            if (pos < text.length) parts.push({ text: text.slice(pos), match: false });
+            return parts.length ? parts : [{ text, match: false }];
+        });
 
         async function loadLibs() {
             try {
@@ -108,6 +154,7 @@ export default {
             if (!slug.value || !canInsert.value) return;
             dialog.mode = 'create';
             dialog.docId = null;
+            dialog.row = null;
             dialog.form = { title: '', external_id: '', text: '', splitter: 'text', metadata_json: '' };
             dialog.open = true;
         }
@@ -116,14 +163,28 @@ export default {
             if (!slug.value || !canInsert.value) return;
             dialog.mode = 'edit';
             dialog.docId = row.id;
+            dialog.row = row;
             dialog.form = {
                 title: row.title || '',
                 external_id: row.external_id || '',
                 text: '',
                 splitter: 'text',
-                metadata_json: row.metadata ? JSON.stringify(row.metadata) : '',
+                metadata_json: row.metadata ? JSON.stringify(row.metadata, null, 2) : '',
             };
             dialog.open = true;
+        }
+
+        function openReplaceImport(row) {
+            if (!slug.value || !canInsert.value) return;
+            router.push({
+                path: '/import',
+                query: {
+                    library: slug.value,
+                    mode: 'replace',
+                    replaceDocumentId: row.id,
+                    replaceTitle: documentDisplayName(row),
+                },
+            });
         }
 
         async function submitIngest() {
@@ -152,7 +213,7 @@ export default {
                     ? await api.updateDocument(slug.value, dialog.docId, body)
                     : await api.ingestDocument(slug.value, body);
                 ElMessage.success(dialog.mode === 'edit'
-                    ? `已更新并重新入队 ${resp.chunk_count} 个分片`
+                    ? `已覆盖正文并重新入队 ${resp.chunk_count} 个分片`
                     : `已入队 ${resp.chunk_count} 个分片 (doc_id=${resp.document_id.slice(0, 8)}…)`);
                 dialog.open = false;
                 loadDocs();
@@ -161,10 +222,18 @@ export default {
 
         async function del(row) {
             if (!slug.value) return;
+            if (!canDelete.value) {
+                ElMessage.warning('没有删除权限');
+                return;
+            }
             try {
-                await ElMessageBox.confirm(`删除文档 "${row.title || row.id.slice(0, 8)}"?`, '确认', { type: 'warning' });
+                await ElMessageBox.confirm(
+                    `确认删除文档 "${documentDisplayName(row)}"？\n\n删除后文档将不可用于后续检索；向量清理为异步执行；历史问答引用不会自动恢复。`,
+                    '删除文档',
+                    { type: 'warning', confirmButtonText: '确认删除', cancelButtonText: '取消' }
+                );
                 await api.deleteDocument(slug.value, row.id);
-                ElMessage.success('已删除 (Qdrant 异步清理)');
+                ElMessage.success('已删除，向量清理将异步完成');
                 loadDocs();
             } catch (e) {
                 if (e !== 'cancel') ElMessage.error(e.message || String(e));
@@ -225,6 +294,73 @@ export default {
             catch (_) { return '—'; }
         }
 
+        function shortText(value, size = 18) {
+            const text = String(value || '');
+            if (!text) return '—';
+            return text.length > size ? `${text.slice(0, size)}…` : text;
+        }
+
+        async function copyDocValue(value, label) {
+            try {
+                await copyTextToClipboard(value);
+                ElMessage.success(`已复制${label}`);
+            } catch (e) {
+                ElMessage.error(e.message || '复制失败');
+            }
+        }
+
+        async function openFullSource(row) {
+            if (!slug.value || !row) return;
+            sourceReader.open = true;
+            sourceReader.loading = true;
+            sourceReader.row = row;
+            sourceReader.data = null;
+            sourceReader.error = '';
+            sourceReader.keyword = '';
+            try {
+                sourceReader.data = await api.getDocumentFullSource(slug.value, row.id);
+            } catch (e) {
+                sourceReader.error = e.status === 404
+                    ? '该文档缺少原文快照，请重新导入后再阅读原文。'
+                    : (e.message || '加载原文失败');
+            } finally {
+                sourceReader.loading = false;
+            }
+        }
+
+        async function downloadOriginalFile(row) {
+            if (!slug.value || !row) return;
+            try {
+                const { blob, filename } = await api.downloadDocumentFile(slug.value, row.id);
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = filename || documentDisplayName(row);
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                URL.revokeObjectURL(url);
+            } catch (e) {
+                const msg = e.status === 404
+                    ? '该文档缺少原始文件，请重新导入后再下载'
+                    : (e.message || '下载原文件失败');
+                ElMessage.error(msg);
+            }
+        }
+
+        function closeFullSource() {
+            sourceReader.open = false;
+            sourceReader.loading = false;
+            sourceReader.data = null;
+            sourceReader.error = '';
+            sourceReader.keyword = '';
+        }
+
+        function deleteTitle() {
+            if (!slug.value) return '请先选择知识库';
+            return canDelete.value ? '删除文档' : '没有删除权限';
+        }
+
         watch(
             () => [filters.keyword, filters.status, filters.type, ...(filters.dateRange || [])],
             () => { page.value = 1; },
@@ -253,9 +389,11 @@ export default {
         return {
             myLibs, slug, docs, stats, loading, canInsert, canDelete, isSuperuser,
             processingCount, filters, page, pageSize, pagination, visibleDocs, partialList,
-            detail, dialog, loadDocs, resetFilters, openFileImport, openIngest, openEdit,
-            openDetail, retryJob, retryDocument, submitIngest, del, metadataText,
-            documentDisplayName, documentStatusLabel, documentStatusTag, documentTypeIcon,
+            detail, detailLatestJob, sourceReader, sourceText, sourceMatchCount, highlightedSourceParts,
+            dialog, loadDocs, resetFilters, openFileImport, openIngest, openEdit,
+            openReplaceImport, openDetail, openFullSource, downloadOriginalFile, closeFullSource, retryJob, retryDocument, submitIngest, del, metadataText,
+            copyDocValue, deleteTitle, shortText,
+            documentDisplayName, documentStatusLabel, documentStatusTag, documentTypeIcon, documentTypeLabel,
             formatDocumentTime, dataEmpty,
         };
     },
@@ -341,13 +479,15 @@ export default {
             <el-table-column label="更新时间" width="155">
               <template #default="{row}">{{ formatDocumentTime(row.updated_at) }}</template>
             </el-table-column>
-            <el-table-column label="操作" width="220">
+            <el-table-column label="操作" width="250" class-name="documents-op-column">
               <template #default="{row}">
-                <el-button link class="doc-link-btn" @click="openDetail(row)">详情</el-button>
-                <el-button link class="doc-link-btn" :disabled="!canInsert" @click="openEdit(row)">编辑</el-button>
-                <el-button v-if="isSuperuser && row.status === 'failed'" link type="warning"
-                           @click="retryDocument(row)">重试</el-button>
-                <el-button link type="danger" :disabled="!canDelete" @click="del(row)">删除</el-button>
+                <div class="documents-op-group">
+                  <el-button link class="doc-link-btn" @click="openDetail(row)">详情</el-button>
+                  <el-button link class="doc-link-btn" :disabled="!canInsert" :title="canInsert ? '编辑文档' : '没有写入权限'" @click="openEdit(row)">编辑</el-button>
+                  <el-button v-if="isSuperuser && row.status === 'failed'" link type="warning"
+                             @click="retryDocument(row)">重试</el-button>
+                  <el-button link type="danger" class="doc-delete-btn" :disabled="!canDelete" :title="deleteTitle()" @click="del(row)">删除</el-button>
+                </div>
               </template>
             </el-table-column>
           </el-table>
@@ -359,67 +499,135 @@ export default {
         </div>
       </section>
 
-      <el-drawer v-model="detail.open" class="documents-detail" title="文档详情" size="520px">
+      <el-drawer v-model="detail.open" class="documents-detail" title="文档详情" size="780px">
         <template v-if="detail.row">
-          <div class="documents-detail-meta">
-            <span>标题</span><b>{{ documentDisplayName(detail.row) }}</b>
-            <span>文档 ID</span><span class="mono">{{ detail.row.id }}</span>
-            <span>external_id</span><span>{{ detail.row.external_id || '—' }}</span>
-            <span>状态</span><el-tag :type="documentStatusTag(detail.row.status)">{{ documentStatusLabel(detail.row.status) }}</el-tag>
-            <span>版本</span><span>v{{ detail.row.current_revision || 0 }}</span>
-            <span>content hash</span><span class="mono">{{ detail.row.content_hash || '—' }}</span>
-            <span>创建时间</span><span>{{ formatDocumentTime(detail.row.created_at) }}</span>
-            <span>更新时间</span><span>{{ formatDocumentTime(detail.row.updated_at) }}</span>
-            <span>最后错误</span><span class="documents-error">{{ detail.row.last_error || '—' }}</span>
-          </div>
-          <h3>Metadata</h3>
-          <pre class="documents-detail-json">{{ metadataText(detail.row) }}</pre>
-          <h3>摄入任务</h3>
-          <div v-loading="detail.loading">
-            <el-empty v-if="!detail.loading && !detail.jobs.length" description="暂无摄入任务" />
-            <article v-for="job in detail.jobs" :key="job.id" class="documents-job">
-              <div class="documents-job-head">
-                <el-tag :type="documentStatusTag(job.status)">{{ documentStatusLabel(job.status) }}</el-tag>
-                <el-button v-if="isSuperuser && job.status === 'failed'" link type="warning"
-                           @click="retryJob(job)">重试</el-button>
+          <section class="documents-detail-card">
+            <div class="documents-detail-card-head">
+              <h3>基础信息</h3>
+              <el-tag :type="documentStatusTag(detail.row.status)">{{ documentStatusLabel(detail.row.status) }}</el-tag>
+            </div>
+            <div class="documents-detail-grid">
+              <span>文件名</span><b>{{ documentDisplayName(detail.row) }}</b>
+              <span>文件类型</span><span>{{ documentTypeLabel(detail.row) }}</span>
+              <span>状态</span><span>{{ documentStatusLabel(detail.row.status) }}</span>
+              <span>版本</span><span>v{{ detail.row.current_revision || 0 }}</span>
+              <span>文档 ID</span><span class="documents-copy-line"><code>{{ detail.row.id }}</code><el-button text class="documents-copy-btn" title="复制文档 ID" @click="copyDocValue(detail.row.id, '文档 ID')"><local-icon icon="mdi:content-copy"></local-icon></el-button></span>
+              <span>external_id</span><span>{{ detail.row.external_id || '—' }}</span>
+              <span>更新时间</span><span>{{ formatDocumentTime(detail.row.updated_at) }}</span>
+              <span>content_hash</span><span class="documents-copy-line"><code :title="detail.row.content_hash || ''">{{ shortText(detail.row.content_hash, 28) }}</code><el-button v-if="detail.row.content_hash" text class="documents-copy-btn" title="复制 content_hash" @click="copyDocValue(detail.row.content_hash, 'content_hash')"><local-icon icon="mdi:content-copy"></local-icon></el-button></span>
+            </div>
+          </section>
+
+          <section class="documents-detail-card">
+            <div class="documents-detail-card-head"><h3>处理信息</h3></div>
+            <div v-loading="detail.loading">
+              <div class="documents-detail-grid">
+                <span>最近摄入任务</span><span>{{ detailLatestJob?.id || '—' }}</span>
+                <span>任务状态</span><span><el-tag v-if="detailLatestJob" :type="documentStatusTag(detailLatestJob.status)" size="small">{{ documentStatusLabel(detailLatestJob.status) }}</el-tag><template v-else>—</template></span>
+                <span>失败原因</span><span class="documents-error">{{ detailLatestJob?.last_error || detail.row.last_error || '—' }}</span>
               </div>
-              <div>创建：{{ formatDocumentTime(job.created_at) }}</div>
-              <div>开始：{{ formatDocumentTime(job.claimed_at) }}</div>
-              <div>结束：{{ formatDocumentTime(job.finished_at) }}</div>
-              <div>尝试次数：{{ job.attempt_count ?? '—' }}</div>
-              <div v-if="job.last_error" class="documents-error">{{ job.last_error }}</div>
-            </article>
-          </div>
+              <el-empty v-if="!detail.loading && !detail.jobs.length" description="暂无摄入任务" />
+              <article v-for="job in detail.jobs" :key="job.id" class="documents-job">
+                <div class="documents-job-head">
+                  <el-tag :type="documentStatusTag(job.status)">{{ documentStatusLabel(job.status) }}</el-tag>
+                  <el-button v-if="isSuperuser && job.status === 'failed'" link type="warning"
+                             @click="retryJob(job)">重试失败任务</el-button>
+                </div>
+                <div>任务 ID：{{ job.id }}</div>
+                <div>创建：{{ formatDocumentTime(job.created_at) }}</div>
+                <div>开始：{{ formatDocumentTime(job.claimed_at) }}</div>
+                <div>结束：{{ formatDocumentTime(job.finished_at) }}</div>
+                <div>尝试次数：{{ job.attempt_count ?? '—' }}</div>
+                <div v-if="job.last_error" class="documents-error">{{ job.last_error }}</div>
+              </article>
+            </div>
+          </section>
+
+          <section class="documents-detail-card">
+            <div class="documents-detail-card-head">
+              <h3>来源信息</h3>
+              <div class="documents-source-actions">
+                <el-button type="primary" plain @click="openFullSource(detail.row)">阅读原文</el-button>
+                <el-button plain @click="downloadOriginalFile(detail.row)">下载原文件</el-button>
+              </div>
+            </div>
+            <p class="documents-source-note">阅读原文使用 normalized_text 快照；下载原文件只在后端已持久化原始上传文件时可用。</p>
+          </section>
+
+          <section class="documents-detail-card documents-metadata-card">
+            <div class="documents-detail-card-head"><h3>Metadata</h3></div>
+            <pre class="documents-detail-json">{{ metadataText(detail.row) }}</pre>
+          </section>
         </template>
       </el-drawer>
 
-      <el-dialog v-model="dialog.open" :title="dialog.mode === 'edit' ? '编辑文档（整篇替换并重 embed）' : (slug ? ('向 ' + slug + ' 提交文档') : '提交文档')" width="640px">
-        <el-alert v-if="dialog.mode === 'edit'" type="warning" :closable="false" style="margin-bottom:12px"
-                  title="更新会用下面的正文整篇替换旧内容：删除旧分片与旧向量，重新切分并重新 embed。请粘贴完整的新正文。" />
-        <el-form label-width="100px">
-          <el-form-item label="标题"><el-input v-model="dialog.form.title" /></el-form-item>
-          <el-form-item label="external_id">
-            <el-input v-model="dialog.form.external_id" :disabled="dialog.mode === 'edit'" placeholder="可选；用于幂等/upsert" />
-          </el-form-item>
-          <el-form-item label="切分方式">
-            <el-radio-group v-model="dialog.form.splitter">
-              <el-radio value="text">text</el-radio>
-              <el-radio value="markdown">markdown</el-radio>
-              <el-radio value="none">none (单一分片)</el-radio>
-            </el-radio-group>
-          </el-form-item>
-          <el-form-item label="metadata">
-            <el-input v-model="dialog.form.metadata_json" type="textarea" :rows="2"
-                      placeholder='可选 JSON，例如 {"author":"...","year":2024}' />
-          </el-form-item>
-          <el-form-item label="正文" required>
-            <el-input v-model="dialog.form.text" type="textarea" :rows="10"
-                      placeholder="粘贴文本 / Markdown / JSON 字符串" />
-          </el-form-item>
+      <el-dialog v-model="sourceReader.open" title="阅读原文" width="860px" class="documents-source-dialog" @closed="closeFullSource">
+        <div v-if="sourceReader.loading" class="documents-source-loading">正在加载原文...</div>
+        <template v-else>
+          <el-alert v-if="sourceReader.error" type="warning" :closable="false" show-icon :title="sourceReader.error" />
+          <template v-else-if="sourceReader.data">
+            <div class="documents-source-meta">
+              <span>{{ sourceReader.data.file_name || sourceReader.data.document_title || documentDisplayName(sourceReader.row) }}</span>
+              <span v-if="sourceReader.data.file_type">{{ sourceReader.data.file_type }}</span>
+              <span>v{{ sourceReader.data.revision || sourceReader.row?.current_revision || 0 }}</span>
+              <span>{{ sourceReader.data.text_length || sourceText.length }} 字</span>
+            </div>
+            <div class="documents-source-toolbar">
+              <el-input v-model="sourceReader.keyword" clearable placeholder="搜索原文关键词" />
+              <span class="documents-source-match-count">{{ sourceReader.keyword ? ('匹配 ' + sourceMatchCount + ' 处') : '输入关键词后高亮匹配' }}</span>
+            </div>
+            <el-empty v-if="!sourceText" description="原文快照为空" />
+            <pre v-else class="documents-source-text"><template v-for="(part, pi) in highlightedSourceParts" :key="pi"><mark v-if="part.match">{{ part.text }}</mark><span v-else>{{ part.text }}</span></template></pre>
+          </template>
+          <el-empty v-else description="暂无原文内容" />
+        </template>
+      </el-dialog>
+
+      <el-dialog v-model="dialog.open" :title="dialog.mode === 'edit' ? '编辑文档' : (slug ? ('向 ' + slug + ' 提交文档') : '提交文档')" width="720px" class="documents-edit-dialog">
+        <template v-if="dialog.mode === 'edit'">
+          <el-alert type="warning" :closable="false" class="documents-edit-alert"
+                    title="当前保存是文本覆盖：会替换正文、重新切分、重新向量化，旧问答引用不会自动更新。" />
+        </template>
+        <el-form label-width="110px">
+          <section class="documents-edit-section">
+            <h3>{{ dialog.mode === 'edit' ? '基础信息编辑' : '基础信息' }}</h3>
+            <p v-if="dialog.mode === 'edit'" class="documents-edit-hint">标题和 metadata 会随下方文本覆盖一起提交；external_id 当前版本不可修改。</p>
+            <el-form-item label="标题"><el-input v-model="dialog.form.title" /></el-form-item>
+            <el-form-item label="external_id">
+              <el-input v-model="dialog.form.external_id" :disabled="dialog.mode === 'edit'" placeholder="可选；用于幂等/upsert" />
+              <div v-if="dialog.mode === 'edit'" class="documents-form-help">后端当前不支持在文档页单独修改 external_id。</div>
+            </el-form-item>
+            <el-form-item label="metadata">
+              <el-input v-model="dialog.form.metadata_json" type="textarea" :rows="3"
+                        placeholder='可选 JSON，例如 {"author":"...","year":2024}' />
+            </el-form-item>
+          </section>
+
+          <section class="documents-edit-section documents-content-overwrite">
+            <h3>{{ dialog.mode === 'edit' ? '覆盖文档内容（文本覆盖）' : '正文' }}</h3>
+            <p v-if="dialog.mode === 'edit'" class="documents-edit-hint">此操作会用下面的完整正文替换旧正文，重新切分并重新向量化；旧问答引用不会自动更新。</p>
+            <el-form-item label="切分方式">
+              <el-radio-group v-model="dialog.form.splitter">
+                <el-radio value="text">text</el-radio>
+                <el-radio value="markdown">markdown</el-radio>
+                <el-radio value="none">none (单一分片)</el-radio>
+              </el-radio-group>
+            </el-form-item>
+            <el-form-item label="正文" required>
+              <el-input v-model="dialog.form.text" type="textarea" :rows="10"
+                        placeholder="粘贴完整文本 / Markdown / JSON 字符串" />
+            </el-form-item>
+          </section>
+
+          <section v-if="dialog.mode === 'edit'" class="documents-edit-section documents-reimport-zone">
+            <h3>覆盖导入新文档</h3>
+            <p>如果需要用 PDF、Word、Excel 等文件覆盖，请使用导入页的替换模式。新文件导入后会覆盖此文档并重新向量化。</p>
+            <el-button type="warning" plain @click="openReplaceImport(dialog.row)">重新导入并覆盖此文档</el-button>
+          </section>
         </el-form>
         <template #footer>
           <el-button @click="dialog.open = false">取消</el-button>
-          <el-button type="primary" @click="submitIngest">{{ dialog.mode === 'edit' ? '保存并重新 embed' : '提交（异步 embed）' }}</el-button>
+          <el-button type="primary" @click="submitIngest">{{ dialog.mode === 'edit' ? '保存文本覆盖并重新向量化' : '提交（异步 embed）' }}</el-button>
         </template>
       </el-dialog>
     </div>

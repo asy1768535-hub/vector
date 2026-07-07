@@ -7,5 +7,11 @@ export function resolveImportEntry(query, libraries, currentSlug = null) {
             ? currentSlug
             : (libraries?.[0]?.slug ?? null);
     const mode = query?.mode === 'replace' ? 'replace' : 'add';
-    return { slug, mode };
+    const replaceDocumentId = mode === 'replace' && typeof query?.replaceDocumentId === 'string'
+        ? query.replaceDocumentId
+        : '';
+    const replaceTitle = mode === 'replace' && typeof query?.replaceTitle === 'string'
+        ? query.replaceTitle
+        : '';
+    return { slug, mode, replaceDocumentId, replaceTitle };
 }

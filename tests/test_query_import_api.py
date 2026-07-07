@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import hashlib
+import shutil
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
@@ -18,6 +20,7 @@ from app.models.user import User
 from app.models.library import Library
 from app.models.document import Document
 from app.models.chunk import Chunk
+from app.models.document_file import DocumentFile
 from app.models.document_source import DocumentSource
 from app.models.embedding_job import EmbeddingJob
 from app.schemas.documents import QueryRequest
@@ -91,6 +94,8 @@ def make_db_mock(*, existing=None, scalar_list=None, get_return=None, library=No
     （默认 mock_library），其余查询走 existing 语义，避免库锁查到 Document 或误 404。
     """
     db = AsyncMock()  # commit/flush/get/rollback 是 async → AsyncMock 合适
+    db.add = MagicMock()
+    db.add_all = MagicMock()
     lib_obj = library if library is not None else mock_library
 
     result = MagicMock()
@@ -111,6 +116,8 @@ def make_db_mock(*, existing=None, scalar_list=None, get_return=None, library=No
     db.execute = _execute
     if get_return is not None:
         db.get = AsyncMock(return_value=get_return)
+    else:
+        db.get = AsyncMock(return_value=None)
     return db
 
 
@@ -233,6 +240,53 @@ def test_query_library_unauthorized(mock_has_perm, client):
         json={"query": "test query", "limit": 5}
     )
     assert response.status_code == status.HTTP_403_FORBIDDEN
+
+def _safe_tmp_dir(name: str) -> Path:
+    root = (Path(".pytest-tmp") / name).resolve()
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
+    return root
+
+
+@patch("app.services.ingest.ingest_text", new_callable=AsyncMock)
+def test_import_txt_file_persists_original_upload(mock_ingest, monkeypatch):
+    mock_user.is_superuser = True
+    tmp_path = _safe_tmp_dir("document-file-import")
+    monkeypatch.setattr(settings, "document_files_dir", str(tmp_path))
+    doc = MagicMock()
+    doc.id = uuid.uuid4()
+    doc.status = "pending"
+    doc.title = "keep.txt"
+    doc.external_id = None
+    doc.current_revision = 1
+    job = MagicMock()
+    job.id = uuid.uuid4()
+    mock_ingest.return_value = (doc, job, 1, False)
+    db = make_db_mock()
+    try:
+        with patch("app.deps.load_active_library", new_callable=AsyncMock) as ml:
+            ml.return_value = mock_library
+            resp = _client_with_db(db).post(
+                "/libraries/testlib/import-file",
+                files={"file": ("keep.txt", b"original bytes", "text/plain")},
+            )
+            assert resp.status_code == status.HTTP_201_CREATED
+            added_files = [
+                call.args[0] for call in db.add.call_args_list
+                if call.args and isinstance(call.args[0], DocumentFile)
+            ]
+            assert len(added_files) == 1
+            row = added_files[0]
+            assert row.document_id == doc.id
+            assert row.revision == 1
+            assert row.file_name == "keep.txt"
+            assert row.content_type == "text/plain"
+            assert row.size_bytes == len(b"original bytes")
+            assert (tmp_path / row.storage_path).read_bytes() == b"original bytes"
+    finally:
+        app.dependency_overrides.clear()
+
 
 @patch("app.services.ingest.ingest_text", new_callable=AsyncMock)
 def test_import_txt_file(mock_ingest, client):
@@ -1137,4 +1191,188 @@ def test_get_document_source_legacy_without_source_does_not_fabricate_offsets():
             assert data["source_start"] is None
             assert data["source_end"] is None
     finally:
+        app.dependency_overrides.clear()
+
+
+def test_get_document_full_source_returns_normalized_text():
+    mock_user.is_superuser = True
+    doc = Document(
+        id=uuid.uuid4(),
+        library_id=mock_library.id,
+        title="full-source.txt",
+        content_hash="h",
+        current_revision=3,
+        status="ready",
+    )
+    now = datetime.now(timezone.utc)
+    source = DocumentSource(
+        document_id=doc.id,
+        revision=3,
+        file_name="full-source.txt",
+        file_type="txt",
+        normalized_text="第一行\n第二行 needle",
+        created_at=now,
+        updated_at=now,
+    )
+    db = AsyncMock()
+
+    async def _get(model, ident):
+        if model is Document:
+            return doc
+        if model is DocumentSource:
+            return source
+        return None
+
+    db.get = _get
+    try:
+        with patch("app.deps.load_active_library", new_callable=AsyncMock) as ml:
+            ml.return_value = mock_library
+            resp = _client_with_db(db).get(f"/libraries/testlib/documents/{doc.id}/source/full")
+            assert resp.status_code == status.HTTP_200_OK
+            data = resp.json()
+            assert data["document_id"] == str(doc.id)
+            assert data["document_title"] == "full-source.txt"
+            assert data["file_name"] == "full-source.txt"
+            assert data["file_type"] == "txt"
+            assert data["revision"] == 3
+            assert data["normalized_text"] == "第一行\n第二行 needle"
+            assert data["text_length"] == len("第一行\n第二行 needle")
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_get_document_full_source_without_snapshot_returns_clear_404():
+    mock_user.is_superuser = True
+    doc = Document(
+        id=uuid.uuid4(),
+        library_id=mock_library.id,
+        title="legacy.txt",
+        content_hash="h",
+        current_revision=1,
+        status="ready",
+    )
+    db = AsyncMock()
+
+    async def _get(model, ident):
+        if model is Document:
+            return doc
+        if model is DocumentSource:
+            return None
+        return None
+
+    db.get = _get
+    try:
+        with patch("app.deps.load_active_library", new_callable=AsyncMock) as ml:
+            ml.return_value = mock_library
+            resp = _client_with_db(db).get(f"/libraries/testlib/documents/{doc.id}/source/full")
+            assert resp.status_code == status.HTTP_404_NOT_FOUND
+            assert "重新导入" in resp.json()["detail"]
+    finally:
+        app.dependency_overrides.clear()
+
+
+@patch("app.deps.has_permission")
+def test_get_document_full_source_requires_read_permission(mock_has_perm):
+    mock_user.is_superuser = False
+    mock_has_perm.return_value = False
+    doc_id = uuid.uuid4()
+    db = AsyncMock()
+    try:
+        with patch("app.deps.load_active_library", new_callable=AsyncMock) as ml:
+            ml.return_value = mock_library
+            resp = _client_with_db(db).get(f"/libraries/testlib/documents/{doc_id}/source/full")
+            assert resp.status_code == status.HTTP_403_FORBIDDEN
+    finally:
+        mock_user.is_superuser = True
+        app.dependency_overrides.clear()
+
+
+def test_download_document_file_returns_persisted_bytes(monkeypatch):
+    tmp_path = _safe_tmp_dir("document-file-download")
+    mock_user.is_superuser = True
+    monkeypatch.setattr(settings, "document_files_dir", str(tmp_path))
+    doc = Document(
+        id=uuid.uuid4(),
+        library_id=mock_library.id,
+        title="download.txt",
+        content_hash="h",
+        current_revision=1,
+        status="ready",
+    )
+    stored = tmp_path / "lib" / "doc" / "file.txt"
+    stored.parent.mkdir(parents=True)
+    stored.write_bytes(b"download bytes")
+    row = DocumentFile(
+        document_id=doc.id,
+        revision=1,
+        file_name="download.txt",
+        content_type="text/plain",
+        storage_path=str(stored.relative_to(tmp_path)),
+        size_bytes=len(b"download bytes"),
+        sha256=hashlib.sha256(b"download bytes").hexdigest(),
+    )
+    db = AsyncMock()
+
+    async def _get(model, ident):
+        if model is Document:
+            return doc
+        if model is DocumentFile:
+            return row
+        return None
+
+    db.get = _get
+    try:
+        with patch("app.deps.load_active_library", new_callable=AsyncMock) as ml:
+            ml.return_value = mock_library
+            resp = _client_with_db(db).get(f"/libraries/testlib/documents/{doc.id}/file")
+            assert resp.status_code == status.HTTP_200_OK
+            assert resp.content == b"download bytes"
+            assert "download.txt" in resp.headers.get("content-disposition", "")
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_download_document_file_missing_original_returns_clear_404():
+    mock_user.is_superuser = True
+    doc = Document(
+        id=uuid.uuid4(),
+        library_id=mock_library.id,
+        title="missing.txt",
+        content_hash="h",
+        current_revision=1,
+        status="ready",
+    )
+    db = AsyncMock()
+
+    async def _get(model, ident):
+        if model is Document:
+            return doc
+        if model is DocumentFile:
+            return None
+        return None
+
+    db.get = _get
+    try:
+        with patch("app.deps.load_active_library", new_callable=AsyncMock) as ml:
+            ml.return_value = mock_library
+            resp = _client_with_db(db).get(f"/libraries/testlib/documents/{doc.id}/file")
+            assert resp.status_code == status.HTTP_404_NOT_FOUND
+            assert "缺少原始文件" in resp.json()["detail"]
+    finally:
+        app.dependency_overrides.clear()
+
+
+@patch("app.deps.has_permission")
+def test_download_document_file_requires_read_permission(mock_has_perm):
+    mock_user.is_superuser = False
+    mock_has_perm.return_value = False
+    doc_id = uuid.uuid4()
+    db = AsyncMock()
+    try:
+        with patch("app.deps.load_active_library", new_callable=AsyncMock) as ml:
+            ml.return_value = mock_library
+            resp = _client_with_db(db).get(f"/libraries/testlib/documents/{doc_id}/file")
+            assert resp.status_code == status.HTTP_403_FORBIDDEN
+    finally:
+        mock_user.is_superuser = True
         app.dependency_overrides.clear()

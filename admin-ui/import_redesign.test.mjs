@@ -240,4 +240,29 @@ test('CSS defines import-dropzone with dashed border and drag-over highlight', (
     assert.match(css, /\.import-dropzone\.is-dragover\s*\{/, 'is-dragover state');
 });
 
+test('replace route query auto-selects target document and handles not-found state', () => {
+    for (const token of [
+        'routeReplaceDocumentId',
+        'routeReplaceTitle',
+        'applyRouteReplaceTarget()',
+        'replaceDocId.value = target.id',
+        '目标文档不存在或已被删除，请返回文档管理重新选择',
+        '正在加载目标文档...',
+        '正在替换《',
+        '返回文档管理',
+    ]) assert.ok(source.includes(token), `missing replace deep-link token: ${token}`);
+});
+
+test('replace submission preserves target document id and never falls back to add', () => {
+    assert.ok(source.includes('api.importFile(slug.value, file, { replaceDocumentId: replaceDocId.value })'), 'submits selected replace target');
+    assert.ok(source.includes('!routeReplaceError.value'), 'canReplace blocks not-found target');
+    assert.ok(source.includes('if (!routeReplaceActive.value) replaceDocId.value = null'), 'route-driven target is not cleared after replace');
+    assert.equal(source.includes('api.importFile(slug.value, file, {})'), false, 'replace mode does not upload without target');
+});
+
+test('replace route query locks library and mode controls', () => {
+    assert.ok(source.includes('class="import-lib-select" :disabled="routeReplaceActive"'), 'route replace locks library select');
+    assert.ok(source.includes('<el-radio-group v-model="mode" :disabled="routeReplaceActive">'), 'route replace locks mode switch');
+});
+
 console.log('import redesign test passed');

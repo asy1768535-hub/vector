@@ -28,6 +28,7 @@ node_modules/
 admin-ui/dist/
 admin-ui/.vite/
 cpwsImportData/
+storage/document_files/
 
 # 备份产物（PG dump / Qdrant 快照等）——绝不入库（见 docs/27）
 /backups/

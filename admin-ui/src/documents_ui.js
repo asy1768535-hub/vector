@@ -16,6 +16,17 @@ const STATUS_TAG = {
     deleted: 'info',
 };
 
+const TYPE_LABEL = {
+    pdf: 'PDF',
+    word: 'Word',
+    excel: 'Excel',
+    markdown: 'Markdown',
+    text: '文本',
+    json: 'JSON',
+    csv: 'CSV',
+    other: '其他',
+};
+
 export function documentType(row) {
     const name = String(row?.title || row?.external_id || '').toLowerCase();
     const ext = name.includes('.') ? name.split('.').pop() : '';
@@ -27,6 +38,10 @@ export function documentType(row) {
     if (ext === 'json') return 'json';
     if (ext === 'csv') return 'csv';
     return 'other';
+}
+
+export function documentTypeLabel(row) {
+    return TYPE_LABEL[documentType(row)] || TYPE_LABEL.other;
 }
 
 const FILE_TYPE_ASSETS = {
@@ -82,6 +97,14 @@ export function filterDocuments(rows, filters = {}) {
         }
         return true;
     });
+}
+
+export function latestDocumentJob(jobs = []) {
+    return [...(jobs || [])].sort((a, b) => {
+        const at = new Date(a?.created_at || a?.finished_at || 0).getTime() || 0;
+        const bt = new Date(b?.created_at || b?.finished_at || 0).getTime() || 0;
+        return bt - at;
+    })[0] || null;
 }
 
 export function paginateDocuments(rows, requestedPage = 1, requestedSize = 10) {
