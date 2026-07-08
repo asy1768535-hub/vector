@@ -20,6 +20,10 @@ class DocumentIngestResponse(BaseModel):
     document_id: uuid.UUID
     status: str
     chunk_count: int
+    document_status: Optional[str] = None
+    revision_status: Optional[str] = None
+    job_status: Optional[str] = None
+    document_revision_id: Optional[uuid.UUID] = None
     job_id: Optional[uuid.UUID] = None   # 无新任务（如 no-op upsert / 去重命中）时为 null
 
 

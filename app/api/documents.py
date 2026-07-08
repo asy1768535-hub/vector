@@ -12,7 +12,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Query, status, File, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Query, Response, status, File, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
@@ -44,6 +44,7 @@ from app.schemas.documents import (
 from app.config import settings
 from app.services import embedding, ingest as ingest_service, source_enrichment
 from app.services import cleanup as cleanup_service
+from app.services.metadata_guard import MetadataValidationError
 from app.services import rerank as rerank_svc
 from app.services import retrieval as retrieval_svc
 
@@ -181,7 +182,30 @@ async def _lock_writable(db: AsyncSession, lib: Library) -> Library:
     return locked
 
 
-async def _apply_reingest(db: AsyncSession, lib: Library, doc: Document, body: "DocumentIngestRequest", *, force: bool = False):
+def _ingest_response(doc: Document, job: EmbeddingJob | None, chunk_count: int) -> DocumentIngestResponse:
+    revision_id = job.document_revision_id if job is not None else doc.latest_revision_id
+    revision_status = job.status if job is not None and job.document_revision_id is not None else None
+    return DocumentIngestResponse(
+        document_id=doc.id,
+        status=doc.status,
+        document_status=doc.status,
+        revision_status=revision_status,
+        job_status=job.status if job is not None else None,
+        document_revision_id=revision_id,
+        chunk_count=chunk_count,
+        job_id=job.id if job is not None else None,
+    )
+
+
+def _set_write_status(response: Response, *, changed: bool) -> None:
+    if not getattr(settings, "enable_evidence_write_path", False):
+        return
+    response.status_code = status.HTTP_202_ACCEPTED if changed else status.HTTP_200_OK
+
+
+async def _apply_reingest(
+    db: AsyncSession, lib: Library, doc: Document, body: "DocumentIngestRequest", *, force: bool = False
+):
     """更新已存在文档：重切 + 开新代际（current_revision+=1 + supersede 旧 job）。
 
     force=True（显式 PUT）总是重做；force=False（external_id upsert）内容没变则 no-op。
@@ -194,7 +218,7 @@ async def _apply_reingest(db: AsyncSession, lib: Library, doc: Document, body: "
         force=force,
     )
     await db.commit()
-    return job, chunk_count
+    return job, chunk_count, changed
 
 
 async def _upsert_document_source(db, document_id, revision: int, source: dict | None) -> None:
@@ -390,6 +414,7 @@ async def _replace_document(db: AsyncSession, lib: Library, target_id: uuid.UUID
 )
 async def ingest(
     body: DocumentIngestRequest,
+    response: Response,
     lib: Library = Depends(require_lib("insert")),
     user: User = Depends(current_active_user),
     db: AsyncSession = Depends(get_db),
@@ -407,13 +432,13 @@ async def ingest(
         )).scalars().first()
         if existing is not None:
             try:
-                job, chunk_count = await _apply_reingest(db, lib, existing, body)
+                job, chunk_count, changed = await _apply_reingest(db, lib, existing, body)
+            except MetadataValidationError as exc:
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
             except ValueError as exc:
                 raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
-            return DocumentIngestResponse(
-                document_id=existing.id, status=existing.status,
-                chunk_count=chunk_count, job_id=job.id if job is not None else None,
-            )
+            _set_write_status(response, changed=changed)
+            return _ingest_response(existing, job, chunk_count)
 
     try:
         doc, job, chunk_count, _existing = await ingest_service.ingest_text(
@@ -426,21 +451,20 @@ async def ingest(
             splitter=body.splitter,
             created_by=user.id,
         )
+    except MetadataValidationError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     await db.commit()
-    return DocumentIngestResponse(
-        document_id=doc.id,
-        status=doc.status,
-        chunk_count=chunk_count,
-        job_id=job.id if job is not None else None,
-    )
+    _set_write_status(response, changed=not _existing)
+    return _ingest_response(doc, job, chunk_count)
 
 
 @router.put("/documents/{document_id}", response_model=DocumentIngestResponse)
 async def update_document(
     document_id: uuid.UUID,
     body: DocumentIngestRequest,
+    response: Response,
     lib: Library = Depends(require_lib("insert")),
     user: User = Depends(current_active_user),
     db: AsyncSession = Depends(get_db),
@@ -454,13 +478,13 @@ async def update_document(
     if doc is None or doc.library_id != lib.id or doc.deleted_at is not None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "document not found")
     try:
-        job, chunk_count = await _apply_reingest(db, lib, doc, body, force=True)
+        job, chunk_count, changed = await _apply_reingest(db, lib, doc, body, force=True)
+    except MetadataValidationError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
-    return DocumentIngestResponse(
-        document_id=doc.id, status=doc.status,
-        chunk_count=chunk_count, job_id=job.id if job is not None else None,
-    )
+    _set_write_status(response, changed=changed)
+    return _ingest_response(doc, job, chunk_count)
 
 
 @router.get("/documents", response_model=list[DocumentRead])

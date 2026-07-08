@@ -18,10 +18,13 @@ from sqlalchemy import delete as sa_delete, func, select, update as sa_update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.models.chunk import Chunk
 from app.models.document import Document
 from app.models.embedding_job import EmbeddingJob
 from app.models.library import Library
+from app.services.evidence_write_path import PreparedChunk, create_evidence_generation
+from app.services.metadata_guard import validate_external_metadata
 from app.services import splitter as splitter_service
 
 log = logging.getLogger(__name__)
@@ -29,6 +32,10 @@ log = logging.getLogger(__name__)
 
 def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _evidence_write_enabled() -> bool:
+    return bool(getattr(settings, "enable_evidence_write_path", False))
 
 
 def _chunk_text_and_metadata(
@@ -51,6 +58,18 @@ def _chunk_text_and_metadata(
     if chunk.get("source_ranges"):
         metadata["source_ranges"] = list(chunk["source_ranges"])
     return text, metadata
+
+
+def _prepare_evidence_chunks(
+    chunks_text: list[str | dict], *, title: str | None, external_id: str | None, revision: int
+) -> list[PreparedChunk]:
+    prepared: list[PreparedChunk] = []
+    for chunk in chunks_text:
+        txt, chunk_metadata = _chunk_text_and_metadata(
+            chunk, title=title, external_id=external_id, revision=revision
+        )
+        prepared.append(PreparedChunk(text=txt, metadata=chunk_metadata))
+    return prepared
 
 
 async def _find_active(
@@ -133,6 +152,8 @@ async def ingest_text(
     chunks 不为 None 时直接用它作为分片（跳过 split_text）——用于表格感知切分等
     上游已组好块的场景；content_hash / 去重仍按扁平 text 计算，语义不变。
     """
+    if _evidence_write_enabled():
+        validate_external_metadata(metadata)
     chash = _content_hash(text)
 
     # 身份解析（external_id 优先，否则 content_hash）→ 命中已有活动文档直接返回（不重复 embed）
@@ -181,6 +202,32 @@ async def ingest_text(
                  library.slug, external_id, chash[:8], winner.id)
         job, chunk_count = await _latest_job_and_count(db, winner.id)
         return winner, job, chunk_count, True
+
+    if _evidence_write_enabled():
+        prepared_chunks = _prepare_evidence_chunks(
+            chunks_text, title=title, external_id=external_id, revision=doc.current_revision
+        )
+        result = await create_evidence_generation(
+            db,
+            library=library,
+            document=doc,
+            normalized_text=text,
+            title=title,
+            document_metadata=metadata,
+            splitter=splitter,
+            created_by=created_by,
+            prepared_chunks=prepared_chunks,
+        )
+        log.info(
+            "evidence ingest queued: lib=%s doc_id=%s rev=%s revision_id=%s chunks=%s job_id=%s",
+            library.slug,
+            doc.id,
+            doc.current_revision,
+            result.revision.id,
+            len(result.chunks),
+            result.job.id,
+        )
+        return doc, result.job, len(result.chunks), False
 
     chunk_objs: list[Chunk] = []
     for seq, chunk in enumerate(chunks_text):
@@ -237,6 +284,8 @@ async def reingest_document(
     #6：changed 时走 _new_generation（current_revision+=1 + supersede 旧 job）。旧 Qdrant points
     **不再**由调用方同步删除（决策 1）——靠检索按 current_revision 过滤即不可见，物理清理走批次 B outbox。
     """
+    if _evidence_write_enabled():
+        validate_external_metadata(metadata)
     new_hash = _content_hash(new_text)
     unchanged = (
         not force
@@ -270,6 +319,29 @@ async def reingest_document(
 
     # 开新代际：current_revision+=1 + supersede 旧 job + 建带新 revision 的 job
     job = await _new_generation(db, library, document)
+
+    if _evidence_write_enabled():
+        prepared_chunks = _prepare_evidence_chunks(
+            chunks_text, title=title, external_id=document.external_id, revision=document.current_revision
+        )
+        result = await create_evidence_generation(
+            db,
+            library=library,
+            document=document,
+            normalized_text=new_text,
+            title=title,
+            document_metadata=metadata,
+            splitter=splitter,
+            created_by=document.created_by,
+            prepared_chunks=prepared_chunks,
+            job=job,
+        )
+        from app.services import cleanup as cleanup_service
+        await cleanup_service.enqueue_delete_before_revision(
+            db, library, document.id, document.current_revision)
+        log.info("evidence reingest queued: lib=%s doc_id=%s rev=%s revision_id=%s chunks=%s job_id=%s",
+                 library.slug, document.id, document.current_revision, result.revision.id, len(result.chunks), job.id)
+        return job, len(result.chunks), True
 
     for seq, chunk in enumerate(chunks_text):
         txt, chunk_metadata = _chunk_text_and_metadata(

@@ -217,6 +217,9 @@ class Settings(BaseSettings):
     # 外键类型（统一）
     source_key_type: str = "bigint"
 
+    # ---- v0.2 Evidence Foundation feature flags ----
+    enable_evidence_write_path: bool = False
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
