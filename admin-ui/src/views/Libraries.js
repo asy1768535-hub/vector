@@ -25,14 +25,14 @@ export default {
             form: { slug: '', name: '', description: '', embedding_model: '', embedding_dim: null,
                 vector_distance: 'cosine', embedding_base_url: '', embed_batch_size: null,
                 rerank_enabled: null, ocr_enabled: null, docx_table_aware: null,
-                retrieval_mode: 'dense', chunk_size: 1000, chunk_overlap: 120 },
+                retrieval_mode: 'dense', source_enrichment_enabled: true, chunk_size: 1000, chunk_overlap: 120 },
         });
         const edit = reactive({
             open: false, slug: '', initial: null,
             form: { name: '', description: '', embedding_model: '', embedding_dim: null,
                 vector_distance: 'cosine', embedding_base_url: '', embed_batch_size: null,
                 rerank_enabled: null, ocr_enabled: null, docx_table_aware: null,
-                retrieval_mode: 'dense', chunk_size: 1000, chunk_overlap: 120 },
+                retrieval_mode: 'dense', source_enrichment_enabled: true, chunk_size: 1000, chunk_overlap: 120 },
         });
 
         const stats = computed(() => computeLibraryStats(libs.value));
@@ -55,6 +55,7 @@ export default {
         function openDetail(row) { selectedLibrary.value = row; detailOpen.value = true; }
         function toggleLabel(val) { if (val === true) return '开启'; if (val === false) return '关闭'; return '继承'; }
         function embedDisplay(row) { return (row.embedding_model || '全局默认') + ' / ' + (row.embedding_dim ? row.embedding_dim + 'd' : '—'); }
+        function sourceDisplay(config) { return config ? `开启（${srcSummary(config)}）` : '关闭'; }
 
         async function load(forceRefresh = false) {
             loading.value = true;
@@ -73,7 +74,7 @@ export default {
             create.form = { slug: '', name: '', description: '', embedding_model: '', embedding_dim: null,
                 vector_distance: 'cosine', embedding_base_url: '', embed_batch_size: null,
                 rerank_enabled: null, ocr_enabled: null, docx_table_aware: null,
-                retrieval_mode: 'dense', chunk_size: 1000, chunk_overlap: 120 };
+                retrieval_mode: 'dense', source_enrichment_enabled: true, chunk_size: 1000, chunk_overlap: 120 };
             create.open = true;
         }
 
@@ -96,7 +97,8 @@ export default {
                 embedding_base_url: row.embedding_base_url || '', embed_batch_size: row.embed_batch_size ?? null,
                 rerank_enabled: row.rerank_enabled ?? null, ocr_enabled: row.ocr_enabled ?? null,
                 docx_table_aware: row.docx_table_aware ?? null, retrieval_mode: row.retrieval_mode || 'dense',
-                chunk_size: row.chunk_size, chunk_overlap: row.chunk_overlap };
+                chunk_size: row.chunk_size, chunk_overlap: row.chunk_overlap,
+                source_enrichment_enabled: row.source_config != null };
             edit.form = { ...snapshot }; edit.initial = snapshot; edit.open = true;
         }
 
@@ -147,7 +149,7 @@ export default {
         return { libs, loading, showDeleted, create, edit, stats, pagedLibraries, detailOpen, selectedLibrary,
             keyword, statusFilter, retrievalFilter, page, pageSize, resetFilters, openDetail,
             load, openCreate, submitCreate, openEdit, submitEdit, rebuild, del, testEmbedding,
-            dataEmpty, srcSummary, libraryStatus, toggleLabel, embedDisplay,
+            dataEmpty, srcSummary, sourceDisplay, libraryStatus, toggleLabel, embedDisplay,
             faqMgr, openFaq, addFaq, saveFaq, removeFaq };
     },
     template: `
@@ -280,7 +282,7 @@ export default {
               </div>
               <div class="libraries-detail-field">
                 <span class="libraries-detail-label">全文源</span>
-                <span class="libraries-detail-value libraries-detail-value--mono">{{ srcSummary(selectedLibrary.source_config) }}</span>
+                <span class="libraries-detail-value libraries-detail-value--mono">{{ sourceDisplay(selectedLibrary.source_config) }}</span>
               </div>
               <div class="libraries-detail-field">
                 <span class="libraries-detail-label">接口地址</span>
@@ -322,9 +324,11 @@ export default {
               <el-col :span="12"><el-form-item label="Rerank"><el-select v-model="create.form.rerank_enabled" class="libraries-form-control"><el-option :value="null" label="继承全局" /><el-option :value="true" label="开启" /><el-option :value="false" label="关闭" /></el-select><div class="libraries-form-hint">需先在 .env 配 RERANK_* 才生效</div></el-form-item></el-col>
               <el-col :span="12"><el-form-item label="图片 OCR"><el-select v-model="create.form.ocr_enabled" class="libraries-form-control"><el-option :value="null" label="继承全局" /><el-option :value="true" label="开启" /><el-option :value="false" label="关闭" /></el-select><div class="libraries-form-hint">识别 DOCX 内嵌图片/PDF 扫描页（较慢）</div></el-form-item></el-col>
               <el-col :span="12"><el-form-item label="docx表格"><el-select v-model="create.form.docx_table_aware" class="libraries-form-control"><el-option :value="null" label="继承全局" /><el-option :value="true" label="开启" /><el-option :value="false" label="关闭" /></el-select><div class="libraries-form-hint">每表单独成块带表头；表格重的库建议开</div></el-form-item></el-col>
+              <el-col :span="12"><el-form-item label="全文源"><el-switch v-model="create.form.source_enrichment_enabled" active-text="启用 PGSQL 全文源补全" /></el-form-item></el-col>
             </el-row>
           </div>
-          <el-alert type="info" :closable="false" class="libraries-form-alert">PGSQL 全文源按<b>约定</b>自动配置：源表 = <code>{{ create.form.slug || '<库唯一ID>' }}</code>（本库唯一ID）· 外键 <code>text_id</code> → 正文列 <code>content</code> · <code>bigint</code> · 源库取 <code>.env</code> 配置。</el-alert>
+          <el-alert v-if="create.form.source_enrichment_enabled" type="info" :closable="false" class="libraries-form-alert">PGSQL 全文源按<b>约定</b>自动配置：源表 = <code>{{ create.form.slug || '<库唯一ID>' }}</code>（本库唯一ID）· 外键 <code>text_id</code> → 正文列 <code>content</code> · <code>bigint</code> · 源库取 <code>.env</code> 配置。</el-alert>
+          <el-alert v-else type="warning" :closable="false" class="libraries-form-alert">已关闭全文源补全：检索结果只使用向量库已有文本，不自动回查 PGSQL 全文源。</el-alert>
         </el-form>
         <template #footer><el-button @click="create.open = false" :disabled="create.submitting">取消</el-button><el-button type="primary" :loading="create.submitting" @click="submitCreate">创建</el-button></template>
       </el-dialog>
@@ -355,8 +359,11 @@ export default {
               <el-col :span="12"><el-form-item label="Rerank"><el-select v-model="edit.form.rerank_enabled" class="libraries-form-control"><el-option :value="null" label="继承全局" /><el-option :value="true" label="开启" /><el-option :value="false" label="关闭" /></el-select><div class="libraries-form-hint">需先在 .env 配 RERANK_* 才生效</div></el-form-item></el-col>
               <el-col :span="12"><el-form-item label="图片 OCR"><el-select v-model="edit.form.ocr_enabled" class="libraries-form-control"><el-option :value="null" label="继承全局" /><el-option :value="true" label="开启" /><el-option :value="false" label="关闭" /></el-select><div class="libraries-form-hint">改开关只影响之后新上传/重灌的文档</div></el-form-item></el-col>
               <el-col :span="12"><el-form-item label="docx表格"><el-select v-model="edit.form.docx_table_aware" class="libraries-form-control"><el-option :value="null" label="继承全局" /><el-option :value="true" label="开启" /><el-option :value="false" label="关闭" /></el-select><div class="libraries-form-hint">改开关只影响之后新上传/重灌的文档</div></el-form-item></el-col>
+              <el-col :span="12"><el-form-item label="全文源"><el-switch v-model="edit.form.source_enrichment_enabled" active-text="启用 PGSQL 全文源补全" /></el-form-item></el-col>
             </el-row>
           </div>
+          <el-alert v-if="edit.form.source_enrichment_enabled" type="info" :closable="false" class="libraries-form-alert">PGSQL 全文源按<b>约定</b>自动配置：源表 = <code>{{ edit.slug || '<库唯一ID>' }}</code>（本库唯一ID）· 开启时已有高级配置会保持不变；从关闭改为开启会按约定重新生成。</el-alert>
+          <el-alert v-else type="warning" :closable="false" class="libraries-form-alert">已关闭全文源补全：检索结果只使用向量库已有文本，不自动回查 PGSQL 全文源。</el-alert>
         </el-form>
         <template #footer><el-button @click="edit.open = false">取消</el-button><el-button type="primary" @click="submitEdit">保存</el-button></template>
       </el-dialog>

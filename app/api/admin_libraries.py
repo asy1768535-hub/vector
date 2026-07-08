@@ -40,6 +40,17 @@ def _collection_name(slug: str) -> str:
     return f"lib_{slug}"
 
 
+def _has_non_empty_source_config(value: object) -> bool:
+    return isinstance(value, dict) and bool(value)
+
+
+def _validate_source_config_or_400(source_config: dict | None) -> dict | None:
+    try:
+        return source_enrichment.parse_source_config(source_config)
+    except source_enrichment.SourceConfigError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"invalid source_config: {exc}") from exc
+
+
 @router.post("", response_model=LibraryRead, status_code=status.HTTP_201_CREATED)
 async def create_library(
     body: LibraryCreate,
@@ -51,17 +62,20 @@ async def create_library(
     chunk_size = body.chunk_size or settings.default_chunk_size
     chunk_overlap = body.chunk_overlap or settings.default_chunk_overlap
 
-    # 全文源：默认按约定自动生成（表=slug、text_id→content、bigint、库=.env）；
-    # 仅当显式传 source_config 时才用自定义结构（高级/脚本用法）。
-    if body.source_config:
+    # 全文源：普通开关默认开启；显式自定义 source_config 仍按高级配置写入。
+    if not body.source_enrichment_enabled and _has_non_empty_source_config(body.source_config):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "source_enrichment_enabled=false conflicts with non-empty source_config",
+        )
+    if _has_non_empty_source_config(body.source_config):
         source_config = body.source_config
-    else:
+    elif body.source_enrichment_enabled:
         source_config = source_enrichment.conventional_config(body.slug)
-    # 校验（非法直接 400，不落库）
-    try:
-        source_enrichment.parse_source_config(source_config)
-    except source_enrichment.SourceConfigError as exc:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"invalid source_config: {exc}") from exc
+    else:
+        source_config = None
+    # 校验（非法直接 400，不落库；None 表示关闭）
+    _validate_source_config_or_400(source_config)
 
     lib = Library(
         slug=body.slug,
@@ -199,20 +213,31 @@ async def update_library(
         lib.docx_table_aware = body.docx_table_aware
         changes["docx_table_aware"] = body.docx_table_aware
 
-    # 全文源（高级哨兵）：不传 → 不变；传 {} → 清空；传非空 dict → 校验后写入
-    if body.source_config is not None:
-        if body.source_config == {}:
+    # 全文源：source_enrichment_enabled 是普通 UI 开关；source_config 保留高级哨兵能力。
+    source_config_provided = "source_config" in body.model_fields_set
+    enrichment_switch_provided = "source_enrichment_enabled" in body.model_fields_set
+    if body.source_enrichment_enabled is False and _has_non_empty_source_config(body.source_config):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "source_enrichment_enabled=false conflicts with non-empty source_config",
+        )
+
+    if source_config_provided and _has_non_empty_source_config(body.source_config):
+        _validate_source_config_or_400(body.source_config)
+        lib.source_config = body.source_config
+        changes["source_config"] = body.source_config
+    elif source_config_provided and body.source_config == {}:
+        lib.source_config = None
+        changes["source_config"] = None
+    elif enrichment_switch_provided:
+        if body.source_enrichment_enabled is False:
             lib.source_config = None
             changes["source_config"] = None
-        else:
-            try:
-                source_enrichment.parse_source_config(body.source_config)
-            except source_enrichment.SourceConfigError as exc:
-                raise HTTPException(
-                    status.HTTP_400_BAD_REQUEST, f"invalid source_config: {exc}"
-                ) from exc
-            lib.source_config = body.source_config
-            changes["source_config"] = body.source_config
+        elif body.source_enrichment_enabled is True and lib.source_config is None:
+            source_config = source_enrichment.conventional_config(lib.slug)
+            _validate_source_config_or_400(source_config)
+            lib.source_config = source_config
+            changes["source_config"] = source_config
 
     if changes:
         await audit_log.record(db, actor.id, "library.update", {"slug": slug, **changes})

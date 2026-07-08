@@ -300,12 +300,6 @@ export default {
             return text.length > size ? `${text.slice(0, size)}…` : text;
         }
 
-        function shortDocumentId(value) {
-            const text = String(value || '');
-            if (!text) return '—';
-            return text.length > 10 ? `${text.slice(0, 10)}…` : text;
-        }
-
         async function copyDocValue(value, label) {
             try {
                 await copyTextToClipboard(value);
@@ -398,7 +392,7 @@ export default {
             detail, detailLatestJob, sourceReader, sourceText, sourceMatchCount, highlightedSourceParts,
             dialog, loadDocs, resetFilters, openFileImport, openIngest, openEdit,
             openReplaceImport, openDetail, openFullSource, downloadOriginalFile, closeFullSource, retryJob, retryDocument, submitIngest, del, metadataText,
-            copyDocValue, deleteTitle, shortText, shortDocumentId,
+            copyDocValue, deleteTitle, shortText,
             documentDisplayName, documentStatusLabel, documentStatusTag, documentTypeIcon, documentTypeLabel,
             formatDocumentTime, dataEmpty,
         };
@@ -470,10 +464,6 @@ export default {
                     <local-icon v-else class="documents-file-icon" icon="mdi:file-document-outline"></local-icon>
                     <span class="documents-file-name" :title="documentDisplayName(row)">{{ documentDisplayName(row) }}</span>
                   </div>
-                  <div class="documents-file-doc-id" :title="row.id">
-                    <span>ID: {{ shortDocumentId(row.id) }}</span>
-                    <el-button text class="documents-file-doc-id-copy" title="复制完整文档 ID" @click.stop="copyDocValue(row.id, '文档 ID')">复制</el-button>
-                  </div>
                 </div>
               </template>
             </el-table-column>
@@ -484,9 +474,6 @@ export default {
             </el-table-column>
             <el-table-column label="版本" width="80">
               <template #default="{row}">v{{ row.current_revision || 0 }}</template>
-            </el-table-column>
-            <el-table-column label="external_id" min-width="120" show-overflow-tooltip>
-              <template #default="{row}">{{ row.external_id || '—' }}</template>
             </el-table-column>
             <el-table-column label="更新时间" width="155">
               <template #default="{row}">{{ formatDocumentTime(row.updated_at) }}</template>

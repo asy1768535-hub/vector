@@ -129,13 +129,13 @@ export default {
         <!-- API usage doc -->
         <section class="api-keys-doc-card">
             <div class="api-keys-doc-main">
-                <h3>API 接入说明：检索知识库切片</h3>
-                <p><code>/query</code> 返回召回切片，不是最终回答；如需最终回答，请调用方将切片交给自己的 LLM。</p>
-                <p class="api-keys-doc-note">推荐把 <code>BASE_URL</code> / <code>LIBRARY_ID</code> / <code>API_KEY</code> 放到 <code>.env</code>，不要写死在前端或脚本源码里。</p>
+                <h3>API 接入说明：调用知识库检索切片</h3>
+                <p><code>POST /libraries/{LIBRARY_ID}/query</code> 返回 <code>results</code> 检索切片，不是最终回答；如需最终回答，请将切片交给你自己的 LLM。</p>
+                <p class="api-keys-doc-note"><code>LIBRARY_ID</code> 填知识库 <code>slug / 库唯一ID</code>；推荐把 <code>BASE_URL</code> / <code>LIBRARY_ID</code> / <code>API_KEY</code> 放到 <code>.env</code>。</p>
                 <ol class="api-keys-doc-steps">
                     <li>创建并保存 API Key</li>
                     <li>在 <code>.env</code> 配置 <code>VECTOR_KB_BASE_URL</code>、<code>VECTOR_KB_LIBRARY_ID</code>、<code>VECTOR_KB_API_KEY</code></li>
-                    <li>调用 <code>POST /libraries/{LIBRARY_ID}/query</code> 获取 <code>results</code> 切片</li>
+                    <li>调用 <code>POST /libraries/{LIBRARY_ID}/query</code> 获取 <code>results</code> 切片；如需最终回答，请将切片交给你自己的 LLM</li>
                 </ol>
             </div>
             <div class="api-keys-doc-actions">
@@ -207,17 +207,26 @@ export default {
         <el-dialog v-model="docDialog.open" title="完整接入模板" width="860px" class="api-keys-doc-dialog">
             <div class="api-keys-doc-dialog-body">
                 <section>
-                    <h4>1. .env 配置示例</h4>
-                    <p>普通用户可直接在这里复制接入模板；推荐把地址、知识库 ID 和 API Key 放在调用脚本同目录的 <code>.env</code>，不要写死在代码里。</p>
+                    <h4>1. 最常用：API Key 调用知识库检索接口</h4>
+                    <p>接口：<code>POST /libraries/{LIBRARY_ID}/query</code>；鉴权：<code>Authorization: Bearer &lt;API_KEY&gt;</code>。</p>
+                    <p><code>LIBRARY_ID</code> 实际填写知识库 <code>slug / 库唯一ID</code>，不是数据库自增 ID，也不是隐藏主键。</p>
+                    <p class="api-keys-doc-note">这个接口返回 <code>results</code> 检索切片，不经过后端 LLM，不直接返回最终 <code>answer</code>。</p>
+                </section>
+                <section>
+                    <h4>2. .env 配置示例</h4>
+                    <p>推荐把地址、知识库 slug 和 API Key 放在调用脚本同目录的 <code>.env</code>，不要写死在代码里。</p>
                     <pre class="api-keys-doc-code">VECTOR_KB_BASE_URL=http://10.0.10.2:8100
 VECTOR_KB_LIBRARY_ID=deploy_acceptance_server
 VECTOR_KB_API_KEY=你的完整API_KEY
+
+# 可选：仅当调用方脚本自己接 LLM 时填写，知识库后端不会读取
 LOCAL_LLM_BASE_URL=可选
 LOCAL_LLM_API_KEY=可选
 LOCAL_LLM_MODEL=可选</pre>
                 </section>
                 <section>
-                    <h4>2. Python 完整接入脚本</h4>
+                    <h4>3. Python 完整接入脚本</h4>
+                    <p>默认只返回检索切片；打印 <code>title</code>、<code>document_id</code>、<code>chunk_id</code>、<code>metadata</code> 等来源字段。可选扩展演示如何继续调用 <code>/source</code>。</p>
                     <pre class="api-keys-doc-code">from pathlib import Path
 from typing import Any
 import os
@@ -228,7 +237,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).with_name(".env"))
 
 VECTOR_KB_BASE_URL = os.getenv("VECTOR_KB_BASE_URL", "").rstrip("/")
-VECTOR_KB_LIBRARY_ID = os.getenv("VECTOR_KB_LIBRARY_ID", "")
+VECTOR_KB_LIBRARY_ID = os.getenv("VECTOR_KB_LIBRARY_ID", "")  # 知识库 slug / 库唯一ID
 VECTOR_KB_API_KEY = os.getenv("VECTOR_KB_API_KEY", "")
 
 LOCAL_LLM_BASE_URL = os.getenv("LOCAL_LLM_BASE_URL", "")
@@ -242,22 +251,42 @@ def require_env(name: str, value: str) -> str:
     return value
 
 
+def auth_headers() -> dict[str, str]:
+    api_key = require_env("VECTOR_KB_API_KEY", VECTOR_KB_API_KEY)
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+
 def search_kb(question: str, limit: int = 5) -> list[dict[str, Any]]:
+    """调用 /query，返回 results 检索切片，不是最终 answer。"""
     base_url = require_env("VECTOR_KB_BASE_URL", VECTOR_KB_BASE_URL)
     library_id = require_env("VECTOR_KB_LIBRARY_ID", VECTOR_KB_LIBRARY_ID)
-    api_key = require_env("VECTOR_KB_API_KEY", VECTOR_KB_API_KEY)
 
     resp = requests.post(
         f"{base_url}/libraries/{library_id}/query",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
+        headers=auth_headers(),
         json={"query": question, "limit": limit},
         timeout=30,
     )
     resp.raise_for_status()
     return resp.json().get("results", [])
+
+
+def get_chunk_source(document_id: str, chunk_id: str | None = None) -> dict[str, Any]:
+    """可选扩展：查看命中切片在原文中的位置/窗口。"""
+    base_url = require_env("VECTOR_KB_BASE_URL", VECTOR_KB_BASE_URL)
+    library_id = require_env("VECTOR_KB_LIBRARY_ID", VECTOR_KB_LIBRARY_ID)
+    params = {"chunk_id": chunk_id} if chunk_id else None
+    resp = requests.get(
+        f"{base_url}/libraries/{library_id}/documents/{document_id}/source",
+        headers=auth_headers(),
+        params=params,
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 
 def build_context(chunks: list[dict[str, Any]]) -> str:
@@ -269,6 +298,7 @@ def build_context(chunks: list[dict[str, Any]]) -> str:
             f"相关性：{chunk.get('similarity')}\n"
             f"document_id：{chunk.get('document_id')}\n"
             f"chunk_id：{chunk.get('chunk_id')}\n"
+            f"metadata：{chunk.get('metadata') or {}}\n"
             f"正文：\n{chunk.get('text') or ''}"
         )
     return "\n\n---\n\n".join(parts)
@@ -276,25 +306,16 @@ def build_context(chunks: list[dict[str, Any]]) -> str:
 
 def call_your_llm(prompt: str) -> str:
     # 占位函数：请替换为你自己的大模型调用。
-    # 建议从 .env 读取 LOCAL_LLM_BASE_URL / LOCAL_LLM_API_KEY / LOCAL_LLM_MODEL。
-    # 不要把大模型 API Key 写死在代码里。
+    # use_llm=True 是本脚本里的本地流程，不是后端 /query 参数。
     raise NotImplementedError("请将 call_your_llm(prompt) 替换为自己的模型调用")
 
 
 def ask(question: str, limit: int = 5, use_llm: bool = False):
     chunks = search_kb(question, limit=limit)
-
     if not use_llm:
         return chunks
 
-    context = build_context(chunks)
-    prompt = f"""请只根据以下知识库切片回答问题。若切片中没有答案，请说明无法从已给资料确认。
-
-问题：{question}
-
-知识库切片：
-{context}
-"""
+    prompt = "请只根据以下知识库检索切片回答问题：\n\n" + build_context(chunks)
     answer = call_your_llm(prompt)
     sources = [
         {
@@ -302,6 +323,7 @@ def ask(question: str, limit: int = 5, use_llm: bool = False):
             "document_id": chunk.get("document_id"),
             "chunk_id": chunk.get("chunk_id"),
             "similarity": chunk.get("similarity"),
+            "metadata": chunk.get("metadata"),
         }
         for chunk in chunks
     ]
@@ -309,32 +331,40 @@ def ask(question: str, limit: int = 5, use_llm: bool = False):
 
 
 if __name__ == "__main__":
-    question = "你的问题"
-
-    print("=== use_llm=False：只返回 results 切片 ===")
-    chunks = ask(question, limit=5, use_llm=False)
-    for item in chunks:
-        print("来源文档：", item.get("title"))
-        print("相关性：", item.get("similarity"))
-        print("切片正文：", item.get("text"))
+    chunks = ask("你的问题", limit=5, use_llm=False)
+    print("=== /query 返回 results 检索切片，不是最终回答 ===")
+    for index, item in enumerate(chunks, start=1):
+        print(f"--- 结果 {index} ---")
+        print("title：", item.get("title"))
+        print("document_id：", item.get("document_id"))
+        print("chunk_id：", item.get("chunk_id"))
+        print("similarity：", item.get("similarity"))
+        print("metadata：", item.get("metadata"))
+        print("text：", item.get("text"))
         print()
 
-    # 替换 call_your_llm(prompt) 后，再打开下面两行：
-    # print("=== use_llm=True：返回 answer + sources ===")
-    # print(ask(question, limit=5, use_llm=True))</pre>
+    # 可选：根据第一条结果继续查看命中切片在原文中的位置/窗口
+    # if chunks and chunks[0].get("document_id"):
+    #     source = get_chunk_source(chunks[0]["document_id"], chunks[0].get("chunk_id"))
+    #     print("=== /source 原文定位 ===")
+    #     print(source)
+
+    # 若知识库开启全文源补全，results[].text 可能是回查 PGSQL 全文源后补全的正文。
+    # 这是管理员配置的知识库级能力，不是本次请求参数。</pre>
                 </section>
                 <section>
-                    <h4>3. use_llm 两种模式</h4>
+                    <h4>4. 是否经过 LLM</h4>
                     <ul class="api-keys-doc-list">
-                        <li><code>use_llm=False</code>：只调用 <code>/query</code>，直接返回 <code>results</code> 切片。</li>
-                        <li><code>use_llm=True</code>：先检索切片，再调用方自己执行 <code>call_your_llm(prompt)</code>，返回 <code>answer + sources</code>。</li>
+                        <li>默认文档模式：不经过后端 LLM，只调用 <code>/query</code>，返回 <code>results</code> 检索切片。</li>
+                        <li>如果需要最终回答：调用方先 <code>/query</code>，再自己调用 LLM。示例里的 <code>use_llm=True</code> 是本地脚本流程，不是后端参数。</li>
+                        <li>不要把“调用方自己接 LLM”理解成“知识库后端会自动回答”。</li>
                     </ul>
-                    <p class="api-keys-doc-note"><code>call_your_llm</code> 是占位函数，需要用户替换为自己的大模型调用。</p>
                 </section>
                 <section>
-                    <h4>4. JavaScript/Node 简版</h4>
+                    <h4>5. JavaScript/Node 简版</h4>
+                    <p>只取 <code>results</code> 检索切片，不伪装成最终问答接口。</p>
                     <pre class="api-keys-doc-code">const VECTOR_KB_BASE_URL = process.env.VECTOR_KB_BASE_URL;
-const VECTOR_KB_LIBRARY_ID = process.env.VECTOR_KB_LIBRARY_ID;
+const VECTOR_KB_LIBRARY_ID = process.env.VECTOR_KB_LIBRARY_ID; // 知识库 slug / 库唯一ID
 const VECTOR_KB_API_KEY = process.env.VECTOR_KB_API_KEY;
 
 async function searchKb(question, limit = 5) {
@@ -350,24 +380,58 @@ async function searchKb(question, limit = 5) {
     }
   );
   if (!response.ok) throw new Error("知识库请求失败：" + response.status);
-  return (await response.json()).results || [];
-}</pre>
+  const data = await response.json();
+  return data.results || [];
+}
+
+searchKb("你的问题", 5).then((results) => {
+  for (const item of results) {
+    console.log({
+      title: item.title,
+      document_id: item.document_id,
+      chunk_id: item.chunk_id,
+      similarity: item.similarity,
+      metadata: item.metadata,
+      text: item.text
+    });
+  }
+});</pre>
                 </section>
                 <section>
-                    <h4>5. curl 仅用于临时测试</h4>
+                    <h4>6. curl 仅用于临时测试</h4>
+                    <p><code>curl</code> 只建议用于连通性与临时调试，不建议作为生产集成方式。</p>
                     <pre class="api-keys-doc-code">curl -X POST "$VECTOR_KB_BASE_URL/libraries/$VECTOR_KB_LIBRARY_ID/query" \
   -H "Authorization: Bearer $VECTOR_KB_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"query":"你的问题","limit":5}'</pre>
                 </section>
                 <section>
-                    <h4>6. 响应字段说明</h4>
+                    <h4>7. 响应字段与引用来源</h4>
                     <ul class="api-keys-doc-list">
-                        <li><code>results[].text</code>：召回切片正文</li>
-                        <li><code>results[].similarity</code>：相似度/相关性分数</li>
-                        <li><code>results[].document_id</code>：来源文档</li>
-                        <li><code>results[].chunk_id</code>：来源切片</li>
-                        <li><code>results[].title</code>：来源文档标题</li>
+                        <li><code>results[].text</code>：检索切片正文；如果知识库开启全文源补全，可能是回查 PGSQL 全文源后补全过的正文。</li>
+                        <li><code>results[].similarity</code>：相似度/相关性分数；开启 rerank 时可能是重排后的分数。</li>
+                        <li><code>results[].document_id</code>：来源文档 ID，可继续用于来源定位、全文、原文件接口。</li>
+                        <li><code>results[].chunk_id</code>：来源切片 ID，用于定位具体命中切片。</li>
+                        <li><code>results[].title</code>：来源文档标题，适合做引用展示。</li>
+                        <li><code>results[].metadata</code>：额外元数据，例如向量分数、重排分数或文档相关字段。</li>
+                    </ul>
+                </section>
+                <section>
+                    <h4>8. 来源定位 / 原文 / 原文件接口</h4>
+                    <ul class="api-keys-doc-list">
+                        <li><code>GET /libraries/{slug}/documents/{document_id}/source?chunk_id={chunk_id}</code>：查看命中切片在原文中的位置/窗口。</li>
+                        <li><code>GET /libraries/{slug}/documents/{document_id}/source/full</code>：查看该文档完整归一化原文。</li>
+                        <li><code>GET /libraries/{slug}/documents/{document_id}/file</code>：下载原始文件。</li>
+                    </ul>
+                    <p class="api-keys-doc-note">这里的 <code>{slug}</code> 与 <code>LIBRARY_ID</code> 是同一个含义：知识库 slug / 库唯一ID。</p>
+                </section>
+                <section>
+                    <h4>9. 全文源补全与常见误区</h4>
+                    <ul class="api-keys-doc-list">
+                        <li>全文源补全是管理员配置的知识库级能力；新建库默认开启。</li>
+                        <li>开启后，<code>results[].text</code> 可能是自动回查 PGSQL 全文源后补全的正文。</li>
+                        <li>普通 API Key 调用方不能在单次请求里动态开关全文源补全。</li>
+                        <li><code>/query</code> 不直接返回最终回答；<code>use_llm=True</code> 不是后端参数；API Key 不应用于创建/管理 API Key。</li>
                     </ul>
                 </section>
             </div>
@@ -410,11 +474,12 @@ async function searchKb(question, limit = 5) {
                 <img :src="apiKeySecurity" class="illustration-api-key-security" alt="" aria-hidden="true" />
                 <h4>使用方式</h4>
                 <p>在 API 请求中通过 <code>Authorization: Bearer &lt;API Key&gt;</code> 头传递密钥。</p>
+                <p><code>LIBRARY_ID</code> 填知识库 slug；<code>/query</code> 返回 <code>results</code> 检索切片，不是最终回答。</p>
                 <p>示例：</p>
-                <pre class="api-keys-usage-code">curl -H "Authorization: Bearer YOUR_KEY"
+                <pre class="api-keys-usage-code">curl -X POST BASE_URL/libraries/LIBRARY_ID/query
+     -H "Authorization: Bearer YOUR_KEY"
      -H "Content-Type: application/json"
-     -d '{"query":"你的问题","limit":5}'
-     BASE_URL/libraries/LIBRARY_ID/query</pre>
+     -d '{"query":"你的问题","limit":5}'</pre>
             </div>
         </div>
     </div>

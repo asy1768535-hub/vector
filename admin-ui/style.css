@@ -1210,24 +1210,25 @@ local-icon { display: inline-block; vertical-align: -0.125em; }
 .documents-load-note { margin-bottom: 12px; color: var(--app-text-secondary); font-size: 13px; }
 .documents-table-shell { width: 100%; overflow-x: auto; }
 .documents-table-shell .el-table { min-width: 0; font-size: 15px; }
+.documents-table-shell .el-table td.el-table__cell { padding: 4px 0; }
+.documents-table-shell .el-table .cell { line-height: 1.25; }
 .documents-table-shell .el-table .el-tag--small { font-size: 13px; }
 .documents-file { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .documents-file-icon { flex: 0 0 auto; width: 48px; height: 48px; color: inherit; object-fit: contain; }
 .documents-file-icon svg { width: 48px; height: 48px; display: block; }
-.documents-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; }
+.documents-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; line-height: 1.25; }
 .documents-pagination { display: flex; justify-content: flex-end; margin-top: 16px; }
 .doc-link-btn { color: #7EB8E0 !important; }
 .doc-link-btn:hover { color: #5A9FCC !important; }
 .doc-link-btn.is-disabled { color: #B0D0E8 !important; }
-.documents-op-group { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; }
+.documents-op-group { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 8px; min-height: 48px; }
 .documents-op-group .el-button + .el-button { margin-left: 0; }
+.documents-op-group .el-button { padding: 2px 4px; min-height: 28px; }
 .doc-delete-btn { color: #c45656 !important; opacity: .82; }
 .doc-delete-btn:hover { opacity: 1; }
 .doc-delete-btn.is-disabled { color: #d8b4b4 !important; opacity: .7; }
 .documents-detail .el-drawer__body { background: var(--app-panel-2); padding: 18px; }
-.documents-file-cell { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.documents-file-doc-id { display: flex; align-items: center; gap: 6px; padding-left: 58px; color: var(--app-text-muted); font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 12px; line-height: 1.3; }
-.documents-file-doc-id-copy { min-height: 0 !important; padding: 0 2px !important; color: var(--app-text-muted) !important; font-size: 12px !important; }
+.documents-file-cell { display: flex; align-items: center; min-width: 0; min-height: 48px; }
 
 .documents-detail-card { margin-bottom: 14px; padding: 16px; border: 1px solid var(--app-border); border-radius: 12px; background: #fff; }
 .documents-detail-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }

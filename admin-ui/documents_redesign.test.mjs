@@ -82,16 +82,18 @@ test('edit copy separates metadata from overwrite/reimport semantics', () => {
     assert.ok(source.includes('replaceTitle: documentDisplayName(row)'), 'reimport carries target title');
 });
 
-test('document list shows copyable short document id under filename', () => {
+test('document list keeps ids only inside details', () => {
     for (const token of [
+        '{{ detail.row.id }}',
+        '{{ detail.row.external_id || \'—\' }}',
+    ]) assert.ok(source.includes(token), `missing document id list token: ${token}`);
+    for (const forbidden of [
         'shortDocumentId',
         'documents-file-doc-id',
-        ':title="row.id"',
         'ID: {{ shortDocumentId(row.id) }}',
         "@click.stop=\"copyDocValue(row.id, '文档 ID')\"",
-        'label="external_id"',
-        '{{ detail.row.id }}',
-    ]) assert.ok(source.includes(token), `missing document id list token: ${token}`);
+        '<el-table-column label="external_id"',
+    ]) assert.equal(source.includes(forbidden), false, `forbidden list id token: ${forbidden}`);
 });
 
 test('delete remains permission-gated and explains risks', () => {
@@ -145,6 +147,15 @@ test('defines responsive document workspace styling', () => {
     assert.ok(filtersBase < overview899, 'documents-filters base rule must come before 899px media query');
 });
 
+test('document list rows are compact and icon-led', () => {
+    assert.match(css, /\.documents-table-shell \.el-table td\.el-table__cell\s*\{[^}]*padding:\s*4px 0/s);
+    assert.match(css, /\.documents-file-cell\s*\{[^}]*display:\s*flex/s);
+    assert.match(css, /\.documents-file-cell\s*\{[^}]*align-items:\s*center/s);
+    assert.match(css, /\.documents-file-cell\s*\{[^}]*min-height:\s*48px/s);
+    assert.match(css, /\.documents-file\s*\{[^}]*display:\s*flex/s);
+    assert.match(css, /\.documents-file\s*\{[^}]*align-items:\s*center/s);
+    assert.doesNotMatch(css, /\.documents-file-doc-id\s*\{/s);
+});
 test('blocks write actions when no library is selected', () => {
     assert.ok(source.includes("Boolean(slug.value) && (store.user?.is_superuser || hasPermission(slug.value, 'insert'))"), 'canInsert requires slug');
     assert.ok(source.includes("Boolean(slug.value) && (store.user?.is_superuser || hasPermission(slug.value, 'delete'))"), 'canDelete requires slug');

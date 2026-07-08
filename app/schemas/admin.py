@@ -83,11 +83,16 @@ class LibraryCreate(BaseModel):
         default=None, pattern="^(dense|hybrid)$",
         description="检索模式：dense=纯向量(默认)；hybrid=向量+pg_trgm 关键词 RRF 融合。不传按 dense。",
     )
+    # 普通 UI 开关：默认开启时后端按约定生成 PGSQL 全文源；高级用户仍可传 source_config 覆盖。
+    source_enrichment_enabled: bool = Field(
+        default=True,
+        description="是否启用按知识库配置的 PGSQL 全文源补全；false 时不写 source_config。",
+    )
     # 默认按「约定」自动生成 PGSQL 全文源（表=slug、列=content、外键=text_id、bigint、库=.env）。
-    # 仅当显式传入 source_config 时才用自定义结构（高级/脚本用法）。
+    # 显式传入非空 source_config 时使用自定义结构（高级/脚本用法）。
     source_config: Optional[dict[str, Any]] = Field(
         default=None,
-        description="高级用法：完整跨库补全配置；不传则按约定自动生成。结构见 source_enrichment.parse_source_config。",
+        description="高级用法：完整跨库补全配置；不传则按 source_enrichment_enabled 决定是否按约定自动生成。结构见 source_enrichment.parse_source_config。",
     )
 
     @field_validator("slug")
@@ -130,6 +135,7 @@ class LibraryUpdate(BaseModel):
     ocr_enabled: Optional[bool] = Field(default=None)
     docx_table_aware: Optional[bool] = Field(default=None)
     retrieval_mode: Optional[str] = Field(default=None, pattern="^(dense|hybrid)$")
+    source_enrichment_enabled: Optional[bool] = Field(default=None)
     # source_config 哨兵：不传=不改；传 {} =清空；传非空 dict=自定义。
     source_config: Optional[dict[str, Any]] = Field(default=None)
 

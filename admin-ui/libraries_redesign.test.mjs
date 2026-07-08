@@ -187,4 +187,35 @@ test('.run_logs is in .gitignore', () => {
     assert.ok(gi.includes('.run_logs/'));
 });
 
+test('source enrichment switch defaults on in create dialog', () => {
+    assert.match(source, /source_enrichment_enabled:\s*true/);
+    assert.match(source, /v-model="create\.form\.source_enrichment_enabled"/);
+    assert.match(source, /启用 PGSQL 全文源补全/);
+    assert.match(source, /v-if="create\.form\.source_enrichment_enabled"/);
+    assert.match(source, /已关闭全文源补全：检索结果只使用向量库已有文本/);
+});
+
+test('create submission includes disabled source_enrichment_enabled in payload', () => {
+    assert.match(source, /const body = \{ \.\.\.create\.form \}/);
+    assert.match(source, /api\.createLibrary\(body\)/);
+    assert.match(source, /source_enrichment_enabled:\s*true/);
+});
+
+test('edit dialog backfills source enrichment switch from source_config', () => {
+    assert.match(source, /source_enrichment_enabled:\s*row\.source_config != null/);
+    assert.match(source, /v-model="edit\.form\.source_enrichment_enabled"/);
+});
+
+test('edit from enabled to disabled submits source_enrichment_enabled diff', () => {
+    assert.match(source, /for \(const k of Object\.keys\(edit\.form\)\) if \(edit\.form\[k\] !== edit\.initial\[k\]\) diff\[k\] = edit\.form\[k\]/);
+    assert.match(source, /api\.updateLibrary\(edit\.slug, diff\)/);
+    assert.match(source, /source_enrichment_enabled/);
+});
+
+test('detail drawer displays source enrichment enabled or disabled clearly', () => {
+    assert.match(source, /function sourceDisplay\(config\)/);
+    assert.match(source, /开启（\$\{srcSummary\(config\)\}）/);
+    assert.match(source, /sourceDisplay\(selectedLibrary\.source_config\)/);
+});
+
 console.log('libraries redesign test passed');
