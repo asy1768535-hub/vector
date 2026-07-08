@@ -13,7 +13,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import app.models  # noqa: F401
 from app.config import settings
-from app.db import Base
 from app.models.chunk import Chunk
 from app.models.document import Document
 from app.models.document_block import DocumentBlock
@@ -33,6 +32,17 @@ pytestmark = pytest.mark.skipif(
 def _parts():
     parsed = urlparse(_DSN.replace("+asyncpg", ""))
     return parsed.hostname, parsed.port or 5432, parsed.username, parsed.password
+
+
+def _apply_settings_from_dsn(monkeypatch) -> str:
+    parsed = urlparse(_DSN.replace("+asyncpg", ""))
+    db_name = parsed.path.lstrip("/")
+    monkeypatch.setattr(settings, "db_host", parsed.hostname)
+    monkeypatch.setattr(settings, "db_port", int(parsed.port or 5432))
+    monkeypatch.setattr(settings, "db_user", parsed.username)
+    monkeypatch.setattr(settings, "db_password", parsed.password)
+    monkeypatch.setattr(settings, "db_name", db_name)
+    return db_name
 
 
 async def _admin(host: str, port: int, user: str, password: str, sql: str) -> None:
@@ -96,15 +106,14 @@ def test_alembic_upgrade_0018_and_downgrade_0017(monkeypatch):
         asyncio.run(_admin(host, port, user, password, f'DROP DATABASE IF EXISTS "{name}"'))
 
 
-def test_backfill_batch_creates_revision_evidence_and_chunk_links_idempotently():
+def test_backfill_batch_creates_revision_evidence_and_chunk_links_idempotently(monkeypatch):
+    _apply_settings_from_dsn(monkeypatch)
+    command.upgrade(Config("alembic.ini"), "0018")
+
     async def run():
         eng = create_async_engine(_DSN)
         Session = async_sessionmaker(eng, expire_on_commit=False)
         try:
-            async with eng.begin() as conn:
-                await conn.run_sync(Base.metadata.drop_all)
-                await conn.run_sync(Base.metadata.create_all)
-
             async with Session() as db:
                 lib = Library(
                     slug="v02_m1_" + uuid.uuid4().hex[:8],
