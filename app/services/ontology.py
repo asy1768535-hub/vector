@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.attribute_definition import (
@@ -77,6 +78,25 @@ async def get_ontology_version(
     if ontology.status == ONTOLOGY_STATUS_DELETED:
         raise LookupError("ontology version not found")
     return ontology
+
+
+async def find_ontology_version(
+    db: AsyncSession,
+    library: Library,
+    *,
+    version_key: str,
+    version_no: int,
+) -> OntologyVersion | None:
+    result = await db.execute(
+        select(OntologyVersion)
+        .where(
+            OntologyVersion.library_id == library.id,
+            OntologyVersion.version_key == version_key,
+            OntologyVersion.version_no == version_no,
+        )
+        .limit(1)
+    )
+    return result.scalars().first()
 
 
 async def create_ontology_version(
@@ -167,6 +187,24 @@ async def create_entity_type(
     return row
 
 
+async def find_entity_type(
+    db: AsyncSession,
+    library: Library,
+    ontology_version_id: uuid.UUID,
+    key: str,
+) -> EntityType | None:
+    result = await db.execute(
+        select(EntityType)
+        .where(
+            EntityType.library_id == library.id,
+            EntityType.ontology_version_id == ontology_version_id,
+            EntityType.key == key,
+        )
+        .limit(1)
+    )
+    return result.scalars().first()
+
+
 async def update_entity_type(
     db: AsyncSession,
     library: Library,
@@ -221,6 +259,24 @@ async def create_relation_type(
     db.add(row)
     await db.flush()
     return row
+
+
+async def find_relation_type(
+    db: AsyncSession,
+    library: Library,
+    ontology_version_id: uuid.UUID,
+    key: str,
+) -> RelationType | None:
+    result = await db.execute(
+        select(RelationType)
+        .where(
+            RelationType.library_id == library.id,
+            RelationType.ontology_version_id == ontology_version_id,
+            RelationType.key == key,
+        )
+        .limit(1)
+    )
+    return result.scalars().first()
 
 
 async def update_relation_type(
@@ -278,6 +334,29 @@ async def create_relation_type_constraint(
     db.add(row)
     await db.flush()
     return row
+
+
+async def find_relation_type_constraint(
+    db: AsyncSession,
+    library: Library,
+    ontology_version_id: uuid.UUID,
+    *,
+    relation_type_id: uuid.UUID,
+    source_entity_type_id: uuid.UUID,
+    target_entity_type_id: uuid.UUID,
+) -> RelationTypeConstraint | None:
+    result = await db.execute(
+        select(RelationTypeConstraint)
+        .where(
+            RelationTypeConstraint.library_id == library.id,
+            RelationTypeConstraint.ontology_version_id == ontology_version_id,
+            RelationTypeConstraint.relation_type_id == relation_type_id,
+            RelationTypeConstraint.source_entity_type_id == source_entity_type_id,
+            RelationTypeConstraint.target_entity_type_id == target_entity_type_id,
+        )
+        .limit(1)
+    )
+    return result.scalars().first()
 
 
 async def update_relation_type_constraint(
@@ -356,6 +435,29 @@ async def create_attribute_definition(
     db.add(row)
     await db.flush()
     return row
+
+
+async def find_attribute_definition(
+    db: AsyncSession,
+    library: Library,
+    ontology_version_id: uuid.UUID,
+    *,
+    owner_kind: str,
+    owner_type_id: uuid.UUID,
+    key: str,
+) -> AttributeDefinition | None:
+    result = await db.execute(
+        select(AttributeDefinition)
+        .where(
+            AttributeDefinition.library_id == library.id,
+            AttributeDefinition.ontology_version_id == ontology_version_id,
+            AttributeDefinition.owner_kind == owner_kind,
+            AttributeDefinition.owner_type_id == owner_type_id,
+            AttributeDefinition.key == key,
+        )
+        .limit(1)
+    )
+    return result.scalars().first()
 
 
 async def update_attribute_definition(
