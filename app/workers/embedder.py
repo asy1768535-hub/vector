@@ -16,6 +16,7 @@ import os
 import socket
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import select, text, update
@@ -25,6 +26,7 @@ from app.config import settings
 from app.db import async_session_factory
 from app.models.chunk import Chunk
 from app.models.document import Document
+from app.models.document_revision import DocumentRevision
 from app.models.embedding_job import EmbeddingJob
 from app.models.library import Library
 from app.models.rebuild_operation import RebuildOperation
@@ -37,12 +39,24 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+REVISION_POINT_NAMESPACE = uuid.UUID("a65d3d18-55c6-4df6-9f42-2f5dfdcf0a76")
+
 
 def _worker_id() -> str:
     return f"{socket.gethostname()}-{os.getpid()}"
 
 
-def eligibility(job, document, library, operation) -> bool:
+def deterministic_revision_point_id(document_revision_id: uuid.UUID, chunk_id: uuid.UUID) -> str:
+    return str(uuid.uuid5(REVISION_POINT_NAMESPACE, f"{document_revision_id}:{chunk_id}"))
+
+
+def _point_id_for_chunk(job: EmbeddingJob, chunk: Chunk) -> str:
+    if job.document_revision_id is not None:
+        return deterministic_revision_point_id(job.document_revision_id, chunk.id)
+    return str(chunk.id)
+
+
+def eligibility(job, document, library, operation, revision=None) -> bool:
     """统一资格条件（#6 设计 §5.1）：claim / embedding 前 / 最终写入前三处复用同一条。
 
     operation 是该 job 的 rebuild_operations 行（普通 job 或非重建时为 None）。
@@ -54,7 +68,16 @@ def eligibility(job, document, library, operation) -> bool:
         return False
     if document.deleted_at is not None:
         return False
-    if job.document_revision != document.current_revision:
+    if settings.enable_revision_id_worker:
+        if getattr(job, "document_revision_id", None) is None or revision is None:
+            return False
+        if getattr(revision, "id", None) != job.document_revision_id:
+            return False
+        if getattr(revision, "status", None) not in ("pending", "processing"):
+            return False
+        if getattr(document, "latest_revision_id", None) != job.document_revision_id:
+            return False
+    elif job.document_revision != document.current_revision:
         return False
     if library.index_state == "ready":
         # ready 时只放行普通 job；带 rebuild_operation_id 的（含失败 operation 遗留）一律拒绝
@@ -70,7 +93,28 @@ def eligibility(job, document, library, operation) -> bool:
     return False
 
 
-def _build_payload(lib: Library, doc: Document, chunk: Chunk) -> dict:
+async def _chunks_for_job(db: AsyncSession, job: EmbeddingJob, doc: Document) -> list[Chunk]:
+    if settings.enable_revision_id_worker and job.document_revision_id is not None:
+        rows = await db.execute(
+            select(Chunk)
+            .where(Chunk.document_revision_id == job.document_revision_id)
+            .order_by(Chunk.seq)
+        )
+    else:
+        rows = await db.execute(
+            select(Chunk).where(Chunk.document_id == doc.id).order_by(Chunk.seq)
+        )
+    return list(rows.scalars().all())
+
+
+def _build_payload(
+    lib: Library,
+    doc: Document,
+    chunk: Chunk,
+    *,
+    job: EmbeddingJob | None = None,
+    revision: DocumentRevision | None = None,
+) -> dict:
     """构造单个 Qdrant point 的 payload。
 
     关键：用户提供的 doc_metadata 先展开，系统保留字段**最后**写入，
@@ -78,6 +122,17 @@ def _build_payload(lib: Library, doc: Document, chunk: Chunk) -> dict:
     用户无法通过 metadata 覆盖它们（否则会破坏删除/检索完整性、伪造文档归属）。
     """
     payload = dict(doc.doc_metadata or {})
+    document_revision_id = (
+        getattr(job, "document_revision_id", None)
+        or getattr(chunk, "document_revision_id", None)
+        or getattr(revision, "id", None)
+    )
+    document_revision_no = (
+        getattr(job, "document_revision_no", None)
+        or getattr(revision, "revision_no", None)
+        or getattr(job, "document_revision", None)
+        or doc.current_revision
+    )
     payload.update(
         {
             "library_id": str(lib.id),
@@ -87,7 +142,20 @@ def _build_payload(lib: Library, doc: Document, chunk: Chunk) -> dict:
             "text": chunk.text,
             "title": doc.title,
             "external_id": doc.external_id,
-            "document_revision": doc.current_revision,  # #6：检索按它过滤陈旧 point
+            "document_revision": document_revision_no,  # #6：检索按它过滤陈旧 point
+            "document_revision_no": document_revision_no,
+            "document_revision_id": str(document_revision_id) if document_revision_id else None,
+            "block_id": str(chunk.block_id) if chunk.block_id else None,
+            "evidence_id": str(chunk.evidence_id) if chunk.evidence_id else None,
+            "chunk_kind": chunk.chunk_kind,
+            "page_start": chunk.page_start,
+            "page_end": chunk.page_end,
+            "title_path": chunk.title_path,
+            "source_start": chunk.source_start,
+            "source_end": chunk.source_end,
+            "position": chunk.position,
+            "visibility_scope": doc.visibility_scope,
+            "security_level": doc.security_level,
         }
     )
     return payload
@@ -176,6 +244,99 @@ async def _mark_superseded(db: AsyncSession, job: EmbeddingJob) -> None:
     await db.commit()
 
 
+async def _publish_revision_after_qdrant(
+    db: AsyncSession,
+    *,
+    library: Library,
+    job: EmbeddingJob,
+    now: datetime | None = None,
+) -> bool:
+    """Publish a revision only after Qdrant upsert has succeeded."""
+    now = now or datetime.now(timezone.utc)
+    await db.rollback()
+    from app.services import cleanup as cleanup_service
+
+    doc = (
+        await db.execute(
+            select(Document)
+            .where(Document.id == job.document_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    revision = (
+        await db.execute(
+            select(DocumentRevision)
+            .where(DocumentRevision.id == job.document_revision_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+
+    if (
+        doc is None
+        or doc.deleted_at is not None
+        or revision is None
+        or doc.latest_revision_id != job.document_revision_id
+    ):
+        await db.execute(
+            update(EmbeddingJob)
+            .where(EmbeddingJob.id == job.id)
+            .values(status="superseded", finished_at=now)
+        )
+        if job.document_revision_id is not None:
+            await db.execute(
+                update(DocumentRevision)
+                .where(DocumentRevision.id == job.document_revision_id)
+                .values(status="superseded", finished_at=now)
+            )
+            await cleanup_service.enqueue_delete_unpublished_revision_points(
+                db, library, job.document_id, job.document_revision_id
+            )
+        await db.commit()
+        return False
+
+    old_current_revision_id = doc.current_revision_id
+    await db.execute(
+        update(DocumentRevision)
+        .where(DocumentRevision.id == job.document_revision_id)
+        .values(
+            status="ready",
+            published_at=now,
+            finished_at=now,
+            last_error=None,
+        )
+    )
+    await db.execute(
+        update(EmbeddingJob)
+        .where(EmbeddingJob.id == job.id)
+        .values(status="done", finished_at=now, last_error=None)
+    )
+    await db.execute(
+        update(Document)
+        .where(
+            Document.id == job.document_id,
+            Document.latest_revision_id == job.document_revision_id,
+            Document.deleted_at.is_(None),
+        )
+        .values(
+            current_revision_id=job.document_revision_id,
+            status="ready",
+            last_error=None,
+            updated_at=now,
+        )
+    )
+    if old_current_revision_id is not None and old_current_revision_id != job.document_revision_id:
+        await db.execute(
+            update(DocumentRevision)
+            .where(DocumentRevision.id == old_current_revision_id)
+            .values(status="superseded", finished_at=now)
+        )
+        await cleanup_service.enqueue_delete_document_revision(
+            db, library, job.document_id, old_current_revision_id
+        )
+    await db.commit()
+    return True
+
+
 async def _process_job(db: AsyncSession, job: EmbeddingJob) -> None:
     """处理单个 job：资格检查 → 拉 chunks → embed → 按锁序复核 → upsert → 标 done（#6 §5）。"""
     lib = await db.get(Library, job.library_id)
@@ -184,17 +345,19 @@ async def _process_job(db: AsyncSession, job: EmbeddingJob) -> None:
         await _mark_failed(db, job, "library or document missing")
         return
     op = await db.get(RebuildOperation, job.rebuild_operation_id) if job.rebuild_operation_id else None
+    revision = (
+        await db.get(DocumentRevision, job.document_revision_id)
+        if settings.enable_revision_id_worker and job.document_revision_id is not None
+        else None
+    )
 
     # 资格检查 #1（embedding 前，§5.3）：不满足直接 superseded，省下 embedding 成本
-    if not eligibility(job, doc, lib, op):
+    if not eligibility(job, doc, lib, op, revision):
         await _mark_superseded(db, job)
         log.info("superseded (pre-embed): job=%s doc=%s rev=%s", job.id, doc.id, job.document_revision)
         return
 
-    rows = await db.execute(
-        select(Chunk).where(Chunk.document_id == doc.id).order_by(Chunk.seq)
-    )
-    chunks = list(rows.scalars().all())
+    chunks = await _chunks_for_job(db, job, doc)
     if not chunks:
         await _mark_failed(db, job, "no chunks to embed")
         return
@@ -217,6 +380,42 @@ async def _process_job(db: AsyncSession, job: EmbeddingJob) -> None:
             raise RuntimeError(f"dim mismatch: expected {lib.embedding_dim}")
 
         # 资格检查 #2（写 Qdrant 前，§5.4）：按锁序 library FOR KEY SHARE → document FOR UPDATE 复核
+        if settings.enable_revision_id_worker and job.document_revision_id is not None:
+            lib_l = await db.get(Library, job.library_id)
+            doc_l = await db.get(Document, job.document_id)
+            revision_l = await db.get(DocumentRevision, job.document_revision_id)
+            op_l = await db.get(RebuildOperation, job.rebuild_operation_id) if job.rebuild_operation_id else None
+            if lib_l is None or doc_l is None or not eligibility(job, doc_l, lib_l, op_l, revision_l):
+                await _mark_superseded(db, job)
+                log.info(
+                    "superseded (pre-write): job=%s doc=%s rev=%s",
+                    job.id,
+                    job.document_id,
+                    job.document_revision,
+                )
+                return
+            points = [
+                {
+                    "id": _point_id_for_chunk(job, chunk),
+                    "vector": vec,
+                    "payload": _build_payload(lib_l, doc_l, chunk, job=job, revision=revision_l),
+                }
+                for chunk, vec in zip(chunks, vectors)
+            ]
+            await qdrant.upsert_points(
+                lib_l.qdrant_collection, points, timeout=settings.qdrant_upsert_timeout_seconds
+            )
+            published = await _publish_revision_after_qdrant(db, library=lib_l, job=job)
+            if published:
+                log.info(
+                    "done: lib=%s doc=%s revision_id=%s chunks=%s",
+                    lib_l.slug,
+                    doc_l.id,
+                    job.document_revision_id,
+                    len(chunks),
+                )
+            return
+
         lib_l = (await db.execute(
             select(Library).where(Library.id == job.library_id).with_for_update(read=True, key_share=True)
         )).scalar_one_or_none()

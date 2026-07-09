@@ -420,7 +420,6 @@ def _table_chunk_spans(
     header = rows[0]
     data_rows = rows[1:]  # 不含表头的数据行
     row_numbers = list(seg.get("row_numbers") or [])
-    location = dict(seg.get("location") or {})
 
     full_prefix = prefix + [header]
     flat = "\n".join(prefix + rows)  # 原文（一段落，无重复）

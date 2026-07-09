@@ -217,6 +217,14 @@ class Settings(BaseSettings):
     # 外键类型（统一）
     source_key_type: str = "bigint"
 
+    # ---- v0.2 Evidence Foundation feature flags ----
+    enable_evidence_write_path: bool = False
+    enable_revision_id_worker: bool = False
+    enable_revision_id_visibility: bool = False
+    enable_sync_source_api: bool = False
+    sync_batch_max_items: int = 100
+    sync_document_text_max_chars: int = 2_000_000
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

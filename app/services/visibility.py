@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models.document import Document
+from app.models.document_revision import DocumentRevision
 
 
 def _missing_revision_ok(payload_rev: Any) -> int:
@@ -40,14 +41,32 @@ async def compute_visible_mask(
         did = p.get("document_id")
         if did:
             ids.append(str(did))
-    info: dict[str, tuple[str, int, object]] = {}
+    info: dict[str, tuple] = {}
     if ids:
-        rows = (await db.execute(
-            select(Document.id, Document.library_id, Document.current_revision, Document.deleted_at).where(
-                Document.id.in_(list(set(ids)))
-            )
-        )).all()
-        info = {str(did): (str(lib_id), int(rev), deleted) for did, lib_id, rev, deleted in rows}
+        if settings.enable_revision_id_visibility:
+            rows = (await db.execute(
+                select(
+                    Document.id,
+                    Document.library_id,
+                    Document.current_revision,
+                    Document.current_revision_id,
+                    Document.deleted_at,
+                    DocumentRevision.status,
+                )
+                .outerjoin(DocumentRevision, DocumentRevision.id == Document.current_revision_id)
+                .where(Document.id.in_(list(set(ids))))
+            )).all()
+            info = {
+                str(did): (str(lib_id), int(rev), str(cur_rev_id) if cur_rev_id else None, deleted, rev_status)
+                for did, lib_id, rev, cur_rev_id, deleted, rev_status in rows
+            }
+        else:
+            rows = (await db.execute(
+                select(Document.id, Document.library_id, Document.current_revision, Document.deleted_at).where(
+                    Document.id.in_(list(set(ids)))
+                )
+            )).all()
+            info = {str(did): (str(lib_id), int(rev), deleted) for did, lib_id, rev, deleted in rows}
 
     lib_id = str(library.id)
     mask: list[bool] = []
@@ -60,12 +79,21 @@ async def compute_visible_mask(
         if rec is None:                    # 不存在（硬删/异常）
             mask.append(False)
             continue
-        doc_lib, cur_rev, deleted_at = rec
+        if settings.enable_revision_id_visibility:
+            doc_lib, cur_rev, current_revision_id, deleted_at, current_revision_status = rec
+        else:
+            doc_lib, cur_rev, deleted_at = rec
+            current_revision_id = None
+            current_revision_status = None
         if deleted_at is not None:         # #7 已 tombstone → 立即不可见（不等 Qdrant 清理）
             mask.append(False)
             continue
         if doc_lib != lib_id:              # 库不匹配
             mask.append(False)
+            continue
+        payload_revision_id = p.get("document_revision_id")
+        if settings.enable_revision_id_visibility and payload_revision_id:
+            mask.append(str(payload_revision_id) == current_revision_id and current_revision_status == "ready")
             continue
         mask.append(_missing_revision_ok(p.get("document_revision")) == cur_rev)
     return mask

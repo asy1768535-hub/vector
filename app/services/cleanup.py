@@ -15,13 +15,16 @@ from app.models.cleanup_outbox import (
     EVENT_DELETE_COLLECTION,
     EVENT_DELETE_DOCUMENT_ALL,
     EVENT_DELETE_DOCUMENT_BEFORE_REVISION,
+    EVENT_DELETE_DOCUMENT_REVISION,
+    EVENT_DELETE_UNPUBLISHED_REVISION_POINTS,
 )
 
 log = logging.getLogger(__name__)
 
 
 async def _enqueue(db: AsyncSession, *, event_type, library_id, collection_name,
-                   idempotency_key, document_id=None, target_revision=None) -> None:
+                   idempotency_key, document_id=None, target_revision=None,
+                   payload=None) -> None:
     """插一条 outbox（ON CONFLICT(idempotency_key) DO NOTHING → 幂等，重复删除不产生重复任务）。
 
     不提交：与触发它的删除/更新同事务，由调用方一起 commit（事务性 outbox）。
@@ -33,6 +36,7 @@ async def _enqueue(db: AsyncSession, *, event_type, library_id, collection_name,
         document_id=document_id,
         collection_name=collection_name,
         target_revision=target_revision,
+        payload=payload,
         idempotency_key=idempotency_key,
         status="pending",
     ).on_conflict_do_nothing(index_elements=["idempotency_key"])
@@ -56,6 +60,24 @@ async def enqueue_delete_before_revision(db, library, document_id, target_revisi
     )
 
 
+async def enqueue_delete_document_revision(db, library, document_id, document_revision_id) -> None:
+    await _enqueue(
+        db, event_type=EVENT_DELETE_DOCUMENT_REVISION, library_id=library.id,
+        collection_name=library.qdrant_collection, document_id=document_id,
+        payload={"document_revision_id": str(document_revision_id)},
+        idempotency_key=f"delete-document-revision:{document_id}:{document_revision_id}",
+    )
+
+
+async def enqueue_delete_unpublished_revision_points(db, library, document_id, document_revision_id) -> None:
+    await _enqueue(
+        db, event_type=EVENT_DELETE_UNPUBLISHED_REVISION_POINTS, library_id=library.id,
+        collection_name=library.qdrant_collection, document_id=document_id,
+        payload={"document_revision_id": str(document_revision_id)},
+        idempotency_key=f"delete-unpublished-revision:{document_id}:{document_revision_id}",
+    )
+
+
 async def enqueue_delete_collection(db, library) -> None:
     await _enqueue(
         db, event_type=EVENT_DELETE_COLLECTION, library_id=library.id,
@@ -72,6 +94,11 @@ async def execute_event(row: CleanupOutbox) -> None:
     elif row.event_type == EVENT_DELETE_DOCUMENT_BEFORE_REVISION:
         await qdrant.delete_points_before_revision(
             row.collection_name, str(row.document_id), int(row.target_revision))
+    elif row.event_type in (EVENT_DELETE_DOCUMENT_REVISION, EVENT_DELETE_UNPUBLISHED_REVISION_POINTS):
+        document_revision_id = (row.payload or {}).get("document_revision_id")
+        if not document_revision_id:
+            raise ValueError(f"cleanup event missing document_revision_id: {row.id}")
+        await qdrant.delete_points_by_document_revision_id(row.collection_name, str(document_revision_id))
     elif row.event_type == EVENT_DELETE_COLLECTION:
         await qdrant.delete_collection(row.collection_name)
     else:

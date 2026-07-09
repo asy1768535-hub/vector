@@ -4,7 +4,6 @@ from __future__ import annotations
 from app.services.splitter import (
     build_structured_source_from_segments,
     chunk_segments,
-    _table_chunk_spans,
 )
 
 

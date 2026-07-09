@@ -31,6 +31,7 @@ class EmbeddingJob(Base):
             "uq_jobs_op_doc", "rebuild_operation_id", "document_id",
             unique=True, postgresql_where=text("rebuild_operation_id IS NOT NULL"),
         ),
+        Index("ix_embedding_jobs_revision_id", "document_revision_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -42,6 +43,8 @@ class EmbeddingJob(Base):
     )
     # 建 job 时快照 documents.current_revision（#6）。迁移已去 DB 默认（与 0009 一致）→ 应用层必须显式赋值。
     document_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    document_revision_id: Mapped[Optional[uuid.UUID]] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    document_revision_no: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     # 非空=本 job 由某次 rebuild operation 创建；ON DELETE RESTRICT 禁止删 operation 把旧 job 变普通 job。
     rebuild_operation_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         PgUUID(as_uuid=True),

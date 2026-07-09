@@ -20,15 +20,36 @@ class Document(Base):
     # 两个索引互斥（按 external_id 是否为空划分），同时充当对应查询的加速索引。
     __table_args__ = (
         Index(
-            "uq_documents_library_external_active", "library_id", "external_id",
+            "uq_documents_library_external_no_source_active",
+            "library_id",
+            "external_id",
             unique=True,
-            postgresql_where=text("external_id IS NOT NULL AND deleted_at IS NULL"),
+            postgresql_where=text(
+                "sync_source_id IS NULL AND external_id IS NOT NULL AND deleted_at IS NULL"
+            ),
         ),
         Index(
-            "uq_documents_library_hash_active", "library_id", "content_hash",
+            "uq_documents_library_sync_external_active",
+            "library_id",
+            "sync_source_id",
+            "external_id",
             unique=True,
-            postgresql_where=text("external_id IS NULL AND deleted_at IS NULL"),
+            postgresql_where=text(
+                "sync_source_id IS NOT NULL AND external_id IS NOT NULL AND deleted_at IS NULL"
+            ),
         ),
+        Index(
+            "uq_documents_library_hash_active",
+            "library_id",
+            "content_hash",
+            unique=True,
+            postgresql_where=text(
+                "sync_source_id IS NULL AND external_id IS NULL AND deleted_at IS NULL"
+            ),
+        ),
+        Index("ix_documents_folder", "folder_id"),
+        Index("ix_documents_current_revision_id", "current_revision_id"),
+        Index("ix_documents_latest_revision_id", "latest_revision_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -38,12 +59,19 @@ class Document(Base):
         nullable=False,
         index=True,
     )
-    external_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    folder_id: Mapped[Optional[uuid.UUID]] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    sync_source_id: Mapped[Optional[uuid.UUID]] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    external_id: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     title: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    display_name: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     doc_metadata: Mapped[Optional[dict[str, Any]]] = mapped_column("metadata", JSONB, nullable=True)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     # 索引版本（#6）：内容/title/metadata/任何入 payload 字段变更或重建都 +1。
     current_revision: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    current_revision_id: Mapped[Optional[uuid.UUID]] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    latest_revision_id: Mapped[Optional[uuid.UUID]] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    visibility_scope: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    security_level: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
     last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
