@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import hashlib
-import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -242,7 +241,11 @@ def test_query_library_unauthorized(mock_has_perm, client):
     assert response.status_code == status.HTTP_403_FORBIDDEN
 
 def _safe_tmp_dir(name: str) -> Path:
-    return Path(tempfile.mkdtemp(prefix=f"vector-db-{name}-")).resolve()
+    root = Path.cwd() / "pytest_tmp_files"
+    root.mkdir(exist_ok=True)
+    path = root / f"vector-db-{name}-{uuid.uuid4().hex}"
+    path.mkdir(parents=True, exist_ok=False)
+    return path.resolve()
 
 
 @patch("app.services.ingest.ingest_text", new_callable=AsyncMock)

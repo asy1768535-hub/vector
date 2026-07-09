@@ -19,6 +19,8 @@ venv/
 *.bak
 .pytest_cache/
 .pytest-tmp/
+.tmp/
+pytest_tmp*/
 .ruff_cache/
 .mypy_cache/
 .idea/

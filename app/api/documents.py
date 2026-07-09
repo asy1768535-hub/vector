@@ -182,15 +182,35 @@ async def _lock_writable(db: AsyncSession, lib: Library) -> Library:
     return locked
 
 
+def _uuid_or_none(value) -> uuid.UUID | None:
+    if isinstance(value, uuid.UUID):
+        return value
+    if isinstance(value, str):
+        try:
+            return uuid.UUID(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _str_or_none(value) -> str | None:
+    return value if isinstance(value, str) else None
+
+
 def _ingest_response(doc: Document, job: EmbeddingJob | None, chunk_count: int) -> DocumentIngestResponse:
-    revision_id = job.document_revision_id if job is not None else doc.latest_revision_id
-    revision_status = job.status if job is not None and job.document_revision_id is not None else None
+    revision_id = (
+        _uuid_or_none(getattr(job, "document_revision_id", None))
+        if job is not None
+        else _uuid_or_none(getattr(doc, "latest_revision_id", None))
+    )
+    job_status = _str_or_none(getattr(job, "status", None)) if job is not None else None
+    revision_status = job_status if revision_id is not None else None
     return DocumentIngestResponse(
         document_id=doc.id,
         status=doc.status,
         document_status=doc.status,
         revision_status=revision_status,
-        job_status=job.status if job is not None else None,
+        job_status=job_status,
         document_revision_id=revision_id,
         chunk_count=chunk_count,
         job_id=job.id if job is not None else None,

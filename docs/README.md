@@ -49,6 +49,8 @@
 | # | 文档 | 主题 |
 |---|---|---|
 | 28 | [升级说明（main → v0.1.7）](./28-upgrade-summary-v0.1.7.md) | 做了什么、有什么用、为什么做、下一步建议 |
+| 30 | [v0.2 Evidence acceptance runbook](./30-v0.2-evidence-acceptance-runbook.md) | M5 release gates, migration dry-run, rollback dry-run, PostgreSQL/Qdrant acceptance |
+| 31 | [v0.2 Evidence Foundation upgrade summary](./31-upgrade-summary-v0.2-evidence-foundation.md) | Compatibility fields, release scope, and v0.3 evidence handoff |
 
 ---
 
