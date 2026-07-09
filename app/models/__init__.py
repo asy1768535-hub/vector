@@ -1,6 +1,7 @@
 """所有 ORM 模型集中 import，方便 Alembic autogenerate 发现。"""
 from app.models.api_key import ApiKey
 from app.models.audit import AuditLog
+from app.models.attribute_definition import AttributeDefinition
 from app.models.chat_history import ChatConversation, ChatMessage, ChatMessageSource
 from app.models.chunk import Chunk
 from app.models.chunk_links import ChunkBlock, ChunkEvidence
@@ -12,12 +13,16 @@ from app.models.document_revision_file import DocumentRevisionFile
 from app.models.document_source import DocumentSource
 from app.models.document import Document
 from app.models.embedding_job import EmbeddingJob
+from app.models.entity_type import EntityType
 from app.models.evidence_unit import EvidenceUnit
 from app.models.folder import Folder
 from app.models.library import Library
 from app.models.library_faq import LibraryFAQQuestion
 from app.models.migration_backfill_state import MigrationBackfillState
+from app.models.ontology_version import OntologyVersion
 from app.models.rebuild_operation import RebuildOperation
+from app.models.relation_type import RelationType
+from app.models.relation_type_constraint import RelationTypeConstraint
 from app.models.service_heartbeat import ServiceHeartbeat
 from app.models.sync_source import SyncSource
 from app.models.user import User
@@ -25,6 +30,7 @@ from app.models.user import User
 __all__ = [
     "ApiKey",
     "AuditLog",
+    "AttributeDefinition",
     "ChatConversation",
     "ChatMessage",
     "ChatMessageSource",
@@ -39,12 +45,16 @@ __all__ = [
     "DocumentRevisionFile",
     "DocumentSource",
     "EmbeddingJob",
+    "EntityType",
     "EvidenceUnit",
     "Folder",
     "Library",
     "LibraryFAQQuestion",
     "MigrationBackfillState",
+    "OntologyVersion",
     "RebuildOperation",
+    "RelationType",
+    "RelationTypeConstraint",
     "ServiceHeartbeat",
     "SyncSource",
     "User",
