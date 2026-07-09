@@ -225,6 +225,9 @@ class Settings(BaseSettings):
     sync_batch_max_items: int = 100
     sync_document_text_max_chars: int = 2_000_000
 
+    # ---- v0.3 Graph Relation Foundation feature flags ----
+    graph_v03_enabled: bool = False
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

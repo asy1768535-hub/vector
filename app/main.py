@@ -33,6 +33,7 @@ from app.api.health import router as health_router
 from app.api.me import router as me_router
 from app.api.retrieval import router as retrieval_router
 from app.api.v02_m4 import router as v02_m4_router
+from app.api.v03_graph import router as v03_graph_router
 from app.auth.routes import build_auth_router
 from app.casbin.enforcer import get_enforcer
 from app.config import settings
@@ -135,6 +136,7 @@ def create_app() -> FastAPI:
     app.include_router(me_router)
     app.include_router(documents_router)
     app.include_router(v02_m4_router)
+    app.include_router(v03_graph_router)
     app.include_router(retrieval_router)
     app.include_router(chat_router)
     app.include_router(admin_users_router)
