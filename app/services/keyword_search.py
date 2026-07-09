@@ -59,6 +59,11 @@ def _hit(row) -> dict:
             "text": row.text,
             "title": row.title,
             "external_id": row.external_id,
+            "document_revision_id": (
+                str(row.document_revision_id)
+                if getattr(row, "document_revision_id", None)
+                else None
+            ),
             # keyword 命中来自实时 PG（非 Qdrant 快照），其 revision 必为当前版本。
             # 必须带上，否则 visibility 会把缺失视作 1，更新过(current_revision>1)的文档会被误过滤。
             "document_revision": int(row.document_revision),
@@ -73,12 +78,18 @@ async def recall(db: AsyncSession, library, query: str, *, limit: int) -> list[d
     lib_id = str(library.id)
     tb = settings.hybrid_keyword_title_boost
     eb = settings.hybrid_keyword_external_id_boost
+    revision_filter = (
+        "AND (c.document_revision_id IS NULL OR c.document_revision_id = d.current_revision_id)"
+        if settings.enable_revision_id_visibility
+        else ""
+    )
 
     if await _has_trgm(db):
         thr = settings.hybrid_keyword_threshold
         sql = text(
-            """
+            f"""
             SELECT c.id AS chunk_id, c.document_id, c.library_id, c.text,
+                   c.document_revision_id AS document_revision_id,
                    d.title, d.external_id, d.current_revision AS document_revision,
                    GREATEST(
                      word_similarity(:q, c.text),
@@ -89,6 +100,7 @@ async def recall(db: AsyncSession, library, query: str, *, limit: int) -> list[d
             JOIN documents d ON d.id = c.document_id
             WHERE c.library_id = :lib
               AND d.deleted_at IS NULL
+              {revision_filter}
               AND (
                     word_similarity(:q, c.text) >= :thr
                  OR word_similarity(:q, COALESCE(d.title, '')) >= :thr
@@ -121,12 +133,14 @@ async def recall(db: AsyncSession, library, query: str, *, limit: int) -> list[d
     sql = text(
         f"""
         SELECT c.id AS chunk_id, c.document_id, c.library_id, c.text,
+               c.document_revision_id AS document_revision_id,
                d.title, d.external_id, d.current_revision AS document_revision,
                ({score_expr}) AS score
         FROM chunks c
         JOIN documents d ON d.id = c.document_id
         WHERE c.library_id = :lib
           AND d.deleted_at IS NULL
+          {revision_filter}
           AND ({where})
         ORDER BY score DESC, c.id ASC
         LIMIT :limit

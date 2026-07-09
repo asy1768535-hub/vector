@@ -337,8 +337,9 @@ async def reingest_document(
             job=job,
         )
         from app.services import cleanup as cleanup_service
-        await cleanup_service.enqueue_delete_before_revision(
-            db, library, document.id, document.current_revision)
+        if not settings.enable_revision_id_worker:
+            await cleanup_service.enqueue_delete_before_revision(
+                db, library, document.id, document.current_revision)
         log.info("evidence reingest queued: lib=%s doc_id=%s rev=%s revision_id=%s chunks=%s job_id=%s",
                  library.slug, document.id, document.current_revision, result.revision.id, len(result.chunks), job.id)
         return job, len(result.chunks), True

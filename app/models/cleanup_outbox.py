@@ -20,6 +20,8 @@ from app.db import Base
 # 事件类型
 EVENT_DELETE_DOCUMENT_ALL = "delete_document_all"                 # 删文档：删该 document_id 全部 points
 EVENT_DELETE_DOCUMENT_BEFORE_REVISION = "delete_document_before_revision"  # 更新：删 revision 缺失或 < target
+EVENT_DELETE_DOCUMENT_REVISION = "delete_document_revision"       # 删指定 document_revision_id points
+EVENT_DELETE_UNPUBLISHED_REVISION_POINTS = "delete_unpublished_revision_points"  # 删未发布 revision points
 EVENT_DELETE_COLLECTION = "delete_collection"                     # 删库：删整个 collection
 
 

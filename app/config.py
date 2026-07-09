@@ -219,6 +219,8 @@ class Settings(BaseSettings):
 
     # ---- v0.2 Evidence Foundation feature flags ----
     enable_evidence_write_path: bool = False
+    enable_revision_id_worker: bool = False
+    enable_revision_id_visibility: bool = False
 
 
 @lru_cache(maxsize=1)

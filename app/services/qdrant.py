@@ -105,6 +105,24 @@ async def delete_points_by_document_id(collection: str, document_id: str) -> Non
     resp.raise_for_status()
 
 
+async def delete_points_by_document_revision_id(collection: str, document_revision_id: str) -> None:
+    async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
+        resp = await client.post(
+            _url(f"/collections/{collection}/points/delete?wait=true"),
+            headers=_headers(),
+            json={
+                "filter": {
+                    "must": [
+                        {"key": "document_revision_id", "match": {"value": document_revision_id}}
+                    ]
+                }
+            },
+        )
+    if resp.status_code == 404:
+        return
+    resp.raise_for_status()
+
+
 async def delete_points_before_revision(collection: str, document_id: str, target_revision: int) -> None:
     """删该 document_id 中 document_revision 缺失或 < target 的 points（更新后清旧版本，#7 §6.1）。
 
