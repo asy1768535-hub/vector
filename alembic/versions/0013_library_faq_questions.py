@@ -33,8 +33,8 @@ def upgrade() -> None:
             sa.ForeignKey("sys_libraries.id", ondelete="CASCADE"), nullable=False,
         ),
         sa.Column("question", sa.Text(), nullable=False),
-        sa.Column("sort_order", sa.Integer(), nullable=False, server_default="0"),
-        sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.true()),
+        sa.Column("sort_order", sa.Integer(), nullable=False, server_default=sa.text("0")),
+        sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.text("true")),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         # question 去掉首尾空白后不能为空（schema 层也校验，这里兜底防脏写）
