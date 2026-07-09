@@ -13,14 +13,19 @@ from app.models.document_revision_file import DocumentRevisionFile
 from app.models.document_source import DocumentSource
 from app.models.document import Document
 from app.models.embedding_job import EmbeddingJob
+from app.models.entity import Entity
+from app.models.entity_alias import EntityAlias
+from app.models.entity_mention import EntityMention
 from app.models.entity_type import EntityType
 from app.models.evidence_unit import EvidenceUnit
 from app.models.folder import Folder
+from app.models.knowledge_relation import KnowledgeRelation
 from app.models.library import Library
 from app.models.library_faq import LibraryFAQQuestion
 from app.models.migration_backfill_state import MigrationBackfillState
 from app.models.ontology_version import OntologyVersion
 from app.models.rebuild_operation import RebuildOperation
+from app.models.relation_evidence import RelationEvidence
 from app.models.relation_type import RelationType
 from app.models.relation_type_constraint import RelationTypeConstraint
 from app.models.service_heartbeat import ServiceHeartbeat
@@ -45,14 +50,19 @@ __all__ = [
     "DocumentRevisionFile",
     "DocumentSource",
     "EmbeddingJob",
+    "Entity",
+    "EntityAlias",
+    "EntityMention",
     "EntityType",
     "EvidenceUnit",
     "Folder",
+    "KnowledgeRelation",
     "Library",
     "LibraryFAQQuestion",
     "MigrationBackfillState",
     "OntologyVersion",
     "RebuildOperation",
+    "RelationEvidence",
     "RelationType",
     "RelationTypeConstraint",
     "ServiceHeartbeat",
