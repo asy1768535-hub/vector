@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from sqlalchemy import CheckConstraint, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
+
+
+MIGRATION = Path("alembic/versions/0021_v04_m1_graph_extraction_foundation.py")
 
 
 def _constraint_names(table, kind) -> set[str]:
@@ -366,3 +371,73 @@ def test_context_snapshot_is_the_immutable_timestamp_exception():
     assert "created_at" in cols
     assert "updated_at" not in cols
     assert cols.purged_at.nullable is True
+
+
+def test_v04_m1_migration_is_0021_and_contains_only_m1_schema():
+    text = MIGRATION.read_text(encoding="utf-8")
+
+    assert 'revision: str = "0021"' in text
+    assert 'down_revision: Union[str, None] = "0020"' in text
+    for table_name in (
+        "graph_extraction_jobs",
+        "graph_extraction_units",
+        "extraction_context_snapshots",
+        "extraction_raw_output_attempts",
+    ):
+        assert f'op.create_table("{table_name}"' in text
+        assert f'op.drop_table("{table_name}")' in text
+
+    for column_name in (
+        "graph_extraction_enabled",
+        "external_llm_enabled",
+        "graph_extraction_allowed_security_levels",
+    ):
+        assert f'"{column_name}"' in text
+        assert f'op.drop_column("sys_libraries", "{column_name}")' in text
+
+    assert 'op.drop_constraint("ck_heartbeat_service_type"' in text
+    assert "graph_extractor" in text
+    assert "DELETE FROM service_heartbeats" in text
+    assert "trigger_type = 'full_rerun' AND rerun_of_job_id IS NOT NULL" in text
+    assert "trigger_type = 'repair'" in text
+    assert "trigger_type IN ('manual','revision_published','eval')" in text
+    assert "ck_extraction_raw_attempts_payload_or_purged" in text
+
+    context_section = text.split(
+        "def _create_extraction_context_snapshots() -> None:", 1
+    )[1].split("def _create_extraction_raw_output_attempts() -> None:", 1)[0]
+    assert '"created_at"' in context_section
+    assert '"updated_at"' not in context_section
+    context_section_lower = context_section.lower()
+    assert "purged_at is null" in context_section_lower
+    assert "purged_at is not null" in context_section_lower
+    for column_name in (
+        "context_json",
+        "context_text",
+        "document_metadata",
+        "chunk_title_path",
+        "block_title_path",
+        "effective_title_path",
+    ):
+        assert f"{column_name} is null" in context_section_lower
+
+    attempt_section = text.split(
+        "def _create_extraction_raw_output_attempts() -> None:", 1
+    )[1].split("def downgrade() -> None:", 1)[0]
+    attempt_section_lower = attempt_section.lower()
+    for column_name in ("raw_response", "parsed_response", "parse_error"):
+        assert f"{column_name} is null" in attempt_section_lower
+
+    forbidden = (
+        "graph_entity_occurrences",
+        "graph_relation_occurrences",
+        "graph_entity_candidates",
+        "graph_relation_candidates",
+        "candidate_evidence",
+        "graph_publications",
+        "0022",
+        "CHAT_API_KEY",
+        "chat_api_key",
+    )
+    for needle in forbidden:
+        assert needle not in text
