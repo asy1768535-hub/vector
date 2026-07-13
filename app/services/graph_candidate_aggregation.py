@@ -685,6 +685,138 @@ async def _upsert_relation_occurrence(
     return row
 
 
+async def _handle_endpoint_replay_mismatch(
+    db,
+    *,
+    job: Any,
+    unit: Any,
+    ordinal: int,
+    source_occurrence: GraphEntityOccurrence,
+    target_occurrence: GraphEntityOccurrence,
+    proposed_candidate_key: str,
+) -> tuple[GraphRelationOccurrence, GraphRelationCandidate] | None:
+    result = await db.execute(
+        select(GraphRelationOccurrence)
+        .where(
+            GraphRelationOccurrence.extraction_unit_id == unit.id,
+            GraphRelationOccurrence.ordinal == ordinal,
+        )
+        .with_for_update()
+    )
+    occurrence = result.scalars().first()
+    if occurrence is None:
+        return None
+    if occurrence.purged_at is not None:
+        raise CandidateReplayError(
+            "relation_occurrence_purged", "purged Relation Occurrence cannot be replayed"
+        )
+    candidate = await db.get(GraphRelationCandidate, occurrence.relation_candidate_id)
+    if candidate is None or candidate.job_id != job.id:
+        raise CandidateReplayError(
+            "relation_occurrence_replay_mismatch",
+            "existing Relation Occurrence Candidate is missing or out of scope",
+        )
+    endpoints_match = (
+        occurrence.source_entity_occurrence_id == source_occurrence.id
+        and occurrence.target_entity_occurrence_id == target_occurrence.id
+        and candidate.candidate_key == proposed_candidate_key
+    )
+    if endpoints_match:
+        return None
+
+    old_source_occurrence = await db.get(
+        GraphEntityOccurrence, occurrence.source_entity_occurrence_id
+    )
+    old_target_occurrence = await db.get(
+        GraphEntityOccurrence, occurrence.target_entity_occurrence_id
+    )
+    if old_source_occurrence is None or old_target_occurrence is None:
+        raise CandidateReplayError(
+            "relation_occurrence_replay_mismatch",
+            "existing Relation Occurrence endpoint audit row is missing",
+        )
+    endpoint_values = {
+        "source_candidate_id": (
+            old_source_occurrence.entity_candidate_id,
+            source_occurrence.entity_candidate_id,
+        ),
+        "target_candidate_id": (
+            old_target_occurrence.entity_candidate_id,
+            target_occurrence.entity_candidate_id,
+        ),
+    }
+    fields = [
+        {
+            "field": field,
+            "value_hashes": sorted(
+                {
+                    canonical_graph_value_hash_v1(str(value))
+                    for value in values
+                }
+            ),
+        }
+        for field, values in sorted(endpoint_values.items())
+        if values[0] != values[1]
+    ]
+    if not fields:
+        fields = [
+            {
+                "field": "candidate_key",
+                "value_hashes": sorted(
+                    {
+                        canonical_graph_value_hash_v1(candidate.candidate_key),
+                        canonical_graph_value_hash_v1(proposed_candidate_key),
+                    }
+                ),
+            }
+        ]
+    key = conflict_key_v1(
+        job_id=job.id,
+        conflict_type="endpoint_mismatch",
+        entity_candidate_ids=[],
+        relation_candidate_ids=[candidate.id],
+        conflicting_fields=fields,
+    )
+    await db.execute(
+        pg_insert(GraphExtractionConflict)
+        .values(
+            id=uuid.uuid4(),
+            job_id=job.id,
+            library_id=job.library_id,
+            conflict_key=key,
+            conflict_type="endpoint_mismatch",
+            entity_candidate_ids=[],
+            relation_candidate_ids=[str(candidate.id)],
+            conflicting_fields=fields,
+            status="open",
+            details={
+                "existing_candidate_key": candidate.candidate_key,
+                "proposed_candidate_key": proposed_candidate_key,
+                "existing_source_candidate_id": str(
+                    old_source_occurrence.entity_candidate_id
+                ),
+                "proposed_source_candidate_id": str(
+                    source_occurrence.entity_candidate_id
+                ),
+                "existing_target_candidate_id": str(
+                    old_target_occurrence.entity_candidate_id
+                ),
+                "proposed_target_candidate_id": str(
+                    target_occurrence.entity_candidate_id
+                ),
+            },
+        )
+        .on_conflict_do_nothing(index_elements=["job_id", "conflict_key"])
+    )
+    candidate.has_conflict = True
+    candidate.status = "pending_review"
+    candidate.review_reason = "endpoint_mismatch"
+    candidate.validation_errors = [
+        {"code": "endpoint_mismatch", "field": item["field"]} for item in fields
+    ]
+    return occurrence, candidate
+
+
 def _evidence_quality(rows: list[Any]) -> float:
     if not rows or any(row.validation_status != "valid" for row in rows):
         return 0.0
@@ -957,6 +1089,22 @@ async def stage_unit_candidate_occurrences(
     for candidate_key, ordinal, raw, source_candidate, target_candidate in sorted(
         relation_entries, key=lambda item: (item[0], item[1])
     ):
+        source_occurrence = occurrences_by_local[raw["source_local_id"]]
+        target_occurrence = occurrences_by_local[raw["target_local_id"]]
+        mismatch = await _handle_endpoint_replay_mismatch(
+            db,
+            job=job,
+            unit=unit,
+            ordinal=ordinal,
+            source_occurrence=source_occurrence,
+            target_occurrence=target_occurrence,
+            proposed_candidate_key=candidate_key,
+        )
+        if mismatch is not None:
+            occurrence, existing_candidate = mismatch
+            relation_candidates[existing_candidate.id] = existing_candidate
+            relation_occurrences.append(occurrence)
+            continue
         candidate = await _upsert_relation_candidate(
             db,
             job=job,
@@ -971,8 +1119,8 @@ async def stage_unit_candidate_occurrences(
             unit=unit,
             ordinal=ordinal,
             candidate=candidate,
-            source_occurrence=occurrences_by_local[raw["source_local_id"]],
-            target_occurrence=occurrences_by_local[raw["target_local_id"]],
+            source_occurrence=source_occurrence,
+            target_occurrence=target_occurrence,
             payload=raw,
         )
         relation_candidates[candidate.id] = candidate
@@ -991,7 +1139,8 @@ async def stage_unit_candidate_occurrences(
     for candidate in sorted(
         relation_candidates.values(), key=lambda item: item.candidate_key
     ):
-        await _recompute_relation_candidate(db, candidate=candidate)
+        if candidate.review_reason != "endpoint_mismatch":
+            await _recompute_relation_candidate(db, candidate=candidate)
 
     await db.flush()
     return UnitCandidateStageResult(
