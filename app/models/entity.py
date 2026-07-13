@@ -72,6 +72,15 @@ class Entity(Base):
     source_type: Mapped[str] = mapped_column(String(32), nullable=False, default=GRAPH_SOURCE_MANUAL)
     authority_level: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    created_by_job_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey(
+            "graph_extraction_jobs.id",
+            ondelete="SET NULL",
+            name="fk_entities_created_by_job",
+        ),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

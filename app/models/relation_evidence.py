@@ -66,6 +66,15 @@ class RelationEvidence(Base):
     source_span: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
     confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    created_by_job_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey(
+            "graph_extraction_jobs.id",
+            ondelete="SET NULL",
+            name="fk_relation_evidence_created_by_job",
+        ),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

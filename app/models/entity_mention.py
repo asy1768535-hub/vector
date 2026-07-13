@@ -4,7 +4,17 @@ import uuid
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import CheckConstraint, DateTime, Float, ForeignKey, Index, String, Text, func
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -29,6 +39,12 @@ class EntityMention(Base):
             "library_id",
             "document_revision_id",
             "status",
+        ),
+        Index(
+            "uq_entity_mentions_extraction_key",
+            "extraction_key",
+            unique=True,
+            postgresql_where=text("extraction_key IS NOT NULL"),
         ),
     )
 
@@ -62,6 +78,16 @@ class EntityMention(Base):
     confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     source_type: Mapped[str] = mapped_column(String(32), nullable=False, default="manual")
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    created_by_job_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey(
+            "graph_extraction_jobs.id",
+            ondelete="SET NULL",
+            name="fk_entity_mentions_created_by_job",
+        ),
+        nullable=True,
+    )
+    extraction_key: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

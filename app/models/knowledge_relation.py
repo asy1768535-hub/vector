@@ -4,7 +4,16 @@ import uuid
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import CheckConstraint, DateTime, Float, ForeignKey, Index, String, func
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    String,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -43,6 +52,12 @@ class KnowledgeRelation(Base):
             "library_id",
             "target_entity_id",
             "relation_type_id",
+        ),
+        Index(
+            "uq_knowledge_relations_extraction_key",
+            "extraction_key",
+            unique=True,
+            postgresql_where=text("extraction_key IS NOT NULL"),
         ),
     )
 
@@ -85,6 +100,16 @@ class KnowledgeRelation(Base):
     confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     valid_from: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     valid_to: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by_job_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey(
+            "graph_extraction_jobs.id",
+            ondelete="SET NULL",
+            name="fk_knowledge_relations_created_by_job",
+        ),
+        nullable=True,
+    )
+    extraction_key: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
