@@ -1,10 +1,11 @@
 """集中配置：pydantic-settings 从 .env 加载，启动时类型校验。"""
 from __future__ import annotations
 
+import math
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -227,6 +228,90 @@ class Settings(BaseSettings):
 
     # ---- v0.3 Graph Relation Foundation feature flags ----
     graph_v03_enabled: bool = False
+
+    # ---- v0.4 Graph Extraction Pipeline (M1 defaults; fail closed) ----
+    graph_extraction_enabled: bool = False
+    graph_extraction_auto_trigger_enabled: bool = False
+    graph_extraction_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    graph_extraction_model: str = "qwen-plus"
+    graph_extraction_api_key: SecretStr = SecretStr("")
+    graph_extraction_timeout_seconds: float = 120.0
+    graph_extraction_temperature: float = 0.0
+    graph_extraction_response_format: str = "json_object"
+    graph_extraction_max_context_chars: int = 24_000
+    graph_extraction_previous_chunks: int = 1
+    graph_extraction_next_chunks: int = 1
+
+    graph_extraction_prompt_version: str = "v1"
+    graph_extraction_extractor_version: str = "v1"
+    graph_extraction_output_parser_version: str = "v1"
+    graph_extraction_context_policy_version: str = "v1"
+    graph_extraction_policy_version: str = "v1"
+    graph_extraction_normalization_rule_version: str = "normalization_v1"
+    graph_extraction_confidence_policy_version: str = "v1"
+
+    graph_extraction_entity_materialization_threshold: float = 0.85
+    graph_extraction_relation_draft_threshold: float = 0.85
+    graph_extraction_weight_model: float = 0.25
+    graph_extraction_weight_evidence: float = 0.35
+    graph_extraction_weight_schema: float = 0.25
+    graph_extraction_weight_normalization: float = 0.15
+    graph_extraction_auto_evidence_types: str = "direct_statement,table_cell"
+    graph_extraction_evidence_group_policy: str = "all_claims_valid"
+
+    graph_extraction_worker_poll_seconds: float = 3.0
+    graph_extraction_unit_lease_seconds: int = 180
+    graph_extraction_unit_lease_renew_seconds: int = 30
+    graph_extraction_worker_max_model_attempts: int = 3
+
+    graph_extraction_context_retention_days: int = 30
+    graph_extraction_raw_output_retention_days: int = 30
+    graph_extraction_candidate_retention_days: int = 180
+
+
+def validate_graph_extraction_startup(config: Settings) -> None:
+    weights = {
+        "model": config.graph_extraction_weight_model,
+        "evidence": config.graph_extraction_weight_evidence,
+        "schema": config.graph_extraction_weight_schema,
+        "normalization": config.graph_extraction_weight_normalization,
+    }
+    if any(value < 0 or value > 1 for value in weights.values()):
+        raise RuntimeError(
+            "[security] graph extraction confidence weight must be within [0, 1]"
+        )
+    if not math.isclose(math.fsum(weights.values()), 1.0, rel_tol=0.0, abs_tol=1e-9):
+        raise RuntimeError(
+            "[security] graph extraction confidence weights must sum to 1.0"
+        )
+
+    lease = config.graph_extraction_unit_lease_seconds
+    renew = config.graph_extraction_unit_lease_renew_seconds
+    if renew >= lease / 2:
+        raise RuntimeError(
+            "[security] graph extraction lease renew must be less than half the lease"
+        )
+
+    retention_values = (
+        config.graph_extraction_context_retention_days,
+        config.graph_extraction_raw_output_retention_days,
+        config.graph_extraction_candidate_retention_days,
+    )
+    if any(value <= 0 for value in retention_values):
+        raise RuntimeError("[security] graph extraction retention days must be positive")
+
+    if config.graph_extraction_timeout_seconds >= lease:
+        raise RuntimeError(
+            "[security] graph extraction provider timeout must be below the Unit lease"
+        )
+
+    if (
+        config.graph_extraction_auto_trigger_enabled
+        and not config.graph_extraction_api_key.get_secret_value().strip()
+    ):
+        raise RuntimeError(
+            "[security] GRAPH_EXTRACTION_API_KEY is required when auto trigger is enabled"
+        )
 
 
 @lru_cache(maxsize=1)
