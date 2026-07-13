@@ -221,8 +221,10 @@ async def run_rebuild(db: AsyncSession, library_id) -> str:
         )).scalar_one_or_none()
 
     if active is not None and active.status == "running":
-        await try_finalize(db, active.id)
-        return str(active.id)
+        await db.rollback()
+        raise ConcurrentRebuildError(
+            f"library {library_id} already has an active rebuild operation"
+        )
 
     if active is not None and active.status in ("preparing", "failed"):
         op_id = active.id

@@ -34,15 +34,18 @@ def _parts():
     return parsed.hostname, parsed.port or 5432, parsed.username, parsed.password
 
 
-def _apply_settings_from_dsn(monkeypatch) -> str:
+def _apply_settings_from_dsn(monkeypatch, *, database: str | None = None) -> str:
     parsed = urlparse(_DSN.replace("+asyncpg", ""))
-    db_name = parsed.path.lstrip("/")
+    db_name = database or parsed.path.lstrip("/")
     monkeypatch.setattr(settings, "db_host", parsed.hostname)
     monkeypatch.setattr(settings, "db_port", int(parsed.port or 5432))
     monkeypatch.setattr(settings, "db_user", parsed.username)
     monkeypatch.setattr(settings, "db_password", parsed.password)
     monkeypatch.setattr(settings, "db_name", db_name)
-    return db_name
+    return (
+        f"postgresql+asyncpg://{parsed.username}:{parsed.password}"
+        f"@{parsed.hostname}:{parsed.port or 5432}/{db_name}"
+    )
 
 
 async def _admin(host: str, port: int, user: str, password: str, sql: str) -> None:
@@ -107,11 +110,14 @@ def test_alembic_upgrade_0018_and_downgrade_0017(monkeypatch):
 
 
 def test_backfill_batch_creates_revision_evidence_and_chunk_links_idempotently(monkeypatch):
-    _apply_settings_from_dsn(monkeypatch)
-    command.upgrade(Config("alembic.ini"), "0018")
+    host, port, user, password = _parts()
+    name = "vkt_v02_backfill_" + uuid.uuid4().hex[:8]
+    asyncio.run(_admin(host, port, user, password, f'DROP DATABASE IF EXISTS "{name}"'))
+    asyncio.run(_admin(host, port, user, password, f'CREATE DATABASE "{name}"'))
+    dsn = _apply_settings_from_dsn(monkeypatch, database=name)
 
     async def run():
-        eng = create_async_engine(_DSN)
+        eng = create_async_engine(dsn)
         Session = async_sessionmaker(eng, expire_on_commit=False)
         try:
             async with Session() as db:
@@ -209,4 +215,8 @@ def test_backfill_batch_creates_revision_evidence_and_chunk_links_idempotently(m
         finally:
             await eng.dispose()
 
-    asyncio.run(run())
+    try:
+        command.upgrade(Config("alembic.ini"), "head")
+        asyncio.run(run())
+    finally:
+        asyncio.run(_admin(host, port, user, password, f'DROP DATABASE IF EXISTS "{name}"'))
