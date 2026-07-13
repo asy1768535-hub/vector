@@ -23,6 +23,13 @@ from app.models.extraction_raw_output_attempt import ExtractionRawOutputAttempt
 from app.models.folder import Folder
 from app.models.graph_extraction_job import GraphExtractionJob
 from app.models.graph_extraction_unit import GraphExtractionUnit
+from app.models.graph_candidate_evidence import (
+    GraphEntityCandidateEvidence,
+    GraphRelationCandidateEvidence,
+)
+from app.models.graph_candidates import GraphEntityCandidate, GraphRelationCandidate
+from app.models.graph_occurrences import GraphEntityOccurrence, GraphRelationOccurrence
+from app.models.graph_review import GraphEntityMergeCandidate, GraphExtractionConflict
 from app.models.knowledge_relation import KnowledgeRelation
 from app.models.library import Library
 from app.models.library_faq import LibraryFAQQuestion
@@ -64,6 +71,14 @@ __all__ = [
     "Folder",
     "GraphExtractionJob",
     "GraphExtractionUnit",
+    "GraphEntityCandidate",
+    "GraphRelationCandidate",
+    "GraphEntityOccurrence",
+    "GraphRelationOccurrence",
+    "GraphEntityCandidateEvidence",
+    "GraphRelationCandidateEvidence",
+    "GraphEntityMergeCandidate",
+    "GraphExtractionConflict",
     "KnowledgeRelation",
     "Library",
     "LibraryFAQQuestion",
