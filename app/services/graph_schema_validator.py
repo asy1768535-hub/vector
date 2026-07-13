@@ -34,6 +34,7 @@ from app.models.relation_type import (
     RelationType,
 )
 from app.models.relation_type_constraint import RelationTypeConstraint
+from app.services.graph_normalization import normalize_graph_name_v1
 
 
 SCHEMA_STATUS_ACTIVE = "active"
@@ -85,7 +86,7 @@ class RelationWriteValidation:
 
 
 def normalize_graph_name(value: str) -> str:
-    return " ".join(value.strip().casefold().split())
+    return normalize_graph_name_v1(value)
 
 
 async def validate_entity_write(
