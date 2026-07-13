@@ -18,7 +18,11 @@ from app.models.entity_alias import EntityAlias
 from app.models.entity_mention import EntityMention
 from app.models.entity_type import EntityType
 from app.models.evidence_unit import EvidenceUnit
+from app.models.extraction_context_snapshot import ExtractionContextSnapshot
+from app.models.extraction_raw_output_attempt import ExtractionRawOutputAttempt
 from app.models.folder import Folder
+from app.models.graph_extraction_job import GraphExtractionJob
+from app.models.graph_extraction_unit import GraphExtractionUnit
 from app.models.knowledge_relation import KnowledgeRelation
 from app.models.library import Library
 from app.models.library_faq import LibraryFAQQuestion
@@ -55,7 +59,11 @@ __all__ = [
     "EntityMention",
     "EntityType",
     "EvidenceUnit",
+    "ExtractionContextSnapshot",
+    "ExtractionRawOutputAttempt",
     "Folder",
+    "GraphExtractionJob",
+    "GraphExtractionUnit",
     "KnowledgeRelation",
     "Library",
     "LibraryFAQQuestion",
