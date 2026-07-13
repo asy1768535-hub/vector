@@ -50,7 +50,15 @@ def _candidate_evidence_constraints(prefix: str) -> tuple[Any, ...]:
             "AND resolved_evidence_id IS NOT NULL AND resolved_document_id IS NOT NULL "
             "AND resolved_document_revision_id IS NOT NULL AND resolved_chunk_id IS NOT NULL "
             "AND resolved_source_span IS NOT NULL AND evidence_type IS NOT NULL "
-            "AND evidence_quality_score IS NOT NULL) OR "
+            "AND evidence_quality_score IS NOT NULL "
+            "AND candidate_matches -> 0 ->> 'evidence_id' = resolved_evidence_id::text "
+            "AND candidate_matches -> 0 ->> 'document_id' = resolved_document_id::text "
+            "AND candidate_matches -> 0 ->> 'revision_id' = "
+            "resolved_document_revision_id::text "
+            "AND candidate_matches -> 0 ->> 'chunk_id' = resolved_chunk_id::text "
+            "AND (candidate_matches -> 0 ->> 'block_id') IS NOT DISTINCT FROM "
+            "resolved_block_id::text "
+            "AND candidate_matches -> 0 -> 'source_span' = resolved_source_span) OR "
             "(validation_status = 'ambiguous' "
             "AND jsonb_array_length(candidate_matches) >= 2 AND "
             f"{nullable_resolution}) OR "
@@ -90,7 +98,7 @@ class _CandidateEvidenceBase(Base):
     job_id: Mapped[uuid.UUID]
     extraction_unit_id: Mapped[uuid.UUID]
     claim_key: Mapped[str] = mapped_column(String(64), nullable=False)
-    context_ref: Mapped[str] = mapped_column(String(128), nullable=False)
+    context_ref: Mapped[str] = mapped_column(String(32), nullable=False)
     quote_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     quote_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     resolved_evidence_id: Mapped[Optional[uuid.UUID]]

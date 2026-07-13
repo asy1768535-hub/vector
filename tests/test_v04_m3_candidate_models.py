@@ -450,6 +450,16 @@ def _assert_candidate_evidence_table(table, prefix: str, candidate_target: str) 
     assert "candidate_matches = '[]'::jsonb" in resolution
     assert "purged_at is not null" in resolution
     assert "quote_text is null" in resolution
+    for match_key, resolved_column in (
+        ("evidence_id", "resolved_evidence_id"),
+        ("document_id", "resolved_document_id"),
+        ("revision_id", "resolved_document_revision_id"),
+        ("chunk_id", "resolved_chunk_id"),
+        ("block_id", "resolved_block_id"),
+        ("source_span", "resolved_source_span"),
+    ):
+        assert match_key in resolution
+        assert resolved_column in resolution
 
     _assert_fk(
         table,
