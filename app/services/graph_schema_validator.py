@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any, Literal
@@ -58,6 +59,64 @@ GRAPH_SOURCE_TYPES = {
 
 
 @dataclass(frozen=True)
+class AttributeDefinitionRule:
+    key: str
+    value_type: str
+    required: bool
+    enum_values: tuple[Any, ...] | None = None
+    validation_schema: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class EntityTypeRule:
+    id: uuid.UUID
+    ontology_version_id: uuid.UUID
+    key: str
+    properties_schema: dict[str, Any] | None
+    active_attribute_definitions: tuple[AttributeDefinitionRule, ...] = field(
+        default_factory=tuple
+    )
+
+
+@dataclass(frozen=True)
+class RelationTypeRule:
+    id: uuid.UUID
+    ontology_version_id: uuid.UUID
+    key: str
+    direction: str
+    requires_evidence: bool
+    default_review_policy: str
+    properties_schema: dict[str, Any] | None
+    active_attribute_definitions: tuple[AttributeDefinitionRule, ...] = field(
+        default_factory=tuple
+    )
+
+
+@dataclass(frozen=True)
+class RelationConstraintRule:
+    source_entity_type_id: uuid.UUID
+    target_entity_type_id: uuid.UUID
+    cardinality: str | None
+    requires_review: bool
+
+
+@dataclass(frozen=True)
+class EntityShapeValidation:
+    normalized_name: str
+    validated_properties: dict[str, Any]
+    reasons: tuple[str, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class RelationShapeValidation:
+    valid: bool
+    schema_boundary_clear: bool
+    requires_review: bool
+    validated_properties: dict[str, Any]
+    reasons: tuple[str, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
 class EntityWriteValidation:
     ontology_version: OntologyVersion
     entity_type: EntityType
@@ -89,6 +148,88 @@ def normalize_graph_name(value: str) -> str:
     return normalize_graph_name_v1(value)
 
 
+def validate_entity_shape(
+    *,
+    entity_type: EntityTypeRule,
+    canonical_name: str,
+    properties: dict[str, Any],
+) -> EntityShapeValidation:
+    normalized_name = normalize_graph_name_v1(canonical_name)
+    if not normalized_name:
+        raise ValueError("canonical_name must be non-empty")
+    props = _coerce_properties(properties)
+    _validate_properties_schema(props, entity_type.properties_schema, "entity properties")
+    _validate_attribute_definitions(props, entity_type.active_attribute_definitions)
+    return EntityShapeValidation(
+        normalized_name=normalized_name,
+        validated_properties=deepcopy(props),
+    )
+
+
+def validate_relation_shape(
+    *,
+    relation_type: RelationTypeRule,
+    constraint: RelationConstraintRule | None,
+    source_entity_type_id: uuid.UUID,
+    target_entity_type_id: uuid.UUID,
+    properties: dict[str, Any],
+) -> RelationShapeValidation:
+    props = _coerce_properties(properties)
+    _validate_properties_schema(
+        props, relation_type.properties_schema, "relation properties"
+    )
+    _validate_attribute_definitions(props, relation_type.active_attribute_definitions)
+
+    if constraint is None:
+        if relation_type.key == RELATION_TYPE_RELATED_TO:
+            return RelationShapeValidation(
+                valid=True,
+                schema_boundary_clear=False,
+                requires_review=True,
+                validated_properties=deepcopy(props),
+                reasons=("related_to schema boundary is unclear",),
+            )
+        return RelationShapeValidation(
+            valid=False,
+            schema_boundary_clear=False,
+            requires_review=True,
+            validated_properties=deepcopy(props),
+            reasons=("active relation_type_constraint not found",),
+        )
+
+    if (
+        constraint.source_entity_type_id != source_entity_type_id
+        or constraint.target_entity_type_id != target_entity_type_id
+    ):
+        return RelationShapeValidation(
+            valid=False,
+            schema_boundary_clear=False,
+            requires_review=True,
+            validated_properties=deepcopy(props),
+            reasons=("relation endpoint types do not match constraint",),
+        )
+
+    requires_review = (
+        constraint.requires_review
+        or relation_type.key == RELATION_TYPE_RELATED_TO
+        or relation_type.default_review_policy != REVIEW_POLICY_AUTO_ACTIVE
+    )
+    reasons: list[str] = []
+    if constraint.requires_review:
+        reasons.append("relation type constraint requires review")
+    if relation_type.key == RELATION_TYPE_RELATED_TO:
+        reasons.append("related_to requires review")
+    if relation_type.default_review_policy != REVIEW_POLICY_AUTO_ACTIVE:
+        reasons.append("relation type review policy requires review")
+    return RelationShapeValidation(
+        valid=True,
+        schema_boundary_clear=True,
+        requires_review=requires_review,
+        validated_properties=deepcopy(props),
+        reasons=tuple(reasons),
+    )
+
+
 async def validate_entity_write(
     db: AsyncSession,
     library: Library,
@@ -103,13 +244,9 @@ async def validate_entity_write(
 ) -> EntityWriteValidation:
     ontology_version = await _get_scoped_active_ontology(db, library, ontology_version_id)
     entity_type = await _get_active_entity_type(db, library, ontology_version.id, entity_type_id)
-    normalized_name = normalize_graph_name(canonical_name)
-    if not normalized_name:
-        raise ValueError("canonical_name must be non-empty")
     _require_graph_fact_status(requested_status)
     _require_source_type(source_type)
     props = _coerce_properties(properties)
-    _validate_properties_schema(props, entity_type.properties_schema, "entity properties")
     attribute_definitions = await _list_active_attribute_definitions(
         db,
         library,
@@ -117,15 +254,25 @@ async def validate_entity_write(
         owner_kind=ATTRIBUTE_OWNER_ENTITY_TYPE,
         owner_type_id=entity_type.id,
     )
-    _validate_attribute_definitions(props, attribute_definitions)
-    await _reject_duplicate_active_entity(db, library, ontology_version.id, entity_type.id, normalized_name)
+    shape = validate_entity_shape(
+        entity_type=_entity_type_rule(entity_type, attribute_definitions),
+        canonical_name=canonical_name,
+        properties=props,
+    )
+    await _reject_duplicate_active_entity(
+        db,
+        library,
+        ontology_version.id,
+        entity_type.id,
+        shape.normalized_name,
+    )
 
     return EntityWriteValidation(
         ontology_version=ontology_version,
         entity_type=entity_type,
         canonical_name=canonical_name.strip(),
-        normalized_name=normalized_name,
-        properties=props,
+        normalized_name=shape.normalized_name,
+        properties=shape.validated_properties,
         status=requested_status,
         source_type=source_type,
         confidence=confidence,
@@ -161,7 +308,6 @@ async def validate_relation_write(
     ontology_version = await _get_scoped_active_ontology(db, library, source_entity.ontology_version_id)
     relation_type = await _get_active_relation_type(db, library, ontology_version.id, relation_type_id)
     props = _coerce_properties(properties)
-    _validate_properties_schema(props, relation_type.properties_schema, "relation properties")
     attribute_definitions = await _list_active_attribute_definitions(
         db,
         library,
@@ -169,8 +315,6 @@ async def validate_relation_write(
         owner_kind=ATTRIBUTE_OWNER_RELATION_TYPE,
         owner_type_id=relation_type.id,
     )
-    _validate_attribute_definitions(props, attribute_definitions)
-
     constraint = await _find_active_relation_type_constraint(
         db,
         library,
@@ -179,8 +323,15 @@ async def validate_relation_write(
         source_entity_type_id=source_entity.entity_type_id,
         target_entity_type_id=target_entity.entity_type_id,
     )
-    if constraint is None and relation_type.key != RELATION_TYPE_RELATED_TO:
-        raise ValueError("active relation_type_constraint not found")
+    shape = validate_relation_shape(
+        relation_type=_relation_type_rule(relation_type, attribute_definitions),
+        constraint=_relation_constraint_rule(constraint),
+        source_entity_type_id=source_entity.entity_type_id,
+        target_entity_type_id=target_entity.entity_type_id,
+        properties=props,
+    )
+    if not shape.valid:
+        raise ValueError(shape.reasons[0])
 
     evidence_count = await _resolve_active_relation_evidence_count(
         db,
@@ -206,7 +357,7 @@ async def validate_relation_write(
         source_entity=source_entity,
         target_entity=target_entity,
         constraint=constraint,
-        properties=props,
+        properties=shape.validated_properties,
         status=status,
         review_status=review_status,
         source_type=source_type,
@@ -399,6 +550,73 @@ async def _list_active_attribute_definitions(
     return list(result.scalars().all())
 
 
+def _attribute_definition_rule(row: AttributeDefinition) -> AttributeDefinitionRule:
+    enum_values = None
+    if row.enum_values is not None:
+        enum_values = tuple(deepcopy(row.enum_values))
+    return AttributeDefinitionRule(
+        key=row.key,
+        value_type=row.value_type,
+        required=row.required,
+        enum_values=enum_values,
+        validation_schema=deepcopy(row.validation_schema),
+    )
+
+
+def _entity_type_rule(
+    row: EntityType,
+    attribute_definitions: list[AttributeDefinition],
+) -> EntityTypeRule:
+    rules = tuple(
+        sorted(
+            (_attribute_definition_rule(item) for item in attribute_definitions),
+            key=lambda item: item.key,
+        )
+    )
+    return EntityTypeRule(
+        id=row.id,
+        ontology_version_id=row.ontology_version_id,
+        key=row.key,
+        properties_schema=deepcopy(row.properties_schema),
+        active_attribute_definitions=rules,
+    )
+
+
+def _relation_type_rule(
+    row: RelationType,
+    attribute_definitions: list[AttributeDefinition],
+) -> RelationTypeRule:
+    rules = tuple(
+        sorted(
+            (_attribute_definition_rule(item) for item in attribute_definitions),
+            key=lambda item: item.key,
+        )
+    )
+    return RelationTypeRule(
+        id=row.id,
+        ontology_version_id=row.ontology_version_id,
+        key=row.key,
+        direction=row.direction,
+        requires_evidence=row.requires_evidence,
+        default_review_policy=row.default_review_policy,
+        properties_schema=deepcopy(row.properties_schema),
+        active_attribute_definitions=rules,
+    )
+
+
+def _relation_constraint_rule(
+    row: RelationTypeConstraint | None,
+) -> RelationConstraintRule | None:
+    if row is None:
+        return None
+    return RelationConstraintRule(
+        source_entity_type_id=row.source_entity_type_id,
+        target_entity_type_id=row.target_entity_type_id,
+        cardinality=row.cardinality,
+        requires_review=row.requires_review,
+    )
+
+
 async def _reject_duplicate_active_entity(
     db: AsyncSession,
     library: Library,
@@ -508,7 +726,7 @@ def _matches_json_schema_type(value: Any, type_name: str) -> bool:
 
 def _validate_attribute_definitions(
     properties: dict[str, Any],
-    attribute_definitions: list[AttributeDefinition],
+    attribute_definitions: tuple[AttributeDefinitionRule, ...],
 ) -> None:
     for definition in attribute_definitions:
         if definition.required and definition.key not in properties:
@@ -518,7 +736,7 @@ def _validate_attribute_definitions(
         _validate_attribute_value(definition, properties[definition.key])
 
 
-def _validate_attribute_value(definition: AttributeDefinition, value: Any) -> None:
+def _validate_attribute_value(definition: AttributeDefinitionRule, value: Any) -> None:
     value_type = definition.value_type
     key = definition.key
     if value_type in {"string", "text"}:
@@ -547,7 +765,12 @@ def _validate_attribute_value(definition: AttributeDefinition, value: Any) -> No
         return
     if value_type == "enum":
         if not definition.enum_values or value not in definition.enum_values:
-            raise ValueError(f"attribute {key} must be one of {definition.enum_values}")
+            enum_values = (
+                list(definition.enum_values)
+                if definition.enum_values is not None
+                else None
+            )
+            raise ValueError(f"attribute {key} must be one of {enum_values}")
         return
     if value_type == "json":
         return
