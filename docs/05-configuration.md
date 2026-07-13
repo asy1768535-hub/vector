@@ -84,6 +84,13 @@
 | worker/lease | `GRAPH_EXTRACTION_WORKER_POLL_SECONDS=3`; `GRAPH_EXTRACTION_UNIT_LEASE_SECONDS=180`; `GRAPH_EXTRACTION_UNIT_LEASE_RENEW_SECONDS=30`; `GRAPH_EXTRACTION_WORKER_MAX_MODEL_ATTEMPTS=3` |
 | retention | `GRAPH_EXTRACTION_CONTEXT_RETENTION_DAYS=30`; `GRAPH_EXTRACTION_RAW_OUTPUT_RETENTION_DAYS=30`; `GRAPH_EXTRACTION_CANDIDATE_RETENTION_DAYS=180` |
 
+Disabling graph_extraction_enabled or external_llm_enabled, or changing the normalized security allowlist,
+is permanent for in-flight work.
+The Admin PATCH transaction first marks pending Attempts abandoned with unit_cancelled, then marks
+queued/processing Units cancelled with unit_cancelled and clears worker/claim/lease fields, and finally
+marks queued/processing Jobs cancelled with library_opt_out or security_allowlist_changed. Re-enabling or
+restoring the old allowlist does not revive cancelled Jobs.
+
 ### 切分默认值
 
 | 变量 | 默认 | 说明 |

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
@@ -13,6 +14,7 @@ from app.db import get_db
 from app.main import app
 from app.models.library import Library
 from app.models.user import User
+from app.schemas.admin import LibraryRead
 
 
 def _custom_source_config(table: str = "custom_docs") -> dict[str, object]:
@@ -28,6 +30,33 @@ def _custom_source_config(table: str = "custom_docs") -> dict[str, object]:
 
 def _superuser() -> User:
     return User(id=uuid.uuid4(), email="su@example.com", is_superuser=True, is_active=True)
+
+
+def test_library_read_exposes_fail_closed_graph_extraction_defaults():
+    lib = Library(
+        id=uuid.uuid4(),
+        slug="safe_defaults",
+        name="Safe Defaults",
+        embedding_model="bge-m3",
+        embedding_dim=1024,
+        vector_distance="cosine",
+        chunk_size=1000,
+        chunk_overlap=120,
+        retrieval_mode="dense",
+        qdrant_collection="lib_safe_defaults",
+        lifecycle_mode="managed",
+        index_state="ready",
+        graph_extraction_enabled=False,
+        external_llm_enabled=False,
+        graph_extraction_allowed_security_levels=[],
+        created_at=datetime(2026, 7, 10, tzinfo=timezone.utc),
+    )
+
+    result = LibraryRead.model_validate(lib)
+
+    assert result.graph_extraction_enabled is False
+    assert result.external_llm_enabled is False
+    assert result.graph_extraction_allowed_security_levels == []
 
 
 def test_create_library_duplicate_slug_returns_clear_chinese_409():

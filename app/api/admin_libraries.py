@@ -26,7 +26,13 @@ from app.schemas.admin import (
     LibraryRead,
     LibraryUpdate,
 )
-from app.services import audit_log, library_faq, qdrant, source_enrichment
+from app.services import (
+    audit_log,
+    graph_extraction_safety,
+    library_faq,
+    qdrant,
+    source_enrichment,
+)
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin/libraries", tags=["admin"])
@@ -238,6 +244,34 @@ async def update_library(
             _validate_source_config_or_400(source_config)
             lib.source_config = source_config
             changes["source_config"] = source_config
+
+    safety_change_error = None
+    for field in ("graph_extraction_enabled", "external_llm_enabled"):
+        if field in body.model_fields_set:
+            value = getattr(body, field)
+            setattr(lib, field, value)
+            changes[field] = value
+            if value is False:
+                safety_change_error = "library_opt_out"
+
+    if "graph_extraction_allowed_security_levels" in body.model_fields_set:
+        old_levels = list(lib.graph_extraction_allowed_security_levels or [])
+        levels = graph_extraction_safety.normalize_allowed_security_levels(
+            body.graph_extraction_allowed_security_levels
+        )
+        lib.graph_extraction_allowed_security_levels = levels
+        changes["graph_extraction_allowed_security_levels"] = levels
+        if levels != old_levels and safety_change_error is None:
+            safety_change_error = "security_allowlist_changed"
+
+    if safety_change_error is not None:
+        changes["cancelled_graph_extraction_jobs"] = (
+            await graph_extraction_safety.cancel_library_jobs_for_safety_change(
+                db,
+                library_id=lib.id,
+                job_error_code=safety_change_error,
+            )
+        )
 
     if changes:
         await audit_log.record(db, actor.id, "library.update", {"slug": slug, **changes})

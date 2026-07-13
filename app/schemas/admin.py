@@ -8,6 +8,8 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
+from app.services.graph_extraction_safety import normalize_allowed_security_levels
+
 # 库唯一ID：只允许大小写英文字母和下划线（其它一律不允许）。
 # 同时它也是 Dify knowledge_id、URL 路径段、Qdrant collection 名、约定全文源表名，
 # 限定为合法 SQL 标识符字符集可避免下游各处转义问题。
@@ -138,6 +140,23 @@ class LibraryUpdate(BaseModel):
     source_enrichment_enabled: Optional[bool] = Field(default=None)
     # source_config 哨兵：不传=不改；传 {} =清空；传非空 dict=自定义。
     source_config: Optional[dict[str, Any]] = Field(default=None)
+    graph_extraction_enabled: Optional[bool] = None
+    external_llm_enabled: Optional[bool] = None
+    graph_extraction_allowed_security_levels: Optional[list[str]] = None
+
+    @field_validator("graph_extraction_enabled", "external_llm_enabled", mode="before")
+    @classmethod
+    def _reject_null_graph_opt_in(cls, value):
+        if value is None:
+            raise ValueError("graph extraction opt-in cannot be null")
+        return value
+
+    @field_validator("graph_extraction_allowed_security_levels", mode="before")
+    @classmethod
+    def _validate_graph_security_levels(cls, value):
+        if value is None:
+            raise ValueError("graph extraction security levels cannot be null")
+        return normalize_allowed_security_levels(value)
 
     @model_validator(mode="after")
     def _check_chunk_params(self):
@@ -162,6 +181,9 @@ class LibraryRead(BaseModel):
     retrieval_mode: str = "dense"
     qdrant_collection: str
     source_config: Optional[dict[str, Any]] = None
+    graph_extraction_enabled: bool = False
+    external_llm_enabled: bool = False
+    graph_extraction_allowed_security_levels: list[str] = Field(default_factory=list)
     lifecycle_mode: str = "managed"                 # #6 managed | external
     index_state: str = "ready"                      # #6 ready | rebuilding | failed
     active_rebuild_operation_id: Optional[uuid.UUID] = None
