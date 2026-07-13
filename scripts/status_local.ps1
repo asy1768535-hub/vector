@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Show local three-process status, port 8100, and /health
+  Show local four-process status, port 8100, and /health
 .DESCRIPTION
   Checks PID files for process liveness, port occupancy, and calls /health.
   Does not print passwords, API keys, or JWT_SECRET.
@@ -18,6 +18,15 @@ if (Test-Path $envPath) {
         $apiPort = [int]$match.Matches.Groups[1].Value
     }
 }
+$graphEnabledText = if ($env:GRAPH_EXTRACTION_ENABLED) {
+    $env:GRAPH_EXTRACTION_ENABLED
+} elseif (Test-Path $envPath) {
+    $match = Select-String -Path $envPath -Pattern '^\s*GRAPH_EXTRACTION_ENABLED\s*=\s*(.*)' | Select-Object -First 1
+    if ($match -and $match.Matches.Groups[1].Value) {
+        $match.Matches.Groups[1].Value.Trim()
+    }
+}
+$graphExtractionEnabled = $graphEnabledText -match '(?i)^(true|1|yes|on)$'
 
 function Test-PidAlive($pidFile, $label) {
     if (-not (Test-Path $pidFile)) {
@@ -48,6 +57,11 @@ Write-Host "--- Project processes ---" -ForegroundColor White
 $apiAlive = Test-PidAlive (Join-Path $pidDir "api.pid") "API"
 $embedAlive = Test-PidAlive (Join-Path $pidDir "embedder.pid") "Embedder Worker"
 $cleanAlive = Test-PidAlive (Join-Path $pidDir "cleanup.pid") "Cleanup Worker"
+if ($graphExtractionEnabled) {
+    $graphAlive = Test-PidAlive (Join-Path $pidDir "graph_extractor.pid") "Graph Extractor"
+} else {
+    Write-Host "  Graph Extractor : DISABLED" -ForegroundColor DarkGray
+}
 
 Write-Host ""
 

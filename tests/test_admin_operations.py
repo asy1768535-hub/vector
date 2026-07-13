@@ -64,9 +64,14 @@ def test_status_empty_db_shape():
         resp = client.get("/admin/operations/status")
         assert resp.status_code == 200, resp.text
         body = resp.json()
-        # 三类进程恒定出现且 offline
+        # 四类进程恒定出现且 offline
         types = {s["service_type"]: s for s in body["services"]}
-        assert set(types) == {"api", "embedding_worker", "cleanup_worker"}
+        assert set(types) == {
+            "api",
+            "embedding_worker",
+            "cleanup_worker",
+            "graph_extractor",
+        }
         for s in body["services"]:
             assert s["status"] == "offline"
             assert s["online_instances"] == 0 and s["known_instances"] == 0
@@ -97,7 +102,12 @@ def test_status_aggregates_counts_and_progress():
             started_at=NOW, last_seen_at=NOW, status="online", heartbeat_metadata=None,
         )
 
-    hbs = [_hb("api", "h-1-a"), _hb("embedding_worker", "h-2-b"), _hb("cleanup_worker", "h-3-c")]
+    hbs = [
+        _hb("api", "h-1-a"),
+        _hb("embedding_worker", "h-2-b"),
+        _hb("cleanup_worker", "h-3-c"),
+        _hb("graph_extractor", "h-4-d"),
+    ]
 
     db = AsyncMock()
     db.execute = AsyncMock(side_effect=[

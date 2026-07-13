@@ -9,6 +9,8 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
+from sqlalchemy import CheckConstraint
+
 from app.config import settings
 from app.models.service_heartbeat import ServiceHeartbeat
 from app.services import heartbeat
@@ -113,6 +115,16 @@ def test_metadata_reserved_name_mapping():
     assert row.heartbeat_metadata == {"watch": True}
     row.heartbeat_metadata = {"degraded": True}      # 可写
     assert row.heartbeat_metadata["degraded"] is True
+
+
+def test_service_heartbeat_model_allows_graph_extractor():
+    check = next(
+        constraint
+        for constraint in ServiceHeartbeat.__table__.constraints
+        if isinstance(constraint, CheckConstraint)
+        and constraint.name == "ck_heartbeat_service_type"
+    )
+    assert "graph_extractor" in str(check.sqltext)
 
 
 # ── §8.4 心跳写失败不向上抛、不终止调用方 ──────────────────────────────────

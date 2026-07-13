@@ -37,8 +37,13 @@ from app.services import audit_log
 
 router = APIRouter(prefix="/admin/operations", tags=["admin"])
 
-# 三类进程恒定各输出一条（即使无任何心跳行也要给出 offline）。
-_SERVICE_TYPES = ("api", "embedding_worker", "cleanup_worker")
+# 四类进程恒定各输出一条（即使无任何心跳行也要给出 offline）。
+_SERVICE_TYPES = (
+    "api",
+    "embedding_worker",
+    "cleanup_worker",
+    "graph_extractor",
+)
 
 # last_error 仅取摘要，截断到 200 字符，绝不含完整堆栈。
 _LAST_ERROR_MAX = 200
