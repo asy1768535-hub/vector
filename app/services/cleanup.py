@@ -44,9 +44,14 @@ async def _enqueue(db: AsyncSession, *, event_type, library_id, collection_name,
 
 
 async def enqueue_delete_document(db, library, document_id) -> None:
-    from app.services import graph_evidence
+    from app.services import graph_evidence, graph_extraction_purge
 
     await graph_evidence.mark_document_graph_evidence_stale(db, library, document_id=document_id)
+    await graph_extraction_purge.purge_document_graph_extraction_payloads(
+        db,
+        library_id=library.id,
+        document_id=document_id,
+    )
     await _enqueue(
         db, event_type=EVENT_DELETE_DOCUMENT_ALL, library_id=library.id,
         collection_name=library.qdrant_collection, document_id=document_id,
@@ -64,10 +69,15 @@ async def enqueue_delete_before_revision(db, library, document_id, target_revisi
 
 
 async def enqueue_delete_document_revision(db, library, document_id, document_revision_id) -> None:
-    from app.services import graph_evidence
+    from app.services import graph_evidence, graph_extraction_purge
 
     await graph_evidence.mark_document_revision_graph_evidence_stale(
         db, library, document_revision_id=document_revision_id
+    )
+    await graph_extraction_purge.purge_revision_graph_extraction_payloads(
+        db,
+        library_id=library.id,
+        document_revision_id=document_revision_id,
     )
     await _enqueue(
         db, event_type=EVENT_DELETE_DOCUMENT_REVISION, library_id=library.id,

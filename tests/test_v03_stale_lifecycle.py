@@ -307,6 +307,7 @@ def test_active_read_helpers_filter_stale_deleted_and_non_active_rows_by_default
 def test_cleanup_enqueue_delete_document_marks_graph_stale_before_outbox(monkeypatch):
     from app.services import cleanup
     from app.services import graph_evidence
+    from app.services import graph_extraction_purge
 
     calls: list[str] = []
 
@@ -318,17 +319,28 @@ def test_cleanup_enqueue_delete_document_marks_graph_stale_before_outbox(monkeyp
         assert kwargs["document_id"] == DOC_ID
         calls.append("outbox")
 
+    async def fake_purge(db, *, library_id, document_id):
+        assert library_id == LIB_ID
+        assert document_id == DOC_ID
+        calls.append("purge")
+
     monkeypatch.setattr(graph_evidence, "mark_document_graph_evidence_stale", fake_stale)
+    monkeypatch.setattr(
+        graph_extraction_purge,
+        "purge_document_graph_extraction_payloads",
+        fake_purge,
+    )
     monkeypatch.setattr(cleanup, "_enqueue", fake_enqueue)
 
     asyncio.run(cleanup.enqueue_delete_document(object(), _lib(), DOC_ID))
 
-    assert calls == ["graph", "outbox"]
+    assert calls == ["graph", "purge", "outbox"]
 
 
 def test_cleanup_enqueue_delete_document_revision_marks_graph_stale_before_outbox(monkeypatch):
     from app.services import cleanup
     from app.services import graph_evidence
+    from app.services import graph_extraction_purge
 
     calls: list[str] = []
 
@@ -341,9 +353,19 @@ def test_cleanup_enqueue_delete_document_revision_marks_graph_stale_before_outbo
         assert kwargs["payload"] == {"document_revision_id": str(REVISION_ID)}
         calls.append("outbox")
 
+    async def fake_purge(db, *, library_id, document_revision_id):
+        assert library_id == LIB_ID
+        assert document_revision_id == REVISION_ID
+        calls.append("purge")
+
     monkeypatch.setattr(graph_evidence, "mark_document_revision_graph_evidence_stale", fake_stale)
+    monkeypatch.setattr(
+        graph_extraction_purge,
+        "purge_revision_graph_extraction_payloads",
+        fake_purge,
+    )
     monkeypatch.setattr(cleanup, "_enqueue", fake_enqueue)
 
     asyncio.run(cleanup.enqueue_delete_document_revision(object(), _lib(), DOC_ID, REVISION_ID))
 
-    assert calls == ["graph", "outbox"]
+    assert calls == ["graph", "purge", "outbox"]

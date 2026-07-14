@@ -156,6 +156,25 @@ async def run(watch: bool) -> None:
             pass
 
     while True:
+        from app.services.graph_extraction_purge import (
+            purge_expired_graph_extraction_payloads,
+        )
+
+        try:
+            async with async_session_factory() as purge_session:
+                async with purge_session.begin():
+                    purged = await purge_expired_graph_extraction_payloads(
+                        purge_session,
+                        batch_limit=min(settings.cleanup_worker_batch, 1000),
+                    )
+            if purged.purged_row_count:
+                log.info(
+                    "purged graph extraction payloads: jobs=%s rows=%s",
+                    purged.job_count,
+                    purged.purged_row_count,
+                )
+        except Exception:  # noqa: BLE001
+            log.exception("scheduled graph extraction payload purge failed")
         async with async_session_factory() as s:
             reset = await _reset_stale(s)
             if reset:
