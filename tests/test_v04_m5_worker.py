@@ -15,13 +15,16 @@ from app.services.graph_extraction_provider import (
     ProviderResponse,
 )
 from app.services.graph_extraction_worker import (
+    GraphExtractionProcessResult,
     PreparedGraphExtractionUnit,
+    StaleUnitRecoveryResult,
     claim_graph_extraction_unit,
     lock_live_graph_extraction_claim,
     mark_claimed_unit_terminal,
     process_graph_extraction_unit,
     recover_stale_graph_extraction_units,
     renew_graph_extraction_unit_lease,
+    run_graph_extraction_worker,
 )
 
 
@@ -554,3 +557,46 @@ def test_watch_entrypoint_delegates_to_active_worker_with_m5_heartbeat(monkeypat
         "mode": "active_worker",
         "milestone": "M5",
     }
+
+
+def test_worker_materializes_only_when_processing_marks_job_ready():
+    unit = _unit()
+    unit.claim_token = CLAIM_TOKEN
+    sessions = _SessionFactory()
+    metadata = {}
+    with (
+        patch(
+            "app.services.graph_extraction_worker.recover_stale_graph_extraction_units",
+            new=AsyncMock(return_value=StaleUnitRecoveryResult(0, 0, 0)),
+        ),
+        patch(
+            "app.services.graph_extraction_worker.claim_graph_extraction_unit",
+            new=AsyncMock(side_effect=[unit, None]),
+        ),
+        patch(
+            "app.services.graph_extraction_worker.process_graph_extraction_unit",
+            new=AsyncMock(
+                return_value=GraphExtractionProcessResult(
+                    "succeeded",
+                    ready_for_materialization=True,
+                )
+            ),
+        ),
+        patch(
+            "app.services.graph_extraction_materializer.materialize_graph_extraction_job",
+            new=AsyncMock(
+                return_value=SimpleNamespace(already_materialized=False)
+            ),
+        ) as materialize,
+    ):
+        asyncio.run(
+            run_graph_extraction_worker(
+                watch=False,
+                metadata=metadata,
+                session_factory=sessions,
+            )
+        )
+
+    materialize.assert_awaited_once_with(sessions, job_id=JOB_ID)
+    assert metadata["claimed"] == 1
+    assert metadata["succeeded"] == 1

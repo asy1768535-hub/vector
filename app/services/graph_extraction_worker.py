@@ -1080,4 +1080,17 @@ async def run_graph_extraction_worker(
             unit_id=unit.id,
             claim_token=token,
         )
+        if result.ready_for_materialization:
+            from app.services.graph_extraction_materializer import (
+                GraphExtractionMaterializationError,
+                materialize_graph_extraction_job,
+            )
+
+            try:
+                await materialize_graph_extraction_job(
+                    session_factory,
+                    job_id=unit.job_id,
+                )
+            except GraphExtractionMaterializationError as exc:
+                result = GraphExtractionProcessResult("failed", exc.code)
         metadata[result.outcome] += 1
