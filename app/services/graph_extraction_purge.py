@@ -4,7 +4,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import exists, or_, select, update
+from sqlalchemy import exists, null, or_, select, update
 
 from app.config import settings
 from app.models.extraction_context_snapshot import ExtractionContextSnapshot
@@ -116,12 +116,12 @@ async def _purge_context_payloads(
             ExtractionContextSnapshot.purged_at.is_(None),
         )
         .values(
-            context_json=None,
+            context_json=null(),
             context_text=None,
-            document_metadata=None,
-            chunk_title_path=None,
-            block_title_path=None,
-            effective_title_path=None,
+            document_metadata=null(),
+            chunk_title_path=null(),
+            block_title_path=null(),
+            effective_title_path=null(),
             purged_at=now,
         )
     )
@@ -147,7 +147,7 @@ async def _purge_attempt_payloads(
         )
         .values(
             raw_response=None,
-            parsed_response=None,
+            parsed_response=null(),
             parse_error=None,
             purged_at=now,
             updated_at=now,
@@ -169,7 +169,7 @@ async def _purge_candidate_payloads(
         result = await db.execute(
             update(model)
             .where(model.job_id.in_(job_ids), model.purged_at.is_(None))
-            .values(raw_payload=None, purged_at=now)
+            .values(raw_payload=null(), purged_at=now)
         )
         count += _rowcount(result)
     entity_candidates = await db.execute(
@@ -181,11 +181,11 @@ async def _purge_candidate_payloads(
         .values(
             canonical_name=None,
             normalized_name=None,
-            proposed_aliases=None,
-            proposed_properties=None,
-            external_mapping_hints=None,
+            proposed_aliases=null(),
+            proposed_properties=null(),
+            external_mapping_hints=null(),
             review_reason=None,
-            validation_errors=None,
+            validation_errors=null(),
             purged_at=now,
             updated_at=now,
         )
@@ -198,9 +198,9 @@ async def _purge_candidate_payloads(
             GraphRelationCandidate.purged_at.is_(None),
         )
         .values(
-            proposed_properties=None,
+            proposed_properties=null(),
             review_reason=None,
-            validation_errors=None,
+            validation_errors=null(),
             purged_at=now,
             updated_at=now,
         )
@@ -212,7 +212,7 @@ async def _purge_candidate_payloads(
             .where(model.job_id.in_(job_ids), model.purged_at.is_(None))
             .values(
                 quote_text=None,
-                resolved_source_span=None,
+                resolved_source_span=null(),
                 validation_error=None,
                 candidate_matches=[],
                 purged_at=now,
@@ -224,9 +224,9 @@ async def _purge_candidate_payloads(
             update(model)
             .where(model.job_id.in_(job_ids), model.purged_at.is_(None))
             .values(
-                details=None,
+                details=null(),
                 description=None,
-                evidence=None,
+                evidence=null(),
                 purged_at=now,
                 updated_at=now,
             )

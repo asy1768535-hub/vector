@@ -107,6 +107,13 @@ def test_immediate_document_purge_cancels_first_and_clears_every_payload_class()
         "sensitive_payload_purged_at",
     ):
         assert field in sql
+    context_sql = str(db.statements[5]).lower().replace(" ", "")
+    assert "context_json=null" in context_sql
+    assert "document_metadata=null" in context_sql
+    attempt_sql = str(db.statements[6]).lower().replace(" ", "")
+    assert "parsed_response=null" in attempt_sql
+    occurrence_sql = str(db.statements[7]).lower().replace(" ", "")
+    assert "raw_payload=null" in occurrence_sql
     evidence_statements = [
         statement
         for statement in db.statements
