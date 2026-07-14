@@ -9,7 +9,7 @@ venv/
 # PDF OCR 真实测试样本（含客户业务文书）——不入库
 /samples/
 # OCR 验收报告含真实客户名称/证件号/金额——仅本地留档，未脱敏前不入库
-/docs/24-pdf-ocr-acceptance.md
+/docs/testing/
 # 本机 OCR 验收脚本（建库/生命周期）——仅本机用，不入库
 /scripts/create_pdf_ocr_test_lib.py
 /scripts/ocr_lifecycle.py
