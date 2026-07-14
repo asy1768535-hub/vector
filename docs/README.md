@@ -58,6 +58,7 @@
 | v0.4 M3 | [M3 implementation plan](./superpowers/plans/2026-07-13-v0.4-graph-extraction-pipeline-m3.md) | Candidate/Occurrence staging, exact Evidence binding, provenance and Migration 0022 |
 | v0.4 M4 | [M4 implementation plan](./superpowers/plans/2026-07-13-v0.4-graph-extraction-pipeline-m4.md) | Shared Validator, normalization_v1, deterministic Candidate aggregation, conflicts and confidence routing |
 | v0.4 M5 | [M5 implementation plan](./superpowers/plans/2026-07-14-v0.4-graph-extraction-pipeline-m5.md) | Operational Worker, Retry/Rerun, Materializer, API, triggers, compensation and purge |
+| v0.4 M6 | [M6 implementation plan](./superpowers/plans/2026-07-14-v0.4-graph-extraction-pipeline-m6.md) | Real DashScope evaluation, frozen release policy, PostgreSQL/compatibility gates and v0.4 acceptance |
 
 ---
 
