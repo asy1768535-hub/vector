@@ -862,7 +862,7 @@ async def process_graph_extraction_unit(
         )
         outcome = "cancelled" if finished else "lost_lease"
         return GraphExtractionProcessResult(outcome, exc.code)
-    except ContextBuildError:
+    except ContextBuildError as exc:
         finished = await _finish_claim_after_error(
             session_factory,
             unit_id=unit_id,
@@ -870,6 +870,7 @@ async def process_graph_extraction_unit(
             max_attempts=max_attempts,
             status="failed",
             error_code="context_build_failed",
+            error_message=str(exc),
         )
         outcome = "failed" if finished else "lost_lease"
         return GraphExtractionProcessResult(outcome, "context_build_failed")

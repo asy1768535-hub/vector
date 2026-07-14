@@ -125,7 +125,6 @@ def _render_context(
     following: list[_ChunkInfo],
     document_title: str | None,
     document_metadata: dict[str, Any] | None,
-    ontology_snapshot: dict[str, Any],
 ) -> tuple[dict[str, Any], str, dict[str, Any]]:
     referenced = [("c0", center)]
     referenced.extend((f"p{index}", item) for index, item in enumerate(previous, 1))
@@ -137,7 +136,6 @@ def _render_context(
             "metadata": document_metadata,
         },
         "effective_title_path": center.effective_title_path,
-        "ontology": ontology_snapshot,
         "chunks": [_context_chunk(item, ref) for ref, item in referenced],
     }
     context_mapping = {
@@ -364,7 +362,6 @@ async def build_context_snapshot(
             following=following,
             document_title=document_title,
             document_metadata=document_metadata,
-            ontology_snapshot=job.ontology_snapshot,
         )
 
     context_json, context_text, context_mapping = render()

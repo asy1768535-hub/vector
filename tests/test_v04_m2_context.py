@@ -360,6 +360,33 @@ def test_center_context_overflow_fails_instead_of_truncating():
         )
 
 
+def test_frozen_ontology_does_not_consume_document_context_budget():
+    db, job, unit = _fixture(metadata=None)
+    job.ontology_snapshot = {
+        "relation_constraints": [
+            {
+                "relation_type_id": str(_id(0x80000000, index)),
+                "source_entity_type_id": str(_id(0x81000000, index)),
+                "target_entity_type_id": str(_id(0x82000000, index)),
+            }
+            for index in range(128)
+        ]
+    }
+
+    snapshot = _build(
+        db,
+        job,
+        unit,
+        previous_chunks=0,
+        next_chunks=0,
+        max_context_chars=2_000,
+    )
+
+    assert "ontology" not in snapshot.context_json
+    assert snapshot.ontology_snapshot_hash == job.ontology_snapshot_hash
+    assert snapshot.context_char_count <= 2_000
+
+
 def test_context_hash_is_deterministic_for_identical_inputs():
     first_db, first_job, first_unit = _fixture(metadata={"b": 2, "a": 1})
     second_db, second_job, second_unit = _fixture(metadata={"a": 1, "b": 2})
