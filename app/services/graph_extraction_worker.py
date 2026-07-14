@@ -1052,6 +1052,13 @@ async def run_graph_extraction_worker(
     metadata.setdefault("cancelled", 0)
     metadata.setdefault("lost_lease", 0)
     while True:
+        from app.services.graph_extraction_triggers import (
+            compensate_ready_graph_extractions,
+        )
+
+        metadata["compensated"] = await compensate_ready_graph_extractions(
+            session_factory=session_factory,
+        )
         async with session_factory() as db:
             recovery = await recover_stale_graph_extraction_units(
                 db,

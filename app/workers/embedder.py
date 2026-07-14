@@ -334,6 +334,22 @@ async def _publish_revision_after_qdrant(
             db, library, job.document_id, old_current_revision_id
         )
     await db.commit()
+    try:
+        from app.services.graph_extraction_triggers import (
+            enqueue_ready_revision_graph_extraction,
+        )
+
+        await enqueue_ready_revision_graph_extraction(
+            library_id=library.id,
+            document_id=job.document_id,
+            revision_id=job.document_revision_id,
+        )
+    except Exception:  # noqa: BLE001
+        log.exception(
+            "graph extraction auto trigger failed after publication: doc=%s revision=%s",
+            job.document_id,
+            job.document_revision_id,
+        )
     return True
 
 
