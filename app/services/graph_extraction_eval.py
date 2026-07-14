@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import re
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -296,6 +297,118 @@ class GraphEvalMetricReport(_StrictModel):
     candidate_duplicate_rate: GraphEvalRate
     cross_revision_evidence_count: int = Field(ge=0)
     eval_formal_write_count: int = Field(ge=0)
+
+
+class GraphEvalRunArtifact(_StrictModel):
+    schema_version: Literal["graph-extraction-eval-result-v1"]
+    run_id: str
+    phase: Literal["development-smoke", "calibration", "post-freeze", "mock"]
+    status: Literal["passed", "failed"]
+    real_provider: bool
+    started_at: datetime
+    finished_at: datetime
+    code_commit: str
+    alembic_head: Literal["0022"]
+    database_name: str
+    dataset_id: str
+    dataset_counts: GraphEvalDatasetCounts
+    dataset_manifest_sha256: str
+    dataset_content_sha256: str
+    evaluation_config_hash: str
+    model_provider: str
+    model_name: str
+    component_versions: dict[str, str]
+    job_ids: tuple[uuid.UUID, ...]
+    job_status_counts: dict[str, int]
+    unit_status_counts: dict[str, int]
+    attempt_status_counts: dict[str, int]
+    model_attempt_count: int = Field(ge=0)
+    real_model_call_count: int = Field(ge=0)
+    provider_request_id_count: int = Field(ge=0)
+    provider_request_id_sha256: str | None
+    metrics: GraphEvalMetricReport
+    stable_error_code_counts: dict[str, int]
+    policy_id: str | None = None
+    policy_sha256: str | None = None
+
+    _run_id = field_validator("run_id")(_validate_key)
+    _dataset_id = field_validator("dataset_id")(_validate_key)
+
+    @field_validator(
+        "dataset_manifest_sha256",
+        "dataset_content_sha256",
+        "evaluation_config_hash",
+    )
+    @classmethod
+    def _required_hash_is_sha256(cls, value: str) -> str:
+        if not _SHA256_RE.fullmatch(value):
+            raise ValueError("must be a lowercase SHA-256 digest")
+        return value
+
+    @field_validator("code_commit")
+    @classmethod
+    def _commit_is_full_sha1(cls, value: str) -> str:
+        if not re.fullmatch(r"[0-9a-f]{40}", value):
+            raise ValueError("code_commit must be a full lowercase Git SHA-1")
+        return value
+
+    @field_validator("database_name")
+    @classmethod
+    def _database_name_is_eval_scoped(cls, value: str) -> str:
+        if len(value) > 63 or not re.fullmatch(r"vkt_m6_eval_[a-z0-9_]+", value):
+            raise ValueError("database_name must use the vkt_m6_eval_ prefix")
+        return value
+
+    @field_validator(
+        "job_status_counts",
+        "unit_status_counts",
+        "attempt_status_counts",
+        "stable_error_code_counts",
+    )
+    @classmethod
+    def _counts_are_non_negative(cls, value: dict[str, int]) -> dict[str, int]:
+        if any(not isinstance(count, int) or isinstance(count, bool) or count < 0 for count in value.values()):
+            raise ValueError("status and error counts must be non-negative integers")
+        return value
+
+    @model_validator(mode="after")
+    def _artifact_is_internally_consistent(self) -> GraphEvalRunArtifact:
+        if self.started_at.tzinfo is None or self.finished_at.tzinfo is None:
+            raise ValueError("run timestamps must be timezone-aware")
+        if self.finished_at < self.started_at:
+            raise ValueError("finished_at must not precede started_at")
+        if self.model_attempt_count != sum(self.attempt_status_counts.values()):
+            raise ValueError("model_attempt_count must equal Attempt status counts")
+        expected_real_calls = self.model_attempt_count if self.real_provider else 0
+        if self.real_model_call_count != expected_real_calls:
+            raise ValueError("real_model_call_count is inconsistent with Provider mode")
+        if self.provider_request_id_count > self.model_attempt_count:
+            raise ValueError("Provider request ID count exceeds Attempt count")
+        if self.provider_request_id_count:
+            if self.provider_request_id_sha256 is None or not _SHA256_RE.fullmatch(
+                self.provider_request_id_sha256
+            ):
+                raise ValueError("Provider request ID digest is required")
+        elif self.provider_request_id_sha256 is not None:
+            raise ValueError("empty Provider request ID population must not have a digest")
+        if (self.policy_id is None) != (self.policy_sha256 is None):
+            raise ValueError("policy_id and policy_sha256 must appear together")
+        if self.policy_sha256 is not None and not _SHA256_RE.fullmatch(
+            self.policy_sha256
+        ):
+            raise ValueError("policy_sha256 must be a lowercase SHA-256 digest")
+        if self.phase == "post-freeze" and self.policy_id is None:
+            raise ValueError("post-freeze results require a frozen policy")
+        if self.status == "passed":
+            if set(self.job_status_counts) != {"succeeded"}:
+                raise ValueError("passed runs require only succeeded Jobs")
+            if set(self.unit_status_counts) != {"succeeded"}:
+                raise ValueError("passed runs require only succeeded Units")
+            if self.metrics.cross_revision_evidence_count:
+                raise ValueError("passed runs cannot contain cross-revision Evidence")
+            if self.metrics.eval_formal_write_count:
+                raise ValueError("passed runs cannot contain Eval formal writes")
+        return self
 
 
 class GraphEvalPolicyThresholds(_StrictModel):
