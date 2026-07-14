@@ -18,6 +18,8 @@ from app.services.graph_extraction_eval import (  # noqa: E402
 
 
 def _validate(manifest: Path) -> int:
+    if "app.config" in sys.modules or "app.db" in sys.modules:
+        raise RuntimeError("offline validation loaded application Settings or database modules")
     loaded = load_graph_eval_dataset(
         repository_root=ROOT_DIR,
         manifest_path=manifest,

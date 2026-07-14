@@ -8,7 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from app.services.graph_extraction_eval import load_graph_eval_dataset
+from app.services.graph_extraction_eval import (
+    ENTERPRISE_EVAL_RELATION_CONSTRAINTS,
+    load_graph_eval_dataset,
+)
+from app.services.graph_seed import expanded_default_relation_constraints
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -68,6 +72,18 @@ def test_every_gold_relation_uses_a_valid_local_enterprise_constraint():
             assert relation.source_gold_id in entities
             assert relation.target_gold_id in entities
             assert len(relation.evidence_unit_keys) == 1
+
+
+def test_offline_constraint_matrix_exactly_matches_the_runtime_enterprise_seed():
+    runtime = {
+        (
+            row.relation_type_key,
+            row.source_entity_type_key,
+            row.target_entity_type_key,
+        )
+        for row in expanded_default_relation_constraints()
+    }
+    assert ENTERPRISE_EVAL_RELATION_CONSTRAINTS == runtime
 
 
 def test_loader_rejects_an_undersized_release_manifest(tmp_path: Path):
@@ -204,6 +220,6 @@ def test_offline_validate_is_deterministic_and_does_not_emit_process_secret():
 
 def test_offline_validate_never_imports_settings_or_database_modules():
     source = (ROOT / "scripts/graph_extraction_eval.py").read_text(encoding="utf-8")
-    assert "app.config" not in source
-    assert "app.db" not in source
+    assert '"app.config" in sys.modules' in source
+    assert '"app.db" in sys.modules' in source
     assert "GRAPH_EXTRACTION_API_KEY" not in source

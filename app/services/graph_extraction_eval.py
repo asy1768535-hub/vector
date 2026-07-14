@@ -11,13 +11,8 @@ from typing import Any, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.services.graph_candidate_aggregation import canonical_graph_json_v1
+from app.services.graph_canonical import canonical_graph_json_v1
 from app.services.graph_normalization import normalize_graph_name_v1
-from app.services.graph_seed import (
-    DEFAULT_ENTITY_TYPES,
-    DEFAULT_RELATION_TYPES,
-    expanded_default_relation_constraints,
-)
 
 
 _KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
@@ -55,6 +50,50 @@ _UUID_TEXT_RE = re.compile(
 )
 _URL_TEXT_RE = re.compile(r"https?://", re.IGNORECASE)
 _FORBIDDEN_DATASET_KEYS = {"api_key", "authorization", "headers", "cookie"}
+_ENTERPRISE_ENTITY_TYPE_KEYS = frozenset(
+    {
+        "person",
+        "department",
+        "position",
+        "policy",
+        "process",
+        "project",
+        "product",
+        "customer",
+        "document",
+        "term",
+    }
+)
+_ENTERPRISE_RELATION_CONSTRAINT_GROUPS = {
+    "belongs_to": (("person", "position"), ("department",)),
+    "responsible_for": (
+        ("person", "department"),
+        ("project", "process", "policy", "product"),
+    ),
+    "applies_to": (("policy",), ("department", "position", "person")),
+    "constrains": (("policy",), ("process", "project")),
+    "depends_on": (("process",), ("policy", "process")),
+    "references": (("policy", "document"), ("policy", "document")),
+    "approves": (("person", "position", "department"), ("process",)),
+    "owns": (("department",), ("product", "project")),
+    "related_to": (
+        tuple(sorted(_ENTERPRISE_ENTITY_TYPE_KEYS)),
+        tuple(sorted(_ENTERPRISE_ENTITY_TYPE_KEYS)),
+    ),
+}
+ENTERPRISE_EVAL_RELATION_CONSTRAINTS = frozenset(
+    (relation_type, source_type, target_type)
+    for relation_type, (source_types, target_types) in (
+        _ENTERPRISE_RELATION_CONSTRAINT_GROUPS.items()
+    )
+    for source_type in source_types
+    for target_type in target_types
+) | frozenset(
+    {
+        ("reports_to", "person", "person"),
+        ("reports_to", "position", "position"),
+    }
+)
 
 
 class _StrictModel(BaseModel):
@@ -414,20 +453,13 @@ def _assert_synthetic_dataset_value(value: Any) -> None:
 
 
 def _validate_ontology_contract(documents: tuple[GraphEvalDocument, ...]) -> None:
-    entity_types = {row.key for row in DEFAULT_ENTITY_TYPES}
-    relation_types = {row.key: row for row in DEFAULT_RELATION_TYPES}
-    constraints = {
-        (
-            row.relation_type_key,
-            row.source_entity_type_key,
-            row.target_entity_type_key,
-        )
-        for row in expanded_default_relation_constraints()
+    relation_types = {
+        relation_type for relation_type, _, _ in ENTERPRISE_EVAL_RELATION_CONSTRAINTS
     }
     for document in documents:
         entities = {row.gold_id: row for row in document.gold_entities}
         for entity in document.gold_entities:
-            if entity.entity_type_key not in entity_types:
+            if entity.entity_type_key not in _ENTERPRISE_ENTITY_TYPE_KEYS:
                 raise ValueError(
                     f"unknown Entity type {entity.entity_type_key} in {document.document_key}"
                 )
@@ -444,7 +476,7 @@ def _validate_ontology_contract(documents: tuple[GraphEvalDocument, ...]) -> Non
                 source.entity_type_key,
                 target.entity_type_key,
             )
-            if constraint not in constraints:
+            if constraint not in ENTERPRISE_EVAL_RELATION_CONSTRAINTS:
                 raise ValueError(
                     "Relation violates enterprise ontology constraint: "
                     f"{document.document_key}/{relation.gold_id}"
