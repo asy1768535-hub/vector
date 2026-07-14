@@ -1,0 +1,113 @@
+{
+  "schema_version": "graph-extraction-eval-document-v1",
+  "document_key": "gold-v1",
+  "title": "Synthetic employee onboarding gold fixture",
+  "security_level": "internal",
+  "units": [
+    {
+      "unit_key": "u1",
+      "text": "人力资源部负责员工入职流程。"
+    },
+    {
+      "unit_key": "u2",
+      "text": "张三隶属于人力资源部。"
+    },
+    {
+      "unit_key": "u3",
+      "text": "员工入职管理制度适用于人力资源部。"
+    },
+    {
+      "unit_key": "u4",
+      "text": "员工入职流程受员工入职管理制度约束。"
+    },
+    {
+      "unit_key": "u5",
+      "text": "人力资源部经理审批正式员工入职申请。"
+    },
+    {
+      "unit_key": "u6",
+      "text": "HR 是人力资源部的常用简称。"
+    }
+  ],
+  "gold_entities": [
+    {
+      "gold_id": "e-hr",
+      "canonical_name": "人力资源部",
+      "entity_type_key": "department",
+      "evidence_unit_keys": ["u1", "u2", "u3", "u6"],
+      "aliases": ["HR"]
+    },
+    {
+      "gold_id": "e-onboarding",
+      "canonical_name": "员工入职流程",
+      "entity_type_key": "process",
+      "evidence_unit_keys": ["u1", "u4"],
+      "aliases": []
+    },
+    {
+      "gold_id": "e-zhangsan",
+      "canonical_name": "张三",
+      "entity_type_key": "person",
+      "evidence_unit_keys": ["u2"],
+      "aliases": []
+    },
+    {
+      "gold_id": "e-policy",
+      "canonical_name": "员工入职管理制度",
+      "entity_type_key": "policy",
+      "evidence_unit_keys": ["u3", "u4"],
+      "aliases": []
+    },
+    {
+      "gold_id": "e-manager",
+      "canonical_name": "人力资源部经理",
+      "entity_type_key": "position",
+      "evidence_unit_keys": ["u5"],
+      "aliases": []
+    },
+    {
+      "gold_id": "e-application",
+      "canonical_name": "正式员工入职申请",
+      "entity_type_key": "process",
+      "evidence_unit_keys": ["u5"],
+      "aliases": []
+    }
+  ],
+  "gold_relations": [
+    {
+      "gold_id": "r-responsible",
+      "source_gold_id": "e-hr",
+      "relation_type_key": "responsible_for",
+      "target_gold_id": "e-onboarding",
+      "evidence_unit_keys": ["u1"]
+    },
+    {
+      "gold_id": "r-belongs",
+      "source_gold_id": "e-zhangsan",
+      "relation_type_key": "belongs_to",
+      "target_gold_id": "e-hr",
+      "evidence_unit_keys": ["u2"]
+    },
+    {
+      "gold_id": "r-applies",
+      "source_gold_id": "e-policy",
+      "relation_type_key": "applies_to",
+      "target_gold_id": "e-hr",
+      "evidence_unit_keys": ["u3"]
+    },
+    {
+      "gold_id": "r-constrains",
+      "source_gold_id": "e-policy",
+      "relation_type_key": "constrains",
+      "target_gold_id": "e-onboarding",
+      "evidence_unit_keys": ["u4"]
+    },
+    {
+      "gold_id": "r-approves",
+      "source_gold_id": "e-manager",
+      "relation_type_key": "approves",
+      "target_gold_id": "e-application",
+      "evidence_unit_keys": ["u5"]
+    }
+  ]
+}

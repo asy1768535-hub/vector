@@ -1,0 +1,522 @@
+from __future__ import annotations
+
+import hashlib
+import math
+import re
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import PurePosixPath
+from typing import Any, Literal, TypeAlias
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from app.services.graph_candidate_aggregation import canonical_graph_json_v1
+from app.services.graph_normalization import normalize_graph_name_v1
+
+
+_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_FORBIDDEN_ARTIFACT_KEYS = {
+    "aliases",
+    "api_key",
+    "authorization",
+    "canonical_name",
+    "context",
+    "context_json",
+    "context_text",
+    "error_message",
+    "headers",
+    "messages",
+    "parse_error",
+    "parsed_response",
+    "prompt",
+    "provider_request_id",
+    "provider_request_ids",
+    "quote",
+    "quote_text",
+    "raw_response",
+    "source_text",
+    "text",
+    "title",
+}
+_SECRET_VALUE_PATTERNS = (
+    re.compile(r"\bbearer\s+\S+", re.IGNORECASE),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{8,}"),
+)
+
+
+class _StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+def _validate_key(value: str) -> str:
+    if not _KEY_RE.fullmatch(value):
+        raise ValueError("must match ^[a-z0-9][a-z0-9_-]{0,63}$")
+    return value
+
+
+class GraphEvalUnit(_StrictModel):
+    unit_key: str
+    text: str = Field(min_length=1)
+
+    _unit_key = field_validator("unit_key")(_validate_key)
+
+    @field_validator("text")
+    @classmethod
+    def _non_blank_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Unit text must not be blank")
+        return value
+
+
+class GraphEvalGoldEntity(_StrictModel):
+    gold_id: str
+    canonical_name: str = Field(min_length=1)
+    entity_type_key: str
+    evidence_unit_keys: tuple[str, ...] = Field(min_length=1)
+    aliases: tuple[str, ...] = ()
+
+    _gold_id = field_validator("gold_id")(_validate_key)
+    _entity_type_key = field_validator("entity_type_key")(_validate_key)
+
+    @field_validator("canonical_name")
+    @classmethod
+    def _canonical_name_is_meaningful(cls, value: str) -> str:
+        if not normalize_graph_name_v1(value):
+            raise ValueError("canonical_name must not normalize to empty")
+        return value
+
+    @field_validator("evidence_unit_keys")
+    @classmethod
+    def _evidence_keys_are_unique(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for key in value:
+            _validate_key(key)
+        if len(value) != len(set(value)):
+            raise ValueError("evidence_unit_keys must be unique")
+        return value
+
+    @field_validator("aliases")
+    @classmethod
+    def _aliases_are_unique_and_non_empty(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = [normalize_graph_name_v1(item) for item in value]
+        if any(not item for item in normalized):
+            raise ValueError("aliases must not normalize to empty")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("aliases must be unique after normalization")
+        return value
+
+
+class GraphEvalGoldRelation(_StrictModel):
+    gold_id: str
+    source_gold_id: str
+    relation_type_key: str
+    target_gold_id: str
+    evidence_unit_keys: tuple[str, ...] = Field(min_length=1)
+
+    _gold_id = field_validator("gold_id")(_validate_key)
+    _source_gold_id = field_validator("source_gold_id")(_validate_key)
+    _relation_type_key = field_validator("relation_type_key")(_validate_key)
+    _target_gold_id = field_validator("target_gold_id")(_validate_key)
+
+    @field_validator("evidence_unit_keys")
+    @classmethod
+    def _evidence_keys_are_unique(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for key in value:
+            _validate_key(key)
+        if len(value) != len(set(value)):
+            raise ValueError("evidence_unit_keys must be unique")
+        return value
+
+
+class GraphEvalDocument(_StrictModel):
+    schema_version: Literal["graph-extraction-eval-document-v1"]
+    document_key: str
+    title: str = Field(min_length=1)
+    security_level: Literal["internal"]
+    units: tuple[GraphEvalUnit, ...] = Field(min_length=1)
+    gold_entities: tuple[GraphEvalGoldEntity, ...] = Field(min_length=1)
+    gold_relations: tuple[GraphEvalGoldRelation, ...] = Field(min_length=1)
+
+    _document_key = field_validator("document_key")(_validate_key)
+
+    @model_validator(mode="after")
+    def _references_are_local_and_unique(self) -> GraphEvalDocument:
+        unit_keys = [row.unit_key for row in self.units]
+        entity_ids = [row.gold_id for row in self.gold_entities]
+        relation_ids = [row.gold_id for row in self.gold_relations]
+        if len(unit_keys) != len(set(unit_keys)):
+            raise ValueError("Unit keys must be unique inside a document")
+        if len(entity_ids) != len(set(entity_ids)):
+            raise ValueError("Entity gold IDs must be unique inside a document")
+        if len(relation_ids) != len(set(relation_ids)):
+            raise ValueError("Relation gold IDs must be unique inside a document")
+        unit_key_set = set(unit_keys)
+        entity_id_set = set(entity_ids)
+        for entity in self.gold_entities:
+            if not set(entity.evidence_unit_keys) <= unit_key_set:
+                raise ValueError("Entity Evidence must reference a local Unit")
+        for relation in self.gold_relations:
+            if not set(relation.evidence_unit_keys) <= unit_key_set:
+                raise ValueError("Relation Evidence must reference a local Unit")
+            if relation.source_gold_id not in entity_id_set:
+                raise ValueError("Relation source must reference a local Entity")
+            if relation.target_gold_id not in entity_id_set:
+                raise ValueError("Relation target must reference a local Entity")
+        return self
+
+
+class GraphEvalDatasetMinimums(_StrictModel):
+    documents: int = Field(ge=1)
+    units: int = Field(ge=1)
+    entities: int = Field(ge=1)
+    relations: int = Field(ge=1)
+
+
+class GraphEvalManifest(_StrictModel):
+    schema_version: Literal["graph-extraction-eval-manifest-v1"]
+    dataset_id: str
+    source_file: str
+    synthetic: Literal[True]
+    document_keys: tuple[str, ...] = Field(min_length=1)
+    minimums: GraphEvalDatasetMinimums
+
+    _dataset_id = field_validator("dataset_id")(_validate_key)
+
+    @field_validator("source_file")
+    @classmethod
+    def _source_file_is_safe_and_relative(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if path.is_absolute() or ".." in path.parts or path.suffix not in {".json", ".jsonl"}:
+            raise ValueError("source_file must be a safe relative JSON/JSONL path")
+        return value
+
+    @field_validator("document_keys")
+    @classmethod
+    def _document_keys_are_sorted_unique(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for key in value:
+            _validate_key(key)
+        if tuple(sorted(value)) != value or len(value) != len(set(value)):
+            raise ValueError("document_keys must be sorted and unique")
+        return value
+
+
+class GraphEvalRate(_StrictModel):
+    numerator: int = Field(ge=0)
+    denominator: int = Field(ge=0)
+    value: float | None
+
+    @model_validator(mode="after")
+    def _value_matches_counts(self) -> GraphEvalRate:
+        expected = None if self.denominator == 0 else self.numerator / self.denominator
+        if self.numerator > self.denominator:
+            raise ValueError("numerator must not exceed denominator")
+        if expected is None:
+            if self.value is not None:
+                raise ValueError("zero denominator must have a null value")
+        elif self.value is None or not math.isclose(
+            self.value, expected, rel_tol=0.0, abs_tol=1e-15
+        ):
+            raise ValueError("rate value does not match numerator and denominator")
+        return self
+
+
+class GraphEvalClassification(_StrictModel):
+    true_positive: int = Field(ge=0)
+    false_positive: int = Field(ge=0)
+    false_negative: int = Field(ge=0)
+    precision: GraphEvalRate
+    recall: GraphEvalRate
+
+
+class GraphEvalMetricReport(_StrictModel):
+    entity: GraphEvalClassification
+    relation: GraphEvalClassification
+    json_parse_rate: GraphEvalRate
+    schema_valid_rate: GraphEvalRate
+    invalid_evidence_rate: GraphEvalRate
+    ambiguous_evidence_count: int = Field(ge=0)
+    candidate_duplicate_rate: GraphEvalRate
+    cross_revision_evidence_count: int = Field(ge=0)
+    eval_formal_write_count: int = Field(ge=0)
+
+
+class GraphEvalPolicyThresholds(_StrictModel):
+    entity_precision: float = Field(ge=0.85, le=1.0)
+    entity_recall: float = Field(ge=0.75, le=1.0)
+    relation_precision: float = Field(ge=0.85, le=1.0)
+    relation_recall: float = Field(ge=0.70, le=1.0)
+
+
+class GraphEvalPolicy(_StrictModel):
+    schema_version: Literal["graph-extraction-eval-policy-v1"]
+    policy_id: Literal["eval_policy_v1"]
+    dataset_manifest_sha256: str
+    evaluation_config_hash: str
+    calibration_result_path: str
+    calibration_result_sha256: str
+    thresholds: GraphEvalPolicyThresholds
+    approved_by: str = Field(min_length=1)
+    approved_at: datetime
+    approval_reference: str = Field(min_length=1)
+
+    @field_validator(
+        "dataset_manifest_sha256",
+        "evaluation_config_hash",
+        "calibration_result_sha256",
+    )
+    @classmethod
+    def _hash_is_sha256(cls, value: str) -> str:
+        if not _SHA256_RE.fullmatch(value):
+            raise ValueError("must be a lowercase SHA-256 digest")
+        return value
+
+    @field_validator("calibration_result_path")
+    @classmethod
+    def _calibration_path_is_scoped(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if (
+            path.is_absolute()
+            or ".." in path.parts
+            or path.suffix != ".json"
+            or path.parts[:3] != ("eval", "graph_extraction", "results")
+        ):
+            raise ValueError("calibration result must be under eval/graph_extraction/results")
+        return value
+
+    @field_validator("approved_by", "approval_reference")
+    @classmethod
+    def _approval_text_is_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("approval metadata must not be blank")
+        return value
+
+    @field_validator("approved_at")
+    @classmethod
+    def _approval_time_is_utc(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("approved_at must be timezone-aware")
+        if value.utcoffset().total_seconds() != 0:
+            raise ValueError("approved_at must be UTC")
+        return value
+
+
+EntityEvalKey: TypeAlias = tuple[str, str, str]
+RelationEvalKey: TypeAlias = tuple[str, EntityEvalKey, str, EntityEvalKey]
+
+
+@dataclass(frozen=True, slots=True)
+class GraphEvalEntityPrediction:
+    document_key: str
+    entity_type_key: str
+    canonical_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class GraphEvalRelationPrediction:
+    document_key: str
+    source_entity_type_key: str
+    source_canonical_name: str
+    relation_type_key: str
+    target_entity_type_key: str
+    target_canonical_name: str
+    directed: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class GraphEvalAttemptMetric:
+    request_status: str
+    parse_status: str | None
+
+
+def canonical_graph_eval_hash(value: Any) -> str:
+    payload = canonical_graph_json_v1(value).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def entity_eval_key(
+    document_key: str,
+    entity_type_key: str,
+    canonical_name: str,
+) -> EntityEvalKey:
+    return (
+        _validate_key(document_key),
+        _validate_key(entity_type_key),
+        normalize_graph_name_v1(canonical_name),
+    )
+
+
+def relation_eval_key(
+    document_key: str,
+    source_key: EntityEvalKey,
+    relation_type_key: str,
+    target_key: EntityEvalKey,
+    *,
+    directed: bool,
+) -> RelationEvalKey:
+    document_key = _validate_key(document_key)
+    relation_type_key = _validate_key(relation_type_key)
+    if source_key[0] != document_key or target_key[0] != document_key:
+        raise ValueError("Relation endpoints must belong to the same document")
+    if not directed and target_key < source_key:
+        source_key, target_key = target_key, source_key
+    return (document_key, source_key, relation_type_key, target_key)
+
+
+def gold_entity_keys(documents: tuple[GraphEvalDocument, ...]) -> list[EntityEvalKey]:
+    return [
+        entity_eval_key(document.document_key, entity.entity_type_key, entity.canonical_name)
+        for document in documents
+        for entity in document.gold_entities
+    ]
+
+
+def gold_relation_keys(
+    documents: tuple[GraphEvalDocument, ...],
+    *,
+    undirected_relation_types: frozenset[str] = frozenset(),
+) -> list[RelationEvalKey]:
+    keys: list[RelationEvalKey] = []
+    for document in documents:
+        entities = {entity.gold_id: entity for entity in document.gold_entities}
+        for relation in document.gold_relations:
+            source = entities[relation.source_gold_id]
+            target = entities[relation.target_gold_id]
+            keys.append(
+                relation_eval_key(
+                    document.document_key,
+                    entity_eval_key(
+                        document.document_key,
+                        source.entity_type_key,
+                        source.canonical_name,
+                    ),
+                    relation.relation_type_key,
+                    entity_eval_key(
+                        document.document_key,
+                        target.entity_type_key,
+                        target.canonical_name,
+                    ),
+                    directed=relation.relation_type_key
+                    not in undirected_relation_types,
+                )
+            )
+    return keys
+
+
+def prediction_entity_keys(
+    rows: tuple[GraphEvalEntityPrediction, ...],
+) -> list[EntityEvalKey]:
+    return [
+        entity_eval_key(row.document_key, row.entity_type_key, row.canonical_name)
+        for row in rows
+    ]
+
+
+def prediction_relation_keys(
+    rows: tuple[GraphEvalRelationPrediction, ...],
+) -> list[RelationEvalKey]:
+    return [
+        relation_eval_key(
+            row.document_key,
+            entity_eval_key(
+                row.document_key,
+                row.source_entity_type_key,
+                row.source_canonical_name,
+            ),
+            row.relation_type_key,
+            entity_eval_key(
+                row.document_key,
+                row.target_entity_type_key,
+                row.target_canonical_name,
+            ),
+            directed=row.directed,
+        )
+        for row in rows
+    ]
+
+
+def rate(numerator: int, denominator: int) -> GraphEvalRate:
+    if numerator < 0 or denominator < 0 or numerator > denominator:
+        raise ValueError("invalid rate counts")
+    return GraphEvalRate(
+        numerator=numerator,
+        denominator=denominator,
+        value=None if denominator == 0 else numerator / denominator,
+    )
+
+
+def classify(gold: list[Any], predicted: list[Any]) -> GraphEvalClassification:
+    gold_set = set(gold)
+    predicted_set = set(predicted)
+    true_positive = len(gold_set & predicted_set)
+    false_positive = len(predicted_set - gold_set)
+    false_negative = len(gold_set - predicted_set)
+    return GraphEvalClassification(
+        true_positive=true_positive,
+        false_positive=false_positive,
+        false_negative=false_negative,
+        precision=rate(true_positive, true_positive + false_positive),
+        recall=rate(true_positive, true_positive + false_negative),
+    )
+
+
+def build_metric_report(
+    *,
+    gold_entities: list[EntityEvalKey],
+    predicted_entities: list[EntityEvalKey],
+    gold_relations: list[RelationEvalKey],
+    predicted_relations: list[RelationEvalKey],
+    attempts: tuple[GraphEvalAttemptMetric, ...],
+    relation_schema_statuses: tuple[str | None, ...],
+    evidence_statuses: tuple[str, ...],
+    cross_revision_evidence_count: int,
+    eval_formal_write_count: int,
+) -> GraphEvalMetricReport:
+    parsed = sum(
+        row.request_status == "succeeded" and row.parse_status == "valid"
+        for row in attempts
+    )
+    schema_valid = sum(status == "valid" for status in relation_schema_statuses)
+    invalid_evidence = sum(status == "invalid" for status in evidence_statuses)
+    ambiguous_evidence = sum(status == "ambiguous" for status in evidence_statuses)
+    all_candidate_keys: list[Any] = [
+        ("entity", row) for row in predicted_entities
+    ] + [("relation", row) for row in predicted_relations]
+    duplicate_count = len(all_candidate_keys) - len(set(all_candidate_keys))
+    return GraphEvalMetricReport(
+        entity=classify(gold_entities, predicted_entities),
+        relation=classify(gold_relations, predicted_relations),
+        json_parse_rate=rate(parsed, len(attempts)),
+        schema_valid_rate=rate(schema_valid, len(relation_schema_statuses)),
+        invalid_evidence_rate=rate(invalid_evidence, len(evidence_statuses)),
+        ambiguous_evidence_count=ambiguous_evidence,
+        candidate_duplicate_rate=rate(duplicate_count, len(all_candidate_keys)),
+        cross_revision_evidence_count=cross_revision_evidence_count,
+        eval_formal_write_count=eval_formal_write_count,
+    )
+
+
+def assert_sanitized_eval_artifact(value: Any) -> None:
+    def visit(item: Any, path: str) -> None:
+        if isinstance(item, dict):
+            for key, child in item.items():
+                if not isinstance(key, str):
+                    raise ValueError(f"artifact key at {path} must be text")
+                normalized = key.strip().casefold()
+                if normalized in _FORBIDDEN_ARTIFACT_KEYS:
+                    raise ValueError(f"forbidden artifact field: {path}.{key}")
+                visit(child, f"{path}.{key}")
+            return
+        if isinstance(item, (list, tuple)):
+            for index, child in enumerate(item):
+                visit(child, f"{path}[{index}]")
+            return
+        if isinstance(item, float) and not math.isfinite(item):
+            raise ValueError(f"non-finite artifact value at {path}")
+        if isinstance(item, str):
+            for pattern in _SECRET_VALUE_PATTERNS:
+                if pattern.search(item):
+                    raise ValueError(f"secret-like artifact value at {path}")
+
+    visit(value, "$artifact")
+    canonical_graph_json_v1(value)
