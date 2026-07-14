@@ -666,8 +666,8 @@ async def _upsert_relation_occurrence(
             != canonical_graph_json_v1(payload)
         ):
             raise CandidateReplayError(
-                "endpoint_mismatch",
-                "existing Relation Occurrence endpoints do not match replayed payload",
+                "relation_occurrence_replay_mismatch",
+                "existing Relation Occurrence does not match replayed payload",
             )
         return existing
     row = GraphRelationOccurrence(
@@ -719,7 +719,6 @@ async def _handle_endpoint_replay_mismatch(
     endpoints_match = (
         occurrence.source_entity_occurrence_id == source_occurrence.id
         and occurrence.target_entity_occurrence_id == target_occurrence.id
-        and candidate.candidate_key == proposed_candidate_key
     )
     if endpoints_match:
         return None
@@ -759,17 +758,7 @@ async def _handle_endpoint_replay_mismatch(
         if values[0] != values[1]
     ]
     if not fields:
-        fields = [
-            {
-                "field": "candidate_key",
-                "value_hashes": sorted(
-                    {
-                        canonical_graph_value_hash_v1(candidate.candidate_key),
-                        canonical_graph_value_hash_v1(proposed_candidate_key),
-                    }
-                ),
-            }
-        ]
+        return None
     key = conflict_key_v1(
         job_id=job.id,
         conflict_type="endpoint_mismatch",
@@ -833,9 +822,26 @@ async def _persist_property_conflicts(
     candidate: GraphEntityCandidate,
     conflicts: tuple[PropertyConflictSpec, ...],
 ) -> int:
+    result = await db.execute(
+        select(GraphExtractionConflict)
+        .where(
+            GraphExtractionConflict.job_id == job.id,
+            GraphExtractionConflict.conflict_type == "property_conflict",
+        )
+        .with_for_update()
+    )
+    candidate_id = str(candidate.id)
+    existing_rows = [
+        row for row in result.scalars().all() if candidate_id in row.entity_candidate_ids
+    ]
     if not conflicts:
-        if candidate.status in {"extracted", "aggregated"}:
+        for row in existing_rows:
+            if row.purged_at is None and row.status == "open":
+                row.status = "superseded"
+        if candidate.review_reason == "property_conflict":
             candidate.status = "aggregated"
+            candidate.review_reason = None
+            candidate.validation_errors = []
         return 0
     fields = [
         {"field": conflict.field, "value_hashes": list(conflict.value_hashes)}
@@ -860,22 +866,40 @@ async def _persist_property_conflicts(
             for conflict in conflicts
         ]
     }
-    await db.execute(
-        pg_insert(GraphExtractionConflict)
-        .values(
-            id=uuid.uuid4(),
-            job_id=job.id,
-            library_id=job.library_id,
-            conflict_key=conflict_key,
-            conflict_type="property_conflict",
-            entity_candidate_ids=[str(candidate.id)],
-            relation_candidate_ids=[],
-            conflicting_fields=fields,
-            status="open",
-            details=details,
+    existing = next((row for row in existing_rows if row.conflict_key == conflict_key), None)
+    for row in existing_rows:
+        if row.conflict_key != conflict_key and row.purged_at is None and row.status == "open":
+            row.status = "superseded"
+    if existing is None:
+        await db.execute(
+            pg_insert(GraphExtractionConflict)
+            .values(
+                id=uuid.uuid4(),
+                job_id=job.id,
+                library_id=job.library_id,
+                conflict_key=conflict_key,
+                conflict_type="property_conflict",
+                entity_candidate_ids=[candidate_id],
+                relation_candidate_ids=[],
+                conflicting_fields=fields,
+                status="open",
+                details=details,
+            )
+            .on_conflict_do_nothing(index_elements=["job_id", "conflict_key"])
         )
-        .on_conflict_do_nothing(index_elements=["job_id", "conflict_key"])
-    )
+    elif existing.purged_at is None:
+        if (
+            existing.library_id != job.library_id
+            or existing.entity_candidate_ids != [candidate_id]
+            or existing.relation_candidate_ids != []
+            or existing.conflicting_fields != fields
+        ):
+            raise CandidateReplayError(
+                "property_conflict_identity_mismatch",
+                "existing Property Conflict does not match its stable identity",
+            )
+        existing.status = "open"
+        existing.details = details
     candidate.status = "pending_review"
     candidate.review_reason = "property_conflict"
     candidate.validation_errors = [

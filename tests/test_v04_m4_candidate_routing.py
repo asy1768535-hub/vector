@@ -94,6 +94,15 @@ def test_entity_hard_routes_precede_score_and_matching_threshold():
     assert route_entity_candidate_v1(
         **(base | {"normalization_method": "ambiguous"})
     ).review_reason == "entity_match_ambiguous"
+    assert route_entity_candidate_v1(
+        **(
+            base
+            | {
+                "normalization_method": "ambiguous",
+                "has_open_conflict": True,
+            }
+        )
+    ).review_reason == "entity_match_ambiguous"
 
     matched = route_entity_candidate_v1(
         **(base | {"matched_entity_id": "existing", "final_confidence": 0.1})

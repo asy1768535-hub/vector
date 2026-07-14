@@ -493,31 +493,57 @@ async def _upsert_merge_candidates(
     candidate: GraphEntityCandidate,
     decision: EntityMatchDecision,
 ) -> int:
-    count = 0
     reason = decision.ambiguity_reason or "entity_merge_ambiguity"
-    for target_id in decision.suggested_target_ids:
-        await db.execute(
-            pg_insert(GraphEntityMergeCandidate)
-            .values(
-                id=uuid.uuid4(),
-                job_id=job.id,
-                library_id=job.library_id,
-                entity_candidate_id=candidate.id,
-                suggested_target_entity_id=target_id,
-                merge_key=merge_candidate_key_v1(
+    expected = {
+        merge_candidate_key_v1(
+            job_id=job.id,
+            entity_candidate_id=candidate.id,
+            suggested_target_entity_id=target_id,
+            reason=reason,
+        ): target_id
+        for target_id in decision.suggested_target_ids
+        if decision.ambiguity_reason is not None
+    }
+    result = await db.execute(
+        select(GraphEntityMergeCandidate)
+        .where(
+            GraphEntityMergeCandidate.job_id == job.id,
+            GraphEntityMergeCandidate.entity_candidate_id == candidate.id,
+        )
+        .with_for_update()
+    )
+    existing = {row.merge_key: row for row in result.scalars().all()}
+    for merge_key, row in existing.items():
+        if merge_key not in expected and row.purged_at is None:
+            row.status = "superseded"
+    for merge_key, target_id in expected.items():
+        row = existing.get(merge_key)
+        if row is None:
+            await db.execute(
+                pg_insert(GraphEntityMergeCandidate)
+                .values(
+                    id=uuid.uuid4(),
                     job_id=job.id,
+                    library_id=job.library_id,
                     entity_candidate_id=candidate.id,
                     suggested_target_entity_id=target_id,
+                    merge_key=merge_key,
                     reason=reason,
-                ),
-                reason=reason,
-                status="pending_review",
-                details={"target_entity_id": str(target_id)},
+                    status="pending_review",
+                    details={"target_entity_id": str(target_id)},
+                )
+                .on_conflict_do_nothing(index_elements=["job_id", "merge_key"])
             )
-            .on_conflict_do_nothing(index_elements=["job_id", "merge_key"])
-        )
-        count += 1
-    return count
+        elif row.purged_at is None:
+            if (
+                row.library_id != job.library_id
+                or row.suggested_target_entity_id != target_id
+                or row.reason != reason
+            ):
+                raise ValueError("existing Merge Candidate does not match its stable identity")
+            row.status = "pending_review"
+            row.details = {"target_entity_id": str(target_id)}
+    return len(expected)
 
 
 async def _upsert_entity_match_conflict(
@@ -527,58 +553,115 @@ async def _upsert_entity_match_conflict(
     candidate: GraphEntityCandidate,
     decision: EntityMatchDecision,
 ) -> int:
-    if decision.ambiguity_reason is None:
-        return 0
-    conflict_type = (
-        "entity_status_conflict"
-        if decision.ambiguity_reason == "entity_status_conflict"
-        else "entity_merge_ambiguity"
-    )
-    if conflict_type == "entity_status_conflict":
-        values = [status for _, status in decision.ineligible_statuses]
-        field_name = "entity.status"
-        details: dict[str, Any] = {
-            "targets": [
-                {"entity_id": str(entity_id), "status": status}
-                for entity_id, status in decision.ineligible_statuses
-            ]
-        }
-    else:
-        values = [str(value) for value in decision.suggested_target_ids]
-        field_name = "matched_entity_id"
-        details = {"target_entity_ids": values}
-    fields = [
-        {
-            "field": field_name,
-            "value_hashes": sorted(
-                {canonical_graph_value_hash_v1(value) for value in values}
+    candidate_id = str(candidate.id)
+    result = await db.execute(
+        select(GraphExtractionConflict)
+        .where(
+            GraphExtractionConflict.job_id == job.id,
+            GraphExtractionConflict.conflict_type.in_(
+                {"entity_merge_ambiguity", "entity_status_conflict"}
             ),
-        }
-    ]
-    key = conflict_key_v1(
-        job_id=job.id,
-        conflict_type=conflict_type,
-        entity_candidate_ids=[candidate.id],
-        relation_candidate_ids=[],
-        conflicting_fields=fields,
+        )
+        .with_for_update()
     )
-    await db.execute(
-        pg_insert(GraphExtractionConflict)
-        .values(
-            id=uuid.uuid4(),
+    existing_rows = [
+        row for row in result.scalars().all() if candidate_id in row.entity_candidate_ids
+    ]
+
+    expected: tuple[str, str, list[dict[str, Any]], dict[str, Any]] | None = None
+    if decision.ambiguity_reason is not None:
+        conflict_type = (
+            "entity_status_conflict"
+            if decision.ambiguity_reason == "entity_status_conflict"
+            else "entity_merge_ambiguity"
+        )
+        if conflict_type == "entity_status_conflict":
+            values = [status for _, status in decision.ineligible_statuses]
+            field_name = "entity.status"
+            details: dict[str, Any] = {
+                "targets": [
+                    {"entity_id": str(entity_id), "status": status}
+                    for entity_id, status in decision.ineligible_statuses
+                ]
+            }
+        else:
+            values = [str(value) for value in decision.suggested_target_ids]
+            field_name = "matched_entity_id"
+            details = {"target_entity_ids": values}
+        fields = [
+            {
+                "field": field_name,
+                "value_hashes": sorted(
+                    {canonical_graph_value_hash_v1(value) for value in values}
+                ),
+            }
+        ]
+        key = conflict_key_v1(
             job_id=job.id,
-            library_id=job.library_id,
-            conflict_key=key,
             conflict_type=conflict_type,
-            entity_candidate_ids=[str(candidate.id)],
+            entity_candidate_ids=[candidate.id],
             relation_candidate_ids=[],
             conflicting_fields=fields,
-            status="open",
-            details=details,
         )
-        .on_conflict_do_nothing(index_elements=["job_id", "conflict_key"])
-    )
+        expected = key, conflict_type, fields, details
+
+    expected_key = expected[0] if expected is not None else None
+    for row in existing_rows:
+        if row.conflict_key != expected_key and row.purged_at is None:
+            row.status = "superseded"
+    if expected is None:
+        return 0
+
+    key, conflict_type, fields, details = expected
+    existing = next((row for row in existing_rows if row.conflict_key == key), None)
+    if existing is None:
+        await db.execute(
+            pg_insert(GraphExtractionConflict)
+            .values(
+                id=uuid.uuid4(),
+                job_id=job.id,
+                library_id=job.library_id,
+                conflict_key=key,
+                conflict_type=conflict_type,
+                entity_candidate_ids=[candidate_id],
+                relation_candidate_ids=[],
+                conflicting_fields=fields,
+                status="open",
+                details=details,
+            )
+            .on_conflict_do_nothing(index_elements=["job_id", "conflict_key"])
+        )
+    elif existing.purged_at is None:
+        if (
+            existing.library_id != job.library_id
+            or existing.conflict_type != conflict_type
+            or existing.entity_candidate_ids != [candidate_id]
+            or existing.relation_candidate_ids != []
+            or existing.conflicting_fields != fields
+        ):
+            raise ValueError("existing Conflict does not match its stable identity")
+        existing.status = "open"
+        existing.details = details
     return 1
+
+
+async def _open_entity_conflicts(db, *, job: Any, candidate: GraphEntityCandidate):
+    result = await db.execute(
+        select(GraphExtractionConflict).where(
+            GraphExtractionConflict.job_id == job.id,
+            GraphExtractionConflict.status == "open",
+            GraphExtractionConflict.purged_at.is_(None),
+        )
+    )
+    candidate_id = str(candidate.id)
+    return sorted(
+        (
+            row
+            for row in result.scalars().all()
+            if candidate_id in row.entity_candidate_ids
+        ),
+        key=lambda row: (row.conflict_type, row.conflict_key),
+    )
 
 
 def _candidate_error(code: str, *, field: str | None = None, message: str | None = None):
@@ -645,22 +728,47 @@ async def validate_job_candidates(db, *, job: Any) -> JobCandidateValidationResu
         )
         candidate.matched_entity_id = decision.matched_entity_id
         candidate.normalization_method = decision.normalization_method
+        merge_count += await _upsert_merge_candidates(
+            db, job=job, candidate=candidate, decision=decision
+        )
+        conflict_count += await _upsert_entity_match_conflict(
+            db, job=job, candidate=candidate, decision=decision
+        )
         if decision.ambiguity_reason is not None:
             candidate.status = "pending_review"
             candidate.review_reason = "entity_match_ambiguous"
             candidate.validation_errors = [
                 _candidate_error(decision.ambiguity_reason, field="matched_entity_id")
             ]
-            merge_count += await _upsert_merge_candidates(
-                db, job=job, candidate=candidate, decision=decision
+        else:
+            open_conflicts = await _open_entity_conflicts(
+                db, job=job, candidate=candidate
             )
-            conflict_count += await _upsert_entity_match_conflict(
-                db, job=job, candidate=candidate, decision=decision
-            )
-        elif candidate.review_reason != "property_conflict":
-            candidate.status = "aggregated"
-            candidate.review_reason = None
-            candidate.validation_errors = []
+            if open_conflicts:
+                candidate.status = "pending_review"
+                candidate.review_reason = (
+                    "property_conflict"
+                    if any(
+                        row.conflict_type == "property_conflict"
+                        for row in open_conflicts
+                    )
+                    else "conflict_open"
+                )
+                candidate.validation_errors = sorted(
+                    [
+                        _candidate_error(
+                            row.conflict_type,
+                            field=field.get("field"),
+                        )
+                        for row in open_conflicts
+                        for field in row.conflicting_fields
+                    ],
+                    key=lambda item: (item["code"], item.get("field") or ""),
+                )
+            else:
+                candidate.status = "aggregated"
+                candidate.review_reason = None
+                candidate.validation_errors = []
 
     relation_result = await db.execute(
         select(GraphRelationCandidate)

@@ -128,10 +128,10 @@ def route_entity_candidate_v1(
         return CandidateRoute("rejected", "evidence_invalid")
     if evidence_ambiguous:
         return CandidateRoute("pending_review", "evidence_ambiguous")
-    if has_open_conflict:
-        return CandidateRoute("pending_review", "conflict_open")
     if normalization_method == "ambiguous":
         return CandidateRoute("pending_review", "entity_match_ambiguous")
+    if has_open_conflict:
+        return CandidateRoute("pending_review", "conflict_open")
     if matched_entity_id is not None:
         return CandidateRoute("validated", None)
     if final_confidence < threshold:
@@ -185,7 +185,14 @@ def _append_error(candidate: Any, code: str) -> None:
     errors = list(candidate.validation_errors or [])
     if not any(isinstance(item, dict) and item.get("code") == code for item in errors):
         errors.append({"code": code})
-    candidate.validation_errors = errors
+    candidate.validation_errors = sorted(
+        errors,
+        key=lambda item: (
+            item.get("code", "") if isinstance(item, dict) else "",
+            item.get("field", "") if isinstance(item, dict) else "",
+            item.get("value_hash", "") if isinstance(item, dict) else "",
+        ),
+    )
 
 
 async def apply_job_candidate_routes(db, *, job: Any) -> JobCandidateRouteResult:
@@ -252,7 +259,10 @@ async def apply_job_candidate_routes(db, *, job: Any) -> JobCandidateRouteResult
             schema_invalid=schema_score == 0.0,
             evidence_invalid=evidence_invalid,
             evidence_ambiguous=evidence_ambiguous,
-            has_open_conflict=str(candidate.id) in conflict_entity_ids,
+            has_open_conflict=(
+                str(candidate.id) in conflict_entity_ids
+                or candidate.review_reason == "property_conflict"
+            ),
             normalization_method=candidate.normalization_method or "ambiguous",
             matched_entity_id=candidate.matched_entity_id,
             final_confidence=candidate.final_confidence,

@@ -28,7 +28,7 @@ from app.models.graph_candidates import GraphEntityCandidate, GraphRelationCandi
 from app.models.graph_extraction_job import GraphExtractionJob
 from app.models.graph_extraction_unit import GraphExtractionUnit
 from app.models.graph_occurrences import GraphEntityOccurrence, GraphRelationOccurrence
-from app.models.graph_review import GraphExtractionConflict
+from app.models.graph_review import GraphEntityMergeCandidate, GraphExtractionConflict
 from app.models.knowledge_relation import KnowledgeRelation
 from app.models.library import Library
 from app.models.ontology_version import OntologyVersion
@@ -37,6 +37,7 @@ from app.models.relation_type import RelationType
 from app.models.relation_type_constraint import RelationTypeConstraint
 from app.schemas.graph_extraction import GraphExtractionPayload
 from app.services.graph_candidate_aggregation import (
+    CandidateReplayError,
     canonical_graph_value_hash_v1,
     recompute_job_candidate_aggregates,
     stage_unit_candidate_occurrences,
@@ -550,6 +551,19 @@ async def _exercise_m4(name: str, ids: dict[str, object]) -> None:
             assert await db.scalar(select(func.count()).select_from(GraphRelationCandidate)) == 1
             assert await db.scalar(select(func.count()).select_from(GraphEntityOccurrence)) == 4
 
+        changed_relation = _payload(" Human Resources ", "Alice", first_quote, 0.8)
+        changed_relation.relations[0].properties = {"note": "changed"}
+        with pytest.raises(CandidateReplayError) as exc_info:
+            await _stage_one(name, ids, 0, changed_relation)
+        assert exc_info.value.code == "relation_occurrence_replay_mismatch"
+        async with sessions() as db:
+            assert await db.scalar(select(func.count()).select_from(GraphRelationCandidate)) == 1
+            assert await db.scalar(
+                select(func.count()).select_from(GraphExtractionConflict).where(
+                    GraphExtractionConflict.conflict_type == "endpoint_mismatch"
+                )
+            ) == 0
+
         mismatch_payload = _payload(" Human Resources ", "Alice", first_quote, 0.8)
         mismatch_payload.relations[0].target_local_id = "department"
         await _stage_one(name, ids, 0, mismatch_payload)
@@ -601,6 +615,92 @@ async def _exercise_m4(name: str, ids: dict[str, object]) -> None:
                 )
             ).scalars().all()
             assert set(statuses) <= {"validated", "pending_review", "rejected"}
+
+        second_entity_id = uuid.uuid4()
+        async with sessions() as db, db.begin():
+            db.add(
+                Entity(
+                    id=second_entity_id,
+                    library_id=ids["library"],
+                    ontology_version_id=ids["ontology"],
+                    entity_type_id=ids["department_type"],
+                    canonical_name="HR Shared Services",
+                    normalized_name="hr shared services",
+                    properties={},
+                    status="active",
+                    source_type="manual",
+                )
+            )
+            await db.flush()
+            db.add(
+                EntityAlias(
+                    library_id=ids["library"],
+                    entity_id=second_entity_id,
+                    alias="Human Resources",
+                    normalized_alias="human resources",
+                    source_type="manual",
+                    status="active",
+                )
+            )
+        async with sessions() as db, db.begin():
+            job = await db.get(GraphExtractionJob, ids["job"])
+            await validate_job_candidates(db, job=job)
+        async with sessions() as db:
+            assert await db.scalar(
+                select(func.count()).select_from(GraphEntityMergeCandidate).where(
+                    GraphEntityMergeCandidate.status == "pending_review"
+                )
+            ) == 2
+            assert await db.scalar(
+                select(func.count()).select_from(GraphExtractionConflict).where(
+                    GraphExtractionConflict.conflict_type == "entity_merge_ambiguity",
+                    GraphExtractionConflict.status == "open",
+                )
+            ) == 1
+
+        async with sessions() as db, db.begin():
+            second_alias = (
+                await db.execute(
+                    select(EntityAlias).where(EntityAlias.entity_id == second_entity_id)
+                )
+            ).scalars().one()
+            second_alias.status = "disabled"
+            job = await db.get(GraphExtractionJob, ids["job"])
+            await validate_job_candidates(db, job=job)
+        async with sessions() as db:
+            assert await db.scalar(
+                select(func.count()).select_from(GraphEntityMergeCandidate).where(
+                    GraphEntityMergeCandidate.status == "superseded"
+                )
+            ) == 2
+            assert await db.scalar(
+                select(func.count()).select_from(GraphExtractionConflict).where(
+                    GraphExtractionConflict.conflict_type == "entity_merge_ambiguity",
+                    GraphExtractionConflict.status == "superseded",
+                )
+            ) == 1
+
+        async with sessions() as db, db.begin():
+            second_alias = (
+                await db.execute(
+                    select(EntityAlias).where(EntityAlias.entity_id == second_entity_id)
+                )
+            ).scalars().one()
+            second_alias.status = "active"
+            job = await db.get(GraphExtractionJob, ids["job"])
+            await validate_job_candidates(db, job=job)
+        async with sessions() as db:
+            assert await db.scalar(
+                select(func.count()).select_from(GraphEntityMergeCandidate).where(
+                    GraphEntityMergeCandidate.status == "pending_review"
+                )
+            ) == 2
+            assert await db.scalar(
+                select(func.count()).select_from(GraphExtractionConflict).where(
+                    GraphExtractionConflict.conflict_type == "entity_merge_ambiguity",
+                    GraphExtractionConflict.status == "open",
+                )
+            ) == 1
     finally:
         await engine.dispose()
 
