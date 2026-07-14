@@ -167,8 +167,8 @@ if (Test-ProcessAlive $cleanPidFile) {
     Write-OK "Cleanup Worker started (PID $($proc.Id))"
 }
 
-# ── Start Graph Extractor Heartbeat Shell ─────────────────
-Write-Step "5/5 Starting Graph Extractor heartbeat shell"
+# ── Start Graph Extraction Worker ─────────────────────────
+Write-Step "5/5 Starting Graph Extraction Worker"
 
 $graphPidFile = Join-Path $pidDir "graph_extractor.pid"
 if (-not $graphExtractionEnabled) {
@@ -183,7 +183,7 @@ if (-not $graphExtractionEnabled) {
         -RedirectStandardOutput (Join-Path $logDir "graph_extractor_stdout.log") `
         -RedirectStandardError (Join-Path $logDir "graph_extractor_stderr.log")
     $proc.Id | Out-File -FilePath $graphPidFile -Encoding utf8 -NoNewline
-    Write-OK "Graph Extractor heartbeat shell started (PID $($proc.Id))"
+    Write-OK "Graph Extraction Worker started (PID $($proc.Id))"
 }
 
 # ── Summary ───────────────────────────────────────────────

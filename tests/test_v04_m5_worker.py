@@ -4,14 +4,22 @@ import asyncio
 import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
+import pytest
 from sqlalchemy.dialects import postgresql
 
 from app.models.graph_extraction_job import GraphExtractionJob
+from app.services.graph_extraction_provider import (
+    GraphExtractionProviderError,
+    ProviderResponse,
+)
 from app.services.graph_extraction_worker import (
+    PreparedGraphExtractionUnit,
     claim_graph_extraction_unit,
     lock_live_graph_extraction_claim,
     mark_claimed_unit_terminal,
+    process_graph_extraction_unit,
     recover_stale_graph_extraction_units,
     renew_graph_extraction_unit_lease,
 )
@@ -42,6 +50,9 @@ class _Result:
     def first(self):
         return self.rows[0] if self.rows else None
 
+    def all(self):
+        return list(self.rows)
+
 
 class FakeDB:
     def __init__(self, *, results=(), objects=None):
@@ -63,6 +74,12 @@ class FakeDB:
 
     async def flush(self):
         self.flush_count += 1
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
 
 
 def _unit():
@@ -176,12 +193,17 @@ def test_lease_renewal_is_fenced_and_refuses_lost_or_expired_claims():
 
 
 def test_stale_recovery_abandons_attempts_then_fails_or_requeues_units():
+    job = _job()
     db = FakeDB(
         results=[
+            _Result([JOB_ID]),
             _Result(rowcount=2),
             _Result(rowcount=1),
             _Result(rowcount=1),
+            _Result([("failed", 1), ("queued", 1)]),
         ]
+        ,
+        objects={(GraphExtractionJob, JOB_ID): job},
     )
 
     result = asyncio.run(
@@ -195,18 +217,21 @@ def test_stale_recovery_abandons_attempts_then_fails_or_requeues_units():
     assert result.abandoned_attempt_count == 2
     assert result.failed_unit_count == 1
     assert result.requeued_unit_count == 1
-    attempt_sql = str(db.statements[0]).lower()
-    failed_sql = str(db.statements[1]).lower()
-    requeue_sql = str(db.statements[2]).lower()
+    attempt_sql = str(db.statements[1]).lower()
+    failed_sql = str(db.statements[2]).lower()
+    requeue_sql = str(db.statements[3]).lower()
     assert "update extraction_raw_output_attempts" in attempt_sql
     assert "update graph_extraction_units" in failed_sql
     assert "update graph_extraction_units" in requeue_sql
     assert "model_attempt_count" in failed_sql
-    for statement in db.statements[1:]:
+    for statement in db.statements[2:4]:
         values = statement.compile().params.values()
         assert None in values
-    assert "failed" in db.statements[1].compile().params.values()
-    assert "queued" in db.statements[2].compile().params.values()
+    assert "failed" in db.statements[2].compile().params.values()
+    assert "queued" in db.statements[3].compile().params.values()
+    assert job.counts["failed"] == 1
+    assert job.counts["queued"] == 1
+    assert job.status == "processing"
 
 
 def test_live_claim_lock_and_terminal_write_both_require_the_same_token():
@@ -257,3 +282,275 @@ def test_live_claim_lock_and_terminal_write_both_require_the_same_token():
             now=NOW,
         )
     )
+
+
+def _prepared():
+    return PreparedGraphExtractionUnit(
+        unit_id=UNIT_ID,
+        job_id=JOB_ID,
+        context_snapshot_id=uuid.uuid4(),
+        claim_token=CLAIM_TOKEN,
+        messages=[{"role": "user", "content": "context"}],
+        model_config_snapshot={
+            "base_url": "https://provider.invalid/v1",
+            "model": "mock-model",
+            "timeout_seconds": 10.0,
+        },
+        model_config_hash="a" * 64,
+    )
+
+
+def _provider_response(content: str) -> ProviderResponse:
+    return ProviderResponse(
+        content=content,
+        provider_request_id="mock-request",
+        raw_response=content,
+        request_payload_hash="b" * 64,
+        input_token_count=1,
+        output_token_count=2,
+        latency_ms=3,
+        finish_reason="stop",
+    )
+
+
+class _SessionFactory:
+    def __init__(self):
+        self.sessions = []
+
+    def __call__(self):
+        session = FakeDB()
+        self.sessions.append(session)
+        return session
+
+
+def test_orchestration_calls_provider_outside_transactions_and_persists_valid_payload():
+    prepared = _prepared()
+    attempt = SimpleNamespace(id=uuid.uuid4())
+    provider = AsyncMock()
+    provider.extract.return_value = _provider_response(
+        '{"entities":[],"relations":[]}'
+    )
+    sessions = _SessionFactory()
+
+    with (
+        patch(
+            "app.services.graph_extraction_worker._prepare_graph_extraction_unit",
+            new=AsyncMock(return_value=prepared),
+        ),
+        patch(
+            "app.services.graph_extraction_worker._preflight_provider_call",
+            new=AsyncMock(),
+        ),
+        patch(
+            "app.services.graph_extraction_worker.create_pending_attempt",
+            new=AsyncMock(return_value=attempt),
+        ) as create_attempt,
+        patch(
+            "app.services.graph_extraction_worker.finalize_attempt",
+            new=AsyncMock(return_value=True),
+        ) as finalize,
+        patch(
+            "app.services.graph_extraction_worker._persist_candidate_result",
+            new=AsyncMock(return_value=True),
+        ) as persist,
+    ):
+        result = asyncio.run(
+            process_graph_extraction_unit(
+                sessions,
+                unit_id=UNIT_ID,
+                claim_token=CLAIM_TOKEN,
+                provider=provider,
+                lease_seconds=180,
+                renew_seconds=30,
+                max_attempts=3,
+            )
+        )
+
+    assert result.outcome == "succeeded"
+    assert result.ready_for_materialization is True
+    provider.extract.assert_awaited_once_with(prepared.messages)
+    create_attempt.assert_awaited_once()
+    completion = finalize.await_args.kwargs["completion"]
+    assert completion.request_status == "succeeded"
+    assert completion.parse_status == "valid"
+    persist.assert_awaited_once()
+
+
+@pytest.mark.parametrize("category", ["timeout", "network_error", "http_error"])
+def test_provider_failure_finalizes_attempt_and_fails_unit_without_candidate_write(
+    category,
+):
+    prepared = _prepared()
+    attempt = SimpleNamespace(id=uuid.uuid4())
+    provider = AsyncMock()
+    provider.extract.side_effect = GraphExtractionProviderError(
+        category,
+        "provider failed",
+        latency_ms=50,
+    )
+    sessions = _SessionFactory()
+
+    with (
+        patch(
+            "app.services.graph_extraction_worker._prepare_graph_extraction_unit",
+            new=AsyncMock(return_value=prepared),
+        ),
+        patch(
+            "app.services.graph_extraction_worker._preflight_provider_call",
+            new=AsyncMock(),
+        ),
+        patch(
+            "app.services.graph_extraction_worker.create_pending_attempt",
+            new=AsyncMock(return_value=attempt),
+        ),
+        patch(
+            "app.services.graph_extraction_worker.finalize_attempt",
+            new=AsyncMock(return_value=True),
+        ) as finalize,
+        patch(
+            "app.services.graph_extraction_worker._finish_claim_after_error",
+            new=AsyncMock(return_value=True),
+        ) as finish,
+        patch(
+            "app.services.graph_extraction_worker._persist_candidate_result",
+            new=AsyncMock(),
+        ) as persist,
+    ):
+        result = asyncio.run(
+            process_graph_extraction_unit(
+                sessions,
+                unit_id=UNIT_ID,
+                claim_token=CLAIM_TOKEN,
+                provider=provider,
+                max_attempts=3,
+            )
+        )
+
+    assert result.outcome == "failed"
+    completion = finalize.await_args.kwargs["completion"]
+    assert completion.request_status == category
+    finish.assert_awaited_once()
+    persist.assert_not_awaited()
+
+
+def test_invalid_json_is_a_protocol_failure_but_candidate_review_is_unit_success():
+    prepared = _prepared()
+    attempt = SimpleNamespace(id=uuid.uuid4())
+    provider = AsyncMock()
+    provider.extract.return_value = _provider_response("not-json")
+    sessions = _SessionFactory()
+
+    with (
+        patch(
+            "app.services.graph_extraction_worker._prepare_graph_extraction_unit",
+            new=AsyncMock(return_value=prepared),
+        ),
+        patch(
+            "app.services.graph_extraction_worker._preflight_provider_call",
+            new=AsyncMock(),
+        ),
+        patch(
+            "app.services.graph_extraction_worker.create_pending_attempt",
+            new=AsyncMock(return_value=attempt),
+        ),
+        patch(
+            "app.services.graph_extraction_worker.finalize_attempt",
+            new=AsyncMock(return_value=True),
+        ) as finalize,
+        patch(
+            "app.services.graph_extraction_worker._finish_claim_after_error",
+            new=AsyncMock(return_value=True),
+        ),
+        patch(
+            "app.services.graph_extraction_worker._persist_candidate_result",
+            new=AsyncMock(),
+        ) as persist,
+    ):
+        result = asyncio.run(
+            process_graph_extraction_unit(
+                sessions,
+                unit_id=UNIT_ID,
+                claim_token=CLAIM_TOKEN,
+                provider=provider,
+                max_attempts=3,
+            )
+        )
+
+    assert result.outcome == "failed"
+    completion = finalize.await_args.kwargs["completion"]
+    assert completion.request_status == "succeeded"
+    assert completion.parse_status == "invalid_json"
+    persist.assert_not_awaited()
+
+
+def test_lost_lease_discards_provider_output_before_attempt_or_candidate_finalize():
+    prepared = _prepared()
+    attempt = SimpleNamespace(id=uuid.uuid4())
+    sessions = _SessionFactory()
+    with (
+        patch(
+            "app.services.graph_extraction_worker._prepare_graph_extraction_unit",
+            new=AsyncMock(return_value=prepared),
+        ),
+        patch(
+            "app.services.graph_extraction_worker._preflight_provider_call",
+            new=AsyncMock(),
+        ),
+        patch(
+            "app.services.graph_extraction_worker.create_pending_attempt",
+            new=AsyncMock(return_value=attempt),
+        ),
+        patch(
+            "app.services.graph_extraction_worker._call_provider_with_lease_renewal",
+            new=AsyncMock(
+                return_value=(
+                    _provider_response('{"entities":[],"relations":[]}'),
+                    True,
+                )
+            ),
+        ),
+        patch(
+            "app.services.graph_extraction_worker.finalize_attempt",
+            new=AsyncMock(),
+        ) as finalize,
+        patch(
+            "app.services.graph_extraction_worker._persist_candidate_result",
+            new=AsyncMock(),
+        ) as persist,
+    ):
+        result = asyncio.run(
+            process_graph_extraction_unit(
+                sessions,
+                unit_id=UNIT_ID,
+                claim_token=CLAIM_TOKEN,
+                provider=AsyncMock(),
+            )
+        )
+
+    assert result.outcome == "lost_lease"
+    finalize.assert_not_awaited()
+    persist.assert_not_awaited()
+
+
+def test_watch_entrypoint_delegates_to_active_worker_with_m5_heartbeat(monkeypatch):
+    from app.services import graph_extraction_worker as worker_service
+    from app.services import heartbeat
+    from app.workers import graph_extractor
+
+    monkeypatch.setattr(graph_extractor.settings, "graph_extraction_enabled", True)
+    monkeypatch.setattr(graph_extractor, "validate_graph_extraction_startup", lambda _: None)
+    monkeypatch.setattr(heartbeat, "make_instance_id", lambda: "worker-instance")
+    monkeypatch.setattr(heartbeat, "heartbeat_loop", AsyncMock())
+    monkeypatch.setattr(heartbeat, "beat", AsyncMock(return_value=True))
+    active = AsyncMock()
+    monkeypatch.setattr(worker_service, "run_graph_extraction_worker", active)
+
+    asyncio.run(graph_extractor.run(watch=True))
+
+    active.assert_awaited_once()
+    metadata = active.await_args.kwargs["metadata"]
+    assert metadata == {
+        "watch": True,
+        "mode": "active_worker",
+        "milestone": "M5",
+    }

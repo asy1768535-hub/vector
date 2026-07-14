@@ -1,15 +1,51 @@
 from __future__ import annotations
 
+import asyncio
+import os
+import socket
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Literal
+from typing import Any, Literal
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
+from app.config import settings
+from app.db import async_session_factory
+from app.models.document import Document
+from app.models.document_revision import DocumentRevision
+from app.models.extraction_context_snapshot import ExtractionContextSnapshot
 from app.models.extraction_raw_output_attempt import ExtractionRawOutputAttempt
 from app.models.graph_extraction_job import GraphExtractionJob
 from app.models.graph_extraction_unit import GraphExtractionUnit
+from app.models.library import Library
+from app.models.ontology_version import OntologyVersion
+from app.services.graph_candidate_aggregation import (
+    canonical_graph_value_hash_v1,
+    recompute_job_candidate_aggregates,
+    stage_unit_candidate_occurrences,
+)
+from app.services.graph_candidate_routing import apply_job_candidate_routes
+from app.services.graph_candidate_validation import validate_job_candidates
+from app.services.graph_extraction_attempts import (
+    AttemptCompletion,
+    AttemptStateError,
+    create_pending_attempt,
+    finalize_attempt,
+)
+from app.services.graph_extraction_context import (
+    ContextBuildError,
+    build_context_snapshot,
+)
+from app.services.graph_extraction_parser import (
+    GraphExtractionParseError,
+    parse_graph_extraction_output,
+)
+from app.services.graph_extraction_prompt import build_graph_extraction_messages
+from app.services.graph_extraction_provider import (
+    DashScopeGraphExtractor,
+    GraphExtractionProviderError,
+)
 
 
 UnitTerminalStatus = Literal["succeeded", "failed", "cancelled"]
@@ -24,6 +60,35 @@ class StaleUnitRecoveryResult:
     @property
     def recovered_unit_count(self) -> int:
         return self.failed_unit_count + self.requeued_unit_count
+
+
+class GraphExtractionWorkerError(RuntimeError):
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(message)
+
+
+class LostGraphExtractionLease(GraphExtractionWorkerError):
+    def __init__(self) -> None:
+        super().__init__("lost_lease", "graph extraction Unit lease is no longer live")
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedGraphExtractionUnit:
+    unit_id: uuid.UUID
+    job_id: uuid.UUID
+    context_snapshot_id: uuid.UUID
+    claim_token: uuid.UUID
+    messages: list[dict[str, str]]
+    model_config_snapshot: dict[str, Any]
+    model_config_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class GraphExtractionProcessResult:
+    outcome: Literal["succeeded", "failed", "cancelled", "lost_lease"]
+    error_code: str | None = None
+    ready_for_materialization: bool = False
 
 
 def _utcnow() -> datetime:
@@ -200,6 +265,12 @@ async def recover_stale_graph_extraction_units(
     )
 
     async with db.begin():
+        affected_result = await db.execute(
+            select(GraphExtractionUnit.job_id)
+            .where(GraphExtractionUnit.id.in_(stale_unit_ids))
+            .distinct()
+        )
+        affected_job_ids = list(affected_result.scalars().all())
         abandoned = await db.execute(
             update(ExtractionRawOutputAttempt)
             .where(
@@ -251,8 +322,762 @@ async def recover_stale_graph_extraction_units(
                 updated_at=recovered_at,
             )
         )
+        for job_id in affected_job_ids:
+            job = await db.get(GraphExtractionJob, job_id, with_for_update=True)
+            if job is not None and job.status in {"queued", "processing"}:
+                await _refresh_graph_extraction_job_state(
+                    db,
+                    job=job,
+                    now=recovered_at,
+                )
     return StaleUnitRecoveryResult(
         abandoned_attempt_count=int(abandoned.rowcount or 0),
         failed_unit_count=int(failed.rowcount or 0),
         requeued_unit_count=int(requeued.rowcount or 0),
     )
+
+
+async def _load_live_scope(db, *, unit: GraphExtractionUnit):
+    job = await db.get(GraphExtractionJob, unit.job_id, with_for_update=True)
+    if job is None or job.status != "processing":
+        raise GraphExtractionWorkerError(
+            "job_not_processing",
+            "graph extraction Job is no longer processing",
+        )
+    library = await db.get(Library, job.library_id)
+    document = await db.get(Document, job.document_id)
+    revision = await db.get(DocumentRevision, job.document_revision_id)
+    ontology = await db.get(OntologyVersion, job.ontology_version_id)
+    _require_live_scope_safety(
+        job=job,
+        unit=unit,
+        library=library,
+        document=document,
+        revision=revision,
+        ontology=ontology,
+    )
+    return job, library, document, revision, ontology
+
+
+def _require_live_scope_safety(
+    *,
+    job: GraphExtractionJob,
+    unit: GraphExtractionUnit,
+    library: Library | None,
+    document: Document | None,
+    revision: DocumentRevision | None,
+    ontology: OntologyVersion | None,
+) -> None:
+    if not settings.graph_extraction_enabled:
+        raise GraphExtractionWorkerError(
+            "graph_extraction_disabled",
+            "graph extraction is disabled globally",
+        )
+    if library is None or getattr(library, "deleted_at", None) is not None:
+        raise GraphExtractionWorkerError("library_unavailable", "Library is unavailable")
+    if not library.graph_extraction_enabled or not library.external_llm_enabled:
+        raise GraphExtractionWorkerError(
+            "library_opt_out",
+            "Library no longer permits graph extraction",
+        )
+    allowed_levels = library.graph_extraction_allowed_security_levels
+    if not isinstance(allowed_levels, list) or not allowed_levels:
+        raise GraphExtractionWorkerError(
+            "security_allowlist_empty",
+            "Library graph extraction security allowlist is empty",
+        )
+    if (
+        document is None
+        or document.library_id != library.id
+        or document.deleted_at is not None
+        or document.current_revision_id != job.document_revision_id
+        or document.status != "ready"
+    ):
+        raise GraphExtractionWorkerError(
+            "document_not_current",
+            "graph extraction document is deleted or no longer current",
+        )
+    if (
+        revision is None
+        or revision.library_id != library.id
+        or revision.document_id != document.id
+        or revision.id != job.document_revision_id
+        or revision.status != "ready"
+    ):
+        raise GraphExtractionWorkerError(
+            "revision_not_ready",
+            "graph extraction revision is not the current ready revision",
+        )
+    if (
+        not isinstance(revision.security_level, str)
+        or not revision.security_level.strip()
+        or revision.security_level.strip() not in allowed_levels
+    ):
+        raise GraphExtractionWorkerError(
+            "security_level_denied",
+            "revision security level is no longer authorized",
+        )
+    if (
+        ontology is None
+        or ontology.id != job.ontology_version_id
+        or ontology.library_id != library.id
+        or ontology.status != "active"
+    ):
+        raise GraphExtractionWorkerError(
+            "active_ontology_changed",
+            "frozen ontology is no longer active",
+        )
+    if (
+        unit.job_id != job.id
+        or unit.library_id != library.id
+        or unit.document_revision_id != revision.id
+    ):
+        raise GraphExtractionWorkerError(
+            "unit_scope_mismatch",
+            "graph extraction Unit scope does not match its Job",
+        )
+
+
+def _context_limits(job: GraphExtractionJob) -> tuple[int, int, int]:
+    snapshot = job.model_config_snapshot
+    try:
+        config_hash = (
+            canonical_graph_value_hash_v1(snapshot)
+            if isinstance(snapshot, dict)
+            else None
+        )
+    except (TypeError, ValueError):
+        config_hash = None
+    if config_hash is None or job.model_config_hash != config_hash:
+        raise GraphExtractionWorkerError(
+            "model_config_hash_mismatch",
+            "frozen model configuration is malformed",
+        )
+    previous = snapshot.get("previous_chunks")
+    following = snapshot.get("next_chunks")
+    maximum = snapshot.get("max_context_chars")
+    if (
+        isinstance(previous, bool)
+        or not isinstance(previous, int)
+        or previous < 0
+        or isinstance(following, bool)
+        or not isinstance(following, int)
+        or following < 0
+        or isinstance(maximum, bool)
+        or not isinstance(maximum, int)
+        or maximum < 1
+    ):
+        raise GraphExtractionWorkerError(
+            "invalid_context_policy",
+            "frozen Context limits are malformed",
+        )
+    return previous, following, maximum
+
+
+async def _prepare_graph_extraction_unit(
+    session_factory,
+    *,
+    unit_id: uuid.UUID,
+    claim_token: uuid.UUID,
+) -> PreparedGraphExtractionUnit:
+    async with session_factory() as db:
+        async with db.begin():
+            unit = await lock_live_graph_extraction_claim(
+                db,
+                unit_id=unit_id,
+                claim_token=claim_token,
+            )
+            if unit is None:
+                raise LostGraphExtractionLease()
+            job, _library, _document, _revision, _ontology = await _load_live_scope(
+                db,
+                unit=unit,
+            )
+            previous, following, maximum = _context_limits(job)
+            job.current_stage = "building_context"
+            snapshot = await build_context_snapshot(
+                db,
+                job=job,
+                unit=unit,
+                previous_chunks=previous,
+                next_chunks=following,
+                max_context_chars=maximum,
+            )
+            if snapshot.context_text is None or snapshot.purged_at is not None:
+                raise GraphExtractionWorkerError(
+                    "context_unavailable",
+                    "graph extraction Context is unavailable",
+                )
+            messages = build_graph_extraction_messages(
+                context_text=snapshot.context_text,
+                ontology_snapshot=job.ontology_snapshot,
+            )
+            job.current_stage = "extracting"
+            await db.flush()
+            return PreparedGraphExtractionUnit(
+                unit_id=unit.id,
+                job_id=job.id,
+                context_snapshot_id=snapshot.id,
+                claim_token=claim_token,
+                messages=messages,
+                model_config_snapshot=dict(job.model_config_snapshot),
+                model_config_hash=job.model_config_hash,
+            )
+
+
+async def _preflight_provider_call(
+    session_factory,
+    *,
+    unit_id: uuid.UUID,
+    claim_token: uuid.UUID,
+) -> None:
+    async with session_factory() as db:
+        async with db.begin():
+            unit = await lock_live_graph_extraction_claim(
+                db,
+                unit_id=unit_id,
+                claim_token=claim_token,
+            )
+            if unit is None:
+                raise LostGraphExtractionLease()
+            job, _library, _document, _revision, _ontology = await _load_live_scope(
+                db,
+                unit=unit,
+            )
+            job.current_stage = "extracting"
+            await db.flush()
+
+
+def _request_payload_hash(prepared: PreparedGraphExtractionUnit) -> str:
+    return canonical_graph_value_hash_v1(
+        {
+            "messages": prepared.messages,
+            "model_config_hash": prepared.model_config_hash,
+        }
+    )
+
+
+def _configured_provider(prepared: PreparedGraphExtractionUnit):
+    snapshot = prepared.model_config_snapshot
+    base_url = snapshot.get("base_url")
+    model = snapshot.get("model")
+    timeout = snapshot.get("timeout_seconds")
+    if (
+        not isinstance(base_url, str)
+        or not base_url.strip()
+        or not isinstance(model, str)
+        or not model.strip()
+        or isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or timeout <= 0
+    ):
+        raise GraphExtractionWorkerError(
+            "provider_not_configured",
+            "frozen Provider configuration is invalid",
+        )
+    api_key = settings.graph_extraction_api_key.get_secret_value().strip()
+    if not api_key:
+        raise GraphExtractionWorkerError(
+            "provider_not_configured",
+            "graph extraction Provider credential is unavailable",
+        )
+    return DashScopeGraphExtractor(
+        base_url=base_url,
+        model=model,
+        api_key=api_key,
+        timeout_seconds=float(timeout),
+    )
+
+
+async def _call_provider_with_lease_renewal(
+    session_factory,
+    *,
+    provider,
+    prepared: PreparedGraphExtractionUnit,
+    lease_seconds: int,
+    renew_seconds: int,
+):
+    _require_positive_int(lease_seconds, label="lease_seconds")
+    _require_positive_int(renew_seconds, label="renew_seconds")
+    lease_lost = False
+
+    async def renew_loop() -> None:
+        nonlocal lease_lost
+        while True:
+            await asyncio.sleep(renew_seconds)
+            async with session_factory() as db:
+                renewed = await renew_graph_extraction_unit_lease(
+                    db,
+                    unit_id=prepared.unit_id,
+                    claim_token=prepared.claim_token,
+                    lease_seconds=lease_seconds,
+                )
+            if not renewed:
+                lease_lost = True
+                return
+
+    renew_task = asyncio.create_task(renew_loop())
+    try:
+        response = await provider.extract(prepared.messages)
+    finally:
+        renew_task.cancel()
+        try:
+            await renew_task
+        except asyncio.CancelledError:
+            pass
+    return response, lease_lost
+
+
+async def _refresh_graph_extraction_job_state(
+    db,
+    *,
+    job: GraphExtractionJob,
+    now: datetime,
+) -> bool:
+    result = await db.execute(
+        select(GraphExtractionUnit.status, func.count(GraphExtractionUnit.id))
+        .where(GraphExtractionUnit.job_id == job.id)
+        .group_by(GraphExtractionUnit.status)
+    )
+    by_status = {status: int(count) for status, count in result.all()}
+    counts = {
+        "total": sum(by_status.values()),
+        "queued": by_status.get("queued", 0),
+        "processing": by_status.get("processing", 0),
+        "succeeded": by_status.get("succeeded", 0),
+        "failed": by_status.get("failed", 0),
+        "cancelled": by_status.get("cancelled", 0),
+    }
+    job.counts = counts
+    pending = counts["queued"] + counts["processing"]
+    if pending:
+        job.status = "processing"
+        job.current_stage = "extracting"
+        job.finished_at = None
+        return False
+    if counts["failed"] or counts["cancelled"]:
+        successful = counts["succeeded"] > 0
+        job.status = "partially_succeeded" if successful else "failed"
+        job.current_stage = "finalizing"
+        job.error_code = "unit_failures"
+        job.error_message = None
+        job.finished_at = now
+        return False
+    if job.execution_mode == "production":
+        job.status = "processing"
+        job.current_stage = "materializing"
+        job.error_code = None
+        job.error_message = None
+        job.finished_at = None
+        return True
+    job.status = "succeeded"
+    job.current_stage = "finalizing"
+    job.error_code = None
+    job.error_message = None
+    job.finished_at = now
+    return False
+
+
+def _set_unit_terminal(
+    unit: GraphExtractionUnit,
+    *,
+    status: UnitTerminalStatus,
+    retryable: bool,
+    error_code: str | None,
+    error_message: str | None,
+    now: datetime,
+) -> None:
+    unit.status = status
+    unit.retryable = retryable
+    unit.worker_id = None
+    unit.claim_token = None
+    unit.claimed_at = None
+    unit.lease_expires_at = None
+    unit.error_code = error_code[:64] if error_code else None
+    unit.error_message = error_message[:1000] if error_message else None
+    unit.finished_at = now
+
+
+async def _finish_claim_after_error(
+    session_factory,
+    *,
+    unit_id: uuid.UUID,
+    claim_token: uuid.UUID,
+    max_attempts: int,
+    status: UnitTerminalStatus,
+    error_code: str,
+    error_message: str | None = None,
+    abandon_pending: bool = False,
+) -> bool:
+    finished_at = _utcnow()
+    async with session_factory() as db:
+        async with db.begin():
+            unit = await lock_live_graph_extraction_claim(
+                db,
+                unit_id=unit_id,
+                claim_token=claim_token,
+                now=finished_at,
+            )
+            if unit is None:
+                return False
+            job = await db.get(GraphExtractionJob, unit.job_id, with_for_update=True)
+            if job is None:
+                return False
+            if abandon_pending:
+                await db.execute(
+                    update(ExtractionRawOutputAttempt)
+                    .where(
+                        ExtractionRawOutputAttempt.extraction_unit_id == unit.id,
+                        ExtractionRawOutputAttempt.request_status == "pending",
+                        ExtractionRawOutputAttempt.claim_token == claim_token,
+                    )
+                    .values(
+                        request_status="abandoned",
+                        abandoned_at=finished_at,
+                        abandoned_reason="unit_cancelled",
+                        updated_at=finished_at,
+                    )
+                )
+            retryable = status == "failed" and unit.model_attempt_count < max_attempts
+            _set_unit_terminal(
+                unit,
+                status=status,
+                retryable=retryable,
+                error_code=error_code,
+                error_message=error_message,
+                now=finished_at,
+            )
+            await db.flush()
+            await _refresh_graph_extraction_job_state(db, job=job, now=finished_at)
+            return True
+
+
+async def _persist_candidate_result(
+    session_factory,
+    *,
+    prepared: PreparedGraphExtractionUnit,
+    payload,
+) -> bool | None:
+    completed_at = _utcnow()
+    async with session_factory() as db:
+        async with db.begin():
+            unit = await lock_live_graph_extraction_claim(
+                db,
+                unit_id=prepared.unit_id,
+                claim_token=prepared.claim_token,
+                now=completed_at,
+            )
+            if unit is None:
+                return None
+            job, _library, _document, _revision, _ontology = await _load_live_scope(
+                db,
+                unit=unit,
+            )
+            snapshot = await db.get(
+                ExtractionContextSnapshot,
+                prepared.context_snapshot_id,
+            )
+            if (
+                snapshot is None
+                or snapshot.extraction_unit_id != unit.id
+                or snapshot.purged_at is not None
+            ):
+                raise GraphExtractionWorkerError(
+                    "context_unavailable",
+                    "graph extraction Context is missing or purged",
+                )
+
+            job.current_stage = "binding_evidence"
+            await stage_unit_candidate_occurrences(
+                db,
+                job=job,
+                unit=unit,
+                snapshot=snapshot,
+                payload=payload,
+            )
+            job.current_stage = "aggregating"
+            aggregate = await recompute_job_candidate_aggregates(db, job=job)
+            job.current_stage = "validating"
+            validation = await validate_job_candidates(db, job=job)
+            job.current_stage = "scoring"
+            routes = await apply_job_candidate_routes(db, job=job)
+            statistics = dict(job.statistics or {})
+            statistics["candidate_pipeline"] = {
+                "entity_candidate_count": aggregate.entity_candidate_count,
+                "relation_candidate_count": aggregate.relation_candidate_count,
+                "property_conflict_count": aggregate.property_conflict_count,
+                "validation_rejected_count": validation.rejected_count,
+                "validation_pending_review_count": validation.pending_review_count,
+                "validated_count": routes.validated_count,
+                "pending_review_count": routes.pending_review_count,
+                "rejected_count": routes.rejected_count,
+            }
+            job.statistics = statistics
+            _set_unit_terminal(
+                unit,
+                status="succeeded",
+                retryable=False,
+                error_code=None,
+                error_message=None,
+                now=completed_at,
+            )
+            await db.flush()
+            return await _refresh_graph_extraction_job_state(
+                db,
+                job=job,
+                now=completed_at,
+            )
+
+
+async def process_graph_extraction_unit(
+    session_factory,
+    *,
+    unit_id: uuid.UUID,
+    claim_token: uuid.UUID,
+    provider=None,
+    lease_seconds: int | None = None,
+    renew_seconds: int | None = None,
+    max_attempts: int | None = None,
+) -> GraphExtractionProcessResult:
+    lease_seconds = lease_seconds or settings.graph_extraction_unit_lease_seconds
+    renew_seconds = renew_seconds or settings.graph_extraction_unit_lease_renew_seconds
+    max_attempts = max_attempts or settings.graph_extraction_worker_max_model_attempts
+    try:
+        prepared = await _prepare_graph_extraction_unit(
+            session_factory,
+            unit_id=unit_id,
+            claim_token=claim_token,
+        )
+    except LostGraphExtractionLease:
+        return GraphExtractionProcessResult("lost_lease", "lost_lease")
+    except GraphExtractionWorkerError as exc:
+        finished = await _finish_claim_after_error(
+            session_factory,
+            unit_id=unit_id,
+            claim_token=claim_token,
+            max_attempts=max_attempts,
+            status="cancelled",
+            error_code=exc.code,
+            abandon_pending=True,
+        )
+        outcome = "cancelled" if finished else "lost_lease"
+        return GraphExtractionProcessResult(outcome, exc.code)
+    except ContextBuildError:
+        finished = await _finish_claim_after_error(
+            session_factory,
+            unit_id=unit_id,
+            claim_token=claim_token,
+            max_attempts=max_attempts,
+            status="failed",
+            error_code="context_build_failed",
+        )
+        outcome = "failed" if finished else "lost_lease"
+        return GraphExtractionProcessResult(outcome, "context_build_failed")
+
+    request_hash = _request_payload_hash(prepared)
+    try:
+        async with session_factory() as db:
+            attempt = await create_pending_attempt(
+                db,
+                unit_id=unit_id,
+                context_snapshot_id=prepared.context_snapshot_id,
+                claim_token=claim_token,
+                request_payload_hash=request_hash,
+                max_attempts=max_attempts,
+            )
+    except AttemptStateError:
+        finished = await _finish_claim_after_error(
+            session_factory,
+            unit_id=unit_id,
+            claim_token=claim_token,
+            max_attempts=max_attempts,
+            status="failed",
+            error_code="attempt_preparation_failed",
+        )
+        outcome = "failed" if finished else "lost_lease"
+        return GraphExtractionProcessResult(outcome, "attempt_preparation_failed")
+
+    try:
+        await _preflight_provider_call(
+            session_factory,
+            unit_id=unit_id,
+            claim_token=claim_token,
+        )
+        active_provider = provider or _configured_provider(prepared)
+    except LostGraphExtractionLease:
+        return GraphExtractionProcessResult("lost_lease", "lost_lease")
+    except GraphExtractionWorkerError as exc:
+        finished = await _finish_claim_after_error(
+            session_factory,
+            unit_id=unit_id,
+            claim_token=claim_token,
+            max_attempts=max_attempts,
+            status="cancelled",
+            error_code=exc.code,
+            abandon_pending=True,
+        )
+        outcome = "cancelled" if finished else "lost_lease"
+        return GraphExtractionProcessResult(outcome, exc.code)
+
+    try:
+        response, lease_lost = await _call_provider_with_lease_renewal(
+            session_factory,
+            provider=active_provider,
+            prepared=prepared,
+            lease_seconds=lease_seconds,
+            renew_seconds=renew_seconds,
+        )
+    except GraphExtractionProviderError as exc:
+        completion = AttemptCompletion(
+            request_status=exc.category,
+            latency_ms=exc.latency_ms,
+        )
+        async with session_factory() as db:
+            finalized = await finalize_attempt(
+                db,
+                attempt_id=attempt.id,
+                claim_token=claim_token,
+                completion=completion,
+            )
+        if not finalized:
+            return GraphExtractionProcessResult("lost_lease", "lost_lease")
+        error_code = f"provider_{exc.category}"
+        finished = await _finish_claim_after_error(
+            session_factory,
+            unit_id=unit_id,
+            claim_token=claim_token,
+            max_attempts=max_attempts,
+            status="failed",
+            error_code=error_code,
+        )
+        outcome = "failed" if finished else "lost_lease"
+        return GraphExtractionProcessResult(outcome, error_code)
+
+    if lease_lost:
+        return GraphExtractionProcessResult("lost_lease", "lost_lease")
+
+    payload = None
+    parse_error = None
+    try:
+        payload = parse_graph_extraction_output(response.content)
+        parse_status = "valid"
+    except GraphExtractionParseError as exc:
+        parse_status = exc.parse_status
+        parse_error = str(exc)
+    completion = AttemptCompletion(
+        request_status="succeeded",
+        parse_status=parse_status,
+        provider_request_id=response.provider_request_id,
+        raw_response=response.raw_response,
+        parsed_response=(payload.model_dump(mode="json") if payload is not None else None),
+        parse_error=parse_error,
+        input_token_count=response.input_token_count,
+        output_token_count=response.output_token_count,
+        latency_ms=response.latency_ms,
+        finish_reason=response.finish_reason,
+    )
+    async with session_factory() as db:
+        finalized = await finalize_attempt(
+            db,
+            attempt_id=attempt.id,
+            claim_token=claim_token,
+            completion=completion,
+        )
+    if not finalized:
+        return GraphExtractionProcessResult("lost_lease", "lost_lease")
+    if payload is None:
+        error_code = f"parse_{parse_status}"
+        finished = await _finish_claim_after_error(
+            session_factory,
+            unit_id=unit_id,
+            claim_token=claim_token,
+            max_attempts=max_attempts,
+            status="failed",
+            error_code=error_code,
+        )
+        outcome = "failed" if finished else "lost_lease"
+        return GraphExtractionProcessResult(outcome, error_code)
+
+    try:
+        ready = await _persist_candidate_result(
+            session_factory,
+            prepared=prepared,
+            payload=payload,
+        )
+    except GraphExtractionWorkerError as exc:
+        finished = await _finish_claim_after_error(
+            session_factory,
+            unit_id=unit_id,
+            claim_token=claim_token,
+            max_attempts=max_attempts,
+            status="cancelled",
+            error_code=exc.code,
+        )
+        outcome = "cancelled" if finished else "lost_lease"
+        return GraphExtractionProcessResult(outcome, exc.code)
+    except Exception:  # noqa: BLE001
+        finished = await _finish_claim_after_error(
+            session_factory,
+            unit_id=unit_id,
+            claim_token=claim_token,
+            max_attempts=max_attempts,
+            status="failed",
+            error_code="candidate_processing_failed",
+        )
+        outcome = "failed" if finished else "lost_lease"
+        return GraphExtractionProcessResult(outcome, "candidate_processing_failed")
+    if ready is None:
+        return GraphExtractionProcessResult("lost_lease", "lost_lease")
+    return GraphExtractionProcessResult(
+        "succeeded",
+        ready_for_materialization=ready,
+    )
+
+
+def graph_extraction_worker_id() -> str:
+    return f"{socket.gethostname()}-{os.getpid()}"
+
+
+async def run_graph_extraction_worker(
+    *,
+    watch: bool,
+    metadata: dict[str, Any] | None = None,
+    session_factory=async_session_factory,
+) -> None:
+    worker_id = graph_extraction_worker_id()
+    metadata = metadata if metadata is not None else {}
+    metadata.setdefault("claimed", 0)
+    metadata.setdefault("succeeded", 0)
+    metadata.setdefault("failed", 0)
+    metadata.setdefault("cancelled", 0)
+    metadata.setdefault("lost_lease", 0)
+    while True:
+        async with session_factory() as db:
+            recovery = await recover_stale_graph_extraction_units(
+                db,
+                max_attempts=settings.graph_extraction_worker_max_model_attempts,
+            )
+        metadata["stale_recovered"] = recovery.recovered_unit_count
+        async with session_factory() as db:
+            unit = await claim_graph_extraction_unit(
+                db,
+                worker_id=worker_id,
+                lease_seconds=settings.graph_extraction_unit_lease_seconds,
+                max_attempts=settings.graph_extraction_worker_max_model_attempts,
+            )
+        if unit is None:
+            if not watch:
+                return
+            await asyncio.sleep(settings.graph_extraction_worker_poll_seconds)
+            continue
+        metadata["claimed"] += 1
+        token = unit.claim_token
+        if token is None:
+            metadata["lost_lease"] += 1
+            continue
+        result = await process_graph_extraction_unit(
+            session_factory,
+            unit_id=unit.id,
+            claim_token=token,
+        )
+        metadata[result.outcome] += 1

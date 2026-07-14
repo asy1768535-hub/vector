@@ -1,4 +1,4 @@
-"""M1 graph extractor process shell: heartbeat only, no Unit consumption."""
+"""Graph extraction worker process entry point."""
 from __future__ import annotations
 
 import argparse
@@ -21,11 +21,11 @@ async def run(*, watch: bool) -> None:
     from app.services import heartbeat
 
     instance_id = heartbeat.make_instance_id()
-    metadata = {
-        "watch": watch,
-        "mode": "heartbeat_only",
-        "milestone": "M1",
-    }
+    metadata = (
+        {"watch": True, "mode": "active_worker", "milestone": "M5"}
+        if watch
+        else {"watch": False, "mode": "heartbeat_only", "milestone": "M1"}
+    )
     if not watch:
         await heartbeat.beat(
             "graph_extractor",
@@ -47,6 +47,8 @@ async def run(*, watch: bool) -> None:
         )
         return
 
+    from app.services import graph_extraction_worker as worker_service
+
     stop_event = asyncio.Event()
     task = asyncio.create_task(
         heartbeat.heartbeat_loop(
@@ -60,8 +62,10 @@ async def run(*, watch: bool) -> None:
         )
     )
     try:
-        while True:
-            await asyncio.sleep(settings.graph_extraction_worker_poll_seconds)
+        await worker_service.run_graph_extraction_worker(
+            watch=True,
+            metadata=metadata,
+        )
     finally:
         stop_event.set()
         await heartbeat.beat(
@@ -82,7 +86,7 @@ async def run(*, watch: bool) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="M1 graph extractor heartbeat shell; does not consume Units."
+        description="Graph extraction worker. Use --watch for active Unit consumption."
     )
     parser.add_argument("--watch", action="store_true")
     args = parser.parse_args()
