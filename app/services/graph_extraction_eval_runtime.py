@@ -219,6 +219,21 @@ async def create_clean_eval_database(admin_dsn: str, database_name: str) -> URL:
     return _database_url(admin_dsn, name)
 
 
+async def drop_eval_database(admin_dsn: str, database_name: str) -> None:
+    name = validate_eval_database_name(database_name)
+    admin_url = make_url(admin_dsn).set(drivername="postgresql+asyncpg")
+    connection = await _connect(admin_url)
+    try:
+        await connection.execute(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+            "WHERE datname = $1 AND pid <> pg_backend_pid()",
+            name,
+        )
+        await connection.execute(f'DROP DATABASE IF EXISTS "{name}"')
+    finally:
+        await connection.close()
+
+
 def upgrade_eval_database(database_url: URL, *, repository_root: Path) -> None:
     original = (
         settings.db_host,
