@@ -24,8 +24,10 @@ from app.services.graph_extraction_jobs import (
     GraphExtractionUnitPlan,
     build_full_rerun_idempotency_key,
     build_ontology_rule_snapshot,
+    cancel_graph_extraction_job,
     create_graph_extraction_job,
     plan_graph_extraction_units,
+    retry_graph_extraction_job,
 )
 
 
@@ -36,8 +38,9 @@ ONTOLOGY_ID = uuid.UUID("40000000-0000-0000-0000-000000000001")
 
 
 class _Result:
-    def __init__(self, rows=()):
+    def __init__(self, rows=(), *, rowcount=0):
         self.rows = list(rows)
+        self.rowcount = rowcount
 
     def scalars(self):
         return self
@@ -54,13 +57,16 @@ class FakeDB:
         self.objects = objects or {}
         self.query_rows = list(query_rows or [])
         self.added = []
+        self.statements = []
 
     async def get(self, model, object_id):
         return self.objects.get((model, object_id))
 
-    async def execute(self, _statement):
+    async def execute(self, statement):
+        self.statements.append(statement)
         assert self.query_rows, "unexpected database query"
-        return _Result(self.query_rows.pop(0))
+        value = self.query_rows.pop(0)
+        return value if isinstance(value, _Result) else _Result(value)
 
     def add(self, value):
         self.added.append(value)
@@ -550,3 +556,89 @@ def test_new_full_rerun_rejects_a_source_job_from_another_scope(monkeypatch):
             )
         )
     assert exc_info.value.code == "rerun_source_not_found"
+
+
+def test_ordinary_retry_requeues_only_failed_retryable_units_in_the_same_job():
+    job = SimpleNamespace(
+        id=uuid.uuid4(),
+        library_id=LIB_ID,
+        status="failed",
+        current_stage="finalizing",
+        retry_generation=2,
+        error_code="unit_failures",
+        error_message=None,
+        finished_at=object(),
+        counts={},
+    )
+    unit = SimpleNamespace(
+        status="failed",
+        retryable=True,
+        worker_id=None,
+        claim_token=None,
+        claimed_at=None,
+        lease_expires_at=None,
+        error_code="provider_timeout",
+        error_message=None,
+        finished_at=object(),
+    )
+    db = FakeDB(query_rows=[[job], [unit], [("queued", 1)]])
+
+    result = asyncio.run(
+        retry_graph_extraction_job(
+            db,
+            library=_library(),
+            job_id=job.id,
+            max_attempts=3,
+        )
+    )
+
+    assert result is job
+    assert job.status == "queued"
+    assert job.retry_generation == 3
+    assert unit.status == "queued"
+    assert unit.retryable is False
+    assert job.counts["queued"] == 1
+    assert not any(isinstance(row, GraphExtractionJob) for row in db.added)
+
+
+def test_cancel_orders_attempt_then_unit_then_job_state_and_preserves_terminal_units():
+    job = SimpleNamespace(
+        id=uuid.uuid4(),
+        library_id=LIB_ID,
+        status="processing",
+        current_stage="extracting",
+        error_code=None,
+        error_message=None,
+        finished_at=None,
+        counts={},
+    )
+    db = FakeDB(
+        query_rows=[
+            [job],
+            _Result(rowcount=1),
+            _Result(rowcount=2),
+            [("cancelled", 2), ("succeeded", 1)],
+        ]
+    )
+
+    result = asyncio.run(
+        cancel_graph_extraction_job(
+            db,
+            library=_library(),
+            job_id=job.id,
+        )
+    )
+
+    assert result is job
+    assert "update extraction_raw_output_attempts" in str(db.statements[1]).lower()
+    assert "update graph_extraction_units" in str(db.statements[2]).lower()
+    assert ["queued", "processing"] in db.statements[2].compile().params.values()
+    assert job.status == "cancelled"
+    assert job.counts == {
+        "total": 3,
+        "queued": 0,
+        "processing": 0,
+        "succeeded": 1,
+        "failed": 0,
+        "cancelled": 2,
+    }

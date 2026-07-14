@@ -5,10 +5,11 @@ import re
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 
 from app.config import settings
 from app.models.attribute_definition import AttributeDefinition
@@ -18,6 +19,7 @@ from app.models.document import Document
 from app.models.document_revision import DocumentRevision
 from app.models.entity_type import EntityType
 from app.models.evidence_unit import EvidenceUnit
+from app.models.extraction_raw_output_attempt import ExtractionRawOutputAttempt
 from app.models.graph_extraction_job import GraphExtractionJob
 from app.models.graph_extraction_unit import GraphExtractionUnit
 from app.models.library import Library
@@ -858,4 +860,161 @@ async def create_graph_extraction_job(
             )
         )
     await db.flush()
+    return job
+
+
+async def get_graph_extraction_job(
+    db,
+    *,
+    library: Library,
+    job_id: uuid.UUID,
+    for_update: bool = False,
+) -> GraphExtractionJob:
+    statement = select(GraphExtractionJob).where(
+        GraphExtractionJob.id == job_id,
+        GraphExtractionJob.library_id == library.id,
+    )
+    if for_update:
+        statement = statement.with_for_update()
+    result = await db.execute(statement)
+    job = result.scalars().first()
+    if job is None:
+        _fail("job_not_found", "graph extraction Job was not found")
+    return job
+
+
+async def _job_unit_counts(db, *, job_id: uuid.UUID) -> dict[str, int]:
+    result = await db.execute(
+        select(GraphExtractionUnit.status, func.count(GraphExtractionUnit.id))
+        .where(GraphExtractionUnit.job_id == job_id)
+        .group_by(GraphExtractionUnit.status)
+    )
+    by_status = {status: int(count) for status, count in result.all()}
+    return {
+        "total": sum(by_status.values()),
+        "queued": by_status.get("queued", 0),
+        "processing": by_status.get("processing", 0),
+        "succeeded": by_status.get("succeeded", 0),
+        "failed": by_status.get("failed", 0),
+        "cancelled": by_status.get("cancelled", 0),
+    }
+
+
+async def retry_graph_extraction_job(
+    db,
+    *,
+    library: Library,
+    job_id: uuid.UUID,
+    max_attempts: int | None = None,
+    now: datetime | None = None,
+) -> GraphExtractionJob:
+    max_attempts = max_attempts or settings.graph_extraction_worker_max_model_attempts
+    if isinstance(max_attempts, bool) or not isinstance(max_attempts, int) or max_attempts < 1:
+        _fail("invalid_attempt_budget", "model attempt budget must be positive")
+    retried_at = now or datetime.now(timezone.utc)
+    job = await get_graph_extraction_job(
+        db,
+        library=library,
+        job_id=job_id,
+        for_update=True,
+    )
+    if job.status not in {"failed", "partially_succeeded"}:
+        _fail("job_not_retryable", "graph extraction Job is not retryable")
+    result = await db.execute(
+        select(GraphExtractionUnit)
+        .where(
+            GraphExtractionUnit.job_id == job.id,
+            GraphExtractionUnit.status == "failed",
+            GraphExtractionUnit.retryable.is_(True),
+            GraphExtractionUnit.model_attempt_count < max_attempts,
+        )
+        .order_by(GraphExtractionUnit.ordinal)
+        .with_for_update()
+    )
+    units = list(result.scalars().all())
+    if not units:
+        _fail("no_retryable_units", "no failed Units have remaining attempt budget")
+    for unit in units:
+        unit.status = "queued"
+        unit.retryable = False
+        unit.worker_id = None
+        unit.claim_token = None
+        unit.claimed_at = None
+        unit.lease_expires_at = None
+        unit.error_code = None
+        unit.error_message = None
+        unit.finished_at = None
+    job.status = "queued"
+    job.current_stage = "preparing"
+    job.retry_generation += 1
+    job.error_code = None
+    job.error_message = None
+    job.finished_at = None
+    job.updated_at = retried_at
+    await db.flush()
+    job.counts = await _job_unit_counts(db, job_id=job.id)
+    return job
+
+
+async def cancel_graph_extraction_job(
+    db,
+    *,
+    library: Library,
+    job_id: uuid.UUID,
+    now: datetime | None = None,
+) -> GraphExtractionJob:
+    cancelled_at = now or datetime.now(timezone.utc)
+    job = await get_graph_extraction_job(
+        db,
+        library=library,
+        job_id=job_id,
+        for_update=True,
+    )
+    if job.status == "cancelled":
+        return job
+    if job.status not in {"queued", "processing"}:
+        _fail("job_not_cancellable", "graph extraction Job is already terminal")
+    unit_ids = select(GraphExtractionUnit.id).where(
+        GraphExtractionUnit.job_id == job.id
+    )
+    await db.execute(
+        update(ExtractionRawOutputAttempt)
+        .where(
+            ExtractionRawOutputAttempt.extraction_unit_id.in_(unit_ids),
+            ExtractionRawOutputAttempt.request_status == "pending",
+        )
+        .values(
+            request_status="abandoned",
+            abandoned_at=cancelled_at,
+            abandoned_reason="unit_cancelled",
+            updated_at=cancelled_at,
+        )
+    )
+    await db.execute(
+        update(GraphExtractionUnit)
+        .where(
+            GraphExtractionUnit.job_id == job.id,
+            GraphExtractionUnit.status.in_(("queued", "processing")),
+        )
+        .values(
+            status="cancelled",
+            retryable=False,
+            worker_id=None,
+            claim_token=None,
+            claimed_at=None,
+            lease_expires_at=None,
+            error_code="unit_cancelled",
+            error_message=None,
+            finished_at=cancelled_at,
+            updated_at=cancelled_at,
+        )
+    )
+    job.status = "cancelled"
+    job.current_stage = "finalizing"
+    job.error_code = "user_cancelled"
+    job.error_message = None
+    job.finished_at = cancelled_at
+    job.updated_at = cancelled_at
+    await db.flush()
+    job.counts = await _job_unit_counts(db, job_id=job.id)
     return job
