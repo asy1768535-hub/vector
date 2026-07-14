@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.services.graph_candidate_aggregation import canonical_graph_json_v1
 from app.services.graph_normalization import normalize_graph_name_v1
+from app.services.graph_seed import (
+    DEFAULT_ENTITY_TYPES,
+    DEFAULT_RELATION_TYPES,
+    expanded_default_relation_constraints,
+)
 
 
 _KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
@@ -43,6 +49,12 @@ _SECRET_VALUE_PATTERNS = (
     re.compile(r"\bbearer\s+\S+", re.IGNORECASE),
     re.compile(r"\bsk-[A-Za-z0-9_-]{8,}"),
 )
+_UUID_TEXT_RE = re.compile(
+    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
+    r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\b"
+)
+_URL_TEXT_RE = re.compile(r"https?://", re.IGNORECASE)
+_FORBIDDEN_DATASET_KEYS = {"api_key", "authorization", "headers", "cookie"}
 
 
 class _StrictModel(BaseModel):
@@ -200,6 +212,13 @@ class GraphEvalManifest(_StrictModel):
         return value
 
 
+class GraphEvalDatasetCounts(_StrictModel):
+    documents: int = Field(ge=0)
+    units: int = Field(ge=0)
+    entities: int = Field(ge=0)
+    relations: int = Field(ge=0)
+
+
 class GraphEvalRate(_StrictModel):
     numerator: int = Field(ge=0)
     denominator: int = Field(ge=0)
@@ -329,9 +348,167 @@ class GraphEvalAttemptMetric:
     parse_status: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class LoadedGraphEvalDataset:
+    manifest: GraphEvalManifest
+    documents: tuple[GraphEvalDocument, ...]
+    counts: GraphEvalDatasetCounts
+    dataset_manifest_sha256: str
+    dataset_content_sha256: str
+
+
 def canonical_graph_eval_hash(value: Any) -> str:
     payload = canonical_graph_json_v1(value).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _load_json(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot load graph Eval JSON: {path.name}") from exc
+
+
+def _load_jsonl(path: Path) -> list[Any]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise ValueError(f"cannot load graph Eval JSONL: {path.name}") from exc
+    values: list[Any] = []
+    for line_number, line in enumerate(lines, start=1):
+        if not line.strip():
+            raise ValueError(f"blank graph Eval JSONL line {line_number}")
+        try:
+            values.append(json.loads(line))
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"invalid graph Eval JSONL at line {line_number}"
+            ) from exc
+    return values
+
+
+def _assert_synthetic_dataset_value(value: Any) -> None:
+    def visit(item: Any, path: str) -> None:
+        if isinstance(item, dict):
+            for key, child in item.items():
+                if not isinstance(key, str):
+                    raise ValueError(f"dataset key at {path} must be text")
+                if key.strip().casefold() in _FORBIDDEN_DATASET_KEYS:
+                    raise ValueError(f"forbidden dataset field: {path}.{key}")
+                visit(child, f"{path}.{key}")
+            return
+        if isinstance(item, list):
+            for index, child in enumerate(item):
+                visit(child, f"{path}[{index}]")
+            return
+        if isinstance(item, str):
+            if _UUID_TEXT_RE.search(item):
+                raise ValueError(f"UUID is forbidden in synthetic dataset at {path}")
+            if _URL_TEXT_RE.search(item):
+                raise ValueError(f"URL is forbidden in synthetic dataset at {path}")
+            for pattern in _SECRET_VALUE_PATTERNS:
+                if pattern.search(item):
+                    raise ValueError(f"secret-like value in synthetic dataset at {path}")
+
+    visit(value, "$dataset")
+
+
+def _validate_ontology_contract(documents: tuple[GraphEvalDocument, ...]) -> None:
+    entity_types = {row.key for row in DEFAULT_ENTITY_TYPES}
+    relation_types = {row.key: row for row in DEFAULT_RELATION_TYPES}
+    constraints = {
+        (
+            row.relation_type_key,
+            row.source_entity_type_key,
+            row.target_entity_type_key,
+        )
+        for row in expanded_default_relation_constraints()
+    }
+    for document in documents:
+        entities = {row.gold_id: row for row in document.gold_entities}
+        for entity in document.gold_entities:
+            if entity.entity_type_key not in entity_types:
+                raise ValueError(
+                    f"unknown Entity type {entity.entity_type_key} in {document.document_key}"
+                )
+        for relation in document.gold_relations:
+            if relation.relation_type_key not in relation_types:
+                raise ValueError(
+                    f"unknown Relation type {relation.relation_type_key} "
+                    f"in {document.document_key}"
+                )
+            source = entities[relation.source_gold_id]
+            target = entities[relation.target_gold_id]
+            constraint = (
+                relation.relation_type_key,
+                source.entity_type_key,
+                target.entity_type_key,
+            )
+            if constraint not in constraints:
+                raise ValueError(
+                    "Relation violates enterprise ontology constraint: "
+                    f"{document.document_key}/{relation.gold_id}"
+                )
+
+
+def load_graph_eval_dataset(
+    *,
+    repository_root: Path,
+    manifest_path: Path,
+) -> LoadedGraphEvalDataset:
+    root = repository_root.resolve()
+    resolved_manifest = manifest_path.resolve()
+    if root not in resolved_manifest.parents:
+        raise ValueError("manifest must be inside the repository")
+    manifest_payload = _load_json(resolved_manifest)
+    _assert_synthetic_dataset_value(manifest_payload)
+    manifest = GraphEvalManifest.model_validate(manifest_payload)
+    source_path = (root / manifest.source_file).resolve()
+    if root not in source_path.parents or not source_path.is_file():
+        raise ValueError("manifest source_file is missing or outside the repository")
+    source_payload = (
+        _load_jsonl(source_path)
+        if source_path.suffix == ".jsonl"
+        else [_load_json(source_path)]
+    )
+    _assert_synthetic_dataset_value(source_payload)
+    source_documents = tuple(
+        GraphEvalDocument.model_validate(row) for row in source_payload
+    )
+    source_keys = tuple(row.document_key for row in source_documents)
+    if source_keys != tuple(sorted(source_keys)) or len(source_keys) != len(
+        set(source_keys)
+    ):
+        raise ValueError("source documents must be sorted and unique")
+    by_key = {row.document_key: row for row in source_documents}
+    missing = set(manifest.document_keys) - set(by_key)
+    if missing:
+        raise ValueError(f"manifest references missing documents: {sorted(missing)}")
+    documents = tuple(by_key[key] for key in manifest.document_keys)
+    _validate_ontology_contract(documents)
+    counts = GraphEvalDatasetCounts(
+        documents=len(documents),
+        units=sum(len(row.units) for row in documents),
+        entities=sum(len(row.gold_entities) for row in documents),
+        relations=sum(len(row.gold_relations) for row in documents),
+    )
+    minimums = manifest.minimums
+    for field in ("documents", "units", "entities", "relations"):
+        if getattr(counts, field) < getattr(minimums, field):
+            raise ValueError(f"dataset does not meet minimum {field} count")
+    if manifest.dataset_id == "development-smoke-v1" and counts.documents != 10:
+        raise ValueError("Development Smoke must select exactly 10 documents")
+    if manifest.dataset_id == "release-v1" and counts.documents < 30:
+        raise ValueError("Release Eval must select at least 30 documents")
+    manifest_value = manifest.model_dump(mode="json")
+    content_value = [row.model_dump(mode="json") for row in documents]
+    return LoadedGraphEvalDataset(
+        manifest=manifest,
+        documents=documents,
+        counts=counts,
+        dataset_manifest_sha256=canonical_graph_eval_hash(manifest_value),
+        dataset_content_sha256=canonical_graph_eval_hash(content_value),
+    )
 
 
 def entity_eval_key(
