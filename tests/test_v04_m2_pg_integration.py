@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -326,10 +326,11 @@ async def _seed_and_exercise(name: str) -> None:
             assert second_attempt.attempt_no == 2
 
         async with session_factory() as db:
+            # Acceptance PostgreSQL may not share the application host clock.
             await db.execute(
                 update(GraphExtractionUnit)
                 .where(GraphExtractionUnit.id == unit_id)
-                .values(lease_expires_at=now - timedelta(seconds=1))
+                .values(lease_expires_at=func.now() - timedelta(seconds=1))
             )
             await db.commit()
         async with session_factory() as db:
