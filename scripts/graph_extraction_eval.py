@@ -53,10 +53,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument(
         "--phase",
-        choices=("development-smoke", "calibration"),
+        choices=("development-smoke", "calibration", "post-freeze"),
         required=True,
     )
     run.add_argument("--manifest", type=Path, required=True)
+    run.add_argument("--policy", type=Path)
     run.add_argument("--database", required=True)
     run.add_argument("--run-id", required=True)
     run.add_argument("--workers", type=int, default=1)
@@ -76,6 +77,10 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("real Eval requires --real-provider")
         if not args.retain_database:
             raise ValueError("real Eval requires --retain-database through acceptance")
+        if args.phase == "post-freeze" and args.policy is None:
+            raise ValueError("post-freeze Eval requires --policy")
+        if args.phase != "post-freeze" and args.policy is not None:
+            raise ValueError("--policy is allowed only for post-freeze Eval")
         loaded = load_graph_eval_dataset(
             repository_root=ROOT_DIR,
             manifest_path=args.manifest,
@@ -95,6 +100,7 @@ def main(argv: list[str] | None = None) -> int:
                 workers=args.workers,
                 confirmation=args.confirm_external_send,
                 output_path=output,
+                policy_path=args.policy,
             )
         )
         print(

@@ -47,14 +47,17 @@ from app.services.graph_extraction_eval import (
     GraphEvalAttemptMetric,
     GraphEvalEntityPrediction,
     GraphEvalMetricReport,
+    GraphEvalPolicy,
     GraphEvalRelationPrediction,
     GraphEvalRunArtifact,
     LoadedGraphEvalDataset,
+    LoadedGraphEvalPolicy,
     assert_sanitized_eval_artifact,
     build_metric_report,
     canonical_graph_eval_hash,
     gold_entity_keys,
     gold_relation_keys,
+    load_graph_eval_policy,
     prediction_entity_keys,
     prediction_relation_keys,
 )
@@ -157,6 +160,31 @@ def validate_real_run_environment(
     if settings.graph_extraction_base_url != DEEPSEEK_BASE_URL:
         raise ValueError("real Eval requires the frozen official DeepSeek base URL")
     return admin_dsn
+
+
+def resolve_eval_policy(
+    *,
+    repository_root: Path,
+    loaded: LoadedGraphEvalDataset,
+    phase: str,
+    policy_path: Path | None,
+) -> LoadedGraphEvalPolicy | None:
+    if phase != "post-freeze":
+        if policy_path is not None:
+            raise ValueError("Eval Policy is allowed only for post-freeze runs")
+        return None
+    if policy_path is None:
+        raise ValueError("post-freeze runs require --policy")
+
+    policy = load_graph_eval_policy(
+        repository_root=repository_root,
+        policy_path=policy_path,
+    )
+    if loaded.dataset_manifest_sha256 != policy.policy.dataset_manifest_sha256:
+        raise ValueError("post-freeze dataset manifest hash does not match Eval Policy")
+    if loaded.dataset_content_sha256 != policy.policy.dataset_content_sha256:
+        raise ValueError("post-freeze dataset content hash does not match Eval Policy")
+    return policy
 
 
 def require_release_worktree_clean(repository_root: Path) -> str:
@@ -607,6 +635,49 @@ def _evaluation_config_payload(job: GraphExtractionJob) -> dict[str, Any]:
     }
 
 
+def determine_eval_run_status(
+    *,
+    phase: str,
+    job_statuses: list[str],
+    unit_statuses: list[str],
+    metrics: GraphEvalMetricReport,
+    real_provider: bool,
+    real_model_call_count: int,
+    evaluation_config_hash: str,
+    policy: GraphEvalPolicy | None,
+) -> str:
+    passed = (
+        set(job_statuses) == {"succeeded"}
+        and set(unit_statuses) == {"succeeded"}
+        and not metrics.cross_revision_evidence_count
+        and not metrics.eval_formal_write_count
+    )
+    if phase != "post-freeze":
+        if policy is not None:
+            raise ValueError("Eval Policy is allowed only for post-freeze runs")
+        return "passed" if passed else "failed"
+    if policy is None:
+        raise ValueError("post-freeze verdict requires a frozen Eval Policy")
+
+    thresholds = policy.thresholds
+    rate_gates = (
+        (metrics.json_parse_rate.value, 0.99),
+        (metrics.schema_valid_rate.value, 0.95),
+        (metrics.entity.precision.value, thresholds.entity_precision),
+        (metrics.entity.recall.value, thresholds.entity_recall),
+        (metrics.relation.precision.value, thresholds.relation_precision),
+        (metrics.relation.recall.value, thresholds.relation_recall),
+    )
+    passed = (
+        passed
+        and real_provider
+        and real_model_call_count >= 100
+        and evaluation_config_hash == policy.evaluation_config_hash
+        and all(value is not None and value >= floor for value, floor in rate_gates)
+    )
+    return "passed" if passed else "failed"
+
+
 async def collect_eval_artifact(
     session_factory,
     *,
@@ -620,9 +691,11 @@ async def collect_eval_artifact(
     code_commit: str,
     started_at: datetime,
     finished_at: datetime,
-    policy_id: str | None = None,
+    policy: GraphEvalPolicy | None = None,
     policy_sha256: str | None = None,
 ) -> GraphEvalRunArtifact:
+    if (policy is None) != (policy_sha256 is None):
+        raise ValueError("Eval Policy and its SHA-256 must appear together")
     source_entity = aliased(GraphEntityCandidate)
     target_entity = aliased(GraphEntityCandidate)
     async with session_factory() as db:
@@ -739,6 +812,7 @@ async def collect_eval_artifact(
     }
     if len(config_values) != 1:
         raise ValueError("Eval Jobs do not share one evaluation config hash")
+    evaluation_config_hash = next(iter(config_values))
     document_key_by_id = {
         document_id: key for key, document_id in seed.document_ids_by_key.items()
     }
@@ -802,18 +876,21 @@ async def collect_eval_artifact(
     job_errors = [job.error_code for job in jobs if job.error_code]
     unit_errors = [unit.error_code for unit in units if unit.error_code]
     first_job = jobs[0]
+    status = determine_eval_run_status(
+        phase=phase,
+        job_statuses=[job.status for job in jobs],
+        unit_statuses=[unit.status for unit in units],
+        metrics=metrics,
+        real_provider=real_provider,
+        real_model_call_count=len(attempts) if real_provider else 0,
+        evaluation_config_hash=evaluation_config_hash,
+        policy=policy,
+    )
     artifact = GraphEvalRunArtifact(
         schema_version="graph-extraction-eval-result-v1",
         run_id=run_id,
         phase=phase,
-        status=(
-            "passed"
-            if {job.status for job in jobs} == {"succeeded"}
-            and {unit.status for unit in units} == {"succeeded"}
-            and not cross_revision
-            and not sum(formal_counts)
-            else "failed"
-        ),
+        status=status,
         real_provider=real_provider,
         started_at=started_at,
         finished_at=finished_at,
@@ -824,7 +901,7 @@ async def collect_eval_artifact(
         dataset_counts=loaded.counts,
         dataset_manifest_sha256=loaded.dataset_manifest_sha256,
         dataset_content_sha256=loaded.dataset_content_sha256,
-        evaluation_config_hash=next(iter(config_values)),
+        evaluation_config_hash=evaluation_config_hash,
         model_provider=first_job.model_provider,
         model_name=first_job.model_name,
         component_versions={
@@ -842,7 +919,7 @@ async def collect_eval_artifact(
         provider_request_id_sha256=request_digest,
         metrics=metrics,
         stable_error_code_counts=_counter(job_errors + unit_errors),
-        policy_id=policy_id,
+        policy_id=policy.policy_id if policy is not None else None,
         policy_sha256=policy_sha256,
     )
     assert_sanitized_eval_artifact(artifact.model_dump(mode="json"))
@@ -889,7 +966,14 @@ async def execute_eval_run(
     workers: int,
     confirmation: str,
     output_path: Path,
+    policy_path: Path | None = None,
 ) -> EvalRuntimeResult:
+    policy = resolve_eval_policy(
+        repository_root=repository_root,
+        loaded=loaded,
+        phase=phase,
+        policy_path=policy_path,
+    )
     admin_dsn = validate_real_run_environment(
         loaded=loaded,
         database_name=database_name,
@@ -906,11 +990,15 @@ async def execute_eval_run(
     try:
         seed = await seed_eval_dataset(session_factory, loaded=loaded)
         job_ids = await create_eval_jobs(session_factory, loaded=loaded, seed=seed)
-        await run_eval_workers(
-            session_factory,
-            library_id=seed.library_id,
-            workers=workers,
-        )
+        worker_error: Exception | None = None
+        try:
+            await run_eval_workers(
+                session_factory,
+                library_id=seed.library_id,
+                workers=workers,
+            )
+        except Exception as exc:  # Preserve a failed artifact when database state is readable.
+            worker_error = exc
         artifact = await collect_eval_artifact(
             session_factory,
             loaded=loaded,
@@ -923,12 +1011,18 @@ async def execute_eval_run(
             code_commit=code_commit,
             started_at=started_at,
             finished_at=datetime.now(timezone.utc),
+            policy=policy.policy if policy is not None else None,
+            policy_sha256=policy.policy_sha256 if policy is not None else None,
         )
         path = write_eval_artifact(
             repository_root=repository_root,
             output_path=output_path,
             artifact=artifact,
         )
+        if worker_error is not None:
+            raise RuntimeError(
+                f"Eval workers failed; sanitized artifact written to {path.name}"
+            ) from worker_error
         return EvalRuntimeResult(artifact, path)
     finally:
         await engine.dispose()

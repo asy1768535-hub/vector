@@ -19,10 +19,13 @@ from app.services.graph_extraction_eval import (
     GraphEvalRate,
     GraphEvalRunArtifact,
     load_graph_eval_dataset,
+    load_graph_eval_policy,
 )
 from app.services.graph_extraction_eval_runtime import (
+    determine_eval_run_status,
     eval_uuid,
     require_release_worktree_clean,
+    resolve_eval_policy,
     run_eval_workers,
     validate_eval_database_name,
     validate_real_run_environment,
@@ -32,6 +35,8 @@ from app.services.graph_extraction_eval_runtime import (
 
 ROOT = Path(__file__).resolve().parents[1]
 SMOKE = ROOT / "eval/graph_extraction/manifests/development_smoke_v1.json"
+RELEASE = ROOT / "eval/graph_extraction/manifests/release_v1.json"
+POLICY = ROOT / "eval/graph_extraction/eval_policy_v1.json"
 
 
 def _rate(value: float = 1.0) -> GraphEvalRate:
@@ -282,6 +287,102 @@ def test_post_freeze_artifact_requires_policy():
     payload["phase"] = "post-freeze"
     with pytest.raises(ValidationError, match="frozen policy"):
         GraphEvalRunArtifact.model_validate(payload)
+
+
+def test_post_freeze_policy_binding_requires_exact_frozen_dataset():
+    release = load_graph_eval_dataset(repository_root=ROOT, manifest_path=RELEASE)
+    binding = resolve_eval_policy(
+        repository_root=ROOT,
+        loaded=release,
+        phase="post-freeze",
+        policy_path=POLICY,
+    )
+    assert binding is not None
+    assert binding.policy_sha256 == (
+        "9fd5652e9ed7d0b585feb6dd57d12aad7c3a4ecf7a85a4159d44f947464ccc3b"
+    )
+
+    smoke = load_graph_eval_dataset(repository_root=ROOT, manifest_path=SMOKE)
+    with pytest.raises(ValueError, match="dataset manifest hash"):
+        resolve_eval_policy(
+            repository_root=ROOT,
+            loaded=smoke,
+            phase="post-freeze",
+            policy_path=POLICY,
+        )
+    with pytest.raises(ValueError, match="require --policy"):
+        resolve_eval_policy(
+            repository_root=ROOT,
+            loaded=release,
+            phase="post-freeze",
+            policy_path=None,
+        )
+    with pytest.raises(ValueError, match="allowed only"):
+        resolve_eval_policy(
+            repository_root=ROOT,
+            loaded=release,
+            phase="calibration",
+            policy_path=POLICY,
+        )
+
+
+@pytest.mark.parametrize(
+    ("metric_path", "numerator", "denominator"),
+    [
+        (("json_parse_rate",), 98, 100),
+        (("schema_valid_rate",), 94, 100),
+        (("entity", "precision"), 84, 100),
+        (("entity", "recall"), 74, 100),
+        (("relation", "precision"), 84, 100),
+        (("relation", "recall"), 69, 100),
+    ],
+)
+def test_post_freeze_verdict_enforces_every_frozen_rate_gate(
+    metric_path, numerator, denominator
+):
+    loaded_policy = load_graph_eval_policy(repository_root=ROOT, policy_path=POLICY)
+    metrics_payload = _artifact().metrics.model_dump(mode="json")
+    target = metrics_payload
+    for key in metric_path[:-1]:
+        target = target[key]
+    target[metric_path[-1]] = {
+        "numerator": numerator,
+        "denominator": denominator,
+        "value": numerator / denominator,
+    }
+    metrics = GraphEvalMetricReport.model_validate(metrics_payload)
+
+    assert determine_eval_run_status(
+        phase="post-freeze",
+        job_statuses=["succeeded"],
+        unit_statuses=["succeeded"],
+        metrics=metrics,
+        real_provider=True,
+        real_model_call_count=120,
+        evaluation_config_hash=loaded_policy.policy.evaluation_config_hash,
+        policy=loaded_policy.policy,
+    ) == "failed"
+
+
+def test_post_freeze_verdict_requires_real_call_floor_and_exact_config_hash():
+    loaded_policy = load_graph_eval_policy(repository_root=ROOT, policy_path=POLICY)
+    values = {
+        "phase": "post-freeze",
+        "job_statuses": ["succeeded"],
+        "unit_statuses": ["succeeded"],
+        "metrics": _artifact().metrics,
+        "real_provider": True,
+        "real_model_call_count": 120,
+        "evaluation_config_hash": loaded_policy.policy.evaluation_config_hash,
+        "policy": loaded_policy.policy,
+    }
+    assert determine_eval_run_status(**values) == "passed"
+
+    values["real_model_call_count"] = 99
+    assert determine_eval_run_status(**values) == "failed"
+    values["real_model_call_count"] = 120
+    values["evaluation_config_hash"] = "0" * 64
+    assert determine_eval_run_status(**values) == "failed"
 
 
 def test_artifact_writer_is_atomic_scoped_and_immutable(tmp_path: Path):
