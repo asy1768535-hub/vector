@@ -10,9 +10,9 @@ from app.services.graph_extraction_prompt import (
     graph_extraction_prompt_hash,
 )
 from app.services.graph_extraction_provider import (
-    DashScopeGraphExtractor,
     GraphExtractionProviderError,
     MockGraphExtractor,
+    OpenAICompatibleGraphExtractor,
 )
 
 
@@ -52,7 +52,7 @@ def test_prompt_hash_is_stable_sha256():
 
 
 @pytest.mark.asyncio
-async def test_dashscope_adapter_uses_exact_openai_compatible_contract():
+async def test_deepseek_adapter_uses_exact_openai_compatible_contract():
     captured: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -74,19 +74,19 @@ async def test_dashscope_adapter_uses_exact_openai_compatible_contract():
             },
         )
 
-    extractor = DashScopeGraphExtractor(
-        base_url="https://dashscope.example/compatible-mode/v1/",
-        model="qwen-plus",
+    extractor = OpenAICompatibleGraphExtractor(
+        base_url="https://api.deepseek.com/v1/",
+        model="deepseek-chat",
         api_key="TOP-SECRET-KEY",
         timeout_seconds=12,
         transport=httpx.MockTransport(handler),
     )
     result = await extractor.extract(_messages())
 
-    assert captured["url"] == "https://dashscope.example/compatible-mode/v1/chat/completions"
+    assert captured["url"] == "https://api.deepseek.com/v1/chat/completions"
     assert captured["authorization"] == "Bearer TOP-SECRET-KEY"
     assert captured["payload"] == {
-        "model": "qwen-plus",
+        "model": "deepseek-chat",
         "messages": _messages(),
         "temperature": 0,
         "stream": False,
@@ -111,15 +111,17 @@ async def test_dashscope_adapter_uses_exact_openai_compatible_contract():
         (httpx.ConnectError("offline"), "network_error"),
     ],
 )
-async def test_dashscope_adapter_classifies_transport_failures(raised: Exception, category: str):
+async def test_openai_compatible_adapter_classifies_transport_failures(
+    raised: Exception, category: str
+):
     def handler(request: httpx.Request) -> httpx.Response:
         if isinstance(raised, httpx.RequestError):
             raised.request = request
         raise raised
 
-    extractor = DashScopeGraphExtractor(
-        base_url="https://dashscope.example/v1",
-        model="qwen-plus",
+    extractor = OpenAICompatibleGraphExtractor(
+        base_url="https://api.deepseek.com/v1",
+        model="deepseek-chat",
         api_key="SECRET-TRANSPORT-KEY",
         transport=httpx.MockTransport(handler),
     )
@@ -131,15 +133,15 @@ async def test_dashscope_adapter_classifies_transport_failures(raised: Exception
 
 
 @pytest.mark.asyncio
-async def test_dashscope_adapter_bounds_and_redacts_http_error_body():
+async def test_openai_compatible_adapter_bounds_and_redacts_http_error_body():
     secret = "SECRET-ECHOED-BY-UPSTREAM"
 
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(429, text=("prefix " + secret + " x" * 2000))
 
-    extractor = DashScopeGraphExtractor(
-        base_url="https://dashscope.example/v1",
-        model="qwen-plus",
+    extractor = OpenAICompatibleGraphExtractor(
+        base_url="https://api.deepseek.com/v1",
+        model="deepseek-chat",
         api_key=secret,
         transport=httpx.MockTransport(handler),
     )
@@ -152,13 +154,13 @@ async def test_dashscope_adapter_bounds_and_redacts_http_error_body():
 
 
 @pytest.mark.asyncio
-async def test_dashscope_adapter_rejects_invalid_provider_envelope_without_leaking_body():
+async def test_openai_compatible_adapter_rejects_invalid_envelope_without_leaking_body():
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text="not-json SECRET-PROVIDER-BODY")
 
-    extractor = DashScopeGraphExtractor(
-        base_url="https://dashscope.example/v1",
-        model="qwen-plus",
+    extractor = OpenAICompatibleGraphExtractor(
+        base_url="https://api.deepseek.com/v1",
+        model="deepseek-chat",
         api_key="SECRET-KEY",
         transport=httpx.MockTransport(handler),
     )

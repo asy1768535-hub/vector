@@ -126,7 +126,7 @@ def test_ready_revision_trigger_uses_production_creator_without_provider_call(mo
             new=AsyncMock(return_value=expected_job),
         ) as create,
         patch(
-            "app.services.graph_extraction_provider.DashScopeGraphExtractor.extract",
+            "app.services.graph_extraction_provider.OpenAICompatibleGraphExtractor.extract",
             new=AsyncMock(),
         ) as provider,
     ):

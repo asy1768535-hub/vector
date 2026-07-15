@@ -63,6 +63,10 @@ from app.services.graph_extraction_jobs import (
     create_graph_extraction_job,
     retry_graph_extraction_job,
 )
+from app.services.graph_extraction_provider import (
+    DEEPSEEK_BASE_URL,
+    DEEPSEEK_MODEL_NAME,
+)
 from app.services.graph_extraction_worker import (
     claim_graph_extraction_unit,
     process_graph_extraction_unit,
@@ -148,12 +152,10 @@ def validate_real_run_environment(
         raise ValueError("process Provider key does not match the accepted runtime Secret")
     if not settings.graph_extraction_enabled or settings.graph_extraction_auto_trigger_enabled:
         raise ValueError("real Eval requires extraction enabled and auto trigger disabled")
-    if settings.graph_extraction_model != "qwen-plus":
-        raise ValueError("real Eval requires the frozen qwen-plus model")
-    if settings.graph_extraction_base_url.rstrip("/") != (
-        "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    ):
-        raise ValueError("real Eval requires the frozen DashScope base URL")
+    if settings.graph_extraction_model != DEEPSEEK_MODEL_NAME:
+        raise ValueError("real Eval requires the frozen DeepSeek model")
+    if settings.graph_extraction_base_url != DEEPSEEK_BASE_URL:
+        raise ValueError("real Eval requires the frozen official DeepSeek base URL")
     return admin_dsn
 
 

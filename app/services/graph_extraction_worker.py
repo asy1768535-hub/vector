@@ -43,8 +43,11 @@ from app.services.graph_extraction_parser import (
 )
 from app.services.graph_extraction_prompt import build_graph_extraction_messages
 from app.services.graph_extraction_provider import (
-    DashScopeGraphExtractor,
+    DEEPSEEK_BASE_URL,
+    DEEPSEEK_MODEL_NAME,
+    DEEPSEEK_PROVIDER_NAME,
     GraphExtractionProviderError,
+    OpenAICompatibleGraphExtractor,
 )
 
 
@@ -559,11 +562,14 @@ def _request_payload_hash(prepared: PreparedGraphExtractionUnit) -> str:
 
 def _configured_provider(prepared: PreparedGraphExtractionUnit):
     snapshot = prepared.model_config_snapshot
+    provider_name = snapshot.get("provider")
     base_url = snapshot.get("base_url")
     model = snapshot.get("model")
     timeout = snapshot.get("timeout_seconds")
     if (
-        not isinstance(base_url, str)
+        not isinstance(provider_name, str)
+        or not provider_name.strip()
+        or not isinstance(base_url, str)
         or not base_url.strip()
         or not isinstance(model, str)
         or not model.strip()
@@ -575,13 +581,22 @@ def _configured_provider(prepared: PreparedGraphExtractionUnit):
             "provider_not_configured",
             "frozen Provider configuration is invalid",
         )
+    if (
+        provider_name != DEEPSEEK_PROVIDER_NAME
+        or base_url != DEEPSEEK_BASE_URL
+        or model != DEEPSEEK_MODEL_NAME
+    ):
+        raise GraphExtractionWorkerError(
+            "provider_config_retired",
+            "frozen Provider configuration is not the accepted DeepSeek contract",
+        )
     api_key = settings.graph_extraction_api_key.get_secret_value().strip()
     if not api_key:
         raise GraphExtractionWorkerError(
             "provider_not_configured",
             "graph extraction Provider credential is unavailable",
         )
-    return DashScopeGraphExtractor(
+    return OpenAICompatibleGraphExtractor(
         base_url=base_url,
         model=model,
         api_key=api_key,

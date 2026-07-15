@@ -9,8 +9,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
+from app.config import settings
 from app.services.graph_extraction_eval import (
     GraphEvalClassification,
     GraphEvalDatasetCounts,
@@ -143,6 +144,73 @@ def test_real_run_requires_explicit_process_credentials_and_matching_confirmatio
             workers=1,
             phase="development-smoke",
         )
+
+
+def _configure_real_deepseek(monkeypatch) -> None:
+    monkeypatch.setenv("VECTOR_KB_M6_EVAL_ADMIN_DSN", "postgresql://test")
+    monkeypatch.setenv("GRAPH_EXTRACTION_API_KEY", "DEEPSEEK-TEST-KEY")
+    monkeypatch.setattr(
+        settings,
+        "graph_extraction_api_key",
+        SecretStr("DEEPSEEK-TEST-KEY"),
+    )
+    monkeypatch.setattr(settings, "graph_extraction_enabled", True)
+    monkeypatch.setattr(settings, "graph_extraction_auto_trigger_enabled", False)
+    monkeypatch.setattr(
+        settings, "graph_extraction_base_url", "https://api.deepseek.com/v1"
+    )
+    monkeypatch.setattr(settings, "graph_extraction_model", "deepseek-chat")
+
+
+def test_real_run_accepts_only_frozen_deepseek_environment(monkeypatch):
+    loaded = load_graph_eval_dataset(repository_root=ROOT, manifest_path=SMOKE)
+    _configure_real_deepseek(monkeypatch)
+
+    assert validate_real_run_environment(
+        loaded=loaded,
+        database_name="vkt_m6_eval_smoke_2",
+        confirmation="development-smoke-v1",
+        workers=2,
+        phase="development-smoke",
+    ) == "postgresql://test"
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("graph_extraction_model", "qwen-plus"),
+        (
+            "graph_extraction_base_url",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        ),
+        ("graph_extraction_base_url", "https://api.deepseek.com/v1/"),
+    ],
+)
+def test_real_run_rejects_retired_dashscope_environment(monkeypatch, name, value):
+    loaded = load_graph_eval_dataset(repository_root=ROOT, manifest_path=SMOKE)
+    _configure_real_deepseek(monkeypatch)
+    monkeypatch.setattr(settings, name, value)
+
+    with pytest.raises(ValueError, match="DeepSeek"):
+        validate_real_run_environment(
+            loaded=loaded,
+            database_name="vkt_m6_eval_smoke_2",
+            confirmation="development-smoke-v1",
+            workers=2,
+            phase="development-smoke",
+        )
+
+
+def test_failed_dashscope_artifact_remains_valid_historical_evidence():
+    path = (
+        ROOT
+        / "eval/graph_extraction/results/development-smoke-v1-20260714-01.json"
+    )
+    artifact = GraphEvalRunArtifact.model_validate_json(path.read_text(encoding="utf-8"))
+
+    assert artifact.status == "failed"
+    assert artifact.model_provider == "dashscope"
+    assert artifact.model_name == "qwen-plus"
 
 
 def test_run_artifact_rejects_inconsistent_real_call_count():

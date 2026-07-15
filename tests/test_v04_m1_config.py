@@ -12,8 +12,8 @@ from app.main import assert_graph_extraction_startup_security
 EXPECTED_DEFAULTS = {
     "graph_extraction_enabled": False,
     "graph_extraction_auto_trigger_enabled": False,
-    "graph_extraction_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    "graph_extraction_model": "qwen-plus",
+    "graph_extraction_base_url": "https://api.deepseek.com/v1",
+    "graph_extraction_model": "deepseek-chat",
     "graph_extraction_timeout_seconds": 120.0,
     "graph_extraction_temperature": 0.0,
     "graph_extraction_response_format": "json_object",
@@ -144,6 +144,29 @@ def test_startup_requires_graph_key_only_when_auto_trigger_is_enabled(monkeypatc
 
     monkeypatch.setattr(settings, "graph_extraction_api_key", SecretStr("graph-secret-value"))
     assert_graph_extraction_startup_security()
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        (
+            "graph_extraction_base_url",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        ),
+        ("graph_extraction_base_url", "https://api.deepseek.com/v1/"),
+        ("graph_extraction_model", "qwen-plus"),
+    ],
+)
+def test_startup_rejects_retired_provider_when_extraction_is_enabled(
+    monkeypatch, name, value
+):
+    _set_valid_runtime(monkeypatch)
+    from app.main import settings
+
+    monkeypatch.setattr(settings, "graph_extraction_enabled", True)
+    monkeypatch.setattr(settings, name, value)
+    with pytest.raises(RuntimeError, match="DeepSeek"):
+        assert_graph_extraction_startup_security()
 
 
 def test_valid_graph_extraction_startup_contract_passes(monkeypatch):

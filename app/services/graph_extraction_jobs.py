@@ -32,6 +32,7 @@ from app.services.graph_candidate_validation import (
     load_ontology_rule_set_v1,
 )
 from app.services.graph_extraction_prompt import graph_extraction_prompt_hash
+from app.services.graph_extraction_provider import DEEPSEEK_PROVIDER_NAME
 
 
 _ACTIVE = "active"
@@ -560,7 +561,7 @@ def _validate_creation_scope(
 
 def _model_config_snapshot() -> dict[str, Any]:
     return {
-        "provider": "dashscope",
+        "provider": DEEPSEEK_PROVIDER_NAME,
         "base_url": settings.graph_extraction_base_url,
         "model": settings.graph_extraction_model,
         "timeout_seconds": settings.graph_extraction_timeout_seconds,
@@ -819,7 +820,7 @@ async def create_graph_extraction_job(
         idempotency_key=stored_idempotency_key,
         rerun_of_job_id=rerun_of_job_id,
         retry_generation=0,
-        model_provider="dashscope",
+        model_provider=DEEPSEEK_PROVIDER_NAME,
         model_name=settings.graph_extraction_model,
         **versions,
         document_parser_version=revision.parser_version,

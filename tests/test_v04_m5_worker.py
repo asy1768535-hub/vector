@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from pydantic import SecretStr
 from sqlalchemy.dialects import postgresql
 
 from app.models.graph_extraction_job import GraphExtractionJob
@@ -16,8 +17,10 @@ from app.services.graph_extraction_provider import (
 )
 from app.services.graph_extraction_worker import (
     GraphExtractionProcessResult,
+    GraphExtractionWorkerError,
     PreparedGraphExtractionUnit,
     StaleUnitRecoveryResult,
+    _configured_provider,
     claim_graph_extraction_unit,
     lock_live_graph_extraction_claim,
     mark_claimed_unit_terminal,
@@ -295,8 +298,9 @@ def _prepared():
         claim_token=CLAIM_TOKEN,
         messages=[{"role": "user", "content": "context"}],
         model_config_snapshot={
-            "base_url": "https://provider.invalid/v1",
-            "model": "mock-model",
+            "provider": "deepseek",
+            "base_url": "https://api.deepseek.com/v1",
+            "model": "deepseek-chat",
             "timeout_seconds": 10.0,
         },
         model_config_hash="a" * 64,
@@ -324,6 +328,114 @@ class _SessionFactory:
         session = FakeDB()
         self.sessions.append(session)
         return session
+
+
+def test_configured_provider_builds_deepseek_adapter_without_http(monkeypatch):
+    from app.services import graph_extraction_worker as worker
+
+    monkeypatch.setattr(
+        worker.settings,
+        "graph_extraction_api_key",
+        SecretStr("DEEPSEEK-TEST-KEY"),
+    )
+    with patch.object(worker, "OpenAICompatibleGraphExtractor") as adapter:
+        configured = _configured_provider(_prepared())
+
+    assert configured is adapter.return_value
+    adapter.assert_called_once_with(
+        base_url="https://api.deepseek.com/v1",
+        model="deepseek-chat",
+        api_key="DEEPSEEK-TEST-KEY",
+        timeout_seconds=10.0,
+    )
+
+
+def test_configured_provider_rejects_retired_dashscope_snapshot_before_http(
+    monkeypatch,
+):
+    from app.services import graph_extraction_worker as worker
+
+    prepared = _prepared()
+    prepared.model_config_snapshot.update(
+        {
+            "provider": "dashscope",
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "model": "qwen-plus",
+        }
+    )
+    monkeypatch.setattr(
+        worker.settings,
+        "graph_extraction_api_key",
+        SecretStr("DEEPSEEK-TEST-KEY"),
+    )
+    with (
+        patch.object(worker, "OpenAICompatibleGraphExtractor") as adapter,
+        pytest.raises(GraphExtractionWorkerError) as exc,
+    ):
+        _configured_provider(prepared)
+
+    assert exc.value.code == "provider_config_retired"
+    adapter.assert_not_called()
+
+
+def test_retired_dashscope_job_is_cancelled_without_provider_http(monkeypatch):
+    from app.services import graph_extraction_worker as worker
+
+    prepared = _prepared()
+    prepared.model_config_snapshot.update(
+        {
+            "provider": "dashscope",
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "model": "qwen-plus",
+        }
+    )
+    sessions = _SessionFactory()
+    attempt = SimpleNamespace(id=uuid.uuid4())
+    monkeypatch.setattr(
+        worker.settings,
+        "graph_extraction_api_key",
+        SecretStr("DEEPSEEK-TEST-KEY"),
+    )
+    with (
+        patch(
+            "app.services.graph_extraction_worker._prepare_graph_extraction_unit",
+            new=AsyncMock(return_value=prepared),
+        ),
+        patch(
+            "app.services.graph_extraction_worker._preflight_provider_call",
+            new=AsyncMock(),
+        ),
+        patch(
+            "app.services.graph_extraction_worker.create_pending_attempt",
+            new=AsyncMock(return_value=attempt),
+        ),
+        patch(
+            "app.services.graph_extraction_worker._finish_claim_after_error",
+            new=AsyncMock(return_value=True),
+        ) as finish,
+        patch.object(
+            worker.OpenAICompatibleGraphExtractor,
+            "extract",
+            new=AsyncMock(),
+        ) as provider_http,
+    ):
+        result = asyncio.run(
+            process_graph_extraction_unit(
+                sessions,
+                unit_id=UNIT_ID,
+                claim_token=CLAIM_TOKEN,
+            )
+        )
+
+    assert result == GraphExtractionProcessResult(
+        "cancelled",
+        "provider_config_retired",
+    )
+    finish.assert_awaited_once()
+    assert finish.await_args.kwargs["status"] == "cancelled"
+    assert finish.await_args.kwargs["error_code"] == "provider_config_retired"
+    assert finish.await_args.kwargs["abandon_pending"] is True
+    provider_http.assert_not_awaited()
 
 
 def test_orchestration_calls_provider_outside_transactions_and_persists_valid_payload():

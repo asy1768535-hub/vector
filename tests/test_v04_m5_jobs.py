@@ -425,7 +425,7 @@ def test_job_creation_freezes_config_and_adds_deterministic_units(monkeypatch):
             new=AsyncMock(return_value=plans),
         ),
         patch(
-            "app.services.graph_extraction_provider.DashScopeGraphExtractor.extract",
+            "app.services.graph_extraction_provider.OpenAICompatibleGraphExtractor.extract",
             new=AsyncMock(),
         ) as provider_call,
     ):
@@ -444,6 +444,11 @@ def test_job_creation_freezes_config_and_adds_deterministic_units(monkeypatch):
 
     provider_call.assert_not_awaited()
     assert isinstance(job, GraphExtractionJob)
+    assert job.model_provider == "deepseek"
+    assert job.model_name == "deepseek-chat"
+    assert job.model_config_snapshot["provider"] == "deepseek"
+    assert job.model_config_snapshot["base_url"] == "https://api.deepseek.com/v1"
+    assert job.model_config_snapshot["model"] == "deepseek-chat"
     assert job.idempotency_key == job.input_fingerprint
     assert job.counts == {
         "total": 2,
