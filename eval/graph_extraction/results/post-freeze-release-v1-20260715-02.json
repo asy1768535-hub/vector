@@ -1,0 +1,138 @@
+{
+  "alembic_head": "0022",
+  "attempt_status_counts": {
+    "succeeded": 120
+  },
+  "code_commit": "70aae387970813c462ad2f6464a74016c3006f92",
+  "component_versions": {
+    "chunking_strategy_version": "m6-unit-v1",
+    "confidence_policy_version": "v1",
+    "context_policy_version": "v1",
+    "document_parser_version": "m6-synthetic-v1",
+    "extraction_policy_version": "v1",
+    "extractor_version": "v1",
+    "normalization_rule_version": "normalization_v1",
+    "output_parser_version": "v1",
+    "prompt_version": "v1"
+  },
+  "database_name": "vkt_m6_eval_postfreeze_20260715_02",
+  "dataset_content_sha256": "6b316cbbcfc7357cb27bb0b8500e8c49ec041ce2d85c52715aba7108c3d6e96b",
+  "dataset_counts": {
+    "documents": 30,
+    "entities": 150,
+    "relations": 120,
+    "units": 120
+  },
+  "dataset_id": "release-v1",
+  "dataset_manifest_sha256": "8cb812a33dac20745b78cca342a27e065684032a25e7adc020cc3d0ad19b5d22",
+  "evaluation_config_hash": "abac93e3e86a5d198708410e6c6046f14a14d0e150970940983eea1b73f2d54a",
+  "finished_at": "2026-07-15T03:31:07.603264Z",
+  "job_ids": [
+    "00866aa9-8328-4449-a38f-ea6cd5a576ed",
+    "0d0c1bf1-8d1d-41e8-9c75-c2620c3fadb3",
+    "0d55ff4f-9441-4720-9e38-9493f225600f",
+    "27b89608-e436-4252-9a12-4775797ae97c",
+    "2a900b0f-ae4b-48a8-906e-54a477444e23",
+    "3f15959c-4259-4dad-8902-166d94df6e8c",
+    "4d57185c-fd36-4502-b14c-2866672569bc",
+    "4fb6bfdc-2728-4a2d-aafa-fabe72e129ad",
+    "5ec85e05-7b15-45c5-8fba-a5170ad42bec",
+    "705646b1-1d08-4f0c-bbe1-dbe432fa1d48",
+    "794a6cfe-597a-4698-a4d2-89644aae0eac",
+    "835d77fd-5314-48db-a19a-41e479c0e7c6",
+    "87875eb3-a690-4acf-831c-f4a84b71cd20",
+    "90bff827-7851-4a3e-a66c-8a1813b1ab51",
+    "925e0cac-a309-408e-a8f4-85434e507106",
+    "a10424e8-039a-480c-9f81-4c23ef5d2b9c",
+    "aedd20fe-d426-4663-95ce-f046d3da42ab",
+    "b63905e5-6023-48bb-bdd7-f9162737a893",
+    "baa560b0-23cf-4f82-9f69-3c3cf07ec9fc",
+    "bcb576b1-ca53-4c30-b7dc-d1ef7e2e7d60",
+    "c21c64a0-1eab-4440-aca2-b99ab57140e2",
+    "d507fda5-a41c-41f0-8254-c407a9578177",
+    "d5584b2a-be9b-4df1-b115-b65074ac084f",
+    "d7194b4a-27f7-4c19-b8da-9cea321a850d",
+    "db5b7175-1711-4c38-85ce-e228a0bc3aff",
+    "eb29edb4-0fc0-4f84-986e-ab26d5fa5dbf",
+    "ef4807d9-7194-4de6-b5b0-505b505fc668",
+    "f0b83c9c-2cba-443d-9364-f9d4810467ff",
+    "f2f2864b-c5dd-45bc-bd46-69ad45f85f60",
+    "febc66c2-7b2d-4141-8d85-f5f3d0f4034e"
+  ],
+  "job_status_counts": {
+    "succeeded": 30
+  },
+  "metrics": {
+    "ambiguous_evidence_count": 0,
+    "candidate_duplicate_rate": {
+      "denominator": 270,
+      "numerator": 0,
+      "value": 0.0
+    },
+    "cross_revision_evidence_count": 0,
+    "entity": {
+      "false_negative": 0,
+      "false_positive": 0,
+      "precision": {
+        "denominator": 150,
+        "numerator": 150,
+        "value": 1.0
+      },
+      "recall": {
+        "denominator": 150,
+        "numerator": 150,
+        "value": 1.0
+      },
+      "true_positive": 150
+    },
+    "eval_formal_write_count": 0,
+    "invalid_evidence_rate": {
+      "denominator": 841,
+      "numerator": 0,
+      "value": 0.0
+    },
+    "json_parse_rate": {
+      "denominator": 120,
+      "numerator": 120,
+      "value": 1.0
+    },
+    "relation": {
+      "false_negative": 0,
+      "false_positive": 0,
+      "precision": {
+        "denominator": 120,
+        "numerator": 120,
+        "value": 1.0
+      },
+      "recall": {
+        "denominator": 120,
+        "numerator": 120,
+        "value": 1.0
+      },
+      "true_positive": 120
+    },
+    "schema_valid_rate": {
+      "denominator": 120,
+      "numerator": 120,
+      "value": 1.0
+    }
+  },
+  "model_attempt_count": 120,
+  "model_name": "deepseek-v4-pro",
+  "model_provider": "deepseek",
+  "phase": "post-freeze",
+  "policy_id": "eval_policy_v1",
+  "policy_sha256": "9fd5652e9ed7d0b585feb6dd57d12aad7c3a4ecf7a85a4159d44f947464ccc3b",
+  "provider_request_id_count": 120,
+  "provider_request_id_sha256": "73b13bf6d52697de5b172fd34f902cc153152ecb7499d05593324a9bb4dba1f8",
+  "real_model_call_count": 120,
+  "real_provider": true,
+  "run_id": "post-freeze-release-v1-20260715-02",
+  "schema_version": "graph-extraction-eval-result-v1",
+  "stable_error_code_counts": {},
+  "started_at": "2026-07-15T03:14:27.257246Z",
+  "status": "passed",
+  "unit_status_counts": {
+    "succeeded": 120
+  }
+}
