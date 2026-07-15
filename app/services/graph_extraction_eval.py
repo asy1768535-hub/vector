@@ -422,6 +422,7 @@ class GraphEvalPolicy(_StrictModel):
     schema_version: Literal["graph-extraction-eval-policy-v1"]
     policy_id: Literal["eval_policy_v1"]
     dataset_manifest_sha256: str
+    dataset_content_sha256: str
     evaluation_config_hash: str
     calibration_result_path: str
     calibration_result_sha256: str
@@ -432,6 +433,7 @@ class GraphEvalPolicy(_StrictModel):
 
     @field_validator(
         "dataset_manifest_sha256",
+        "dataset_content_sha256",
         "evaluation_config_hash",
         "calibration_result_sha256",
     )
@@ -842,3 +844,59 @@ def assert_sanitized_eval_artifact(value: Any) -> None:
 
     visit(value, "$artifact")
     canonical_graph_json_v1(value)
+
+
+@dataclass(frozen=True, slots=True)
+class LoadedGraphEvalPolicy:
+    policy: GraphEvalPolicy
+    calibration: GraphEvalRunArtifact
+    policy_sha256: str
+
+
+def load_graph_eval_policy(
+    *,
+    repository_root: Path,
+    policy_path: Path,
+) -> LoadedGraphEvalPolicy:
+    root = repository_root.resolve()
+    resolved_policy = policy_path.resolve()
+    if root not in resolved_policy.parents:
+        raise ValueError("Eval Policy must be inside the repository")
+
+    payload = _load_json(resolved_policy)
+    policy = GraphEvalPolicy.model_validate(payload)
+    assert_sanitized_eval_artifact(policy.model_dump(mode="json"))
+
+    calibration_path = (root / policy.calibration_result_path).resolve()
+    if root not in calibration_path.parents:
+        raise ValueError("calibration result must be inside the repository")
+    try:
+        calibration_bytes = calibration_path.read_bytes()
+    except OSError as exc:
+        raise ValueError("cannot load frozen calibration result") from exc
+    calibration_sha256 = hashlib.sha256(calibration_bytes).hexdigest()
+    if calibration_sha256 != policy.calibration_result_sha256:
+        raise ValueError("calibration result SHA-256 does not match Eval Policy")
+
+    calibration = GraphEvalRunArtifact.model_validate_json(calibration_bytes)
+    if (
+        calibration.phase != "calibration"
+        or calibration.status != "passed"
+        or not calibration.real_provider
+        or calibration.policy_id is not None
+    ):
+        raise ValueError("Eval Policy requires a passed pre-policy real calibration")
+    if calibration.dataset_manifest_sha256 != policy.dataset_manifest_sha256:
+        raise ValueError("calibration dataset manifest hash does not match Eval Policy")
+    if calibration.dataset_content_sha256 != policy.dataset_content_sha256:
+        raise ValueError("calibration dataset content hash does not match Eval Policy")
+    if calibration.evaluation_config_hash != policy.evaluation_config_hash:
+        raise ValueError("calibration config hash does not match Eval Policy")
+    if policy.approved_at <= calibration.finished_at:
+        raise ValueError("Eval Policy approval must follow calibration completion")
+
+    try:
+        policy_sha256 = hashlib.sha256(resolved_policy.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise ValueError("cannot hash Eval Policy") from exc
+    return LoadedGraphEvalPolicy(policy, calibration, policy_sha256)

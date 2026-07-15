@@ -194,6 +194,7 @@ def test_eval_policy_requires_protection_floors_utc_and_scoped_calibration_path(
         "schema_version": "graph-extraction-eval-policy-v1",
         "policy_id": "eval_policy_v1",
         "dataset_manifest_sha256": "a" * 64,
+        "dataset_content_sha256": "d" * 64,
         "evaluation_config_hash": "b" * 64,
         "calibration_result_path": "eval/graph_extraction/results/calibration-1.json",
         "calibration_result_sha256": "c" * 64,

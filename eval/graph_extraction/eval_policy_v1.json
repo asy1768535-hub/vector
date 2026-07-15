@@ -1,0 +1,18 @@
+{
+  "approval_reference": "m6-task7-approval-20260715-01",
+  "approved_at": "2026-07-15T10:30:00Z",
+  "approved_by": "Alice",
+  "calibration_result_path": "eval/graph_extraction/results/release-calibration-v1-20260715-01.json",
+  "calibration_result_sha256": "10c488998bd1c52d42ef07fde4b95bafa90ea27356c03c11cb14190d0826aeec",
+  "dataset_content_sha256": "6b316cbbcfc7357cb27bb0b8500e8c49ec041ce2d85c52715aba7108c3d6e96b",
+  "dataset_manifest_sha256": "8cb812a33dac20745b78cca342a27e065684032a25e7adc020cc3d0ad19b5d22",
+  "evaluation_config_hash": "abac93e3e86a5d198708410e6c6046f14a14d0e150970940983eea1b73f2d54a",
+  "policy_id": "eval_policy_v1",
+  "schema_version": "graph-extraction-eval-policy-v1",
+  "thresholds": {
+    "entity_precision": 0.85,
+    "entity_recall": 0.75,
+    "relation_precision": 0.85,
+    "relation_recall": 0.7
+  }
+}
