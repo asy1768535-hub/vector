@@ -1,0 +1,26 @@
+{
+  "calibration": {
+    "path": "eval/graph_extraction/results/release-calibration-v1-20260715-01.json",
+    "sha256": "10c488998bd1c52d42ef07fde4b95bafa90ea27356c03c11cb14190d0826aeec"
+  },
+  "evidence_id": "release_evidence_v1",
+  "policy": {
+    "path": "eval/graph_extraction/eval_policy_v1.json",
+    "sha256": "9fd5652e9ed7d0b585feb6dd57d12aad7c3a4ecf7a85a4159d44f947464ccc3b"
+  },
+  "post_freeze_runs": [
+    {
+      "path": "eval/graph_extraction/results/post-freeze-release-v1-20260715-01.json",
+      "sha256": "65a5dbdf1f25f2ff15984f46f4915c72c8cc0070fd4afff2a38fd62bc060f466"
+    },
+    {
+      "path": "eval/graph_extraction/results/post-freeze-release-v1-20260715-02.json",
+      "sha256": "9f771c814022c7a784610b76ee65b0fc9a86002db687e93c4f3a658d550491ce"
+    },
+    {
+      "path": "eval/graph_extraction/results/post-freeze-release-v1-20260715-03.json",
+      "sha256": "f282df26f4852e27df16b698286405e647484137eadd36ed1d493eb6a589e1f1"
+    }
+  ],
+  "schema_version": "graph-extraction-release-evidence-v1"
+}

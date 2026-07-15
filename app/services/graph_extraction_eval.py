@@ -474,6 +474,54 @@ class GraphEvalPolicy(_StrictModel):
         return value
 
 
+class GraphEvalEvidenceReference(_StrictModel):
+    path: str
+    sha256: str
+
+    @field_validator("path")
+    @classmethod
+    def _path_is_repository_scoped_json(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if (
+            path.is_absolute()
+            or ".." in path.parts
+            or path.suffix != ".json"
+            or path.parts[:2] != ("eval", "graph_extraction")
+        ):
+            raise ValueError("release evidence reference must be scoped JSON")
+        return value
+
+    @field_validator("sha256")
+    @classmethod
+    def _sha_is_sha256(cls, value: str) -> str:
+        if not _SHA256_RE.fullmatch(value):
+            raise ValueError("release evidence reference requires a SHA-256 digest")
+        return value
+
+
+class GraphEvalReleaseEvidence(_StrictModel):
+    schema_version: Literal["graph-extraction-release-evidence-v1"]
+    evidence_id: Literal["release_evidence_v1"]
+    calibration: GraphEvalEvidenceReference
+    policy: GraphEvalEvidenceReference
+    post_freeze_runs: tuple[
+        GraphEvalEvidenceReference,
+        GraphEvalEvidenceReference,
+        GraphEvalEvidenceReference,
+    ]
+
+    @model_validator(mode="after")
+    def _selected_paths_are_distinct(self) -> GraphEvalReleaseEvidence:
+        paths = [
+            self.calibration.path,
+            self.policy.path,
+            *(row.path for row in self.post_freeze_runs),
+        ]
+        if len(paths) != len(set(paths)):
+            raise ValueError("release evidence references must be distinct")
+        return self
+
+
 EntityEvalKey: TypeAlias = tuple[str, str, str]
 RelationEvalKey: TypeAlias = tuple[str, EntityEvalKey, str, EntityEvalKey]
 
@@ -900,3 +948,178 @@ def load_graph_eval_policy(
     except OSError as exc:
         raise ValueError("cannot hash Eval Policy") from exc
     return LoadedGraphEvalPolicy(policy, calibration, policy_sha256)
+
+
+@dataclass(frozen=True, slots=True)
+class LoadedGraphEvalReleaseEvidence:
+    evidence: GraphEvalReleaseEvidence
+    evidence_sha256: str
+    policy: LoadedGraphEvalPolicy
+    calibration: GraphEvalRunArtifact
+    post_freeze_runs: tuple[
+        GraphEvalRunArtifact,
+        GraphEvalRunArtifact,
+        GraphEvalRunArtifact,
+    ]
+
+
+def _load_evidence_reference(
+    *,
+    repository_root: Path,
+    reference: GraphEvalEvidenceReference,
+) -> tuple[Path, bytes]:
+    path = (repository_root / reference.path).resolve()
+    if repository_root not in path.parents:
+        raise ValueError("release evidence reference is outside the repository")
+    try:
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise ValueError("cannot load release evidence reference") from exc
+    if hashlib.sha256(payload).hexdigest() != reference.sha256:
+        raise ValueError(f"release evidence SHA-256 mismatch: {reference.path}")
+    return path, payload
+
+
+def _assert_selected_release_run(
+    artifact: GraphEvalRunArtifact,
+    *,
+    policy: LoadedGraphEvalPolicy,
+) -> None:
+    if (
+        artifact.status != "passed"
+        or not artifact.real_provider
+        or artifact.dataset_id != "release-v1"
+        or artifact.model_provider != "deepseek"
+        or artifact.model_name != "deepseek-v4-pro"
+        or artifact.real_model_call_count < 100
+    ):
+        raise ValueError("selected Release run is not a passed real DeepSeek run")
+    if artifact.dataset_manifest_sha256 != policy.policy.dataset_manifest_sha256:
+        raise ValueError("selected Release run manifest hash does not match policy")
+    if artifact.dataset_content_sha256 != policy.policy.dataset_content_sha256:
+        raise ValueError("selected Release run content hash does not match policy")
+    if artifact.evaluation_config_hash != policy.policy.evaluation_config_hash:
+        raise ValueError("selected Release run config hash does not match policy")
+    if artifact.metrics.cross_revision_evidence_count:
+        raise ValueError("selected Release run contains cross-revision Evidence")
+    if artifact.metrics.eval_formal_write_count:
+        raise ValueError("selected Release run contains Eval formal writes")
+
+
+def _assert_post_freeze_release_run(
+    artifact: GraphEvalRunArtifact,
+    *,
+    policy: LoadedGraphEvalPolicy,
+) -> None:
+    _assert_selected_release_run(artifact, policy=policy)
+    if artifact.phase != "post-freeze":
+        raise ValueError("selected post-freeze artifact has the wrong phase")
+    if (
+        artifact.policy_id != policy.policy.policy_id
+        or artifact.policy_sha256 != policy.policy_sha256
+    ):
+        raise ValueError("selected post-freeze artifact does not bind the policy")
+    if artifact.job_status_counts != {
+        "succeeded": artifact.dataset_counts.documents
+    }:
+        raise ValueError("selected post-freeze artifact requires succeeded Jobs")
+    if artifact.unit_status_counts != {"succeeded": artifact.dataset_counts.units}:
+        raise ValueError("selected post-freeze artifact requires succeeded Units")
+
+    thresholds = policy.policy.thresholds
+    rate_gates = (
+        (artifact.metrics.json_parse_rate.value, 0.99),
+        (artifact.metrics.schema_valid_rate.value, 0.95),
+        (artifact.metrics.entity.precision.value, thresholds.entity_precision),
+        (artifact.metrics.entity.recall.value, thresholds.entity_recall),
+        (artifact.metrics.relation.precision.value, thresholds.relation_precision),
+        (artifact.metrics.relation.recall.value, thresholds.relation_recall),
+    )
+    if any(value is None or value < floor for value, floor in rate_gates):
+        raise ValueError("selected post-freeze artifact is below a frozen threshold")
+
+
+def load_graph_eval_release_evidence(
+    *,
+    repository_root: Path,
+    evidence_path: Path,
+) -> LoadedGraphEvalReleaseEvidence:
+    root = repository_root.resolve()
+    resolved_evidence = evidence_path.resolve()
+    expected_evidence = (root / "eval/graph_extraction/release_evidence_v1.json").resolve()
+    if resolved_evidence != expected_evidence:
+        raise ValueError("release evidence must use the frozen v1 repository path")
+    try:
+        evidence_bytes = resolved_evidence.read_bytes()
+    except OSError as exc:
+        raise ValueError("cannot load graph Eval release evidence") from exc
+    evidence = GraphEvalReleaseEvidence.model_validate_json(evidence_bytes)
+    assert_sanitized_eval_artifact(evidence.model_dump(mode="json"))
+
+    expected_policy_path = "eval/graph_extraction/eval_policy_v1.json"
+    if evidence.policy.path != expected_policy_path:
+        raise ValueError("release evidence must select eval_policy_v1")
+    policy_path, _policy_bytes = _load_evidence_reference(
+        repository_root=root,
+        reference=evidence.policy,
+    )
+    policy = load_graph_eval_policy(repository_root=root, policy_path=policy_path)
+    if evidence.policy.sha256 != policy.policy_sha256:
+        raise ValueError("release evidence policy SHA-256 is inconsistent")
+
+    if evidence.calibration.path != policy.policy.calibration_result_path:
+        raise ValueError("release evidence selected the wrong calibration path")
+    calibration_path, calibration_bytes = _load_evidence_reference(
+        repository_root=root,
+        reference=evidence.calibration,
+    )
+    if evidence.calibration.sha256 != policy.policy.calibration_result_sha256:
+        raise ValueError("release evidence selected the wrong calibration SHA-256")
+    calibration = GraphEvalRunArtifact.model_validate_json(calibration_bytes)
+    if calibration_path.name != f"{calibration.run_id}.json":
+        raise ValueError("calibration result filename does not match its run ID")
+    _assert_selected_release_run(calibration, policy=policy)
+    if calibration.phase != "calibration" or calibration.policy_id is not None:
+        raise ValueError("release evidence calibration must predate the policy")
+
+    post_freeze_rows: list[GraphEvalRunArtifact] = []
+    for reference in evidence.post_freeze_runs:
+        if PurePosixPath(reference.path).parts[:3] != (
+            "eval",
+            "graph_extraction",
+            "results",
+        ):
+            raise ValueError("post-freeze result must be under the results directory")
+        run_path, run_bytes = _load_evidence_reference(
+            repository_root=root,
+            reference=reference,
+        )
+        artifact = GraphEvalRunArtifact.model_validate_json(run_bytes)
+        if run_path.name != f"{artifact.run_id}.json":
+            raise ValueError("post-freeze result filename does not match its run ID")
+        _assert_post_freeze_release_run(artifact, policy=policy)
+        post_freeze_rows.append(artifact)
+
+    if len({row.run_id for row in post_freeze_rows}) != 3:
+        raise ValueError("post-freeze run IDs must be distinct")
+    if len({row.database_name for row in post_freeze_rows}) != 3:
+        raise ValueError("post-freeze database names must be distinct")
+    selected = [calibration, *post_freeze_rows]
+    if len({row.dataset_manifest_sha256 for row in selected}) != 1:
+        raise ValueError("selected Release manifest hashes are inconsistent")
+    if len({row.dataset_content_sha256 for row in selected}) != 1:
+        raise ValueError("selected Release content hashes are inconsistent")
+    if len({row.evaluation_config_hash for row in selected}) != 1:
+        raise ValueError("selected Release config hashes are inconsistent")
+
+    return LoadedGraphEvalReleaseEvidence(
+        evidence=evidence,
+        evidence_sha256=hashlib.sha256(evidence_bytes).hexdigest(),
+        policy=policy,
+        calibration=calibration,
+        post_freeze_runs=(
+            post_freeze_rows[0],
+            post_freeze_rows[1],
+            post_freeze_rows[2],
+        ),
+    )

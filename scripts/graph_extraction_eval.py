@@ -15,6 +15,7 @@ if str(ROOT_DIR) not in sys.path:
 from app.services.graph_extraction_eval import (  # noqa: E402
     assert_sanitized_eval_artifact,
     load_graph_eval_dataset,
+    load_graph_eval_release_evidence,
 )
 
 
@@ -37,6 +38,26 @@ def _validate(manifest: Path) -> int:
     return 0
 
 
+def _verify_release(evidence: Path) -> int:
+    if "app.config" in sys.modules or "app.db" in sys.modules:
+        raise RuntimeError("offline verification loaded application Settings or database modules")
+    loaded = load_graph_eval_release_evidence(
+        repository_root=ROOT_DIR,
+        evidence_path=evidence,
+    )
+    output = {
+        "evidence_id": loaded.evidence.evidence_id,
+        "evidence_sha256": loaded.evidence_sha256,
+        "policy_id": loaded.policy.policy.policy_id,
+        "calibration_run_id": loaded.calibration.run_id,
+        "post_freeze_run_ids": [row.run_id for row in loaded.post_freeze_runs],
+        "status": "passed",
+    }
+    assert_sanitized_eval_artifact(output)
+    print(json.dumps(output, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Validate or run isolated v0.4 graph extraction evaluation"
@@ -47,6 +68,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="validate a synthetic dataset manifest without database or network access",
     )
     validate.add_argument("--manifest", type=Path, required=True)
+    verify = subparsers.add_parser(
+        "verify-release",
+        help="verify frozen v0.4 release evidence without database or network access",
+    )
+    verify.add_argument("--evidence", type=Path, required=True)
     run = subparsers.add_parser(
         "run",
         help="run a real Provider evaluation in a fresh isolated PostgreSQL database",
@@ -72,6 +98,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "validate":
         return _validate(args.manifest)
+    if args.command == "verify-release":
+        return _verify_release(args.evidence)
     if args.command == "run":
         if not args.real_provider:
             raise ValueError("real Eval requires --real-provider")

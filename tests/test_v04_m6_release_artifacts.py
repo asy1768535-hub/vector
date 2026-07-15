@@ -8,9 +8,11 @@ import pytest
 from pydantic import ValidationError
 
 from app.services.graph_extraction_eval import (
+    GraphEvalReleaseEvidence,
     GraphEvalPolicy,
     assert_sanitized_eval_artifact,
     load_graph_eval_policy,
+    load_graph_eval_release_evidence,
 )
 
 
@@ -20,6 +22,7 @@ CALIBRATION = (
     ROOT
     / "eval/graph_extraction/results/release-calibration-v1-20260715-01.json"
 )
+EVIDENCE = ROOT / "eval/graph_extraction/release_evidence_v1.json"
 
 
 def _policy_payload() -> dict:
@@ -131,3 +134,91 @@ def test_eval_policy_schema_is_strict_and_requires_utc():
     payload["approved_at"] = "2026-07-15T18:30:00+08:00"
     with pytest.raises(ValidationError, match="UTC"):
         GraphEvalPolicy.model_validate(payload)
+
+
+def _temporary_release_bundle(tmp_path: Path) -> tuple[Path, dict]:
+    payload = json.loads(EVIDENCE.read_text(encoding="utf-8"))
+    references = [
+        payload["calibration"],
+        payload["policy"],
+        *payload["post_freeze_runs"],
+    ]
+    for reference in references:
+        source = ROOT / reference["path"]
+        target = tmp_path / reference["path"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(source.read_bytes())
+    evidence_path = tmp_path / "eval/graph_extraction/release_evidence_v1.json"
+    evidence_path.write_text(
+        json.dumps(payload, ensure_ascii=True, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return evidence_path, payload
+
+
+def test_release_evidence_v1_binds_calibration_policy_and_three_real_runs():
+    loaded = load_graph_eval_release_evidence(
+        repository_root=ROOT,
+        evidence_path=EVIDENCE,
+    )
+
+    assert loaded.calibration.run_id == "release-calibration-v1-20260715-01"
+    assert [row.run_id for row in loaded.post_freeze_runs] == [
+        "post-freeze-release-v1-20260715-01",
+        "post-freeze-release-v1-20260715-02",
+        "post-freeze-release-v1-20260715-03",
+    ]
+    assert len({row.database_name for row in loaded.post_freeze_runs}) == 3
+    assert all(row.status == "passed" for row in loaded.post_freeze_runs)
+    assert_sanitized_eval_artifact(loaded.evidence.model_dump(mode="json"))
+
+
+def test_release_evidence_schema_rejects_duplicate_or_unscoped_references():
+    payload = json.loads(EVIDENCE.read_text(encoding="utf-8"))
+    payload["post_freeze_runs"][2] = payload["post_freeze_runs"][1]
+    with pytest.raises(ValidationError, match="distinct"):
+        GraphEvalReleaseEvidence.model_validate(payload)
+
+    payload = json.loads(EVIDENCE.read_text(encoding="utf-8"))
+    payload["policy"]["path"] = "../eval_policy_v1.json"
+    with pytest.raises(ValidationError, match="scoped JSON"):
+        GraphEvalReleaseEvidence.model_validate(payload)
+
+
+def test_release_evidence_rejects_tampered_bytes(tmp_path):
+    evidence_path, payload = _temporary_release_bundle(tmp_path)
+    run_path = tmp_path / payload["post_freeze_runs"][0]["path"]
+    run_path.write_bytes(run_path.read_bytes() + b"\n")
+
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        load_graph_eval_release_evidence(
+            repository_root=tmp_path,
+            evidence_path=evidence_path,
+        )
+
+
+def test_release_evidence_rejects_result_below_frozen_threshold(tmp_path):
+    evidence_path, payload = _temporary_release_bundle(tmp_path)
+    reference = payload["post_freeze_runs"][2]
+    run_path = tmp_path / reference["path"]
+    artifact = json.loads(run_path.read_text(encoding="utf-8"))
+    artifact["metrics"]["relation"]["recall"] = {
+        "denominator": 100,
+        "numerator": 69,
+        "value": 0.69,
+    }
+    run_path.write_text(
+        json.dumps(artifact, ensure_ascii=True, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    reference["sha256"] = hashlib.sha256(run_path.read_bytes()).hexdigest()
+    evidence_path.write_text(
+        json.dumps(payload, ensure_ascii=True, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="below a frozen threshold"):
+        load_graph_eval_release_evidence(
+            repository_root=tmp_path,
+            evidence_path=evidence_path,
+        )
