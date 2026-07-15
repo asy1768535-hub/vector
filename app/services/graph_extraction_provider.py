@@ -13,7 +13,7 @@ import httpx
 ProviderErrorCategory = Literal["timeout", "network_error", "http_error"]
 DEEPSEEK_PROVIDER_NAME = "deepseek"
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
-DEEPSEEK_MODEL_NAME = "deepseek-chat"
+DEEPSEEK_MODEL_NAME = "deepseek-v4-pro"
 
 
 def _canonical_json(value: Any) -> str:

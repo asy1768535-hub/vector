@@ -13,7 +13,7 @@ EXPECTED_DEFAULTS = {
     "graph_extraction_enabled": False,
     "graph_extraction_auto_trigger_enabled": False,
     "graph_extraction_base_url": "https://api.deepseek.com/v1",
-    "graph_extraction_model": "deepseek-chat",
+    "graph_extraction_model": "deepseek-v4-pro",
     "graph_extraction_timeout_seconds": 120.0,
     "graph_extraction_temperature": 0.0,
     "graph_extraction_response_format": "json_object",

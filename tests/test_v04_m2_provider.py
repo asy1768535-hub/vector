@@ -76,7 +76,7 @@ async def test_deepseek_adapter_uses_exact_openai_compatible_contract():
 
     extractor = OpenAICompatibleGraphExtractor(
         base_url="https://api.deepseek.com/v1/",
-        model="deepseek-chat",
+        model="deepseek-v4-pro",
         api_key="TOP-SECRET-KEY",
         timeout_seconds=12,
         transport=httpx.MockTransport(handler),
@@ -86,7 +86,7 @@ async def test_deepseek_adapter_uses_exact_openai_compatible_contract():
     assert captured["url"] == "https://api.deepseek.com/v1/chat/completions"
     assert captured["authorization"] == "Bearer TOP-SECRET-KEY"
     assert captured["payload"] == {
-        "model": "deepseek-chat",
+        "model": "deepseek-v4-pro",
         "messages": _messages(),
         "temperature": 0,
         "stream": False,
@@ -121,7 +121,7 @@ async def test_openai_compatible_adapter_classifies_transport_failures(
 
     extractor = OpenAICompatibleGraphExtractor(
         base_url="https://api.deepseek.com/v1",
-        model="deepseek-chat",
+        model="deepseek-v4-pro",
         api_key="SECRET-TRANSPORT-KEY",
         transport=httpx.MockTransport(handler),
     )
@@ -141,7 +141,7 @@ async def test_openai_compatible_adapter_bounds_and_redacts_http_error_body():
 
     extractor = OpenAICompatibleGraphExtractor(
         base_url="https://api.deepseek.com/v1",
-        model="deepseek-chat",
+        model="deepseek-v4-pro",
         api_key=secret,
         transport=httpx.MockTransport(handler),
     )
@@ -160,7 +160,7 @@ async def test_openai_compatible_adapter_rejects_invalid_envelope_without_leakin
 
     extractor = OpenAICompatibleGraphExtractor(
         base_url="https://api.deepseek.com/v1",
-        model="deepseek-chat",
+        model="deepseek-v4-pro",
         api_key="SECRET-KEY",
         transport=httpx.MockTransport(handler),
     )

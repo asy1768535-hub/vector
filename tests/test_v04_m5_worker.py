@@ -300,7 +300,7 @@ def _prepared():
         model_config_snapshot={
             "provider": "deepseek",
             "base_url": "https://api.deepseek.com/v1",
-            "model": "deepseek-chat",
+            "model": "deepseek-v4-pro",
             "timeout_seconds": 10.0,
         },
         model_config_hash="a" * 64,
@@ -344,7 +344,7 @@ def test_configured_provider_builds_deepseek_adapter_without_http(monkeypatch):
     assert configured is adapter.return_value
     adapter.assert_called_once_with(
         base_url="https://api.deepseek.com/v1",
-        model="deepseek-chat",
+        model="deepseek-v4-pro",
         api_key="DEEPSEEK-TEST-KEY",
         timeout_seconds=10.0,
     )

@@ -398,6 +398,8 @@ def test_job_creation_fails_closed_before_database_work(
 
 def test_job_creation_freezes_config_and_adds_deterministic_units(monkeypatch):
     monkeypatch.setattr(settings, "graph_extraction_enabled", True)
+    monkeypatch.setattr(settings, "graph_extraction_base_url", "https://api.deepseek.com/v1")
+    monkeypatch.setattr(settings, "graph_extraction_model", "deepseek-v4-pro")
     ontology = SimpleNamespace(id=ONTOLOGY_ID)
     snapshot = {
         "ontology_version_id": str(ONTOLOGY_ID),
@@ -445,10 +447,10 @@ def test_job_creation_freezes_config_and_adds_deterministic_units(monkeypatch):
     provider_call.assert_not_awaited()
     assert isinstance(job, GraphExtractionJob)
     assert job.model_provider == "deepseek"
-    assert job.model_name == "deepseek-chat"
+    assert job.model_name == "deepseek-v4-pro"
     assert job.model_config_snapshot["provider"] == "deepseek"
     assert job.model_config_snapshot["base_url"] == "https://api.deepseek.com/v1"
-    assert job.model_config_snapshot["model"] == "deepseek-chat"
+    assert job.model_config_snapshot["model"] == "deepseek-v4-pro"
     assert job.idempotency_key == job.input_fingerprint
     assert job.counts == {
         "total": 2,

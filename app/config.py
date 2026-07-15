@@ -233,7 +233,7 @@ class Settings(BaseSettings):
     graph_extraction_enabled: bool = False
     graph_extraction_auto_trigger_enabled: bool = False
     graph_extraction_base_url: str = "https://api.deepseek.com/v1"
-    graph_extraction_model: str = "deepseek-chat"
+    graph_extraction_model: str = "deepseek-v4-pro"
     graph_extraction_api_key: SecretStr = SecretStr("")
     graph_extraction_timeout_seconds: float = 120.0
     graph_extraction_temperature: float = 0.0
@@ -307,7 +307,7 @@ def validate_graph_extraction_startup(config: Settings) -> None:
 
     if config.graph_extraction_enabled and (
         config.graph_extraction_base_url != "https://api.deepseek.com/v1"
-        or config.graph_extraction_model != "deepseek-chat"
+        or config.graph_extraction_model != "deepseek-v4-pro"
     ):
         raise RuntimeError(
             "[security] graph extraction requires the frozen official DeepSeek "

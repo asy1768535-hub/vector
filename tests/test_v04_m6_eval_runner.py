@@ -159,7 +159,7 @@ def _configure_real_deepseek(monkeypatch) -> None:
     monkeypatch.setattr(
         settings, "graph_extraction_base_url", "https://api.deepseek.com/v1"
     )
-    monkeypatch.setattr(settings, "graph_extraction_model", "deepseek-chat")
+    monkeypatch.setattr(settings, "graph_extraction_model", "deepseek-v4-pro")
 
 
 def test_real_run_accepts_only_frozen_deepseek_environment(monkeypatch):
