@@ -91,6 +91,21 @@ queued/processing Units cancelled with unit_cancelled and clears worker/claim/le
 marks queued/processing Jobs cancelled with library_opt_out or security_allowlist_changed. Re-enabling or
 restoring the old allowlist does not revive cancelled Jobs.
 
+### v0.5 Active Graph Publication（M1 基础）
+
+配置名和默认值与 `.env.example` 的 `GRAPH_PUBLICATION_*` 块一致。M1 只提供配置和数据库发布快照基础，
+不执行 planner、activation、rollback 或 API。
+
+- 全局 `GRAPH_PUBLICATION_ENABLED=false`，发布命令默认不可用。
+- confidence threshold 必须在 `[0, 1]`。
+- `GRAPH_PUBLICATION_MAX_ITEMS_PER_RUN` 必须为正整数。
+- policy / manifest version 不能为空。
+
+| 组 | 变量与默认值 |
+|---|---|
+| switch/policy | `GRAPH_PUBLICATION_ENABLED=false`; `GRAPH_PUBLICATION_REQUIRE_ENTITY_EVIDENCE=true`; `GRAPH_PUBLICATION_EXTRACTED_ENTITY_MIN_CONFIDENCE=0.85`; `GRAPH_PUBLICATION_EXTRACTED_RELATION_MIN_CONFIDENCE=0.85` |
+| limit/version | `GRAPH_PUBLICATION_MAX_ITEMS_PER_RUN=10000`; `GRAPH_PUBLICATION_POLICY_VERSION=v1`; `GRAPH_PUBLICATION_MANIFEST_VERSION=v1` |
+
 ### 切分默认值
 
 | 变量 | 默认 | 说明 |

@@ -345,6 +345,11 @@ class RebuildOperationStatus(BaseModel):
     last_error: Optional[str] = None
 
 
+class GraphPublicationStats(BaseModel):
+    active: int
+    degraded: int
+
+
 class OperationsStatus(BaseModel):
     """GET /admin/operations/status 响应：三类进程在线 + 任务/Outbox/重建聚合。"""
     now: datetime
@@ -353,4 +358,5 @@ class OperationsStatus(BaseModel):
     embedding_jobs: EmbeddingJobStats
     cleanup_outbox: CleanupOutboxStats
     libraries: LibraryIndexStats
+    graph_publications: GraphPublicationStats
     rebuild_operations: list[RebuildOperationStatus]

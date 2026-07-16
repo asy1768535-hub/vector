@@ -41,14 +41,16 @@ def _offline(command_name: str, revision: str) -> str:
     return output.getvalue().lower()
 
 
-def test_0022_is_the_single_alembic_head_and_has_exact_parent():
+def test_0022_has_exact_parent_and_v05_extends_it_linearly():
     script = ScriptDirectory.from_config(Config(str(ROOT / "alembic.ini")))
-    assert script.get_heads() == ["0022"]
+    assert script.get_heads() == ["0023"]
     migration = script.get_revision("0022")
     assert migration is not None
     assert migration.down_revision == "0021"
     assert Path(migration.path).resolve() == MIGRATION.resolve()
-    assert not list((ROOT / "alembic" / "versions").glob("0023_*.py"))
+    v05_migration = script.get_revision("0023")
+    assert v05_migration is not None
+    assert v05_migration.down_revision == "0022"
 
 
 def test_offline_upgrade_contains_every_orm_table_column_constraint_fk_and_index():

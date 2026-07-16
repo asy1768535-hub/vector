@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.models.entity import Entity
 from app.models.entity_mention import EntityMention
 from app.models.evidence_unit import EVIDENCE_STATUS_ACTIVE, EvidenceUnit
@@ -28,6 +29,14 @@ class GraphStaleLifecycleResult:
     stale_entity_mentions: int
     stale_relation_evidence: int
     stale_relations: int
+
+
+async def _reconcile_publications(db: AsyncSession, library: Library) -> None:
+    if not settings.graph_publication_enabled:
+        return
+    from app.services import graph_publication_reconcile
+
+    await graph_publication_reconcile.reconcile_library_current_publications(db, library)
 
 
 async def require_active_graph_evidence(
@@ -116,6 +125,8 @@ async def create_relation_evidence(
     )
     db.add(row)
     await db.flush()
+    if support_type == "contradicts" and status == GRAPH_BINDING_STATUS_ACTIVE:
+        await _reconcile_publications(db, library)
     return row
 
 
@@ -148,6 +159,7 @@ async def mark_document_revision_graph_evidence_stale(
     )
     if stale_mentions or stale_relation_evidence or stale_relations:
         await db.flush()
+        await _reconcile_publications(db, library)
     return GraphStaleLifecycleResult(
         stale_entity_mentions=stale_mentions,
         stale_relation_evidence=stale_relation_evidence,
@@ -184,6 +196,7 @@ async def mark_document_graph_evidence_stale(
     )
     if stale_mentions or stale_relation_evidence or stale_relations:
         await db.flush()
+        await _reconcile_publications(db, library)
     return GraphStaleLifecycleResult(
         stale_entity_mentions=stale_mentions,
         stale_relation_evidence=stale_relation_evidence,
@@ -225,6 +238,7 @@ async def mark_evidence_unit_graph_evidence_stale(
     )
     if stale_mentions or stale_relation_evidence or stale_relations:
         await db.flush()
+        await _reconcile_publications(db, library)
     return GraphStaleLifecycleResult(
         stale_entity_mentions=stale_mentions,
         stale_relation_evidence=stale_relation_evidence,
@@ -237,7 +251,15 @@ async def mark_relations_without_active_evidence_stale(
     library: Library,
     relation_ids: Iterable[uuid.UUID],
 ) -> int:
-    return await _mark_relations_without_active_evidence_stale(db, library, relation_ids, flush=True)
+    stale_count = await _mark_relations_without_active_evidence_stale(
+        db,
+        library,
+        relation_ids,
+        flush=True,
+    )
+    if stale_count:
+        await _reconcile_publications(db, library)
+    return stale_count
 
 
 async def list_active_entity_mentions(
@@ -288,6 +310,7 @@ async def list_active_knowledge_relations(
     source_entity_id: uuid.UUID | None = None,
     target_entity_id: uuid.UUID | None = None,
 ) -> list[KnowledgeRelation]:
+    """Return lifecycle-active rows; publication-accurate reads must use v0.5 helpers."""
     stmt = select(KnowledgeRelation).where(
         KnowledgeRelation.library_id == library.id,
         KnowledgeRelation.status == GRAPH_RELATION_STATUS_ACTIVE,

@@ -268,6 +268,15 @@ class Settings(BaseSettings):
     graph_extraction_raw_output_retention_days: int = 30
     graph_extraction_candidate_retention_days: int = 180
 
+    # ---- v0.5 Active Graph Publication (M1 defaults; fail closed) ----
+    graph_publication_enabled: bool = False
+    graph_publication_require_entity_evidence: bool = True
+    graph_publication_extracted_entity_min_confidence: float = 0.85
+    graph_publication_extracted_relation_min_confidence: float = 0.85
+    graph_publication_max_items_per_run: int = 10_000
+    graph_publication_policy_version: str = "v1"
+    graph_publication_manifest_version: str = "v1"
+
 
 def validate_graph_extraction_startup(config: Settings) -> None:
     weights = {
@@ -321,6 +330,23 @@ def validate_graph_extraction_startup(config: Settings) -> None:
         raise RuntimeError(
             "[security] GRAPH_EXTRACTION_API_KEY is required when auto trigger is enabled"
         )
+
+
+def validate_graph_publication_startup(config: Settings) -> None:
+    confidence_values = (
+        config.graph_publication_extracted_entity_min_confidence,
+        config.graph_publication_extracted_relation_min_confidence,
+    )
+    if any(value < 0 or value > 1 for value in confidence_values):
+        raise RuntimeError(
+            "[security] graph publication confidence threshold must be within [0, 1]"
+        )
+    if config.graph_publication_max_items_per_run <= 0:
+        raise RuntimeError("[security] graph publication max item limit must be positive")
+    if not config.graph_publication_policy_version.strip():
+        raise RuntimeError("[security] graph publication policy version is required")
+    if not config.graph_publication_manifest_version.strip():
+        raise RuntimeError("[security] graph publication manifest version is required")
 
 
 @lru_cache(maxsize=1)

@@ -53,9 +53,12 @@
 | 31 | [v0.2 Evidence Foundation upgrade summary](./31-upgrade-summary-v0.2-evidence-foundation.md) | Compatibility fields, release scope, and v0.3 evidence handoff |
 | 32 | [v0.4 Graph Extraction evaluation runbook](./32-v0.4-graph-extraction-eval-runbook.md) | Synthetic Eval safety, real DeepSeek runs, immutable artifacts, verification and disposal |
 | 33 | [v0.4 Graph Extraction Pipeline upgrade summary](./33-upgrade-summary-v0.4-graph-extraction-pipeline.md) | M1-M6 changes, fail-closed rollout, compatibility, rollback and v0.5 boundary |
+| 34 | [v0.5 Active Graph Publication operator summary](./34-v0.5-active-graph-publication.md) | Feature gate, lifecycle, API roles, healthy/degraded reads, rollout and rollback |
 | v0.4 Acceptance | [Graph Extraction Pipeline acceptance](./testing/acceptance/v0.4-graph-extraction-pipeline.md) | Exact commits, hashes, metrics, real PostgreSQL/Qdrant gates and release decision |
+| v0.5 Acceptance | [Active Graph Publication acceptance](./testing/acceptance/v0.5-active-graph-publication.md) | Dirty boundary, release gates, compatibility, privacy/scope audit and release decision |
 | v0.3 | [Graph Relation Foundation spec](./superpowers/specs/2026-07-09-v0.3-graph-relation-foundation.md) | Ontology, graph facts, evidence binding, lifecycle, API and acceptance contracts |
 | v0.4 | [Graph Extraction Pipeline Master Plan](./superpowers/plans/2026-07-10-v0.4-graph-extraction-pipeline.md) | M1-M6 boundaries, evidence/schema contracts, safety, evaluation and release gates |
+| v0.5 | [Active Graph Publication Master Plan](./superpowers/plans/2026-07-15-v0.5-active-graph-publication.md) | M1-M6 plan for graph publication schema, manifests, activation, API, reconciliation and acceptance |
 | v0.4 M1 | [M1 implementation and completion record](./superpowers/plans/2026-07-10-v0.4-graph-extraction-pipeline-m1.md) | Migration 0021, fail-closed configuration, Library safety controls, heartbeat and real PostgreSQL acceptance |
 | v0.4 M2 | [M2 implementation plan](./superpowers/plans/2026-07-13-v0.4-graph-extraction-pipeline-m2.md) | Evidence-aware Context Builder, strict Parser, Prompt, Provider adapter and fenced Attempt recording |
 | v0.4 M3 | [M3 implementation plan](./superpowers/plans/2026-07-13-v0.4-graph-extraction-pipeline-m3.md) | Candidate/Occurrence staging, exact Evidence binding, provenance and Migration 0022 |

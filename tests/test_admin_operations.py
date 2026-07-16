@@ -51,6 +51,7 @@ def test_status_empty_db_shape():
         _result(all_rows=[]),        # embedding_jobs group by
         _result(all_rows=[]),        # cleanup_outbox group by
         _result(all_rows=[]),        # libraries group by
+        _result(all_rows=[]),        # graph publications group by
         _result(all_rows=[]),        # rebuild operations
     ])
 
@@ -80,6 +81,7 @@ def test_status_empty_db_shape():
         assert body["embedding_jobs"]["total"] == 0
         assert body["cleanup_outbox"]["dead_letter"] == 0
         assert body["libraries"] == {"rebuilding": 0, "failed": 0}
+        assert body["graph_publications"] == {"active": 0, "degraded": 0}
         assert body["rebuild_operations"] == []
         assert body["offline_threshold_seconds"] == 60
     finally:
@@ -116,6 +118,7 @@ def test_status_aggregates_counts_and_progress():
         _result(all_rows=[("pending", 3), ("processing", 1), ("done", 120), ("superseded", 4)]),
         _result(all_rows=[("pending", 2), ("done", 88), ("failed", 1)]),
         _result(all_rows=[("rebuilding", 1), ("ready", 5)]),
+        _result(all_rows=[("active", 4), ("degraded", 2)]),
         _result(all_rows=[("demo", "running", 50, None, 37)]),
     ])
 
@@ -138,6 +141,7 @@ def test_status_aggregates_counts_and_progress():
         assert body["cleanup_outbox"]["dead_letter"] == 1
         assert body["cleanup_outbox"]["total"] == 91
         assert body["libraries"]["rebuilding"] == 1
+        assert body["graph_publications"] == {"active": 4, "degraded": 2}
         op = body["rebuild_operations"][0]
         assert op["library_slug"] == "demo"
         assert op["done_job_count"] == 37 and op["expected_job_count"] == 50

@@ -20,6 +20,7 @@ from app.config import settings
 from app.db import get_db
 from app.models.cleanup_outbox import CleanupOutbox
 from app.models.embedding_job import EmbeddingJob
+from app.models.graph_publication import GraphPublication
 from app.models.library import Library
 from app.models.rebuild_operation import RebuildOperation
 from app.models.service_heartbeat import ServiceHeartbeat
@@ -27,6 +28,7 @@ from app.models.user import User
 from app.schemas.admin import (
     CleanupOutboxStats,
     EmbeddingJobStats,
+    GraphPublicationStats,
     LibraryIndexStats,
     OperationsStatus,
     RebuildOperationStatus,
@@ -125,7 +127,21 @@ async def operations_status(
         failed=lc.get("failed", 0),
     )
 
-    # ── 5. 活动重建 operation（preparing/running）+ 进度 ─────────────────
+    # 5. Current graph publication health counts.
+    publication_rows = (
+        await db.execute(
+            select(GraphPublication.status, func.count())
+            .where(GraphPublication.status.in_(("active", "degraded")))
+            .group_by(GraphPublication.status)
+        )
+    ).all()
+    publication_counts = dict(publication_rows)
+    graph_publications = GraphPublicationStats(
+        active=publication_counts.get("active", 0),
+        degraded=publication_counts.get("degraded", 0),
+    )
+
+    # ── 6. 活动重建 operation（preparing/running）+ 进度 ─────────────────
     # done_job_count 子查询：每个 op 已完成的 job 数。
     done_subq = (
         select(
@@ -174,6 +190,7 @@ async def operations_status(
         embedding_jobs=embedding_jobs,
         cleanup_outbox=cleanup_outbox,
         libraries=libraries,
+        graph_publications=graph_publications,
         rebuild_operations=rebuild_operations,
     )
 
