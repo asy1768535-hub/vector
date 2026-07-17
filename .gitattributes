@@ -1,0 +1,4 @@
+eval/graph_retrieval/*.json text eol=lf
+eval/graph_retrieval/*.jsonl text eol=lf
+eval/graph_retrieval/manifests/*.json text eol=lf
+eval/graph_retrieval/results/*.json text eol=lf
