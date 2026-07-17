@@ -277,6 +277,16 @@ class Settings(BaseSettings):
     graph_publication_policy_version: str = "v1"
     graph_publication_manifest_version: str = "v1"
 
+    # ---- v0.6 Published Graph Retrieval (M1 contract; fail closed) ----
+    graph_retrieval_enabled: bool = False
+    graph_retrieval_contract_version: str = "v1"
+    graph_retrieval_max_seeds: int = 10
+    graph_retrieval_max_hops: int = 2
+    graph_retrieval_max_nodes: int = 100
+    graph_retrieval_max_relations: int = 200
+    graph_retrieval_max_evidence_per_fact: int = 20
+    graph_retrieval_timeout_seconds: float = 3.0
+
 
 def validate_graph_extraction_startup(config: Settings) -> None:
     weights = {
@@ -347,6 +357,31 @@ def validate_graph_publication_startup(config: Settings) -> None:
         raise RuntimeError("[security] graph publication policy version is required")
     if not config.graph_publication_manifest_version.strip():
         raise RuntimeError("[security] graph publication manifest version is required")
+
+
+def validate_graph_retrieval_startup(config: Settings) -> None:
+    if config.graph_retrieval_contract_version != "v1":
+        raise RuntimeError("[security] graph retrieval contract version must be v1")
+
+    limits = (
+        ("max seeds", config.graph_retrieval_max_seeds, 10),
+        ("max hops", config.graph_retrieval_max_hops, 2),
+        ("max nodes", config.graph_retrieval_max_nodes, 100),
+        ("max relations", config.graph_retrieval_max_relations, 200),
+        ("max Evidence per fact", config.graph_retrieval_max_evidence_per_fact, 20),
+    )
+    for label, value, absolute_cap in limits:
+        if value <= 0 or value > absolute_cap:
+            raise RuntimeError(
+                f"[security] graph retrieval {label} must be within [1, {absolute_cap}]"
+            )
+    if config.graph_retrieval_max_nodes < config.graph_retrieval_max_seeds:
+        raise RuntimeError("[security] graph retrieval max nodes must cover every seed")
+    if (
+        not math.isfinite(config.graph_retrieval_timeout_seconds)
+        or config.graph_retrieval_timeout_seconds <= 0
+    ):
+        raise RuntimeError("[security] graph retrieval timeout must be finite and positive")
 
 
 @lru_cache(maxsize=1)

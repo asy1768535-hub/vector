@@ -106,6 +106,24 @@ restoring the old allowlist does not revive cancelled Jobs.
 | switch/policy | `GRAPH_PUBLICATION_ENABLED=false`; `GRAPH_PUBLICATION_REQUIRE_ENTITY_EVIDENCE=true`; `GRAPH_PUBLICATION_EXTRACTED_ENTITY_MIN_CONFIDENCE=0.85`; `GRAPH_PUBLICATION_EXTRACTED_RELATION_MIN_CONFIDENCE=0.85` |
 | limit/version | `GRAPH_PUBLICATION_MAX_ITEMS_PER_RUN=10000`; `GRAPH_PUBLICATION_POLICY_VERSION=v1`; `GRAPH_PUBLICATION_MANIFEST_VERSION=v1` |
 
+### v0.6 Published Graph Retrieval（M1 合同）
+
+M1 只冻结 DTO、配置和启动校验，不挂载 `/v06` 路由，也不执行图查询。配置名和默认值与
+`.env.example` 的 `GRAPH_RETRIEVAL_*` 块一致。
+
+- `GRAPH_RETRIEVAL_ENABLED=false`，默认 fail closed。
+- contract version 只能是 `v1`。
+- seeds/hops/nodes/relations/Evidence 上限都必须为正，且不能超过 v1 绝对上限。
+- `GRAPH_RETRIEVAL_MAX_NODES` 不能小于 `GRAPH_RETRIEVAL_MAX_SEEDS`。
+- timeout 必须是有限正数。
+- v0.6 DTO 不包含 `properties`，请求中的 `include_properties` 会被拒绝。
+
+| 组 | 变量与默认值 |
+|---|---|
+| switch/version | `GRAPH_RETRIEVAL_ENABLED=false`; `GRAPH_RETRIEVAL_CONTRACT_VERSION=v1` |
+| traversal limits | `GRAPH_RETRIEVAL_MAX_SEEDS=10`; `GRAPH_RETRIEVAL_MAX_HOPS=2`; `GRAPH_RETRIEVAL_MAX_NODES=100`; `GRAPH_RETRIEVAL_MAX_RELATIONS=200` |
+| evidence/timeout | `GRAPH_RETRIEVAL_MAX_EVIDENCE_PER_FACT=20`; `GRAPH_RETRIEVAL_TIMEOUT_SECONDS=3.0` |
+
 ### 切分默认值
 
 | 变量 | 默认 | 说明 |
