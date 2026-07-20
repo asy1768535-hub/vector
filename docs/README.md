@@ -1,5 +1,11 @@
 # 文档索引
 
+> **v0.7 corrective G2.5 (2026-07-20):** Calibration v6 passed safety and SQL
+> attribution but showed that rebuilding a 6,000-row immutable publication projection
+> still lacked latency margin, while near-zero embedding components crossed a sign-only
+> boundary. G2.5 permits a bounded manifest-keyed publication cache, a ternary dead-zone
+> probe signature, and fresh v7 identities. All release gates remain unchanged.
+>
 > **v0.7 corrective G2.4 (2026-07-20):** Calibration v5 validated stable embedding
 > identity but exposed insufficient linker latency margin and an SQL-budget attribution
 > defect. G2.4 permits a bounded canonical-feature cache, assigns the seven-statement
