@@ -43,6 +43,7 @@ from eval.entity_linking.reference_scorer import (
     character_bigram_dice_micros,
     prepare_candidates,
     resolve_mention,
+    score_candidate,
     score_normalized_pair,
 )
 from eval.entity_linking.runtime import (
@@ -52,6 +53,7 @@ from eval.entity_linking.runtime import (
     EntityLinkingEvalError,
     _embedding_vector_sha256,
     _publication_projection_cache,
+    _performance_cases,
     _validate_historical_family_disjoint,
     _validate_references,
     assert_private_data_absent,
@@ -135,7 +137,7 @@ def _v2_calibration_value() -> dict[str, object]:
     value.update(
         schema_version="entity-linking-eval-result-v2",
         run_id=CALIBRATION_RUN_ID,
-        database_id="vkt_v07_el_eval_calibration_v8_20260720_01",
+        database_id="vkt_v07_el_eval_calibration_v9_20260720_01",
         g2_approval_commit=G2_APPROVAL_COMMIT,
         g2_specification_tree_sha256=G2_SPECIFICATION_TREE_SHA256,
         selection_reason="tie-higher-score",
@@ -187,9 +189,9 @@ def _release_value() -> dict[str, object]:
     refs = [
         {
             "ordinal": ordinal,
-            "run_id": f"v07-el-post-freeze-v8-20260720-0{ordinal}",
+            "run_id": f"v07-el-post-freeze-v9-20260720-0{ordinal}",
             "artifact_ref": _artifact_ref_value(
-                f"eval/entity_linking/results/v07-el-post-freeze-v8-20260720-0{ordinal}.json"
+                f"eval/entity_linking/results/v07-el-post-freeze-v9-20260720-0{ordinal}.json"
             ),
         }
         for ordinal in (1, 2, 3)
@@ -223,9 +225,9 @@ def _release_value() -> dict[str, object]:
         "qdrant_fingerprint_sha256": SHA,
         "embedding_fingerprint_sha256": SHA,
         "calibration_ref": _artifact_ref_value(
-            "eval/entity_linking/results/v07-el-calibration-v8-20260720-01.json"
+            "eval/entity_linking/results/v07-el-calibration-v9-20260720-01.json"
         ),
-        "policy_ref": _artifact_ref_value("eval/entity_linking/link_policy_v7.json"),
+        "policy_ref": _artifact_ref_value("eval/entity_linking/link_policy_v8.json"),
         "post_freeze_refs": refs,
         "canonical_response_set_sha256_by_ordinal": [
             {
@@ -346,6 +348,51 @@ def test_v3_decoy_and_historical_family_mutations_are_rejected():
     )
     with pytest.raises(EntityLinkingEvalError, match="family_split_overlap"):
         _validate_historical_family_disjoint(mutated_current, historical_cases)
+
+
+def test_linked_performance_fixture_resolves_full_frozen_mix():
+    dataset = load_dataset(ROOT)
+    threshold, _reason = select_calibration_threshold(build_grid_results(dataset))
+    assert threshold is not None
+    _mixed, linked = _performance_cases(dataset, threshold)
+    entities = {row.entity_key: row for row in dataset.gold.entities}
+    publication = next(
+        row for row in dataset.gold.publications if row.publication_key == "publication-primary"
+    )
+    candidates = tuple(
+        EntityCandidate(
+            entity_id=str(uuid.uuid5(uuid.UUID(dataset.gold.uuid_namespace), f"entity:{key}")),
+            entity_key=key,
+            entity_type_key=entities[key].entity_type_key,
+            canonical_name=entities[key].canonical_name,
+            normalized_name=entities[key].normalized_name,
+        )
+        for key in publication.entity_keys
+    )
+    observed = []
+    for mention in linked.mentions:
+        decision = resolve_mention(
+            mention.text,
+            candidates,
+            entity_type_key=mention.entity_type_key,
+            min_score_micros=threshold.min_score_micros,
+            min_margin_micros=threshold.min_margin_micros,
+        )
+        assert decision.status == "linked"
+        assert decision.selected is not None
+        assert decision.selected.candidate.entity_key == mention.gold_entity_key
+        candidate = next(row for row in candidates if row.entity_key == mention.gold_entity_key)
+        features = score_candidate(mention.text, candidate).features
+        observed.append(
+            "exact"
+            if mention.is_exact_control
+            else "boundary"
+            if features.boundary_omission_micros
+            else "abbreviation"
+        )
+    assert observed.count("exact") == 2
+    assert observed.count("boundary") == 4
+    assert observed.count("abbreviation") == 4
 
 
 def test_canonical_loader_rejects_pretty_json_duplicate_keys_crlf_and_extra(tmp_path):
@@ -562,9 +609,9 @@ def test_paired_bootstrap_is_exact_rational_and_reproducible():
 
 def test_qdrant_collection_and_service_origin_conformance_vectors():
     collection = qdrant_collection_identity(CALIBRATION_RUN_ID, "cal")
-    assert collection.collection_name == "vkt_v07_el_cal_43c5cfde79a5"
+    assert collection.collection_name == "vkt_v07_el_cal_580490804153"
     assert collection.collection_name_sha256 == (
-        "e7833173bea2173e4c8a1fc913c30532de4f9ab4bb582a2cd78b912b95e14482"
+        "eef371ed9043b8792ad2854862ddf591d2729a8d1bc3a6833486a5dc875ff485"
     )
     assert normalize_service_origin("HTTP://Example.COM", qdrant=True) == "http://example.com:80"
     assert (
@@ -760,7 +807,7 @@ def test_privacy_scanner_rejects_dataset_values_canaries_and_private_fields():
 
 def test_policy_approval_and_frozen_policy_contracts_are_strict():
     calibration_ref = _artifact_ref_value(
-        "eval/entity_linking/results/v07-el-calibration-v8-20260720-01.json"
+        "eval/entity_linking/results/v07-el-calibration-v9-20260720-01.json"
     )
     thresholds = {
         "min_score_micros": 850000,
@@ -834,9 +881,9 @@ def test_gate_decisions_reject_wrong_typed_pairs_order_and_derived_values():
 
     run_value = {
         "ordinal": 1,
-        "run_id": "v07-el-post-freeze-v8-20260720-01",
+        "run_id": "v07-el-post-freeze-v9-20260720-01",
         "artifact_ref": _artifact_ref_value(
-            "eval/entity_linking/results/v07-el-post-freeze-v8-20260720-01.json"
+            "eval/entity_linking/results/v07-el-post-freeze-v9-20260720-01.json"
         ),
         "gate_decisions": _passing_gate_values(),
         "all_passed": True,
@@ -862,13 +909,13 @@ def test_post_freeze_contract_requires_ordinal_policy_and_null_calibration_field
     value.update(
         phase="post_freeze_release",
         ordinal=1,
-        run_id="v07-el-post-freeze-v8-20260720-01",
-        database_id="vkt_v07_el_eval_post_freeze_v8_20260720_01",
+        run_id="v07-el-post-freeze-v9-20260720-01",
+        database_id="vkt_v07_el_eval_post_freeze_v9_20260720_01",
         grid_results=None,
         candidate_thresholds=None,
         selection_reason=None,
-        policy_ref=_artifact_ref_value("eval/entity_linking/link_policy_v7.json"),
-        qdrant_collection=qdrant_collection_identity("v07-el-post-freeze-v8-20260720-01", "pf1").model_dump(
+        policy_ref=_artifact_ref_value("eval/entity_linking/link_policy_v8.json"),
+        qdrant_collection=qdrant_collection_identity("v07-el-post-freeze-v9-20260720-01", "pf1").model_dump(
             mode="json"
         ),
     )
@@ -908,7 +955,7 @@ def test_release_evidence_rejects_reordered_refs_false_identity_and_extra_fields
 
 def test_invalidated_v1_calibration_is_rejected_before_policy_write():
     historical_policy_path = ROOT / "eval/entity_linking/link_policy_v1.json"
-    policy_path = ROOT / "eval/entity_linking/link_policy_v7.json"
+    policy_path = ROOT / "eval/entity_linking/link_policy_v8.json"
     assert historical_policy_path.is_file()
     assert not policy_path.exists()
     with pytest.raises(EntityLinkingEvalError, match="invalidated_calibration_artifact"):
@@ -944,8 +991,8 @@ def test_complete_cli_surface_is_frozen_before_replacement_calibration():
 def test_historical_chains_are_preserved_and_current_outputs_await_gate_b():
     base = ROOT / "eval/entity_linking"
     assert (base / "link_policy_v1.json").is_file()
-    assert not (base / "link_policy_v7.json").exists()
-    assert not (base / "release_evidence_v7.json").exists()
+    assert not (base / "link_policy_v8.json").exists()
+    assert not (base / "release_evidence_v8.json").exists()
     results = base / "results"
     historical = results / "v07-el-calibration-v3-20260720-01.json"
     historical_value = json.loads(historical.read_text(encoding="utf-8"))
@@ -1005,9 +1052,9 @@ def test_historical_chains_are_preserved_and_current_outputs_await_gate_b():
         "0f0becf67805b23f38728bda642ce7dbb3fb552c33ffa742f51ec9a695aa3d25"
     )
     forbidden = (
-        "v07-el-post-freeze-v8-20260720-01.json",
-        "v07-el-post-freeze-v8-20260720-02.json",
-        "v07-el-post-freeze-v8-20260720-03.json",
+        "v07-el-post-freeze-v9-20260720-01.json",
+        "v07-el-post-freeze-v9-20260720-02.json",
+        "v07-el-post-freeze-v9-20260720-03.json",
     )
     assert all(not (results / name).exists() for name in forbidden)
 

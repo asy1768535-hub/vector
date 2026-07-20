@@ -125,8 +125,8 @@ from eval.entity_linking.reference_scorer import (
 )
 
 
-G2_APPROVAL_COMMIT = "c53815532d02bc814906f26fa8d0cb208350e383"
-G2_SPECIFICATION_TREE_SHA256 = "e89309ac018f88fbae1b162620a3984a9f53744500652c6eb9fb34356e0dd5c8"
+G2_APPROVAL_COMMIT = "1d67635735b0aa553399168eb3c923500ee41b2b"
+G2_SPECIFICATION_TREE_SHA256 = "af4ca0f30369694722504e34ecfd3667875b1f93dc462c8751497f59697991e0"
 G1_COMMIT = "f40c5c84c3248639aa6603d43b6b306ad76d66fd"
 AUDIT_PRESERVATION_COMMIT = "155ef946c48272518c996458bc206039b6676c18"
 INVALIDATED_G2_APPROVAL_COMMIT = "75bf4141be743c1164bfa9841d0737509d7575fe"
@@ -139,15 +139,15 @@ INVALIDATED_CALIBRATION_BLOB_OID = "4c1dc04cca1ddd874fa309ad0314ad24dfc0ea68"
 PRESERVED_GITATTRIBUTES_BLOB_OID = "3f5e0ee58b5d94db6fd2ed25511a9957130885f6"
 UUID_NAMESPACE = uuid.UUID("47eb7b81-7cac-42be-976d-92d8a009a325")
 SCORER_CONFORMANCE_UUID_NAMESPACE = uuid.UUID("1bcb8d89-4423-563a-962d-670c026f6dc8")
-CALIBRATION_RUN_ID = "v07-el-calibration-v8-20260720-01"
-CALIBRATION_DATABASE_ID = "vkt_v07_el_eval_calibration_v8_20260720_01"
+CALIBRATION_RUN_ID = "v07-el-calibration-v9-20260720-01"
+CALIBRATION_DATABASE_ID = "vkt_v07_el_eval_calibration_v9_20260720_01"
 POST_FREEZE_IDENTITIES = (
-    (1, "v07-el-post-freeze-v8-20260720-01", "vkt_v07_el_eval_post_freeze_v8_20260720_01"),
-    (2, "v07-el-post-freeze-v8-20260720-02", "vkt_v07_el_eval_post_freeze_v8_20260720_02"),
-    (3, "v07-el-post-freeze-v8-20260720-03", "vkt_v07_el_eval_post_freeze_v8_20260720_03"),
+    (1, "v07-el-post-freeze-v9-20260720-01", "vkt_v07_el_eval_post_freeze_v9_20260720_01"),
+    (2, "v07-el-post-freeze-v9-20260720-02", "vkt_v07_el_eval_post_freeze_v9_20260720_02"),
+    (3, "v07-el-post-freeze-v9-20260720-03", "vkt_v07_el_eval_post_freeze_v9_20260720_03"),
 )
-POLICY_PATH = "eval/entity_linking/link_policy_v7.json"
-RELEASE_EVIDENCE_PATH = "eval/entity_linking/release_evidence_v7.json"
+POLICY_PATH = "eval/entity_linking/link_policy_v8.json"
+RELEASE_EVIDENCE_PATH = "eval/entity_linking/release_evidence_v8.json"
 EMBEDDING_PROBE_TEXT = "vkt-v07-entity-linking-identity-probe"
 EMBEDDING_PROBE_SHA256 = "4caad60c112bd93fda55714c91aef2762a3c5c5c0df2a09dc28e6296800cc61f"
 
@@ -4186,10 +4186,16 @@ def _latency_summary(samples: Sequence[int]) -> LatencySummary:
     )
 
 
-def _performance_cases(dataset: LoadedDataset) -> tuple[EvaluationCase, EvaluationCase]:
+def _performance_cases(
+    dataset: LoadedDataset, selected_threshold: Threshold
+) -> tuple[EvaluationCase, EvaluationCase]:
     calibration = tuple(case for case in dataset.cases if case.split == "calibration")
     utility = tuple(case for case in calibration if case.cohort == "utility")
     entities = {row.entity_key: row for row in dataset.gold.entities}
+    publication = next(
+        row for row in dataset.gold.publications if row.publication_key == "publication-primary"
+    )
+    publication_candidates = tuple(_candidate(entities[key]) for key in publication.entity_keys)
     exact: list[MentionRecord] = []
     boundary: list[MentionRecord] = []
     abbreviation: list[MentionRecord] = []
@@ -4205,9 +4211,21 @@ def _performance_cases(dataset: LoadedDataset) -> tuple[EvaluationCase, Evaluati
                 not_found.append(mention)
             elif mention.gold_status == "linkable" and mention.gold_entity_key is not None:
                 features = score_candidate(mention.text, _candidate(entities[mention.gold_entity_key])).features
-                if features.boundary_omission_micros:
+                decision = resolve_mention(
+                    mention.text,
+                    publication_candidates,
+                    entity_type_key=mention.entity_type_key,
+                    min_score_micros=selected_threshold.min_score_micros,
+                    min_margin_micros=selected_threshold.min_margin_micros,
+                )
+                safely_linked = bool(
+                    decision.status == "linked"
+                    and decision.selected is not None
+                    and decision.selected.candidate.entity_key == mention.gold_entity_key
+                )
+                if features.boundary_omission_micros and safely_linked:
                     boundary.append(mention)
-                elif features.ordered_abbreviation_micros:
+                elif features.ordered_abbreviation_micros and safely_linked:
                     abbreviation.append(mention)
     if min(len(exact), len(boundary), len(abbreviation), len(ambiguous), len(not_found)) < 2:
         raise ValueError("performance mention populations incomplete")
@@ -4346,7 +4364,7 @@ async def collect_live_evaluation(
                 exact_results[case.case_id] = exact_only_decisions(dataset, case)
             _current, peak_memory = tracemalloc.get_traced_memory()
             tracemalloc.stop()
-            linker_case, link_graph_case = _performance_cases(dataset)
+            linker_case, link_graph_case = _performance_cases(dataset, selected_threshold)
             for repetition in range(35):
                 before_candidate = sql_statement_count
                 result = await run_candidate_case(
