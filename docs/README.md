@@ -1,5 +1,12 @@
 # 文档索引
 
+> **v0.7 corrective G2.2 (2026-07-20):** Calibration v3 is preserved as
+> non-authoritative audit evidence after exposing latency-measurement interference and
+> a phase-aware acceptance defect. G2.2 permits only bit-for-bit scorer optimization,
+> moving memory instrumentation outside latency samples, phase-aware artifact checks,
+> and fresh v4 run identities. Dataset v2, scorer v2 outputs, thresholds, gates,
+> holdout seal, security boundaries, and default-off rollout remain unchanged.
+
 按功能拆分；每篇都自洽，可独立阅读。建议新人按 1→4 的顺序读完核心概念后，再按需查阅。
 
 ## 项目总览
