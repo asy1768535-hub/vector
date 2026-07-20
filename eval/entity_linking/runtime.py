@@ -125,8 +125,8 @@ from eval.entity_linking.reference_scorer import (
 )
 
 
-G2_APPROVAL_COMMIT = "59d53b20f0e3d71b4f83595afe97553c89cc4898"
-G2_SPECIFICATION_TREE_SHA256 = "099ce17bcd39b4240d26b949f42d152d9a16e996245ce43bc609af381026e1b1"
+G2_APPROVAL_COMMIT = "c53815532d02bc814906f26fa8d0cb208350e383"
+G2_SPECIFICATION_TREE_SHA256 = "e89309ac018f88fbae1b162620a3984a9f53744500652c6eb9fb34356e0dd5c8"
 G1_COMMIT = "f40c5c84c3248639aa6603d43b6b306ad76d66fd"
 AUDIT_PRESERVATION_COMMIT = "155ef946c48272518c996458bc206039b6676c18"
 INVALIDATED_G2_APPROVAL_COMMIT = "75bf4141be743c1164bfa9841d0737509d7575fe"
@@ -137,16 +137,17 @@ INVALIDATED_CALIBRATION_CANONICAL_SHA256 = "96757dcd901439828b61605c473a34c2c838
 INVALIDATED_CALIBRATION_FILE_SHA256 = "c35210075e179ebce197275041e0ff69403297185ec2ebcc16a663d7611e9225"
 INVALIDATED_CALIBRATION_BLOB_OID = "4c1dc04cca1ddd874fa309ad0314ad24dfc0ea68"
 PRESERVED_GITATTRIBUTES_BLOB_OID = "3f5e0ee58b5d94db6fd2ed25511a9957130885f6"
-UUID_NAMESPACE = uuid.UUID("1bcb8d89-4423-563a-962d-670c026f6dc8")
-CALIBRATION_RUN_ID = "v07-el-calibration-v7-20260720-01"
-CALIBRATION_DATABASE_ID = "vkt_v07_el_eval_calibration_v7_20260720_01"
+UUID_NAMESPACE = uuid.UUID("47eb7b81-7cac-42be-976d-92d8a009a325")
+SCORER_CONFORMANCE_UUID_NAMESPACE = uuid.UUID("1bcb8d89-4423-563a-962d-670c026f6dc8")
+CALIBRATION_RUN_ID = "v07-el-calibration-v8-20260720-01"
+CALIBRATION_DATABASE_ID = "vkt_v07_el_eval_calibration_v8_20260720_01"
 POST_FREEZE_IDENTITIES = (
-    (1, "v07-el-post-freeze-v7-20260720-01", "vkt_v07_el_eval_post_freeze_v7_20260720_01"),
-    (2, "v07-el-post-freeze-v7-20260720-02", "vkt_v07_el_eval_post_freeze_v7_20260720_02"),
-    (3, "v07-el-post-freeze-v7-20260720-03", "vkt_v07_el_eval_post_freeze_v7_20260720_03"),
+    (1, "v07-el-post-freeze-v8-20260720-01", "vkt_v07_el_eval_post_freeze_v8_20260720_01"),
+    (2, "v07-el-post-freeze-v8-20260720-02", "vkt_v07_el_eval_post_freeze_v8_20260720_02"),
+    (3, "v07-el-post-freeze-v8-20260720-03", "vkt_v07_el_eval_post_freeze_v8_20260720_03"),
 )
-POLICY_PATH = "eval/entity_linking/link_policy_v6.json"
-RELEASE_EVIDENCE_PATH = "eval/entity_linking/release_evidence_v6.json"
+POLICY_PATH = "eval/entity_linking/link_policy_v7.json"
+RELEASE_EVIDENCE_PATH = "eval/entity_linking/release_evidence_v7.json"
 EMBEDDING_PROBE_TEXT = "vkt-v07-entity-linking-identity-probe"
 EMBEDDING_PROBE_SHA256 = "4caad60c112bd93fda55714c91aef2762a3c5c5c0df2a09dc28e6296800cc61f"
 
@@ -173,10 +174,10 @@ G3_IMPLEMENTATION_PATHS = (
     "eval/entity_linking/reference_scorer.py",
     "eval/entity_linking/runtime.py",
     "eval/entity_linking/README.md",
-    "eval/entity_linking/gold_v2.json",
-    "eval/entity_linking/cases_v2.jsonl",
+    "eval/entity_linking/gold_v3.json",
+    "eval/entity_linking/cases_v3.jsonl",
     "eval/entity_linking/conformance_v2.json",
-    "eval/entity_linking/manifests/feasibility_v2.json",
+    "eval/entity_linking/manifests/feasibility_v3.json",
     "scripts/entity_linking_feasibility.py",
     "tests/test_v07_entity_linking_eval.py",
     "tests/test_v07_entity_linking_eval_pg.py",
@@ -231,6 +232,9 @@ LF_CONTRACT_PATHS = (
     "eval/entity_linking/cases_v2.jsonl",
     "eval/entity_linking/conformance_v2.json",
     "eval/entity_linking/manifests/feasibility_v2.json",
+    "eval/entity_linking/gold_v3.json",
+    "eval/entity_linking/cases_v3.jsonl",
+    "eval/entity_linking/manifests/feasibility_v3.json",
     "eval/entity_linking/results/v07-el-calibration-v1-20260717-01.json",
     "scripts/entity_linking_feasibility.py",
     "tests/test_v07_entity_linking_eval.py",
@@ -255,6 +259,12 @@ HISTORICAL_ENTITY_LINKING_PATHS = (
     "eval/entity_linking/results/v07-el-calibration-v4-20260720-01.json",
     "eval/entity_linking/results/v07-el-calibration-v5-20260720-01.json",
     "eval/entity_linking/results/v07-el-calibration-v6-20260720-01.json",
+    "eval/entity_linking/gold_v2.json",
+    "eval/entity_linking/cases_v2.jsonl",
+    "eval/entity_linking/manifests/feasibility_v2.json",
+    "eval/entity_linking/results/v07-el-calibration-v7-20260720-01.json",
+    "eval/entity_linking/link_policy_v6.json",
+    "eval/entity_linking/results/v07-el-post-freeze-v7-20260720-01.json",
 )
 
 
@@ -613,26 +623,26 @@ def _entity(
 
 
 def _case_prefix(index: int) -> str:
-    return f"v2-{index:03d}"
+    return f"v3-{index:03d}"
 
 
 _CALIBRATION_ROOTS = (
-    "Alder", "Birch", "Cedar", "Elm", "Fir", "Grove", "Hazel", "Ivy", "Juniper", "Linden"
+    "Ardent", "Beacon", "Cobalt", "Drift", "Echo", "Fable", "Harbor", "Ion", "Kestrel", "Meridian"
 )
 _RELEASE_ROOTS = (
-    "Maple", "Oak", "Pine", "Rowan", "Spruce", "Willow", "Yew", "Aspen", "Beech", "Cypress"
+    "Nimbus", "Orbit", "Prism", "Quill", "Radiant", "Summit", "Tundra", "Umber", "Vector", "Zenith"
 )
 _FAMILY_MODIFIERS = (
-    "Amber", "Azure", "Coral", "Delta", "Ember", "Frost",
-    "Jade", "Lunar", "Mist", "Nova", "Opal", "Quartz",
+    "Bronze", "Cinder", "Falcon", "Glacier", "Helix", "Indigo",
+    "Kernel", "Matrix", "Onyx", "Pulsar", "Saffron", "Vertex",
 )
 _CALIBRATION_CJK_ROOTS = (
-    "星河", "云海", "青岚", "远山", "晨光", "松涛", "明湖", "清泉", "长风", "月湾",
+    "苍穹", "碧海", "翠岭", "岚谷", "朝霞", "柏涛", "澄湖", "涌泉", "劲风", "星湾",
 )
 _RELEASE_CJK_ROOTS = (
-    "天际", "海岳", "竹影", "北辰", "曙光", "林涛", "镜湖", "溪谷", "南风", "雪原",
+    "云际", "沧岳", "梅影", "东辰", "霞光", "杉涛", "映湖", "河谷", "西风", "霜原",
 )
-_CJK_MODIFIERS = ("智造", "研究", "工程", "数据", "协作", "创新", "服务", "技术", "设计", "运营", "系统", "实验")
+_CJK_MODIFIERS = ("智联", "勘研", "构造", "算据", "联创", "新域", "云服", "数科", "策划", "营运", "平台", "验证")
 
 
 def _family_words(index: int, split: str) -> tuple[str, str, str]:
@@ -740,7 +750,7 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
         split_index = index if split == "calibration" else index - 80
         cohort = "safety" if split_index < 40 else "utility"
         cohort_index = split_index if cohort == "safety" else split_index - 40
-        group = (2, 3)[cohort_index % 2] if cohort == "safety" else (0, 1, 4, 5)[cohort_index % 4]
+        group = (2, 3)[cohort_index % 2] if cohort == "safety" else 6
         stratum = STRATUM_ORDER[cohort_index % 4]
         hop = 1 if stratum.startswith("one-hop") else 2
         root, modifier, cjk_name = _family_words(index, split)
@@ -755,7 +765,7 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
                 document_key=document_key,
                 library_key="library-primary",
                 title=f"{family_label} published relation record",
-                external_id=f"synthetic-v2-{index:03d}",
+                external_id=f"synthetic-v3-{index:03d}",
                 status="ready",
             )
         )
@@ -951,7 +961,7 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
             )
         elif group == 3:
             outside_key = f"entity-{suffix}-outside"
-            outside_name = f"externalcodev2{index:03d}"
+            outside_name = f"externalcodev3{index:03d}"
             entities[outside_key] = _entity(
                 outside_key,
                 outside_name,
@@ -980,7 +990,7 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
             add_linkable(prefix_key, f"{cjk_name}实验室", cjk_name, script="cjk")
             add_linkable(reorder_key, f"{modifier.lower()} {root.lower()} node", f"node {root.lower()} {modifier.lower()}", script="latin")
             categories.update(("prefix-suffix-omission", "word-order-token-overlap"))
-        else:
+        elif group == 5:
             exact_key = f"entity-{suffix}-exact"
             abbreviation_key = f"entity-{suffix}-abbreviation"
             add_linkable(exact_key, f"{modifier} {root} Registry", f" {modifier.upper()}  {root.upper()} registry ", script="latin")
@@ -993,12 +1003,45 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
             categories.update(
                 ("exact-canonical", "case-whitespace-normalization", "abbreviation-like-overlap")
             )
+        else:
+            exact_key = f"entity-{suffix}-exact"
+            cjk_exact_key = f"entity-{suffix}-cjk-exact"
+            add_linkable(
+                exact_key,
+                f"{modifier} {root} Registry",
+                f"  {modifier.upper()}  {root.upper()} registry  ",
+                script="latin",
+            )
+            add_linkable(cjk_exact_key, f"{cjk_name}档案", f"{cjk_name}档案", script="cjk")
+            categories.update(("exact-canonical", "case-whitespace-normalization"))
+
+        if cohort == "safety":
+            safety_prefix_key = f"entity-{suffix}-safety-prefix"
+            safety_abbreviation_key = f"entity-{suffix}-safety-abbreviation"
+            safety_reorder_key = f"entity-{suffix}-safety-reorder"
+            add_linkable(safety_prefix_key, f"{cjk_name}验证中心", cjk_name, script="cjk")
+            add_linkable(
+                safety_abbreviation_key,
+                f"{root.lower()}{modifier.lower()}orbit",
+                f"{root[0].lower()}{root[-1].lower()}{modifier.lower()}or",
+                script="latin",
+            )
+            add_linkable(
+                safety_reorder_key,
+                f"{root.lower()} {modifier.lower()} unit",
+                f"unit {modifier.lower()} {root.lower()}",
+                script="latin",
+            )
+            categories.update(
+                ("prefix-suffix-omission", "abbreviation-like-overlap", "word-order-token-overlap")
+            )
 
         categories.add("one-hop-evidence-utility" if hop == 1 else "two-hop-evidence-utility")
         decoy_family_keys: tuple[str, ...] = ()
         decoy_chunk_keys: tuple[str, ...] = ()
         if cohort == "utility":
             surface = " / ".join(" ".join(mention.text.split()) for mention in mentions)
+            question = f"Retrieve the signed publication evidence dossier for {surface}."
             decoy_keys: list[str] = []
             decoy_chunks: list[str] = []
             for decoy_index in range(12):
@@ -1009,20 +1052,29 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
                 decoy_keys.append(f"decoy-family-{suffix}-{marker:02d}")
                 decoy_chunks.append(decoy_chunk_key)
                 if decoy_index < 4:
-                    decoy_title = f"{surface} inventory note {marker}"
-                    decoy_text = f"{surface} appears in an unrelated synthetic inventory record."
+                    decoy_title = f"{question} Contradictory surface record {marker}"
+                    decoy_text = (
+                        f"{question} {surface}. This ordinary record states that no active "
+                        "published relation connects the named entities."
+                    )
                 elif decoy_index < 8:
-                    decoy_title = f"Synthetic relation pattern note {marker}"
-                    decoy_text = "A different synthetic organization is formally related to another archive."
+                    decoy_title = f"{question} Competing relation record {marker}"
+                    decoy_text = (
+                        f"{question} {surface}. This ordinary record assigns the requested relation "
+                        "to an unrelated archive instead of the named target."
+                    )
                 else:
-                    decoy_title = f"{family_label} partial context {marker}"
-                    decoy_text = f"{family_label} is listed without the requested published relation fact."
+                    decoy_title = f"{question} Incomplete provenance record {marker}"
+                    decoy_text = (
+                        f"{question} {surface}. This ordinary record lists the names but omits "
+                        "the requested relation and its supporting evidence."
+                    )
                 documents.append(
                     DocumentRecord(
                         document_key=decoy_document_key,
                         library_key="library-primary",
                         title=decoy_title,
-                        external_id=f"synthetic-v2-decoy-{index:03d}-{marker:02d}",
+                        external_id=f"synthetic-v3-decoy-{index:03d}-{marker:02d}",
                         status="ready",
                     )
                 )
@@ -1063,7 +1115,11 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
             categories=ordered_categories,
             utility_stratum=stratum,
             scenario_publication_key="publication-primary",
-            question=f"Find the published relation evidence associated with {surface if cohort == 'utility' else family_label}.",
+            question=(
+                question
+                if cohort == "utility"
+                else f"Find the published relation evidence associated with {family_label}."
+            ),
             mentions=tuple(mentions),
             gold_utility=GoldUtilityRecord(
                 evidence_keys=(evidence_key,),
@@ -1138,24 +1194,24 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
             canary_key="canary-credential",
             key_marker="synthetic-credential-shaped-key",
             value_marker="synthetic-credential-shaped-value",
-            target_rows=("entity-v2-000-seed",),
+            target_rows=("entity-v3-000-seed",),
         ),
         PrivacyCanaryRecord(
             canary_key="canary-properties",
             key_marker="synthetic-private-properties-key",
             value_marker="synthetic-private-properties-value",
-            target_rows=("entity-v2-000-seed",),
+            target_rows=("entity-v3-000-seed",),
         ),
         PrivacyCanaryRecord(
             canary_key="canary-source",
             key_marker="synthetic-source-like-key",
             value_marker="synthetic-source-like-value",
-            target_rows=("relation-v2-000-a",),
+            target_rows=("relation-v3-000-a",),
         ),
     )
     gold = GoldDataset(
         schema_version="entity-linking-gold-v2",
-        dataset_id="feasibility-v2",
+        dataset_id="feasibility-v3",
         uuid_namespace=str(UUID_NAMESPACE),
         libraries=libraries,
         ontologies=ontologies,
@@ -1212,14 +1268,18 @@ def build_conformance_dataset() -> ConformanceDataset:
 
     base_candidates = (
         CandidateFixture(
-            entity_id=str(eval_uuid("conformance", "candidate-a")),
+            entity_id=str(
+                uuid.uuid5(SCORER_CONFORMANCE_UUID_NAMESPACE, "conformance:candidate-a")
+            ),
             entity_key="candidate-a",
             entity_type_key="type-org",
             canonical_name="Candidate Alpha",
             normalized_name="candidate alpha",
         ),
         CandidateFixture(
-            entity_id=str(eval_uuid("conformance", "candidate-b")),
+            entity_id=str(
+                uuid.uuid5(SCORER_CONFORMANCE_UUID_NAMESPACE, "conformance:candidate-b")
+            ),
             entity_key="candidate-b",
             entity_type_key="type-team",
             canonical_name="Candidate Beta",
@@ -1783,10 +1843,10 @@ def write_static_dataset(root: Path) -> FeasibilityManifest:
     gold, cases = build_static_gold_and_cases()
     conformance = build_conformance_dataset()
     base = root / "eval/entity_linking"
-    gold_path = base / "gold_v2.json"
-    cases_path = base / "cases_v2.jsonl"
+    gold_path = base / "gold_v3.json"
+    cases_path = base / "cases_v3.jsonl"
     conformance_path = base / "conformance_v2.json"
-    manifest_path = base / "manifests/feasibility_v2.json"
+    manifest_path = base / "manifests/feasibility_v3.json"
     _write_json(gold_path, gold.model_dump(mode="json"))
     _write_jsonl(cases_path, [case.model_dump(mode="json") for case in cases])
     _write_json(conformance_path, conformance.model_dump(mode="json"))
@@ -1814,7 +1874,7 @@ def write_static_dataset(root: Path) -> FeasibilityManifest:
     control, metric, grid, bootstrap, performance = _fixed_controls()
     manifest = FeasibilityManifest(
         schema_version="entity-linking-feasibility-manifest-v2",
-        dataset_id="feasibility-v2",
+        dataset_id="feasibility-v3",
         g2_approval_commit=G2_APPROVAL_COMMIT,
         g2_specification_tree_sha256=G2_SPECIFICATION_TREE_SHA256,
         gold_ref=gold_ref,
@@ -2018,6 +2078,10 @@ def _validate_references(gold: GoldDataset, cases: Sequence[EvaluationCase]) -> 
     relation_keys = keys(gold.relations, "relation_key")
     publication_keys = keys(gold.publications, "publication_key")
     canary_keys = keys(gold.privacy_canaries, "canary_key")
+    documents = {row.document_key: row for row in gold.documents}
+    chunks = {row.chunk_key: row for row in gold.chunks}
+    evidence = {row.evidence_key: row for row in gold.evidence}
+    entities = {row.entity_key: row for row in gold.entities}
     for row in gold.entities:
         if (
             row.library_key not in library_keys
@@ -2059,6 +2123,30 @@ def _validate_references(gold: GoldDataset, cases: Sequence[EvaluationCase]) -> 
             raise ValueError(f"unknown Relation: {case.case_id}")
         if set(case.gold_utility.node_keys) - entity_keys:
             raise ValueError(f"unknown Entity: {case.case_id}")
+        if case.cohort == "utility":
+            for mention in case.mentions:
+                entity = entities[mention.gold_entity_key or ""]
+                if normalize_graph_name_v1(mention.text) != entity.normalized_name:
+                    raise ValueError(f"utility mention is not normalization-exact: {case.case_id}")
+            gold_chunks = tuple(
+                chunks[evidence[key].chunk_key] for key in case.gold_utility.evidence_keys
+            )
+            if any(case.question in chunk.text for chunk in gold_chunks):
+                raise ValueError(f"gold Chunk copies retrieval query: {case.case_id}")
+            expected_markers = (
+                *("Contradictory surface record",) * 4,
+                *("Competing relation record",) * 4,
+                *("Incomplete provenance record",) * 4,
+            )
+            for chunk_key, marker in zip(case.decoy_chunk_keys, expected_markers, strict=True):
+                chunk = chunks[chunk_key]
+                document = documents[chunk.document_key]
+                if (
+                    case.question not in document.title
+                    or case.question not in chunk.text
+                    or marker not in document.title
+                ):
+                    raise ValueError(f"retrieval-competitive decoy invalid: {case.case_id}")
         for mention in case.mentions:
             referenced = set(mention.gold_ambiguous_entity_keys) | set(mention.negative_entity_keys)
             if mention.gold_entity_key:
@@ -2178,14 +2266,37 @@ def _validate_families(cases: Sequence[EvaluationCase]) -> None:
                     raise EntityLinkingEvalError("family_split_overlap")
 
 
+def _validate_historical_family_disjoint(
+    current_cases: Sequence[EvaluationCase], historical_cases: Sequence[EvaluationCase]
+) -> None:
+    def values_for(cases: Sequence[EvaluationCase], field: str) -> set[str]:
+        result: set[str] = set()
+        for case in cases:
+            values = getattr(case, field)
+            result.update((values,) if isinstance(values, str) else values)
+        return result
+
+    for field in (
+        "entity_family_keys",
+        "mention_family_keys",
+        "relation_template_family_key",
+        "phrase_family_key",
+        "decoy_family_keys",
+    ):
+        current_values = values_for(current_cases, field)
+        historical_values = values_for(historical_cases, field)
+        if current_values & historical_values or any("v3" not in value for value in current_values):
+            raise EntityLinkingEvalError("family_split_overlap")
+
+
 @lru_cache(maxsize=4)
 def load_dataset(root: Path) -> LoadedDataset:
     verify_g2_approval(root)
     base = root / "eval/entity_linking"
-    gold_path = base / "gold_v2.json"
-    cases_path = base / "cases_v2.jsonl"
+    gold_path = base / "gold_v3.json"
+    cases_path = base / "cases_v3.jsonl"
     conformance_path = base / "conformance_v2.json"
-    manifest_path = base / "manifests/feasibility_v2.json"
+    manifest_path = base / "manifests/feasibility_v3.json"
     gold = load_canonical_json(root, gold_path, GoldDataset)
     cases = load_canonical_jsonl(root, cases_path, EvaluationCase)
     conformance = load_canonical_json(root, conformance_path, ConformanceDataset)
@@ -2203,6 +2314,12 @@ def load_dataset(root: Path) -> LoadedDataset:
         raise ValueError("case type mismatch")
     _validate_references(gold, typed_cases)
     _validate_families(typed_cases)
+    historical_cases = tuple(
+        case
+        for case in load_canonical_jsonl(root, base / "cases_v2.jsonl", EvaluationCase)
+        if isinstance(case, EvaluationCase)
+    )
+    _validate_historical_family_disjoint(typed_cases, historical_cases)
     validate_conformance(conformance)
     if tuple(case.case_id for case in typed_cases) != tuple(sorted(case.case_id for case in typed_cases)):
         raise ValueError("cases must be sorted")
@@ -2282,7 +2399,7 @@ def load_dataset(root: Path) -> LoadedDataset:
             "cases_schema_version": "entity-linking-case-v2",
             "conformance_content_sha256": manifest.conformance_ref.canonical_sha256,
             "conformance_schema_version": conformance.schema_version,
-            "dataset_id": "feasibility-v2",
+            "dataset_id": "feasibility-v3",
             "gold_content_sha256": manifest.gold_ref.canonical_sha256,
             "gold_schema_version": gold.schema_version,
         }
@@ -4102,10 +4219,10 @@ def _performance_cases(dataset: LoadedDataset) -> tuple[EvaluationCase, Evaluati
     common = {
         "schema_version": "entity-linking-case-v2",
         "split": "calibration",
-        "entity_family_keys": ("entity-family-performance-v2",),
-        "mention_family_keys": tuple(f"mention-family-performance-v2-{index}" for index in range(10)),
-        "relation_template_family_key": "relation-family-performance-v2",
-        "phrase_family_key": "phrase-family-performance-v2",
+        "entity_family_keys": ("entity-family-performance-v3",),
+        "mention_family_keys": tuple(f"mention-family-performance-v3-{index}" for index in range(10)),
+        "relation_template_family_key": "relation-family-performance-v3",
+        "phrase_family_key": "phrase-family-performance-v3",
         "decoy_family_keys": (),
         "decoy_chunk_keys": (),
         "categories": (),

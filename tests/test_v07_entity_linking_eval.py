@@ -22,6 +22,7 @@ from eval.entity_linking.contracts import (
     GateDecision,
     GridResult,
     FeasibilityManifest,
+    EvaluationCase,
     GoldDataset,
     IdentityTimeCleanupDecision,
     OrdinalArtifactRef,
@@ -34,6 +35,7 @@ from eval.entity_linking.contracts import (
     Threshold,
     canonical_sha256,
     load_canonical_json,
+    load_canonical_jsonl,
 )
 from eval.entity_linking.reference_scorer import (
     EntityCandidate,
@@ -50,6 +52,8 @@ from eval.entity_linking.runtime import (
     EntityLinkingEvalError,
     _embedding_vector_sha256,
     _publication_projection_cache,
+    _validate_historical_family_disjoint,
+    _validate_references,
     assert_private_data_absent,
     build_dependency_closure,
     build_gate_decisions,
@@ -131,7 +135,7 @@ def _v2_calibration_value() -> dict[str, object]:
     value.update(
         schema_version="entity-linking-eval-result-v2",
         run_id=CALIBRATION_RUN_ID,
-        database_id="vkt_v07_el_eval_calibration_v7_20260720_01",
+        database_id="vkt_v07_el_eval_calibration_v8_20260720_01",
         g2_approval_commit=G2_APPROVAL_COMMIT,
         g2_specification_tree_sha256=G2_SPECIFICATION_TREE_SHA256,
         selection_reason="tie-higher-score",
@@ -183,9 +187,9 @@ def _release_value() -> dict[str, object]:
     refs = [
         {
             "ordinal": ordinal,
-            "run_id": f"v07-el-post-freeze-v7-20260720-0{ordinal}",
+            "run_id": f"v07-el-post-freeze-v8-20260720-0{ordinal}",
             "artifact_ref": _artifact_ref_value(
-                f"eval/entity_linking/results/v07-el-post-freeze-v7-20260720-0{ordinal}.json"
+                f"eval/entity_linking/results/v07-el-post-freeze-v8-20260720-0{ordinal}.json"
             ),
         }
         for ordinal in (1, 2, 3)
@@ -204,7 +208,7 @@ def _release_value() -> dict[str, object]:
         "status": "passed",
         "g2_approval_commit": COMMIT,
         "g2_specification_tree_sha256": SHA,
-        "dataset_manifest_ref": _artifact_ref_value("eval/entity_linking/manifests/feasibility_v2.json"),
+        "dataset_manifest_ref": _artifact_ref_value("eval/entity_linking/manifests/feasibility_v3.json"),
         "dataset_content_sha256": SHA,
         "evaluation_config_sha256": SHA,
         "ontology_schema_set_hash": SHA,
@@ -219,9 +223,9 @@ def _release_value() -> dict[str, object]:
         "qdrant_fingerprint_sha256": SHA,
         "embedding_fingerprint_sha256": SHA,
         "calibration_ref": _artifact_ref_value(
-            "eval/entity_linking/results/v07-el-calibration-v7-20260720-01.json"
+            "eval/entity_linking/results/v07-el-calibration-v8-20260720-01.json"
         ),
-        "policy_ref": _artifact_ref_value("eval/entity_linking/link_policy_v6.json"),
+        "policy_ref": _artifact_ref_value("eval/entity_linking/link_policy_v7.json"),
         "post_freeze_refs": refs,
         "canonical_response_set_sha256_by_ordinal": [
             {
@@ -247,6 +251,9 @@ def test_g2_approval_identity_specification_tree_and_ancestry_are_frozen():
 
 def test_fixed_dataset_is_canonical_complete_and_family_disjoint():
     dataset = load_dataset(ROOT)
+    assert dataset.gold.dataset_id == "feasibility-v3"
+    assert dataset.manifest.dataset_id == "feasibility-v3"
+    assert dataset.manifest_path == ROOT / "eval/entity_linking/manifests/feasibility_v3.json"
     assert dataset.manifest.g2_approval_commit == G2_APPROVAL_COMMIT
     assert dataset.manifest.accepted_dependency_closure_path_count == 63
     assert dataset.manifest.counts.questions == 200
@@ -259,6 +266,12 @@ def test_fixed_dataset_is_canonical_complete_and_family_disjoint():
     assert all(
         len(case.decoy_chunk_keys) == (12 if case.cohort == "utility" else 0)
         for case in dataset.cases
+    )
+    assert all(case.case_id.startswith("case-v3-") for case in dataset.cases)
+    assert all(
+        all(mention.is_exact_control for mention in case.mentions)
+        for case in dataset.cases
+        if case.cohort == "utility"
     )
     assert dataset.manifest.counts.linkable_mentions >= 240
     assert dataset.manifest.counts.ambiguous_unlinkable_mentions >= 60
@@ -293,8 +306,50 @@ def test_calibration_dataset_load_does_not_score_release_holdout(monkeypatch):
     assert observed_splits == ["calibration"] * 80
 
 
+def test_v3_decoy_and_historical_family_mutations_are_rejected():
+    dataset = load_dataset(ROOT)
+    utility_case = next(case for case in dataset.cases if case.cohort == "utility")
+    decoy_chunk = next(
+        chunk for chunk in dataset.gold.chunks if chunk.chunk_key == utility_case.decoy_chunk_keys[0]
+    )
+    decoy_document = next(
+        document
+        for document in dataset.gold.documents
+        if document.document_key == decoy_chunk.document_key
+    )
+    mutated_documents = tuple(
+        document.model_copy(update={"title": "query removed"})
+        if document.document_key == decoy_document.document_key
+        else document
+        for document in dataset.gold.documents
+    )
+    with pytest.raises(ValueError, match="retrieval-competitive decoy invalid"):
+        _validate_references(
+            dataset.gold.model_copy(update={"documents": mutated_documents}),
+            dataset.cases,
+        )
+
+    historical_cases = tuple(
+        case
+        for case in load_canonical_jsonl(
+            ROOT,
+            ROOT / "eval/entity_linking/cases_v2.jsonl",
+            EvaluationCase,
+        )
+        if isinstance(case, EvaluationCase)
+    )
+    mutated_current = (
+        dataset.cases[0].model_copy(
+            update={"entity_family_keys": historical_cases[0].entity_family_keys}
+        ),
+        *dataset.cases[1:],
+    )
+    with pytest.raises(EntityLinkingEvalError, match="family_split_overlap"):
+        _validate_historical_family_disjoint(mutated_current, historical_cases)
+
+
 def test_canonical_loader_rejects_pretty_json_duplicate_keys_crlf_and_extra(tmp_path):
-    source = ROOT / "eval/entity_linking/gold_v2.json"
+    source = ROOT / "eval/entity_linking/gold_v3.json"
     value = json.loads(source.read_text(encoding="utf-8"))
     pretty = tmp_path / "pretty.json"
     pretty.write_bytes((json.dumps(value, indent=2) + "\n").encode("utf-8"))
@@ -507,9 +562,9 @@ def test_paired_bootstrap_is_exact_rational_and_reproducible():
 
 def test_qdrant_collection_and_service_origin_conformance_vectors():
     collection = qdrant_collection_identity(CALIBRATION_RUN_ID, "cal")
-    assert collection.collection_name == "vkt_v07_el_cal_6b6029bbdded"
+    assert collection.collection_name == "vkt_v07_el_cal_43c5cfde79a5"
     assert collection.collection_name_sha256 == (
-        "c3d52e2d8a0a27ab16952ceeba3193609a8f8ac2ae9f2e48d9a30f1a2d5aa636"
+        "e7833173bea2173e4c8a1fc913c30532de4f9ab4bb582a2cd78b912b95e14482"
     )
     assert normalize_service_origin("HTTP://Example.COM", qdrant=True) == "http://example.com:80"
     assert (
@@ -705,7 +760,7 @@ def test_privacy_scanner_rejects_dataset_values_canaries_and_private_fields():
 
 def test_policy_approval_and_frozen_policy_contracts_are_strict():
     calibration_ref = _artifact_ref_value(
-        "eval/entity_linking/results/v07-el-calibration-v7-20260720-01.json"
+        "eval/entity_linking/results/v07-el-calibration-v8-20260720-01.json"
     )
     thresholds = {
         "min_score_micros": 850000,
@@ -733,7 +788,7 @@ def test_policy_approval_and_frozen_policy_contracts_are_strict():
         "calibration_ref": calibration_ref,
         "approved_thresholds": thresholds,
         "approval_payload_sha256": canonical_sha256(approval),
-        "dataset_manifest_ref": _artifact_ref_value("eval/entity_linking/manifests/feasibility_v2.json"),
+        "dataset_manifest_ref": _artifact_ref_value("eval/entity_linking/manifests/feasibility_v3.json"),
         "dataset_content_sha256": SHA,
         "evaluation_config_sha256": SHA,
         "ontology_schema_set_hash": SHA,
@@ -779,9 +834,9 @@ def test_gate_decisions_reject_wrong_typed_pairs_order_and_derived_values():
 
     run_value = {
         "ordinal": 1,
-        "run_id": "v07-el-post-freeze-v7-20260720-01",
+        "run_id": "v07-el-post-freeze-v8-20260720-01",
         "artifact_ref": _artifact_ref_value(
-            "eval/entity_linking/results/v07-el-post-freeze-v7-20260720-01.json"
+            "eval/entity_linking/results/v07-el-post-freeze-v8-20260720-01.json"
         ),
         "gate_decisions": _passing_gate_values(),
         "all_passed": True,
@@ -807,13 +862,13 @@ def test_post_freeze_contract_requires_ordinal_policy_and_null_calibration_field
     value.update(
         phase="post_freeze_release",
         ordinal=1,
-        run_id="v07-el-post-freeze-v7-20260720-01",
-        database_id="vkt_v07_el_eval_post_freeze_v7_20260720_01",
+        run_id="v07-el-post-freeze-v8-20260720-01",
+        database_id="vkt_v07_el_eval_post_freeze_v8_20260720_01",
         grid_results=None,
         candidate_thresholds=None,
         selection_reason=None,
-        policy_ref=_artifact_ref_value("eval/entity_linking/link_policy_v6.json"),
-        qdrant_collection=qdrant_collection_identity("v07-el-post-freeze-v7-20260720-01", "pf1").model_dump(
+        policy_ref=_artifact_ref_value("eval/entity_linking/link_policy_v7.json"),
+        qdrant_collection=qdrant_collection_identity("v07-el-post-freeze-v8-20260720-01", "pf1").model_dump(
             mode="json"
         ),
     )
@@ -853,7 +908,7 @@ def test_release_evidence_rejects_reordered_refs_false_identity_and_extra_fields
 
 def test_invalidated_v1_calibration_is_rejected_before_policy_write():
     historical_policy_path = ROOT / "eval/entity_linking/link_policy_v1.json"
-    policy_path = ROOT / "eval/entity_linking/link_policy_v6.json"
+    policy_path = ROOT / "eval/entity_linking/link_policy_v7.json"
     assert historical_policy_path.is_file()
     assert not policy_path.exists()
     with pytest.raises(EntityLinkingEvalError, match="invalidated_calibration_artifact"):
@@ -886,11 +941,11 @@ def test_complete_cli_surface_is_frozen_before_replacement_calibration():
     )
 
 
-def test_no_policy_post_freeze_or_release_artifacts_exist_before_human_approval():
+def test_historical_chains_are_preserved_and_current_outputs_await_gate_b():
     base = ROOT / "eval/entity_linking"
     assert (base / "link_policy_v1.json").is_file()
-    assert not (base / "link_policy_v6.json").exists()
-    assert not (base / "release_evidence_v6.json").exists()
+    assert not (base / "link_policy_v7.json").exists()
+    assert not (base / "release_evidence_v7.json").exists()
     results = base / "results"
     historical = results / "v07-el-calibration-v3-20260720-01.json"
     historical_value = json.loads(historical.read_text(encoding="utf-8"))
@@ -924,10 +979,35 @@ def test_no_policy_post_freeze_or_release_artifacts_exist_before_human_approval(
     assert hashlib.sha256(historical_v6.read_bytes()).hexdigest() == (
         "419052ec9c72a0f8bb4de3e58b5bb0b608063af07fd796aac4bd6a9bd035f5a3"
     )
+    historical_v7 = results / "v07-el-calibration-v7-20260720-01.json"
+    historical_v7_value = json.loads(historical_v7.read_text(encoding="utf-8"))
+    assert canonical_sha256(historical_v7_value) == (
+        "2c46a322e6541b53d27da1f85092534812c5c121ebbf3cec8371d99f2f51321b"
+    )
+    assert hashlib.sha256(historical_v7.read_bytes()).hexdigest() == (
+        "131af9b1cd60881d252d4c34d85ecb8eee15bcb0381c01cd57d06326b5b45663"
+    )
+    historical_policy = base / "link_policy_v6.json"
+    historical_policy_value = json.loads(historical_policy.read_text(encoding="utf-8"))
+    assert canonical_sha256(historical_policy_value) == (
+        "87cca4ed0715cb89efc51199eeada8287d5adefbb774915ff39bf868f48b59cf"
+    )
+    assert hashlib.sha256(historical_policy.read_bytes()).hexdigest() == (
+        "02b327271d2935ba97f30dfafe8051fcc639e7eeaadfe9e83498031e390be558"
+    )
+    historical_ordinal = results / "v07-el-post-freeze-v7-20260720-01.json"
+    historical_ordinal_value = json.loads(historical_ordinal.read_text(encoding="utf-8"))
+    assert historical_ordinal_value["status"] == "no_go"
+    assert canonical_sha256(historical_ordinal_value) == (
+        "da64236da6b2b320710912f8f33f7a9a7082e378c5a5a0834704c85342a4fbfe"
+    )
+    assert hashlib.sha256(historical_ordinal.read_bytes()).hexdigest() == (
+        "0f0becf67805b23f38728bda642ce7dbb3fb552c33ffa742f51ec9a695aa3d25"
+    )
     forbidden = (
-        "v07-el-post-freeze-v7-20260720-01.json",
-        "v07-el-post-freeze-v7-20260720-02.json",
-        "v07-el-post-freeze-v7-20260720-03.json",
+        "v07-el-post-freeze-v8-20260720-01.json",
+        "v07-el-post-freeze-v8-20260720-02.json",
+        "v07-el-post-freeze-v8-20260720-03.json",
     )
     assert all(not (results / name).exists() for name in forbidden)
 
