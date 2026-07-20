@@ -1,5 +1,11 @@
 # 文档索引
 
+> **v0.7 corrective G2.3 (2026-07-20):** Calibration v4 passed scorer, safety,
+> coverage, and latency checks but exposed two numerically equivalent embedding
+> replicas whose exact float hashes differ. G2.3 permits only a stable sign-bit probe
+> signature and fresh v5 workflow identities. All product and release gates remain
+> unchanged.
+>
 > **v0.7 corrective G2.2 (2026-07-20):** Calibration v3 is preserved as
 > non-authoritative audit evidence after exposing latency-measurement interference and
 > a phase-aware acceptance defect. G2.2 permits only bit-for-bit scorer optimization,
