@@ -33,6 +33,22 @@ class EntityCandidate:
 
 
 @dataclass(frozen=True, slots=True)
+class PreparedLexicalValue:
+    value: str
+    character_grams: Counter[str]
+    character_gram_count: int
+    tokens: frozenset[str]
+    compact: str
+    token_initials: str
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedEntityCandidate:
+    candidate: EntityCandidate
+    lexical: PreparedLexicalValue
+
+
+@dataclass(frozen=True, slots=True)
 class FeatureScores:
     character_bigram_dice_micros: int
     token_jaccard_micros: int
@@ -68,13 +84,49 @@ def _character_grams(value: str) -> Counter[str]:
     return Counter(value[index : index + 2] for index in range(len(value) - 1))
 
 
+def prepare_normalized_value(value: str) -> PreparedLexicalValue:
+    if not value:
+        raise ValueError("normalized scorer inputs must be non-empty")
+    grams = _character_grams(value)
+    tokens = value.split()
+    return PreparedLexicalValue(
+        value=value,
+        character_grams=grams,
+        character_gram_count=sum(grams.values()),
+        tokens=frozenset(tokens),
+        compact="".join(tokens),
+        token_initials="".join(token[0] for token in tokens),
+    )
+
+
+def prepare_candidates(
+    candidates: Sequence[EntityCandidate],
+) -> tuple[PreparedEntityCandidate, ...]:
+    return tuple(
+        PreparedEntityCandidate(candidate=row, lexical=prepare_normalized_value(row.normalized_name))
+        for row in candidates
+    )
+
+
+def _character_bigram_dice_prepared(
+    left: PreparedLexicalValue,
+    right: PreparedLexicalValue,
+) -> int:
+    intersection = sum(
+        min(count, right.character_grams.get(gram, 0))
+        for gram, count in left.character_grams.items()
+    )
+    return ratio_micros(
+        2 * intersection,
+        left.character_gram_count + right.character_gram_count,
+    )
+
+
 def character_bigram_dice_micros(left: str, right: str) -> int:
-    left_grams = _character_grams(left)
-    right_grams = _character_grams(right)
-    intersection = sum((left_grams & right_grams).values())
-    numerator = 2 * intersection
-    denominator = sum(left_grams.values()) + sum(right_grams.values())
-    return ratio_micros(numerator, denominator)
+    return _character_bigram_dice_prepared(
+        prepare_normalized_value(left),
+        prepare_normalized_value(right),
+    )
 
 
 def token_jaccard_micros(left: str, right: str) -> int:
@@ -139,14 +191,29 @@ def ordered_abbreviation_micros(left: str, right: str, *, bigram_micros: int) ->
     return scale_support_micros(support)
 
 
-def score_normalized_pair(left: str, right: str) -> FeatureScores:
-    if not left or not right:
-        raise ValueError("normalized scorer inputs must be non-empty")
-    bigram = character_bigram_dice_micros(left, right)
-    jaccard = token_jaccard_micros(left, right)
-    containment = substring_containment_micros(left, right)
-    boundary = boundary_omission_micros(left, right)
-    abbreviation = ordered_abbreviation_micros(left, right, bigram_micros=bigram)
+def score_prepared_pair(
+    left: PreparedLexicalValue,
+    right: PreparedLexicalValue,
+) -> FeatureScores:
+    bigram = _character_bigram_dice_prepared(left, right)
+    union = left.tokens | right.tokens
+    jaccard = ratio_micros(len(left.tokens & right.tokens), len(union))
+    containment = substring_containment_micros(left.value, right.value)
+    boundary = boundary_omission_micros(left.value, right.value)
+    initialism = bool(len(right.tokens) >= 2 and left.compact == right.token_initials)
+    subsequence = bool(
+        2 <= len(left.compact) < len(right.compact)
+        and is_strict_subsequence(left.compact, right.compact)
+        and left.compact not in right.compact
+        and 4 * len(left.compact) <= 3 * len(right.compact)
+    )
+    abbreviation = 0
+    if initialism or subsequence:
+        support = max(
+            bigram,
+            ratio_micros(len(left.compact), len(right.compact)),
+        )
+        abbreviation = scale_support_micros(support)
     return FeatureScores(
         character_bigram_dice_micros=bigram,
         token_jaccard_micros=jaccard,
@@ -154,6 +221,13 @@ def score_normalized_pair(left: str, right: str) -> FeatureScores:
         boundary_omission_micros=boundary,
         ordered_abbreviation_micros=abbreviation,
         score_micros=max(bigram, jaccard, containment, boundary, abbreviation),
+    )
+
+
+def score_normalized_pair(left: str, right: str) -> FeatureScores:
+    return score_prepared_pair(
+        prepare_normalized_value(left),
+        prepare_normalized_value(right),
     )
 
 
@@ -222,6 +296,27 @@ def resolve_mention(
     candidate_floor_micros: int = PRESENTATION_FLOOR_MICROS,
     max_candidates: int = MAX_CANDIDATES,
 ) -> LinkDecision:
+    return resolve_prepared_mention(
+        mention_text,
+        prepare_candidates(candidates),
+        entity_type_key=entity_type_key,
+        min_score_micros=min_score_micros,
+        min_margin_micros=min_margin_micros,
+        candidate_floor_micros=candidate_floor_micros,
+        max_candidates=max_candidates,
+    )
+
+
+def resolve_prepared_mention(
+    mention_text: str,
+    candidates: Sequence[PreparedEntityCandidate],
+    *,
+    entity_type_key: str | None = None,
+    min_score_micros: int,
+    min_margin_micros: int,
+    candidate_floor_micros: int = PRESENTATION_FLOOR_MICROS,
+    max_candidates: int = MAX_CANDIDATES,
+) -> LinkDecision:
     if not 0 <= min_score_micros <= MICROS:
         raise ValueError("min_score_micros out of range")
     if not 0 <= min_margin_micros <= MICROS:
@@ -231,17 +326,29 @@ def resolve_mention(
     if max_candidates != MAX_CANDIDATES:
         raise ValueError("max candidates is frozen")
 
-    exact = resolve_exact_only(
-        mention_text,
-        candidates,
-        entity_type_key=entity_type_key,
-        max_candidates=max_candidates,
+    normalized = normalize_graph_name_v1(mention_text)
+    if not normalized:
+        raise ValueError("mention normalizes to empty")
+    filtered = tuple(
+        row
+        for row in candidates
+        if entity_type_key is None or row.candidate.entity_type_key == entity_type_key
     )
-    if exact.status != "not_found":
-        return exact
+    exact = sorted(
+        (_exact_scored(row.candidate) for row in filtered if row.candidate.normalized_name == normalized),
+        key=stable_candidate_key,
+    )
+    if len(exact) == 1:
+        return LinkDecision("linked", "exact_canonical", exact[0], ())
+    if exact:
+        return LinkDecision("ambiguous", None, None, tuple(exact[:max_candidates]))
 
+    mention = prepare_normalized_value(normalized)
     scored = sorted(
-        (score_candidate(mention_text, row) for row in _filtered_candidates(candidates, entity_type_key)),
+        (
+            ScoredCandidate(row.candidate, score_prepared_pair(mention, row.lexical))
+            for row in filtered
+        ),
         key=stable_candidate_key,
     )
     return decide_scored_candidates(

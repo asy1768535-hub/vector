@@ -113,9 +113,12 @@ from eval.entity_linking.contracts import (
 from eval.entity_linking.reference_scorer import (
     EntityCandidate,
     FeatureScores,
+    PreparedEntityCandidate,
     ScoredCandidate,
     decide_scored_candidates,
+    prepare_candidates,
     logical_decision,
+    resolve_prepared_mention,
     resolve_mention,
     is_strict_subsequence,
     score_candidate,
@@ -124,8 +127,8 @@ from eval.entity_linking.reference_scorer import (
 )
 
 
-G2_APPROVAL_COMMIT = "ff2dd3cc65cdac3a724d2f1806c6afeb7e5cf533"
-G2_SPECIFICATION_TREE_SHA256 = "0da3738946dba65106849d51f94a2126c4f5856b05d1ca5711b05c19d57874d1"
+G2_APPROVAL_COMMIT = "de9a4b514eb38156a2db5cf66edbed33b055fba3"
+G2_SPECIFICATION_TREE_SHA256 = "183175a0e8dd33a85f42af42f5a9b7389c935c51452bfef49fa52d1609d54612"
 G1_COMMIT = "f40c5c84c3248639aa6603d43b6b306ad76d66fd"
 AUDIT_PRESERVATION_COMMIT = "155ef946c48272518c996458bc206039b6676c18"
 INVALIDATED_G2_APPROVAL_COMMIT = "75bf4141be743c1164bfa9841d0737509d7575fe"
@@ -137,15 +140,15 @@ INVALIDATED_CALIBRATION_FILE_SHA256 = "c35210075e179ebce197275041e0ff69403297185
 INVALIDATED_CALIBRATION_BLOB_OID = "4c1dc04cca1ddd874fa309ad0314ad24dfc0ea68"
 PRESERVED_GITATTRIBUTES_BLOB_OID = "3f5e0ee58b5d94db6fd2ed25511a9957130885f6"
 UUID_NAMESPACE = uuid.UUID("1bcb8d89-4423-563a-962d-670c026f6dc8")
-CALIBRATION_RUN_ID = "v07-el-calibration-v3-20260720-01"
-CALIBRATION_DATABASE_ID = "vkt_v07_el_eval_calibration_v3_20260720_01"
+CALIBRATION_RUN_ID = "v07-el-calibration-v4-20260720-01"
+CALIBRATION_DATABASE_ID = "vkt_v07_el_eval_calibration_v4_20260720_01"
 POST_FREEZE_IDENTITIES = (
-    (1, "v07-el-post-freeze-v3-20260720-01", "vkt_v07_el_eval_post_freeze_v3_20260720_01"),
-    (2, "v07-el-post-freeze-v3-20260720-02", "vkt_v07_el_eval_post_freeze_v3_20260720_02"),
-    (3, "v07-el-post-freeze-v3-20260720-03", "vkt_v07_el_eval_post_freeze_v3_20260720_03"),
+    (1, "v07-el-post-freeze-v4-20260720-01", "vkt_v07_el_eval_post_freeze_v4_20260720_01"),
+    (2, "v07-el-post-freeze-v4-20260720-02", "vkt_v07_el_eval_post_freeze_v4_20260720_02"),
+    (3, "v07-el-post-freeze-v4-20260720-03", "vkt_v07_el_eval_post_freeze_v4_20260720_03"),
 )
-POLICY_PATH = "eval/entity_linking/link_policy_v2.json"
-RELEASE_EVIDENCE_PATH = "eval/entity_linking/release_evidence_v2.json"
+POLICY_PATH = "eval/entity_linking/link_policy_v3.json"
+RELEASE_EVIDENCE_PATH = "eval/entity_linking/release_evidence_v3.json"
 EMBEDDING_PROBE_TEXT = "vkt-v07-entity-linking-identity-probe"
 EMBEDDING_PROBE_SHA256 = "4caad60c112bd93fda55714c91aef2762a3c5c5c0df2a09dc28e6296800cc61f"
 
@@ -250,6 +253,7 @@ HISTORICAL_ENTITY_LINKING_PATHS = (
     "eval/entity_linking/results/v07-el-calibration-v2-20260720-01.json",
     "eval/entity_linking/link_policy_v1.json",
     "eval/entity_linking/results/v07-el-post-freeze-v2-20260720-01.json",
+    "eval/entity_linking/results/v07-el-calibration-v3-20260720-01.json",
 )
 
 
@@ -2089,6 +2093,15 @@ def validate_conformance(conformance: ConformanceDataset) -> None:
                 min_score_micros=case.min_score_micros,
                 min_margin_micros=case.min_margin_micros,
             )
+            optimized = resolve_prepared_mention(
+                case.mention_text,
+                prepare_candidates(candidates),
+                entity_type_key=case.entity_type_key,
+                min_score_micros=case.min_score_micros,
+                min_margin_micros=case.min_margin_micros,
+            )
+            if logical_decision(optimized) != logical_decision(decision):
+                raise ValueError(f"prepared decision conformance failed: {case.case_id}")
         else:
             scored = tuple(
                 ScoredCandidate(candidate, FeatureScores(score, score, score, 0, 0, score))
@@ -3554,6 +3567,7 @@ class PublishedCandidateProjection:
     publication_id: uuid.UUID
     ontology_version_id: uuid.UUID
     candidates: tuple[EntityCandidate, ...]
+    prepared_candidates: tuple[PreparedEntityCandidate, ...]
     item_hash_by_entity_id: Mapping[str, str]
 
 
@@ -3638,6 +3652,7 @@ async def load_candidate_projection(
         publication_id=snapshot.publication_id,
         ontology_version_id=snapshot.ontology_version_id,
         candidates=candidates,
+        prepared_candidates=prepare_candidates(candidates),
         item_hash_by_entity_id={str(row.id): row.item_hash for row in rows},
     )
 
@@ -3661,9 +3676,9 @@ async def run_candidate_case(
         seeded.logical_by_uuid,
     )
     decisions = tuple(
-        resolve_mention(
+        resolve_prepared_mention(
             mention.text,
-            projection.candidates,
+            projection.prepared_candidates,
             entity_type_key=(
                 next(
                     row.key
@@ -4167,6 +4182,8 @@ async def collect_live_evaluation(
                     embedding_api_key=embedding_api_key,
                 )
                 exact_results[case.case_id] = exact_only_decisions(dataset, case)
+            _current, peak_memory = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
             linker_case, link_graph_case = _performance_cases(dataset)
             for repetition in range(35):
                 before_candidate = sql_statement_count
@@ -4206,9 +4223,9 @@ async def collect_live_evaluation(
                     )
                     if repetition >= 5:
                         samples.append(result.duration_us)
-        _current, peak_memory = tracemalloc.get_traced_memory()
     finally:
-        tracemalloc.stop()
+        if tracemalloc.is_tracing():
+            tracemalloc.stop()
         event.remove(engine.sync_engine, "before_cursor_execute", count_statement)
         await engine.dispose()
 

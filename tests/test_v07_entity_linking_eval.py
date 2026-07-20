@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -51,6 +53,7 @@ from eval.entity_linking.runtime import (
     repository_module_is_local,
     select_calibration_threshold,
     upgrade_database,
+    verify_calibration_artifact,
     verify_g2_approval,
     require_replacement_calibration_reference,
 )
@@ -118,7 +121,7 @@ def _v2_calibration_value() -> dict[str, object]:
     value.update(
         schema_version="entity-linking-eval-result-v2",
         run_id=CALIBRATION_RUN_ID,
-        database_id="vkt_v07_el_eval_calibration_v3_20260720_01",
+        database_id="vkt_v07_el_eval_calibration_v4_20260720_01",
         g2_approval_commit=G2_APPROVAL_COMMIT,
         g2_specification_tree_sha256=G2_SPECIFICATION_TREE_SHA256,
         selection_reason="tie-higher-score",
@@ -151,9 +154,9 @@ def _release_value() -> dict[str, object]:
     refs = [
         {
             "ordinal": ordinal,
-            "run_id": f"v07-el-post-freeze-v3-20260720-0{ordinal}",
+            "run_id": f"v07-el-post-freeze-v4-20260720-0{ordinal}",
             "artifact_ref": _artifact_ref_value(
-                f"eval/entity_linking/results/v07-el-post-freeze-v3-20260720-0{ordinal}.json"
+                f"eval/entity_linking/results/v07-el-post-freeze-v4-20260720-0{ordinal}.json"
             ),
         }
         for ordinal in (1, 2, 3)
@@ -187,9 +190,9 @@ def _release_value() -> dict[str, object]:
         "qdrant_fingerprint_sha256": SHA,
         "embedding_fingerprint_sha256": SHA,
         "calibration_ref": _artifact_ref_value(
-            "eval/entity_linking/results/v07-el-calibration-v3-20260720-01.json"
+            "eval/entity_linking/results/v07-el-calibration-v4-20260720-01.json"
         ),
-        "policy_ref": _artifact_ref_value("eval/entity_linking/link_policy_v2.json"),
+        "policy_ref": _artifact_ref_value("eval/entity_linking/link_policy_v3.json"),
         "post_freeze_refs": refs,
         "canonical_response_set_sha256_by_ordinal": [
             {
@@ -454,9 +457,9 @@ def test_paired_bootstrap_is_exact_rational_and_reproducible():
 
 def test_qdrant_collection_and_service_origin_conformance_vectors():
     collection = qdrant_collection_identity(CALIBRATION_RUN_ID, "cal")
-    assert collection.collection_name == "vkt_v07_el_cal_c8388773952f"
+    assert collection.collection_name == "vkt_v07_el_cal_f5b3da8848e7"
     assert collection.collection_name_sha256 == (
-        "d6aedd17cc7a671053b580d8646a92716200b7f15a3a24268658156ea1b64166"
+        "f25b15e7030f64372f0b55eecbe37cc8cecbc625d4b7523dc590a6539870c66d"
     )
     assert normalize_service_origin("HTTP://Example.COM", qdrant=True) == "http://example.com:80"
     assert (
@@ -492,7 +495,7 @@ def test_privacy_scanner_rejects_dataset_values_canaries_and_private_fields():
 
 def test_policy_approval_and_frozen_policy_contracts_are_strict():
     calibration_ref = _artifact_ref_value(
-        "eval/entity_linking/results/v07-el-calibration-v3-20260720-01.json"
+        "eval/entity_linking/results/v07-el-calibration-v4-20260720-01.json"
     )
     thresholds = {
         "min_score_micros": 850000,
@@ -566,9 +569,9 @@ def test_gate_decisions_reject_wrong_typed_pairs_order_and_derived_values():
 
     run_value = {
         "ordinal": 1,
-        "run_id": "v07-el-post-freeze-v3-20260720-01",
+        "run_id": "v07-el-post-freeze-v4-20260720-01",
         "artifact_ref": _artifact_ref_value(
-            "eval/entity_linking/results/v07-el-post-freeze-v3-20260720-01.json"
+            "eval/entity_linking/results/v07-el-post-freeze-v4-20260720-01.json"
         ),
         "gate_decisions": _passing_gate_values(),
         "all_passed": True,
@@ -594,13 +597,13 @@ def test_post_freeze_contract_requires_ordinal_policy_and_null_calibration_field
     value.update(
         phase="post_freeze_release",
         ordinal=1,
-        run_id="v07-el-post-freeze-v3-20260720-01",
-        database_id="vkt_v07_el_eval_post_freeze_v3_20260720_01",
+        run_id="v07-el-post-freeze-v4-20260720-01",
+        database_id="vkt_v07_el_eval_post_freeze_v4_20260720_01",
         grid_results=None,
         candidate_thresholds=None,
         selection_reason=None,
-        policy_ref=_artifact_ref_value("eval/entity_linking/link_policy_v2.json"),
-        qdrant_collection=qdrant_collection_identity("v07-el-post-freeze-v3-20260720-01", "pf1").model_dump(
+        policy_ref=_artifact_ref_value("eval/entity_linking/link_policy_v3.json"),
+        qdrant_collection=qdrant_collection_identity("v07-el-post-freeze-v4-20260720-01", "pf1").model_dump(
             mode="json"
         ),
     )
@@ -640,7 +643,7 @@ def test_release_evidence_rejects_reordered_refs_false_identity_and_extra_fields
 
 def test_invalidated_v1_calibration_is_rejected_before_policy_write():
     historical_policy_path = ROOT / "eval/entity_linking/link_policy_v1.json"
-    policy_path = ROOT / "eval/entity_linking/link_policy_v2.json"
+    policy_path = ROOT / "eval/entity_linking/link_policy_v3.json"
     assert historical_policy_path.is_file()
     assert not policy_path.exists()
     with pytest.raises(EntityLinkingEvalError, match="invalidated_calibration_artifact"):
@@ -676,14 +679,26 @@ def test_complete_cli_surface_is_frozen_before_replacement_calibration():
 def test_no_policy_post_freeze_or_release_artifacts_exist_before_human_approval():
     base = ROOT / "eval/entity_linking"
     assert (base / "link_policy_v1.json").is_file()
-    assert not (base / "link_policy_v2.json").exists()
-    assert not (base / "release_evidence_v2.json").exists()
+    assert not (base / "link_policy_v3.json").exists()
+    assert not (base / "release_evidence_v3.json").exists()
     results = base / "results"
+    historical = results / "v07-el-calibration-v3-20260720-01.json"
+    historical_value = json.loads(historical.read_text(encoding="utf-8"))
+    assert canonical_sha256(historical_value) == (
+        "e5e658a9bfd11d2fc36e64197dedbd272b85d3c9d4f1693047dbc80c43316874"
+    )
+    assert hashlib.sha256(historical.read_bytes()).hexdigest() == (
+        "e912cc72b818fc21f374fda11f4d859bf931accd5fc71759a7f6d46d45591411"
+    )
+    calibration = results / "v07-el-calibration-v4-20260720-01.json"
+    if calibration.exists():
+        asyncio.run(
+            verify_calibration_artifact(ROOT, calibration, require_live_absence=False)
+        )
     forbidden = (
-        "v07-el-calibration-v3-20260720-01.json",
-        "v07-el-post-freeze-v3-20260720-01.json",
-        "v07-el-post-freeze-v3-20260720-02.json",
-        "v07-el-post-freeze-v3-20260720-03.json",
+        "v07-el-post-freeze-v4-20260720-01.json",
+        "v07-el-post-freeze-v4-20260720-02.json",
+        "v07-el-post-freeze-v4-20260720-03.json",
     )
     assert all(not (results / name).exists() for name in forbidden)
 
