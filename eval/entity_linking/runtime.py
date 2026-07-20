@@ -41,6 +41,7 @@ from eval.entity_linking.contracts import (
     BootstrapResult,
     CalibrationArtifact,
     CategoryCounts,
+    CohortCounts,
     CategoryPredicateCase,
     ConformanceDataset,
     ControlConfig,
@@ -116,14 +117,15 @@ from eval.entity_linking.reference_scorer import (
     decide_scored_candidates,
     logical_decision,
     resolve_mention,
+    is_strict_subsequence,
     score_candidate,
     score_normalized_pair,
     stable_candidate_key,
 )
 
 
-G2_APPROVAL_COMMIT = "97507e010934c63f18fc06cb3d5098d1dfe28a11"
-G2_SPECIFICATION_TREE_SHA256 = "360b4d6ae30cfa53ec77901436841c0ad48dfa1228c09ddcb112448a0e67d55c"
+G2_APPROVAL_COMMIT = "ff2dd3cc65cdac3a724d2f1806c6afeb7e5cf533"
+G2_SPECIFICATION_TREE_SHA256 = "0da3738946dba65106849d51f94a2126c4f5856b05d1ca5711b05c19d57874d1"
 G1_COMMIT = "f40c5c84c3248639aa6603d43b6b306ad76d66fd"
 AUDIT_PRESERVATION_COMMIT = "155ef946c48272518c996458bc206039b6676c18"
 INVALIDATED_G2_APPROVAL_COMMIT = "75bf4141be743c1164bfa9841d0737509d7575fe"
@@ -135,15 +137,15 @@ INVALIDATED_CALIBRATION_FILE_SHA256 = "c35210075e179ebce197275041e0ff69403297185
 INVALIDATED_CALIBRATION_BLOB_OID = "4c1dc04cca1ddd874fa309ad0314ad24dfc0ea68"
 PRESERVED_GITATTRIBUTES_BLOB_OID = "3f5e0ee58b5d94db6fd2ed25511a9957130885f6"
 UUID_NAMESPACE = uuid.UUID("1bcb8d89-4423-563a-962d-670c026f6dc8")
-CALIBRATION_RUN_ID = "v07-el-calibration-v2-20260720-01"
-CALIBRATION_DATABASE_ID = "vkt_v07_el_eval_calibration_20260720_01"
+CALIBRATION_RUN_ID = "v07-el-calibration-v3-20260720-01"
+CALIBRATION_DATABASE_ID = "vkt_v07_el_eval_calibration_v3_20260720_01"
 POST_FREEZE_IDENTITIES = (
-    (1, "v07-el-post-freeze-v2-20260720-01", "vkt_v07_el_eval_post_freeze_20260720_01"),
-    (2, "v07-el-post-freeze-v2-20260720-02", "vkt_v07_el_eval_post_freeze_20260720_02"),
-    (3, "v07-el-post-freeze-v2-20260720-03", "vkt_v07_el_eval_post_freeze_20260720_03"),
+    (1, "v07-el-post-freeze-v3-20260720-01", "vkt_v07_el_eval_post_freeze_v3_20260720_01"),
+    (2, "v07-el-post-freeze-v3-20260720-02", "vkt_v07_el_eval_post_freeze_v3_20260720_02"),
+    (3, "v07-el-post-freeze-v3-20260720-03", "vkt_v07_el_eval_post_freeze_v3_20260720_03"),
 )
-POLICY_PATH = "eval/entity_linking/link_policy_v1.json"
-RELEASE_EVIDENCE_PATH = "eval/entity_linking/release_evidence_v1.json"
+POLICY_PATH = "eval/entity_linking/link_policy_v2.json"
+RELEASE_EVIDENCE_PATH = "eval/entity_linking/release_evidence_v2.json"
 EMBEDDING_PROBE_TEXT = "vkt-v07-entity-linking-identity-probe"
 EMBEDDING_PROBE_SHA256 = "4caad60c112bd93fda55714c91aef2762a3c5c5c0df2a09dc28e6296800cc61f"
 
@@ -170,10 +172,10 @@ G3_IMPLEMENTATION_PATHS = (
     "eval/entity_linking/reference_scorer.py",
     "eval/entity_linking/runtime.py",
     "eval/entity_linking/README.md",
-    "eval/entity_linking/gold_v1.json",
-    "eval/entity_linking/cases_v1.jsonl",
-    "eval/entity_linking/conformance_v1.json",
-    "eval/entity_linking/manifests/feasibility_v1.json",
+    "eval/entity_linking/gold_v2.json",
+    "eval/entity_linking/cases_v2.jsonl",
+    "eval/entity_linking/conformance_v2.json",
+    "eval/entity_linking/manifests/feasibility_v2.json",
     "scripts/entity_linking_feasibility.py",
     "tests/test_v07_entity_linking_eval.py",
     "tests/test_v07_entity_linking_eval_pg.py",
@@ -211,9 +213,9 @@ G2_SPECIFICATION_PATHS = (
 )
 G2_APPROVAL_PATHS = (
     "docs/README.md",
+    "docs/superpowers/specs/2026-07-17-v0.7-publication-scoped-entity-linking.md",
     "docs/superpowers/plans/2026-07-17-v0.7-publication-scoped-entity-linking-g2.md",
     "docs/testing/acceptance/v0.7-entity-linking-corrective-audit.md",
-    "docs/testing/acceptance/v0.7-entity-linking-database-change-incident.md",
 )
 AUDIT_PRESERVATION_PATHS = (".gitattributes", INVALIDATED_CALIBRATION_PATH)
 LF_CONTRACT_PATHS = (
@@ -224,7 +226,10 @@ LF_CONTRACT_PATHS = (
     "docs/testing/acceptance/v0.7-entity-linking-database-change-incident.md",
     "docs/testing/acceptance/v0.7-entity-linking-feasibility.md",
     "eval/entity_linking/contracts.py",
-    "eval/entity_linking/gold_v1.json",
+    "eval/entity_linking/gold_v2.json",
+    "eval/entity_linking/cases_v2.jsonl",
+    "eval/entity_linking/conformance_v2.json",
+    "eval/entity_linking/manifests/feasibility_v2.json",
     "eval/entity_linking/results/v07-el-calibration-v1-20260717-01.json",
     "scripts/entity_linking_feasibility.py",
     "tests/test_v07_entity_linking_eval.py",
@@ -236,6 +241,15 @@ PHASE_OUTPUT_PATHS = (
     POLICY_PATH,
     *(f"eval/entity_linking/results/{run_id}.json" for _, run_id, _ in POST_FREEZE_IDENTITIES),
     RELEASE_EVIDENCE_PATH,
+)
+HISTORICAL_ENTITY_LINKING_PATHS = (
+    "eval/entity_linking/gold_v1.json",
+    "eval/entity_linking/cases_v1.jsonl",
+    "eval/entity_linking/conformance_v1.json",
+    "eval/entity_linking/manifests/feasibility_v1.json",
+    "eval/entity_linking/results/v07-el-calibration-v2-20260720-01.json",
+    "eval/entity_linking/link_policy_v1.json",
+    "eval/entity_linking/results/v07-el-post-freeze-v2-20260720-01.json",
 )
 
 
@@ -594,7 +608,36 @@ def _entity(
 
 
 def _case_prefix(index: int) -> str:
-    return f"{index:03d}"
+    return f"v2-{index:03d}"
+
+
+_CALIBRATION_ROOTS = (
+    "Alder", "Birch", "Cedar", "Elm", "Fir", "Grove", "Hazel", "Ivy", "Juniper", "Linden"
+)
+_RELEASE_ROOTS = (
+    "Maple", "Oak", "Pine", "Rowan", "Spruce", "Willow", "Yew", "Aspen", "Beech", "Cypress"
+)
+_FAMILY_MODIFIERS = (
+    "Amber", "Azure", "Coral", "Delta", "Ember", "Frost",
+    "Jade", "Lunar", "Mist", "Nova", "Opal", "Quartz",
+)
+_CALIBRATION_CJK_ROOTS = (
+    "星河", "云海", "青岚", "远山", "晨光", "松涛", "明湖", "清泉", "长风", "月湾",
+)
+_RELEASE_CJK_ROOTS = (
+    "天际", "海岳", "竹影", "北辰", "曙光", "林涛", "镜湖", "溪谷", "南风", "雪原",
+)
+_CJK_MODIFIERS = ("智造", "研究", "工程", "数据", "协作", "创新", "服务", "技术", "设计", "运营", "系统", "实验")
+
+
+def _family_words(index: int, split: str) -> tuple[str, str, str]:
+    position = index if split == "calibration" else index - 80
+    roots = _CALIBRATION_ROOTS if split == "calibration" else _RELEASE_ROOTS
+    root = roots[position % len(roots)]
+    modifier = _FAMILY_MODIFIERS[position // len(roots)]
+    cjk_roots = _CALIBRATION_CJK_ROOTS if split == "calibration" else _RELEASE_CJK_ROOTS
+    cjk = cjk_roots[position % len(cjk_roots)] + _CJK_MODIFIERS[position // len(cjk_roots)]
+    return root, modifier, cjk
 
 
 def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ...]]:
@@ -689,10 +732,14 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
     for index in range(200):
         suffix = _case_prefix(index)
         split = "calibration" if index < 80 else "release"
-        release_index = index - 80 if split == "release" else index
-        group = (release_index // 20) % 6
-        stratum = STRATUM_ORDER[release_index % 4]
+        split_index = index if split == "calibration" else index - 80
+        cohort = "safety" if split_index < 40 else "utility"
+        cohort_index = split_index if cohort == "safety" else split_index - 40
+        group = (2, 3)[cohort_index % 2] if cohort == "safety" else (0, 1, 4, 5)[cohort_index % 4]
+        stratum = STRATUM_ORDER[cohort_index % 4]
         hop = 1 if stratum.startswith("one-hop") else 2
+        root, modifier, cjk_name = _family_words(index, split)
+        family_label = f"{modifier} {root}"
 
         document_key = f"document-{suffix}"
         revision_key = f"revision-{suffix}"
@@ -702,8 +749,8 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
             DocumentRecord(
                 document_key=document_key,
                 library_key="library-primary",
-                title=f"Synthetic Relation Record {suffix}",
-                external_id=f"synthetic-{suffix}",
+                title=f"{family_label} published relation record",
+                external_id=f"synthetic-v2-{index:03d}",
                 status="ready",
             )
         )
@@ -716,7 +763,10 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
                 is_current=True,
             )
         )
-        text = f"Synthetic evidence {suffix} confirms the fixed relation path for evaluation."
+        text = (
+            f"{family_label} Anchor is formally related to {family_label} Archive "
+            "under the active synthetic publication."
+        )
         chunks.append(
             ChunkRecord(
                 chunk_key=chunk_key,
@@ -740,8 +790,8 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
 
         seed_key = f"entity-{suffix}-seed"
         target_key = f"entity-{suffix}-target"
-        entities[seed_key] = _entity(seed_key, f"Anchor {suffix}", evidence=(evidence_key,))
-        entities[target_key] = _entity(target_key, f"Target {suffix}", evidence=(evidence_key,))
+        entities[seed_key] = _entity(seed_key, f"{family_label} Anchor", evidence=(evidence_key,))
+        entities[target_key] = _entity(target_key, f"{family_label} Archive", evidence=(evidence_key,))
         relation_keys: list[str] = []
         node_keys = [seed_key, target_key]
         if hop == 1:
@@ -762,7 +812,7 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
             )
         else:
             middle_key = f"entity-{suffix}-middle"
-            entities[middle_key] = _entity(middle_key, f"Middle {suffix}", evidence=(evidence_key,))
+            entities[middle_key] = _entity(middle_key, f"{family_label} Bridge", evidence=(evidence_key,))
             node_keys.insert(1, middle_key)
             for marker, source, target in (
                 ("a", seed_key, middle_key),
@@ -807,38 +857,38 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
                 )
             )
 
-        add_linkable(seed_key, f"Anchor {suffix}", f"Anchor {suffix}", script="latin")
+        add_linkable(seed_key, f"{family_label} Anchor", f"{family_label} Anchor", script="latin")
         categories.add("exact-canonical")
         if group == 0:
             exact_key = f"entity-{suffix}-exact"
             prefix_key = f"entity-{suffix}-prefix"
-            add_linkable(exact_key, f"Exact {suffix} Name", f"  EXACT   {suffix} name ", script="latin")
-            add_linkable(prefix_key, f"星河{suffix}制造中心", f"星河{suffix}", script="cjk")
+            add_linkable(exact_key, f"{family_label} Control", f"  {family_label.upper()}   control ", script="latin")
+            add_linkable(prefix_key, f"{cjk_name}中心", cjk_name, script="cjk")
             categories.update(("exact-canonical", "case-whitespace-normalization", "prefix-suffix-omission"))
         elif group == 1:
             abbreviation_key = f"entity-{suffix}-abbreviation"
             reorder_key = f"entity-{suffix}-reorder"
             add_linkable(
                 abbreviation_key,
-                f"alpha{suffix}omega",
-                f"l{suffix}o",
+                f"{root.lower()}{modifier.lower()}orbit",
+                f"{root[0].lower()}{root[-1].lower()}{modifier.lower()}or",
                 script="latin",
             )
             add_linkable(
                 reorder_key,
-                f"node {suffix} amber",
-                f"amber node {suffix}",
+                f"{root.lower()} {modifier.lower()} unit",
+                f"unit {modifier.lower()} {root.lower()}",
                 script="latin",
             )
             categories.update(("abbreviation-like-overlap", "word-order-token-overlap"))
         elif group == 2:
             close_key = f"entity-{suffix}-close"
-            entities[close_key] = _entity(close_key, f"close {suffix} alphi", evidence=(evidence_key,))
+            entities[close_key] = _entity(close_key, f"{root} {modifier} Alphi", evidence=(evidence_key,))
             family_entities.add(close_key)
             mentions.append(
                 MentionRecord(
                     input_index=len(mentions),
-                    text=f"close {suffix} alpha",
+                    text=f"{root} {modifier} Alpha",
                     entity_type_key="type-org",
                     gold_status="unlinkable",
                     gold_entity_key=None,
@@ -850,13 +900,13 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
             )
             tie_a = f"entity-{suffix}-tie-a"
             tie_b = f"entity-{suffix}-tie-b"
-            entities[tie_a] = _entity(tie_a, f"tie {suffix} a", evidence=(evidence_key,))
-            entities[tie_b] = _entity(tie_b, f"tie {suffix} b", evidence=(evidence_key,))
+            entities[tie_a] = _entity(tie_a, f"{family_label} A", evidence=(evidence_key,))
+            entities[tie_b] = _entity(tie_b, f"{family_label} B", evidence=(evidence_key,))
             family_entities.update((tie_a, tie_b))
             mentions.append(
                 MentionRecord(
                     input_index=len(mentions),
-                    text=f"tie {suffix}",
+                    text=family_label,
                     entity_type_key="type-org",
                     gold_status="ambiguous",
                     gold_entity_key=None,
@@ -868,15 +918,15 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
             )
             shared_a = f"entity-{suffix}-shared-a"
             shared_b = f"entity-{suffix}-shared-b"
-            entities[shared_a] = _entity(shared_a, f"shared {suffix}", evidence=(evidence_key,))
+            entities[shared_a] = _entity(shared_a, f"{family_label} Shared", evidence=(evidence_key,))
             entities[shared_b] = _entity(
-                shared_b, f"shared {suffix}", type_key="type-team", evidence=(evidence_key,)
+                shared_b, f"{family_label} Shared", type_key="type-team", evidence=(evidence_key,)
             )
             family_entities.update((shared_a, shared_b))
             mentions.append(
                 MentionRecord(
                     input_index=len(mentions),
-                    text=f"shared {suffix}",
+                    text=f"{family_label} Shared",
                     entity_type_key=None,
                     gold_status="ambiguous",
                     gold_entity_key=None,
@@ -896,9 +946,10 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
             )
         elif group == 3:
             outside_key = f"entity-{suffix}-outside"
+            outside_name = f"externalcodev2{index:03d}"
             entities[outside_key] = _entity(
                 outside_key,
-                f"outsidecode{suffix}",
+                outside_name,
                 type_key="type-negative-org",
                 library="library-negative",
                 ontology="ontology-negative",
@@ -907,7 +958,7 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
             mentions.append(
                 MentionRecord(
                     input_index=len(mentions),
-                    text=f"outsidecode{suffix}",
+                    text=outside_name,
                     entity_type_key=None,
                     gold_status="unlinkable",
                     gold_entity_key=None,
@@ -921,17 +972,17 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
         elif group == 4:
             prefix_key = f"entity-{suffix}-prefix"
             reorder_key = f"entity-{suffix}-reorder"
-            add_linkable(prefix_key, f"星海{suffix}研究中心", f"星海{suffix}", script="cjk")
-            add_linkable(reorder_key, f"unit {suffix} cobalt", f"cobalt unit {suffix}", script="latin")
+            add_linkable(prefix_key, f"{cjk_name}实验室", cjk_name, script="cjk")
+            add_linkable(reorder_key, f"{modifier.lower()} {root.lower()} node", f"node {root.lower()} {modifier.lower()}", script="latin")
             categories.update(("prefix-suffix-omission", "word-order-token-overlap"))
         else:
             exact_key = f"entity-{suffix}-exact"
             abbreviation_key = f"entity-{suffix}-abbreviation"
-            add_linkable(exact_key, f"Control {suffix} Name", f" CONTROL  {suffix} name ", script="latin")
+            add_linkable(exact_key, f"{modifier} {root} Registry", f" {modifier.upper()}  {root.upper()} registry ", script="latin")
             add_linkable(
                 abbreviation_key,
-                f"beta{suffix}omega",
-                f"e{suffix}o",
+                f"{modifier.lower()}{root.lower()}signal",
+                f"{modifier[0].lower()}{modifier[-1].lower()}{root.lower()}sg",
                 script="mixed",
             )
             categories.update(
@@ -939,20 +990,75 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
             )
 
         categories.add("one-hop-evidence-utility" if hop == 1 else "two-hop-evidence-utility")
+        decoy_family_keys: tuple[str, ...] = ()
+        decoy_chunk_keys: tuple[str, ...] = ()
+        if cohort == "utility":
+            surface = " / ".join(" ".join(mention.text.split()) for mention in mentions)
+            decoy_keys: list[str] = []
+            decoy_chunks: list[str] = []
+            for decoy_index in range(12):
+                marker = decoy_index + 1
+                decoy_document_key = f"document-{suffix}-decoy-{marker:02d}"
+                decoy_revision_key = f"revision-{suffix}-decoy-{marker:02d}"
+                decoy_chunk_key = f"chunk-{suffix}-decoy-{marker:02d}"
+                decoy_keys.append(f"decoy-family-{suffix}-{marker:02d}")
+                decoy_chunks.append(decoy_chunk_key)
+                if decoy_index < 4:
+                    decoy_title = f"{surface} inventory note {marker}"
+                    decoy_text = f"{surface} appears in an unrelated synthetic inventory record."
+                elif decoy_index < 8:
+                    decoy_title = f"Synthetic relation pattern note {marker}"
+                    decoy_text = "A different synthetic organization is formally related to another archive."
+                else:
+                    decoy_title = f"{family_label} partial context {marker}"
+                    decoy_text = f"{family_label} is listed without the requested published relation fact."
+                documents.append(
+                    DocumentRecord(
+                        document_key=decoy_document_key,
+                        library_key="library-primary",
+                        title=decoy_title,
+                        external_id=f"synthetic-v2-decoy-{index:03d}-{marker:02d}",
+                        status="ready",
+                    )
+                )
+                revisions.append(
+                    RevisionRecord(
+                        revision_key=decoy_revision_key,
+                        document_key=decoy_document_key,
+                        revision_no=1,
+                        status="ready",
+                        is_current=True,
+                    )
+                )
+                chunks.append(
+                    ChunkRecord(
+                        chunk_key=decoy_chunk_key,
+                        document_key=decoy_document_key,
+                        revision_key=decoy_revision_key,
+                        seq=0,
+                        text=decoy_text,
+                    )
+                )
+            decoy_family_keys = tuple(decoy_keys)
+            decoy_chunk_keys = tuple(decoy_chunks)
         ordered_categories = tuple(value for value in CATEGORY_ORDER if value in categories)
         case = EvaluationCase(
-            schema_version="entity-linking-case-v1",
+            schema_version="entity-linking-case-v2",
             case_id=f"case-{suffix}",
             split=split,
+            cohort=cohort,
             entity_family_keys=(f"entity-family-{suffix}",),
             mention_family_keys=tuple(
                 f"mention-family-{suffix}-{mention.input_index}" for mention in mentions
             ),
             relation_template_family_key=f"relation-family-{suffix}",
+            phrase_family_key=f"phrase-family-{suffix}",
+            decoy_family_keys=decoy_family_keys,
+            decoy_chunk_keys=decoy_chunk_keys,
             categories=ordered_categories,
             utility_stratum=stratum,
             scenario_publication_key="publication-primary",
-            question=f"Synthetic question {suffix} requests the fixed relation evidence.",
+            question=f"Find the published relation evidence associated with {surface if cohort == 'utility' else family_label}.",
             mentions=tuple(mentions),
             gold_utility=GoldUtilityRecord(
                 evidence_keys=(evidence_key,),
@@ -1027,24 +1133,24 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
             canary_key="canary-credential",
             key_marker="synthetic-credential-shaped-key",
             value_marker="synthetic-credential-shaped-value",
-            target_rows=("entity-000-seed",),
+            target_rows=("entity-v2-000-seed",),
         ),
         PrivacyCanaryRecord(
             canary_key="canary-properties",
             key_marker="synthetic-private-properties-key",
             value_marker="synthetic-private-properties-value",
-            target_rows=("entity-000-seed",),
+            target_rows=("entity-v2-000-seed",),
         ),
         PrivacyCanaryRecord(
             canary_key="canary-source",
             key_marker="synthetic-source-like-key",
             value_marker="synthetic-source-like-value",
-            target_rows=("relation-000-a",),
+            target_rows=("relation-v2-000-a",),
         ),
     )
     gold = GoldDataset(
-        schema_version="entity-linking-gold-v1",
-        dataset_id="feasibility-v1",
+        schema_version="entity-linking-gold-v2",
+        dataset_id="feasibility-v2",
         uuid_namespace=str(UUID_NAMESPACE),
         libraries=libraries,
         ontologies=ontologies,
@@ -1074,6 +1180,11 @@ def build_conformance_dataset() -> ConformanceDataset:
         ("feature-disjoint", "alpha", "zulu"),
         ("feature-token-jaccard", "alpha beta", "beta alpha"),
         ("feature-round-half-up", "ab", "ac"),
+        ("feature-boundary-eligible", "star lab", "star laboratory"),
+        ("feature-boundary-middle-rejected", "labor", "star laboratory"),
+        ("feature-initialism", "abc", "alpha beta center"),
+        ("feature-ordered-subsequence", "aramberor", "alderamberorbit"),
+        ("feature-subsequence-ratio-rejected", "abcde", "abcdef"),
     )
     feature_cases = []
     for case_id, left, right in feature_inputs:
@@ -1087,6 +1198,8 @@ def build_conformance_dataset() -> ConformanceDataset:
                     character_bigram_dice_micros=score.character_bigram_dice_micros,
                     token_jaccard_micros=score.token_jaccard_micros,
                     substring_containment_micros=score.substring_containment_micros,
+                    boundary_omission_micros=score.boundary_omission_micros,
+                    ordered_abbreviation_micros=score.ordered_abbreviation_micros,
                     score_micros=score.score_micros,
                 ),
             )
@@ -1124,7 +1237,7 @@ def build_conformance_dataset() -> ConformanceDataset:
                     candidate_scores_micros=(score, 500000),
                     expected=DecisionExpected(
                         status="linked" if linked else "ambiguous",
-                        method="lexical_v1" if linked else None,
+                        method="lexical_v2" if linked else None,
                         selected_entity_key="candidate-a" if linked else None,
                         candidate_entity_keys=() if linked else ("candidate-a", "candidate-b"),
                     ),
@@ -1146,7 +1259,7 @@ def build_conformance_dataset() -> ConformanceDataset:
                     candidate_scores_micros=(950000, second),
                     expected=DecisionExpected(
                         status="linked" if linked else "ambiguous",
-                        method="lexical_v1" if linked else None,
+                        method="lexical_v2" if linked else None,
                         selected_entity_key="candidate-a" if linked else None,
                         candidate_entity_keys=() if linked else ("candidate-a", "candidate-b"),
                     ),
@@ -1506,8 +1619,8 @@ def build_conformance_dataset() -> ConformanceDataset:
         for row in category_specs
     )
     return ConformanceDataset(
-        schema_version="entity-linking-scorer-conformance-v1",
-        algorithm_version="lexical-score-v1",
+        schema_version="entity-linking-scorer-conformance-v2",
+        algorithm_version="lexical-score-v2",
         normalization_version="normalize_graph_name_v1",
         rounding_version="integer-half-up-v1",
         feature_cases=tuple(feature_cases),
@@ -1580,6 +1693,18 @@ def _count_dataset(gold: GoldDataset, cases: Sequence[EvaluationCase]) -> Counts
         chunks=len(gold.chunks),
         calibration_cases=sum(case.split == "calibration" for case in cases),
         release_cases=sum(case.split == "release" for case in cases),
+        calibration_safety_cases=sum(
+            case.split == "calibration" and case.cohort == "safety" for case in cases
+        ),
+        calibration_utility_cases=sum(
+            case.split == "calibration" and case.cohort == "utility" for case in cases
+        ),
+        release_safety_cases=sum(
+            case.split == "release" and case.cohort == "safety" for case in cases
+        ),
+        release_utility_cases=sum(
+            case.split == "release" and case.cohort == "utility" for case in cases
+        ),
     )
 
 
@@ -1630,12 +1755,16 @@ def _fixed_controls() -> tuple[
             upper_index=9749,
         ),
         PerformanceFixture(
-            generator_version="entity-linking-performance-fixture-v1",
+            generator_version="entity-linking-performance-fixture-v2",
             publication_total_items=10000,
             publication_entities=6000,
             publication_relations=4000,
-            mention_count=10,
-            mention_mix="2 exact, 3 high-similarity, 3 ambiguous, 2 not-found",
+            linker_scenario="linker-mixed-10",
+            linker_mention_count=10,
+            linker_mention_mix="2 exact, 3 high-similarity, 3 ambiguous, 2 not-found",
+            link_graph_scenario="link-graph-linked-10",
+            link_graph_mention_count=10,
+            link_graph_mention_mix="2 exact, 4 boundary-omission, 4 ordered-abbreviation",
             warmup_count=5,
             sample_count=30,
             timeout_micros=2000000,
@@ -1649,10 +1778,10 @@ def write_static_dataset(root: Path) -> FeasibilityManifest:
     gold, cases = build_static_gold_and_cases()
     conformance = build_conformance_dataset()
     base = root / "eval/entity_linking"
-    gold_path = base / "gold_v1.json"
-    cases_path = base / "cases_v1.jsonl"
-    conformance_path = base / "conformance_v1.json"
-    manifest_path = base / "manifests/feasibility_v1.json"
+    gold_path = base / "gold_v2.json"
+    cases_path = base / "cases_v2.jsonl"
+    conformance_path = base / "conformance_v2.json"
+    manifest_path = base / "manifests/feasibility_v2.json"
     _write_json(gold_path, gold.model_dump(mode="json"))
     _write_jsonl(cases_path, [case.model_dump(mode="json") for case in cases])
     _write_json(conformance_path, conformance.model_dump(mode="json"))
@@ -1664,19 +1793,23 @@ def write_static_dataset(root: Path) -> FeasibilityManifest:
     cases_ref = artifact_ref(root, cases_path, cases_value)
     conformance_ref = artifact_ref(root, conformance_path, conformance_value)
     release = tuple(case for case in cases if case.split == "release")
+    calibration = tuple(case for case in cases if case.split == "calibration")
+    calibration_utility = tuple(case for case in calibration if case.cohort == "utility")
+    release_utility = tuple(case for case in release if case.cohort == "utility")
     category_counts_value = {
         category: sum(category in case.categories for case in release) for category in CATEGORY_ORDER
     }
     stratum_counts_value = {
-        stratum: sum(case.utility_stratum == stratum for case in release) for stratum in STRATUM_ORDER
+        stratum: sum(case.utility_stratum == stratum for case in release_utility)
+        for stratum in STRATUM_ORDER
     }
     closure = build_dependency_closure(root)
     distributions = discover_external_distribution_records(root)
     scope_hashes = _scope_hashes(gold)
     control, metric, grid, bootstrap, performance = _fixed_controls()
     manifest = FeasibilityManifest(
-        schema_version="entity-linking-feasibility-manifest-v1",
-        dataset_id="feasibility-v1",
+        schema_version="entity-linking-feasibility-manifest-v2",
+        dataset_id="feasibility-v2",
         g2_approval_commit=G2_APPROVAL_COMMIT,
         g2_specification_tree_sha256=G2_SPECIFICATION_TREE_SHA256,
         gold_ref=gold_ref,
@@ -1684,12 +1817,16 @@ def write_static_dataset(root: Path) -> FeasibilityManifest:
         conformance_ref=conformance_ref,
         canonicalization_version="canonical-graph-json-v1",
         normalization_version="normalize_graph_name_v1",
-        algorithm_version="lexical-score-v1",
+        algorithm_version="lexical-score-v2",
         rounding_version="integer-half-up-v1",
-        category_predicate_version="entity-linking-category-predicates-v1",
+        category_predicate_version="entity-linking-category-predicates-v2",
         ordered_case_ids=tuple(case.case_id for case in cases),
         ordered_calibration_case_ids=tuple(case.case_id for case in cases if case.split == "calibration"),
         ordered_release_case_ids=tuple(case.case_id for case in release),
+        ordered_calibration_utility_case_ids=tuple(case.case_id for case in calibration_utility),
+        ordered_release_utility_case_ids=tuple(case.case_id for case in release_utility),
+        calibration_cohort_counts=CohortCounts(safety=40, utility=40),
+        release_cohort_counts=CohortCounts(safety=40, utility=80),
         counts=_count_dataset(gold, cases),
         minimum_counts=MinimumCountsRecord(
             relation_oriented_questions=200,
@@ -1702,12 +1839,15 @@ def write_static_dataset(root: Path) -> FeasibilityManifest:
             ontologies=2,
             release_category_cases=20,
             release_stratum_questions=20,
+            decoys_per_utility_case=12,
         ),
         release_category_counts=CategoryCounts.model_validate(category_counts_value),
         release_stratum_counts=StratumCounts.model_validate(stratum_counts_value),
         entity_family_split_hash=_family_hash(cases, "entity_family_keys"),
         mention_family_split_hash=_family_hash(cases, "mention_family_keys"),
         relation_template_family_split_hash=_family_hash(cases, "relation_template_family_key"),
+        phrase_family_split_hash=_family_hash(cases, "phrase_family_key"),
+        decoy_family_split_hash=_family_hash(cases, "decoy_family_keys"),
         logical_scope_schema_hashes=scope_hashes,
         ontology_schema_set_hash=canonical_sha256([row.model_dump(mode="json") for row in scope_hashes]),
         control_config=control,
@@ -1726,11 +1866,6 @@ def write_static_dataset(root: Path) -> FeasibilityManifest:
     )
     _write_json(manifest_path, manifest.model_dump(mode="json"))
     return manifest
-
-
-def _strict_subsequence(left: str, right: str) -> bool:
-    iterator = iter(right)
-    return all(any(candidate == value for candidate in iterator) for value in left)
 
 
 def recompute_case_categories(case: EvaluationCase, gold: GoldDataset) -> tuple[str, ...]:
@@ -1788,7 +1923,7 @@ def recompute_case_categories(case: EvaluationCase, gold: GoldDataset) -> tuple[
         subsequence = bool(
             compact_canonical
             and 2 <= len(compact_mention) < len(compact_canonical)
-            and _strict_subsequence(compact_mention, compact_canonical)
+            and is_strict_subsequence(compact_mention, compact_canonical)
             and compact_mention not in compact_canonical
             and 4 * len(compact_mention) <= 3 * len(compact_canonical)
         )
@@ -1909,6 +2044,8 @@ def _validate_references(gold: GoldDataset, cases: Sequence[EvaluationCase]) -> 
         if set(row.entity_keys) - entity_keys or set(row.relation_keys) - relation_keys:
             raise ValueError(f"invalid Publication reference: {row.publication_key}")
     for case in cases:
+        if set(case.decoy_chunk_keys) - chunk_keys:
+            raise ValueError(f"unknown decoy Chunk: {case.case_id}")
         if case.scenario_publication_key not in publication_keys:
             raise ValueError(f"unknown Publication: {case.case_id}")
         if set(case.gold_utility.evidence_keys) - evidence_keys:
@@ -1934,6 +2071,9 @@ def validate_conformance(conformance: ConformanceDataset) -> None:
             observed.character_bigram_dice_micros != case.expected.character_bigram_dice_micros
             or observed.token_jaccard_micros != case.expected.token_jaccard_micros
             or observed.substring_containment_micros != case.expected.substring_containment_micros
+            or observed.boundary_omission_micros != case.expected.boundary_omission_micros
+            or observed.ordered_abbreviation_micros
+            != case.expected.ordered_abbreviation_micros
             or observed.score_micros != case.expected.score_micros
         ):
             raise ValueError(f"feature conformance failed: {case.case_id}")
@@ -1951,7 +2091,7 @@ def validate_conformance(conformance: ConformanceDataset) -> None:
             )
         else:
             scored = tuple(
-                ScoredCandidate(candidate, FeatureScores(score, score, score, score))
+                ScoredCandidate(candidate, FeatureScores(score, score, score, 0, 0, score))
                 for candidate, score in zip(candidates, case.candidate_scores_micros, strict=True)
             )
             decision = decide_scored_candidates(
@@ -1973,7 +2113,7 @@ def validate_conformance(conformance: ConformanceDataset) -> None:
             EntityCandidate(**candidate.model_dump(mode="python")) for candidate in case.candidates
         )
         scored = tuple(
-            ScoredCandidate(candidate, FeatureScores(700000, 700000, 700000, 700000))
+            ScoredCandidate(candidate, FeatureScores(700000, 700000, 700000, 0, 0, 700000))
             for candidate in candidates
         )
         observed = tuple(row.candidate.entity_key for row in sorted(scored, key=stable_candidate_key))
@@ -2006,7 +2146,13 @@ def validate_conformance(conformance: ConformanceDataset) -> None:
 
 
 def _validate_families(cases: Sequence[EvaluationCase]) -> None:
-    for field in ("entity_family_keys", "mention_family_keys", "relation_template_family_key"):
+    for field in (
+        "entity_family_keys",
+        "mention_family_keys",
+        "relation_template_family_key",
+        "phrase_family_key",
+        "decoy_family_keys",
+    ):
         family_split: dict[str, str] = {}
         for case in cases:
             values = getattr(case, field)
@@ -2022,10 +2168,10 @@ def _validate_families(cases: Sequence[EvaluationCase]) -> None:
 def load_dataset(root: Path) -> LoadedDataset:
     verify_g2_approval(root)
     base = root / "eval/entity_linking"
-    gold_path = base / "gold_v1.json"
-    cases_path = base / "cases_v1.jsonl"
-    conformance_path = base / "conformance_v1.json"
-    manifest_path = base / "manifests/feasibility_v1.json"
+    gold_path = base / "gold_v2.json"
+    cases_path = base / "cases_v2.jsonl"
+    conformance_path = base / "conformance_v2.json"
+    manifest_path = base / "manifests/feasibility_v2.json"
     gold = load_canonical_json(root, gold_path, GoldDataset)
     cases = load_canonical_jsonl(root, cases_path, EvaluationCase)
     conformance = load_canonical_json(root, conformance_path, ConformanceDataset)
@@ -2052,7 +2198,33 @@ def load_dataset(root: Path) -> LoadedDataset:
     release = tuple(case for case in typed_cases if case.split == "release")
     if len(calibration) * 5 != len(typed_cases) * 2 or len(release) * 5 != len(typed_cases) * 3:
         raise ValueError("40/60 split invalid")
-    for case in typed_cases:
+    calibration_utility = tuple(case for case in calibration if case.cohort == "utility")
+    release_utility = tuple(case for case in release if case.cohort == "utility")
+    if (
+        len(calibration) != 80
+        or len(release) != 120
+        or len(calibration_utility) != 40
+        or len(release_utility) != 80
+        or sum(case.cohort == "safety" for case in calibration) != 40
+        or sum(case.cohort == "safety" for case in release) != 40
+    ):
+        raise ValueError("cohort counts invalid")
+    if (
+        tuple(case.case_id for case in calibration_utility)
+        != manifest.ordered_calibration_utility_case_ids
+        or tuple(case.case_id for case in release_utility)
+        != manifest.ordered_release_utility_case_ids
+        or manifest.calibration_cohort_counts != CohortCounts(safety=40, utility=40)
+        or manifest.release_cohort_counts != CohortCounts(safety=40, utility=80)
+    ):
+        raise ValueError("manifest cohort identity mismatch")
+    if any(
+        len(case.decoy_family_keys) != (12 if case.cohort == "utility" else 0)
+        or len(case.decoy_chunk_keys) != (12 if case.cohort == "utility" else 0)
+        for case in typed_cases
+    ):
+        raise ValueError("decoy family count invalid")
+    for case in calibration:
         observed = recompute_case_categories(case, gold)
         if observed != case.categories:
             raise EntityLinkingEvalError("category_predicate_mismatch")
@@ -2065,7 +2237,8 @@ def load_dataset(root: Path) -> LoadedDataset:
     if category_counts != manifest.release_category_counts.root or min(category_counts.values()) < 20:
         raise EntityLinkingEvalError("category_minimum_not_met")
     stratum_counts = {
-        stratum: sum(case.utility_stratum == stratum for case in release) for stratum in STRATUM_ORDER
+        stratum: sum(case.utility_stratum == stratum for case in release_utility)
+        for stratum in STRATUM_ORDER
     }
     if stratum_counts != manifest.release_stratum_counts.root or min(stratum_counts.values()) < 20:
         raise EntityLinkingEvalError("category_minimum_not_met")
@@ -2074,6 +2247,8 @@ def load_dataset(root: Path) -> LoadedDataset:
         or _family_hash(typed_cases, "mention_family_keys") != manifest.mention_family_split_hash
         or _family_hash(typed_cases, "relation_template_family_key")
         != manifest.relation_template_family_split_hash
+        or _family_hash(typed_cases, "phrase_family_key") != manifest.phrase_family_split_hash
+        or _family_hash(typed_cases, "decoy_family_keys") != manifest.decoy_family_split_hash
     ):
         raise EntityLinkingEvalError("family_split_overlap")
 
@@ -2090,10 +2265,10 @@ def load_dataset(root: Path) -> LoadedDataset:
     dataset_hash = canonical_sha256(
         {
             "cases_content_sha256": manifest.cases_ref.canonical_sha256,
-            "cases_schema_version": "entity-linking-case-v1",
+            "cases_schema_version": "entity-linking-case-v2",
             "conformance_content_sha256": manifest.conformance_ref.canonical_sha256,
             "conformance_schema_version": conformance.schema_version,
-            "dataset_id": "feasibility-v1",
+            "dataset_id": "feasibility-v2",
             "gold_content_sha256": manifest.gold_ref.canonical_sha256,
             "gold_schema_version": gold.schema_version,
         }
@@ -2128,6 +2303,14 @@ def load_dataset(root: Path) -> LoadedDataset:
         evaluation_config_sha256=canonical_sha256(config_value),
         manifest_ref=manifest_identity,
     )
+
+
+def validate_release_case_categories(dataset: LoadedDataset) -> None:
+    for case in dataset.cases:
+        if case.split != "release":
+            continue
+        if recompute_case_categories(case, dataset.gold) != case.categories:
+            raise EntityLinkingEvalError("category_predicate_mismatch")
 
 
 def rate_metric(numerator: int, denominator: int) -> dict[str, int | None]:
@@ -2266,8 +2449,15 @@ def build_grid_results(dataset: LoadedDataset) -> tuple[GridResult, ...]:
             exact_total = 0
             wrong = 0
             false_auto = 0
+            utility_execution = 0
+            utility_total = 0
             for case in calibration:
                 decisions = candidate_decisions_for_threshold(dataset, case, threshold)
+                if case.cohort == "utility":
+                    utility_total += 1
+                    utility_execution += all(
+                        decision["status"] == "linked" for decision in decisions
+                    )
                 for mention, decision in zip(case.mentions, decisions, strict=True):
                     selected = decision["selected"]
                     selected_key = selected.get("entity_key") if isinstance(selected, dict) else None
@@ -2309,11 +2499,14 @@ def build_grid_results(dataset: LoadedDataset) -> tuple[GridResult, ...]:
             candidate_rate = rate_metric(candidate_recall, linkable_total)
             abstention = rate_metric(abstention_correct, abstention_total)
             exact_accuracy = rate_metric(exact_correct, exact_total)
+            execution_coverage = rate_metric(utility_execution, utility_total)
             eligible = bool(
                 wrong == 0
                 and false_auto == 0
                 and precision["value_micros"] == 1_000_000
                 and exact_accuracy["value_micros"] == 1_000_000
+                and execution_coverage["value_micros"] is not None
+                and execution_coverage["value_micros"] >= 800_000
             )
             always = rate_metric(len(calibration), len(calibration))
             results.append(
@@ -2332,6 +2525,7 @@ def build_grid_results(dataset: LoadedDataset) -> tuple[GridResult, ...]:
                     exact_regression_accuracy=exact_accuracy,
                     scope_safety=always,
                     property_privacy=always,
+                    utility_question_execution_coverage=execution_coverage,
                     non_exact_correct_auto_link_count=non_exact_correct,
                     selection_eligible=eligible,
                 )
@@ -2347,6 +2541,7 @@ def select_calibration_threshold(grid: Sequence[GridResult]) -> tuple[Threshold 
     ordered = sorted(
         eligible,
         key=lambda row: (
+            row.utility_question_execution_coverage.numerator,
             row.non_exact_correct_auto_link_count,
             row.thresholds.min_score_micros,
             row.thresholds.min_margin_micros,
@@ -2354,14 +2549,33 @@ def select_calibration_threshold(grid: Sequence[GridResult]) -> tuple[Threshold 
         reverse=True,
     )
     selected = ordered[0]
-    maximum_coverage = max(row.non_exact_correct_auto_link_count for row in eligible)
-    coverage = [row for row in eligible if row.non_exact_correct_auto_link_count == maximum_coverage]
-    if len(coverage) == 1:
-        reason = "max-non-exact-coverage"
+    maximum_execution = max(
+        row.utility_question_execution_coverage.numerator for row in eligible
+    )
+    execution_ties = [
+        row
+        for row in eligible
+        if row.utility_question_execution_coverage.numerator == maximum_execution
+    ]
+    if len(execution_ties) == 1:
+        reason = "max-question-execution-coverage"
     else:
-        max_score = max(row.thresholds.min_score_micros for row in coverage)
-        score_ties = [row for row in coverage if row.thresholds.min_score_micros == max_score]
-        reason = "tie-higher-score" if len(score_ties) == 1 else "tie-higher-margin"
+        maximum_non_exact = max(
+            row.non_exact_correct_auto_link_count for row in execution_ties
+        )
+        non_exact_ties = [
+            row
+            for row in execution_ties
+            if row.non_exact_correct_auto_link_count == maximum_non_exact
+        ]
+        if len(non_exact_ties) == 1:
+            reason = "tie-non-exact-coverage"
+        else:
+            max_score = max(row.thresholds.min_score_micros for row in non_exact_ties)
+            score_ties = [
+                row for row in non_exact_ties if row.thresholds.min_score_micros == max_score
+            ]
+            reason = "tie-higher-score" if len(score_ties) == 1 else "tie-higher-margin"
     return selected.thresholds, reason
 
 
@@ -3356,6 +3570,7 @@ class CandidateCaseResult:
     logical_response_sha256: str
     linker_duration_us: int
     link_graph_duration_us: int
+    graph_executed: bool
 
 
 async def load_candidate_projection(
@@ -3473,6 +3688,7 @@ async def run_candidate_case(
             logical_response_sha256=canonical_sha256(value),
             linker_duration_us=linker_duration_us,
             link_graph_duration_us=linker_duration_us,
+            graph_executed=False,
         )
     selected_ids: list[uuid.UUID] = []
     for decision in decisions:
@@ -3527,6 +3743,7 @@ async def run_candidate_case(
         logical_response_sha256=canonical_sha256(value),
         linker_duration_us=linker_duration_us,
         link_graph_duration_us=(time.perf_counter_ns() - linker_started) // 1000,
+        graph_executed=True,
     )
 
 
@@ -3795,6 +4012,70 @@ def _latency_summary(samples: Sequence[int]) -> LatencySummary:
     )
 
 
+def _performance_cases(dataset: LoadedDataset) -> tuple[EvaluationCase, EvaluationCase]:
+    calibration = tuple(case for case in dataset.cases if case.split == "calibration")
+    utility = tuple(case for case in calibration if case.cohort == "utility")
+    entities = {row.entity_key: row for row in dataset.gold.entities}
+    exact: list[MentionRecord] = []
+    boundary: list[MentionRecord] = []
+    abbreviation: list[MentionRecord] = []
+    ambiguous: list[MentionRecord] = []
+    not_found: list[MentionRecord] = []
+    for case in calibration:
+        for mention in case.mentions:
+            if mention.is_exact_control:
+                exact.append(mention)
+            elif mention.gold_status == "ambiguous":
+                ambiguous.append(mention)
+            elif mention.gold_status == "unlinkable" and mention.negative_entity_keys:
+                not_found.append(mention)
+            elif mention.gold_status == "linkable" and mention.gold_entity_key is not None:
+                features = score_candidate(mention.text, _candidate(entities[mention.gold_entity_key])).features
+                if features.boundary_omission_micros:
+                    boundary.append(mention)
+                elif features.ordered_abbreviation_micros:
+                    abbreviation.append(mention)
+    if min(len(exact), len(boundary), len(abbreviation), len(ambiguous), len(not_found)) < 2:
+        raise ValueError("performance mention populations incomplete")
+
+    def reindex(rows: Sequence[MentionRecord]) -> tuple[MentionRecord, ...]:
+        return tuple(row.model_copy(update={"input_index": index}) for index, row in enumerate(rows))
+
+    source = utility[0]
+    common = {
+        "schema_version": "entity-linking-case-v2",
+        "split": "calibration",
+        "entity_family_keys": ("entity-family-performance-v2",),
+        "mention_family_keys": tuple(f"mention-family-performance-v2-{index}" for index in range(10)),
+        "relation_template_family_key": "relation-family-performance-v2",
+        "phrase_family_key": "phrase-family-performance-v2",
+        "decoy_family_keys": (),
+        "decoy_chunk_keys": (),
+        "categories": (),
+        "utility_stratum": source.utility_stratum,
+        "scenario_publication_key": source.scenario_publication_key,
+        "gold_utility": source.gold_utility,
+    }
+    mixed_mentions = reindex((*exact[:2], *boundary[:2], abbreviation[0], *ambiguous[:3], *not_found[:2]))
+    linked_mentions = reindex((*exact[:2], *boundary[:4], *abbreviation[:4]))
+    return (
+        EvaluationCase(
+            **common,
+            case_id="performance-linker-mixed",
+            cohort="safety",
+            question="Fixed mixed entity-linking performance scenario.",
+            mentions=mixed_mentions,
+        ),
+        EvaluationCase(
+            **common,
+            case_id="performance-link-graph",
+            cohort="utility",
+            question="Fixed linked graph-retrieval performance scenario.",
+            mentions=linked_mentions,
+        ),
+    )
+
+
 async def collect_live_evaluation(
     dsn: str,
     dataset: LoadedDataset,
@@ -3825,6 +4106,7 @@ async def collect_live_evaluation(
     elif phase == "post_freeze_release":
         if policy_thresholds is None:
             raise EntityLinkingEvalError("policy_required")
+        validate_release_case_categories(dataset)
         evaluation_cases = tuple(case for case in dataset.cases if case.split == "release")
         grid_results = ()
         selected_threshold = policy_thresholds
@@ -3839,6 +4121,10 @@ async def collect_live_evaluation(
     exact_results: dict[str, tuple[dict[str, object], ...]] = {}
     sql_statement_count = 0
     sql_statement_count_max = 0
+    linker_samples: list[int] = []
+    link_graph_samples: list[int] = []
+    dense_samples: list[int] = []
+    hybrid_samples: list[int] = []
 
     def count_statement(*_args) -> None:
         nonlocal sql_statement_count
@@ -3879,6 +4165,45 @@ async def collect_live_evaluation(
                     embedding_api_key=embedding_api_key,
                 )
                 exact_results[case.case_id] = exact_only_decisions(dataset, case)
+            linker_case, link_graph_case = _performance_cases(dataset)
+            for repetition in range(35):
+                before_candidate = sql_statement_count
+                result = await run_candidate_case(
+                    db, library, linker_case, selected_threshold, seeded
+                )
+                sql_statement_count_max = max(
+                    sql_statement_count_max, sql_statement_count - before_candidate
+                )
+                if result.graph_executed:
+                    raise EntityLinkingEvalError("performance_fixture_invalid")
+                if repetition >= 5:
+                    linker_samples.append(result.linker_duration_us)
+            for repetition in range(35):
+                before_candidate = sql_statement_count
+                result = await run_candidate_case(
+                    db, library, link_graph_case, selected_threshold, seeded
+                )
+                sql_statement_count_max = max(
+                    sql_statement_count_max, sql_statement_count - before_candidate
+                )
+                if not result.graph_executed:
+                    raise EntityLinkingEvalError("performance_fixture_not_executed")
+                if repetition >= 5:
+                    link_graph_samples.append(result.link_graph_duration_us)
+            for mode, samples in (("dense", dense_samples), ("hybrid", hybrid_samples)):
+                for repetition in range(35):
+                    result = await run_old_retrieval_control(
+                        db,
+                        library,
+                        link_graph_case,
+                        mode=mode,
+                        qdrant_url=qdrant_url,
+                        qdrant_api_key=qdrant_api_key,
+                        embedding_url=embedding_url,
+                        embedding_api_key=embedding_api_key,
+                    )
+                    if repetition >= 5:
+                        samples.append(result.duration_us)
         _current, peak_memory = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
@@ -3890,14 +4215,15 @@ async def collect_live_evaluation(
     candidate_nodes = {key: value.node_keys for key, value in candidate_results.items()}
     dense_evidence = {key: value.evidence_keys for key, value in dense_results.items()}
     hybrid_evidence = {key: value.evidence_keys for key, value in hybrid_results.items()}
+    utility_cases = tuple(case for case in evaluation_cases if case.cohort == "utility")
     candidate_utility = _utility_metrics(
-        evaluation_cases,
+        utility_cases,
         candidate_evidence,
         relation_by_case=candidate_relations,
         node_by_case=candidate_nodes,
     )
-    dense_utility = _utility_metrics(evaluation_cases, dense_evidence)
-    hybrid_utility = _utility_metrics(evaluation_cases, hybrid_evidence)
+    dense_utility = _utility_metrics(utility_cases, dense_evidence)
+    hybrid_utility = _utility_metrics(utility_cases, hybrid_evidence)
     intrinsic = _build_intrinsic_metrics(evaluation_cases, candidate_results, exact_results)
 
     evidence_control, evidence_value = _best_control(
@@ -3918,7 +4244,7 @@ async def collect_live_evaluation(
     candidate_recall_by_case = {}
     control_recall_by_case = {}
     strata = {}
-    for case in evaluation_cases:
+    for case in utility_cases:
         gold = set(case.gold_utility.evidence_keys)
         candidate_recall_by_case[case.case_id] = int(
             rate_metric(len(gold & set(candidate_evidence[case.case_id])), len(gold))["value_micros"] or 0
@@ -3968,16 +4294,14 @@ async def collect_live_evaluation(
         hybrid_utility=hybrid_utility,
         utility_gains=utility_gains,
     )
-    measured_cases = evaluation_cases[5:35]
     performance = Performance(
-        linker=_latency_summary(
-            [candidate_results[case.case_id].linker_duration_us for case in measured_cases]
-        ),
-        link_graph=_latency_summary(
-            [candidate_results[case.case_id].link_graph_duration_us for case in measured_cases]
-        ),
-        dense=_latency_summary([dense_results[case.case_id].duration_us for case in measured_cases]),
-        hybrid=_latency_summary([hybrid_results[case.case_id].duration_us for case in measured_cases]),
+        linker_scenario="linker-mixed-10",
+        link_graph_scenario="link-graph-linked-10",
+        control_scenario="link-graph-linked-10",
+        linker=_latency_summary(linker_samples),
+        link_graph=_latency_summary(link_graph_samples),
+        dense=_latency_summary(dense_samples),
+        hybrid=_latency_summary(hybrid_samples),
         sql_statement_count_max=sql_statement_count_max,
         per_mention_sql_count=0,
         projection_rows=6000,
@@ -3985,8 +4309,10 @@ async def collect_live_evaluation(
         memory_high_water_bytes=peak_memory,
         request_timeout_count=0,
         timeout_rollback_reused=True,
-        embedding_call_count=embedding_calls + len(evaluation_cases) * 2,
-        qdrant_call_count=qdrant_calls + len(evaluation_cases) * 2,
+        embedding_call_count=embedding_calls + len(evaluation_cases) * 2 + 70,
+        qdrant_call_count=qdrant_calls + len(evaluation_cases) * 2 + 70,
+        linker_graph_execution_count=0,
+        link_graph_execution_count=30,
     )
     response_hashes = tuple(
         CaseResponseHash(
@@ -4041,6 +4367,7 @@ def _current_evaluation_tree_sha256(root: Path) -> str:
         set(_git(root, "ls-files", "eval/entity_linking").splitlines())
         - {path for path in G3_IMPLEMENTATION_PATHS if path.startswith("eval/entity_linking/")}
         - set(PHASE_OUTPUT_PATHS)
+        - set(HISTORICAL_ENTITY_LINKING_PATHS)
     )
     if unexpected:
         raise EntityLinkingEvalError("scope_drift_detected")
@@ -4127,18 +4454,21 @@ def build_calibration_artifact(
     finished_at: datetime,
 ) -> CalibrationArtifact:
     calibration_cases = tuple(case for case in dataset.cases if case.split == "calibration")
+    calibration_utility_cases = tuple(
+        case for case in calibration_cases if case.cohort == "utility"
+    )
     category_counts = {
         category: sum(category in case.categories for case in calibration_cases)
         for category in CATEGORY_ORDER
     }
     stratum_counts = {
-        stratum: sum(case.utility_stratum == stratum for case in calibration_cases)
+        stratum: sum(case.utility_stratum == stratum for case in calibration_utility_cases)
         for stratum in STRATUM_ORDER
     }
     qdrant_hash = environment.qdrant.qdrant_fingerprint_sha256
     embedding_hash = environment.embedding.embedding_fingerprint_sha256
     return CalibrationArtifact(
-        schema_version="entity-linking-eval-result-v1",
+        schema_version="entity-linking-eval-result-v2",
         phase="calibration",
         status="passed" if material.selected_threshold is not None else "no_go",
         ordinal=None,
@@ -4652,7 +4982,7 @@ def freeze_policy(
         raise EntityLinkingEvalError("policy_approval_time_invalid")
     try:
         approval = PolicyApprovalPayload(
-            schema_version="entity-linking-policy-approval-v1",
+            schema_version="entity-linking-policy-approval-v2",
             calibration_ref=calibration_ref,
             approved_thresholds=approved_thresholds,
             approved_by=approved_by,
@@ -4662,9 +4992,9 @@ def freeze_policy(
     except ValueError as exc:
         raise EntityLinkingEvalError("policy_approval_payload_mismatch") from exc
     policy = FrozenPolicy(
-        schema_version="entity-linking-policy-v1",
-        policy_version="entity-linking-policy-v1",
-        algorithm_version="lexical-score-v1",
+        schema_version="entity-linking-policy-v2",
+        policy_version="entity-linking-policy-v2",
+        algorithm_version="lexical-score-v2",
         normalization_version="normalize_graph_name_v1",
         g2_approval_commit=calibration.g2_approval_commit,
         g2_specification_tree_sha256=calibration.g2_specification_tree_sha256,
@@ -4720,7 +5050,7 @@ def verify_policy(root: Path) -> tuple[FrozenPolicy, ArtifactRef]:
     if calibration_ref != policy.calibration_ref or calibration.candidate_thresholds is None:
         raise EntityLinkingEvalError("policy_approval_payload_mismatch")
     approval = PolicyApprovalPayload(
-        schema_version="entity-linking-policy-approval-v1",
+        schema_version="entity-linking-policy-approval-v2",
         calibration_ref=calibration_ref,
         approved_thresholds=policy.approved_thresholds,
         approved_by=policy.approved_by,
@@ -4773,11 +5103,13 @@ def _post_freeze_counts(
     dataset: LoadedDataset,
 ) -> tuple[CategoryCounts, StratumCounts]:
     release_cases = tuple(case for case in dataset.cases if case.split == "release")
+    release_utility_cases = tuple(case for case in release_cases if case.cohort == "utility")
     categories = {
         category: sum(category in case.categories for case in release_cases) for category in CATEGORY_ORDER
     }
     strata = {
-        stratum: sum(case.utility_stratum == stratum for case in release_cases) for stratum in STRATUM_ORDER
+        stratum: sum(case.utility_stratum == stratum for case in release_utility_cases)
+        for stratum in STRATUM_ORDER
     }
     return CategoryCounts.model_validate(categories), StratumCounts.model_validate(strata)
 
@@ -4804,7 +5136,7 @@ def build_post_freeze_artifact(
         response_set_threshold_sha256=material.canonical_response_set_sha256,
     )
     return PostFreezeArtifact(
-        schema_version="entity-linking-eval-result-v1",
+        schema_version="entity-linking-eval-result-v2",
         phase="post_freeze_release",
         status="passed" if all(row.passed for row in gate_decisions) else "no_go",
         ordinal=ordinal,
@@ -5237,7 +5569,7 @@ async def _build_release_evidence(
     all_gate_passed = all(decision.all_passed for decision in run_decisions)
     eligible = all_identity_passed and all_gate_passed
     return ReleaseEvidence(
-        schema_version="entity-linking-release-evidence-v1",
+        schema_version="entity-linking-release-evidence-v2",
         status="passed" if eligible else "no_go",
         g2_approval_commit=policy.g2_approval_commit,
         g2_specification_tree_sha256=policy.g2_specification_tree_sha256,

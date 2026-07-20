@@ -232,8 +232,8 @@ class PrivacyCanaryRecord(StrictModel):
 
 
 class GoldDataset(StrictModel):
-    schema_version: Literal["entity-linking-gold-v1"]
-    dataset_id: Literal["feasibility-v1"]
+    schema_version: Literal["entity-linking-gold-v2"]
+    dataset_id: Literal["feasibility-v2"]
     uuid_namespace: str
     libraries: tuple[LibraryRecord, ...]
     ontologies: tuple[OntologyRecord, ...]
@@ -282,12 +282,16 @@ class GoldUtilityRecord(StrictModel):
 
 
 class EvaluationCase(StrictModel):
-    schema_version: Literal["entity-linking-case-v1"]
+    schema_version: Literal["entity-linking-case-v2"]
     case_id: LogicalKey
     split: Literal["calibration", "release"]
+    cohort: Literal["safety", "utility"]
     entity_family_keys: tuple[LogicalKey, ...]
     mention_family_keys: tuple[LogicalKey, ...]
     relation_template_family_key: LogicalKey
+    phrase_family_key: LogicalKey
+    decoy_family_keys: tuple[LogicalKey, ...]
+    decoy_chunk_keys: tuple[LogicalKey, ...]
     categories: tuple[str, ...]
     utility_stratum: Literal["one-hop-cjk", "one-hop-latin-mixed", "two-hop-cjk", "two-hop-latin-mixed"]
     scenario_publication_key: LogicalKey
@@ -305,6 +309,10 @@ class EvaluationCase(StrictModel):
         expected_hop = 1 if self.utility_stratum.startswith("one-hop") else 2
         if self.gold_utility.hop != expected_hop:
             raise ValueError("utility stratum/hop mismatch")
+        if self.cohort == "utility" and any(
+            mention.gold_status != "linkable" for mention in self.mentions
+        ):
+            raise ValueError("utility cases require only linkable mentions")
         return self
 
 
@@ -312,6 +320,8 @@ class FeatureExpected(StrictModel):
     character_bigram_dice_micros: int = Field(ge=0, le=1_000_000)
     token_jaccard_micros: int = Field(ge=0, le=1_000_000)
     substring_containment_micros: int = Field(ge=0, le=1_000_000)
+    boundary_omission_micros: int = Field(ge=0, le=1_000_000)
+    ordered_abbreviation_micros: int = Field(ge=0, le=1_000_000)
     score_micros: int = Field(ge=0, le=1_000_000)
 
 
@@ -332,7 +342,7 @@ class CandidateFixture(StrictModel):
 
 class DecisionExpected(StrictModel):
     status: Literal["linked", "ambiguous", "not_found"]
-    method: Literal["exact_canonical", "lexical_v1"] | None
+    method: Literal["exact_canonical", "lexical_v2"] | None
     selected_entity_key: LogicalKey | None
     candidate_entity_keys: tuple[LogicalKey, ...]
 
@@ -380,8 +390,8 @@ class CategoryPredicateCase(StrictModel):
 
 
 class ConformanceDataset(StrictModel):
-    schema_version: Literal["entity-linking-scorer-conformance-v1"]
-    algorithm_version: Literal["lexical-score-v1"]
+    schema_version: Literal["entity-linking-scorer-conformance-v2"]
+    algorithm_version: Literal["lexical-score-v2"]
     normalization_version: Literal["normalize_graph_name_v1"]
     rounding_version: Literal["integer-half-up-v1"]
     feature_cases: tuple[FeatureCase, ...]
@@ -407,6 +417,10 @@ class CountsRecord(StrictModel):
     chunks: int = Field(ge=1)
     calibration_cases: int = Field(ge=1)
     release_cases: int = Field(ge=1)
+    calibration_safety_cases: Literal[40]
+    calibration_utility_cases: Literal[40]
+    release_safety_cases: Literal[40]
+    release_utility_cases: Literal[80]
 
 
 class MinimumCountsRecord(StrictModel):
@@ -420,6 +434,12 @@ class MinimumCountsRecord(StrictModel):
     ontologies: Literal[2]
     release_category_cases: Literal[20]
     release_stratum_questions: Literal[20]
+    decoys_per_utility_case: Literal[12]
+
+
+class CohortCounts(StrictModel):
+    safety: int = Field(ge=0)
+    utility: int = Field(ge=0)
 
 
 class CategoryCounts(RootModel[dict[str, int]]):
@@ -492,12 +512,16 @@ class BootstrapConfig(StrictModel):
 
 
 class PerformanceFixture(StrictModel):
-    generator_version: Literal["entity-linking-performance-fixture-v1"]
+    generator_version: Literal["entity-linking-performance-fixture-v2"]
     publication_total_items: Literal[10000]
     publication_entities: Literal[6000]
     publication_relations: Literal[4000]
-    mention_count: Literal[10]
-    mention_mix: Literal["2 exact, 3 high-similarity, 3 ambiguous, 2 not-found"]
+    linker_scenario: Literal["linker-mixed-10"]
+    linker_mention_count: Literal[10]
+    linker_mention_mix: Literal["2 exact, 3 high-similarity, 3 ambiguous, 2 not-found"]
+    link_graph_scenario: Literal["link-graph-linked-10"]
+    link_graph_mention_count: Literal[10]
+    link_graph_mention_mix: Literal["2 exact, 4 boundary-omission, 4 ordered-abbreviation"]
     warmup_count: Literal[5]
     sample_count: Literal[30]
     timeout_micros: Literal[2000000]
@@ -548,8 +572,8 @@ def _validate_external_distribution_records(
 
 
 class FeasibilityManifest(StrictModel):
-    schema_version: Literal["entity-linking-feasibility-manifest-v1"]
-    dataset_id: Literal["feasibility-v1"]
+    schema_version: Literal["entity-linking-feasibility-manifest-v2"]
+    dataset_id: Literal["feasibility-v2"]
     g2_approval_commit: GitCommit
     g2_specification_tree_sha256: Sha256
     gold_ref: ArtifactRef
@@ -557,12 +581,20 @@ class FeasibilityManifest(StrictModel):
     conformance_ref: ArtifactRef
     canonicalization_version: Literal["canonical-graph-json-v1"]
     normalization_version: Literal["normalize_graph_name_v1"]
-    algorithm_version: Literal["lexical-score-v1"]
+    algorithm_version: Literal["lexical-score-v2"]
     rounding_version: Literal["integer-half-up-v1"]
-    category_predicate_version: Literal["entity-linking-category-predicates-v1"]
+    category_predicate_version: Literal["entity-linking-category-predicates-v2"]
     ordered_case_ids: tuple[LogicalKey, ...]
     ordered_calibration_case_ids: tuple[LogicalKey, ...]
     ordered_release_case_ids: tuple[LogicalKey, ...]
+    ordered_calibration_utility_case_ids: tuple[LogicalKey, ...] = Field(
+        min_length=40, max_length=40
+    )
+    ordered_release_utility_case_ids: tuple[LogicalKey, ...] = Field(
+        min_length=80, max_length=80
+    )
+    calibration_cohort_counts: CohortCounts
+    release_cohort_counts: CohortCounts
     counts: CountsRecord
     minimum_counts: MinimumCountsRecord
     release_category_counts: CategoryCounts
@@ -570,6 +602,8 @@ class FeasibilityManifest(StrictModel):
     entity_family_split_hash: Sha256
     mention_family_split_hash: Sha256
     relation_template_family_split_hash: Sha256
+    phrase_family_split_hash: Sha256
+    decoy_family_split_hash: Sha256
     logical_scope_schema_hashes: tuple[ScopeSchemaHash, ...]
     ontology_schema_set_hash: Sha256
     control_config: ControlConfig
@@ -659,8 +693,27 @@ class GridResult(StrictModel):
     exact_regression_accuracy: RateMetric
     scope_safety: RateMetric
     property_privacy: RateMetric
+    utility_question_execution_coverage: RateMetric
     non_exact_correct_auto_link_count: int = Field(ge=0)
     selection_eligible: bool
+
+    @model_validator(mode="after")
+    def validate_selection_eligibility(self) -> GridResult:
+        expected = bool(
+            self.wrong_auto_link_count == 0
+            and self.ambiguous_unlinkable_false_auto_link_count == 0
+            and self.privacy_leak_count == 0
+            and self.publication_membership_failures == 0
+            and self.auto_link_precision.value_micros == 1_000_000
+            and self.exact_regression_accuracy.value_micros == 1_000_000
+            and self.scope_safety.value_micros == 1_000_000
+            and self.property_privacy.value_micros == 1_000_000
+            and self.utility_question_execution_coverage.value_micros is not None
+            and self.utility_question_execution_coverage.value_micros >= 800_000
+        )
+        if self.selection_eligible != expected:
+            raise ValueError("grid selection eligibility invariant failed")
+        return self
 
 
 class IntrinsicMetrics(StrictModel):
@@ -749,6 +802,9 @@ class LatencySummary(StrictModel):
 
 
 class Performance(StrictModel):
+    linker_scenario: Literal["linker-mixed-10"]
+    link_graph_scenario: Literal["link-graph-linked-10"]
+    control_scenario: Literal["link-graph-linked-10"]
     linker: LatencySummary
     link_graph: LatencySummary
     dense: LatencySummary
@@ -762,6 +818,14 @@ class Performance(StrictModel):
     timeout_rollback_reused: bool
     embedding_call_count: int = Field(gt=0)
     qdrant_call_count: int = Field(gt=0)
+    linker_graph_execution_count: Literal[0]
+    link_graph_execution_count: Literal[30]
+
+    @model_validator(mode="after")
+    def validate_independent_scenarios(self) -> Performance:
+        if self.linker.samples_us == self.link_graph.samples_us:
+            raise ValueError("linker and link-graph samples must be independently measured")
+        return self
 
 
 class QdrantCollectionConfig(StrictModel):
@@ -873,7 +937,7 @@ class CaseResponseHash(StrictModel):
 
 
 class CalibrationArtifact(StrictModel):
-    schema_version: Literal["entity-linking-eval-result-v1"]
+    schema_version: Literal["entity-linking-eval-result-v2"]
     phase: Literal["calibration"]
     status: Literal["passed", "no_go"]
     ordinal: None
@@ -902,7 +966,11 @@ class CalibrationArtifact(StrictModel):
     grid_results: tuple[GridResult, ...] = Field(min_length=25, max_length=25)
     candidate_thresholds: Threshold | None
     selection_reason: Literal[
-        "max-non-exact-coverage", "tie-higher-score", "tie-higher-margin", "no-valid-candidate"
+        "max-question-execution-coverage",
+        "tie-non-exact-coverage",
+        "tie-higher-score",
+        "tie-higher-margin",
+        "no-valid-candidate",
     ]
     metrics: Metrics
     category_counts: CategoryCounts
@@ -948,7 +1016,7 @@ class CalibrationArtifact(StrictModel):
 
 
 class PolicyApprovalPayload(StrictModel):
-    schema_version: Literal["entity-linking-policy-approval-v1"]
+    schema_version: Literal["entity-linking-policy-approval-v2"]
     calibration_ref: ArtifactRef
     approved_thresholds: Threshold
     approved_by: str = Field(
@@ -965,9 +1033,9 @@ class PolicyApprovalPayload(StrictModel):
 
 
 class FrozenPolicy(StrictModel):
-    schema_version: Literal["entity-linking-policy-v1"]
-    policy_version: Literal["entity-linking-policy-v1"]
-    algorithm_version: Literal["lexical-score-v1"]
+    schema_version: Literal["entity-linking-policy-v2"]
+    policy_version: Literal["entity-linking-policy-v2"]
+    algorithm_version: Literal["lexical-score-v2"]
     normalization_version: Literal["normalize_graph_name_v1"]
     g2_approval_commit: GitCommit
     g2_specification_tree_sha256: Sha256
@@ -1002,7 +1070,7 @@ class FrozenPolicy(StrictModel):
 
 
 class PostFreezeArtifact(StrictModel):
-    schema_version: Literal["entity-linking-eval-result-v1"]
+    schema_version: Literal["entity-linking-eval-result-v2"]
     phase: Literal["post_freeze_release"]
     status: Literal["passed", "no_go"]
     ordinal: Literal[1, 2, 3]
@@ -1212,7 +1280,7 @@ class IdentityTimeCleanupDecision(StrictModel):
 
 
 class ReleaseEvidence(StrictModel):
-    schema_version: Literal["entity-linking-release-evidence-v1"]
+    schema_version: Literal["entity-linking-release-evidence-v2"]
     status: Literal["passed", "no_go"]
     g2_approval_commit: GitCommit
     g2_specification_tree_sha256: Sha256

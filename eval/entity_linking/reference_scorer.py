@@ -7,7 +7,7 @@ from typing import Literal, Sequence
 from app.services.graph_normalization import normalize_graph_name_v1
 
 
-ALGORITHM_VERSION = "lexical-score-v1"
+ALGORITHM_VERSION = "lexical-score-v2"
 ROUNDING_VERSION = "integer-half-up-v1"
 NORMALIZATION_VERSION = "normalize_graph_name_v1"
 MICROS = 1_000_000
@@ -37,6 +37,8 @@ class FeatureScores:
     character_bigram_dice_micros: int
     token_jaccard_micros: int
     substring_containment_micros: int
+    boundary_omission_micros: int
+    ordered_abbreviation_micros: int
     score_micros: int
 
 
@@ -49,7 +51,7 @@ class ScoredCandidate:
 @dataclass(frozen=True, slots=True)
 class LinkDecision:
     status: Literal["linked", "ambiguous", "not_found"]
-    method: Literal["exact_canonical", "lexical_v1"] | None
+    method: Literal["exact_canonical", "lexical_v2"] | None
     selected: ScoredCandidate | None
     candidates: tuple[ScoredCandidate, ...]
 
@@ -88,17 +90,70 @@ def substring_containment_micros(left: str, right: str) -> int:
     return 0
 
 
+def scale_support_micros(support_micros: int) -> int:
+    if not 0 <= support_micros <= MICROS:
+        raise ValueError("support_micros out of range")
+    return 850_000 + (2 * 150_000 * support_micros + MICROS) // (2 * MICROS)
+
+
+def is_strict_subsequence(left: str, right: str) -> bool:
+    if not left or not right:
+        return False
+    position = 0
+    for value in right:
+        if value == left[position]:
+            position += 1
+            if position == len(left):
+                return True
+    return False
+
+
+def boundary_omission_micros(left: str, right: str) -> int:
+    if len(left) < 2 or len(left) >= len(right):
+        return 0
+    if not (right.startswith(left) or right.endswith(left)):
+        return 0
+    return scale_support_micros(ratio_micros(len(left), len(right)))
+
+
+def ordered_abbreviation_micros(left: str, right: str, *, bigram_micros: int) -> int:
+    compact_left = "".join(left.split())
+    compact_right = "".join(right.split())
+    right_tokens = right.split()
+    initialism = bool(
+        len(right_tokens) >= 2
+        and compact_left == "".join(token[0] for token in right_tokens)
+    )
+    subsequence = bool(
+        2 <= len(compact_left) < len(compact_right)
+        and is_strict_subsequence(compact_left, compact_right)
+        and compact_left not in compact_right
+        and 4 * len(compact_left) <= 3 * len(compact_right)
+    )
+    if not (initialism or subsequence):
+        return 0
+    support = max(
+        bigram_micros,
+        ratio_micros(len(compact_left), len(compact_right)),
+    )
+    return scale_support_micros(support)
+
+
 def score_normalized_pair(left: str, right: str) -> FeatureScores:
     if not left or not right:
         raise ValueError("normalized scorer inputs must be non-empty")
     bigram = character_bigram_dice_micros(left, right)
     jaccard = token_jaccard_micros(left, right)
     containment = substring_containment_micros(left, right)
+    boundary = boundary_omission_micros(left, right)
+    abbreviation = ordered_abbreviation_micros(left, right, bigram_micros=bigram)
     return FeatureScores(
         character_bigram_dice_micros=bigram,
         token_jaccard_micros=jaccard,
         substring_containment_micros=containment,
-        score_micros=max(bigram, jaccard, containment),
+        boundary_omission_micros=boundary,
+        ordered_abbreviation_micros=abbreviation,
+        score_micros=max(bigram, jaccard, containment, boundary, abbreviation),
     )
 
 
@@ -119,7 +174,7 @@ def stable_candidate_key(value: ScoredCandidate) -> tuple[int, str, str, str]:
 
 
 def _exact_scored(candidate: EntityCandidate) -> ScoredCandidate:
-    exact = FeatureScores(MICROS, MICROS, MICROS, MICROS)
+    exact = FeatureScores(MICROS, MICROS, MICROS, 0, 0, MICROS)
     return ScoredCandidate(candidate, exact)
 
 
@@ -221,7 +276,7 @@ def decide_scored_candidates(
     second_score = presented[1].features.score_micros if len(presented) > 1 else 0
     if top_score < min_score_micros or top_score - second_score < min_margin_micros:
         return LinkDecision("ambiguous", None, None, presented)
-    return LinkDecision("linked", "lexical_v1", presented[0], ())
+    return LinkDecision("linked", "lexical_v2", presented[0], ())
 
 
 def logical_decision(decision: LinkDecision) -> dict[str, object]:

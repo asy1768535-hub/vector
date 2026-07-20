@@ -12,6 +12,7 @@ from eval.entity_linking.contracts import (
     CalibrationArtifact,
     FrozenPolicy,
     GateDecision,
+    GridResult,
     FeasibilityManifest,
     GoldDataset,
     IdentityTimeCleanupDecision,
@@ -108,13 +109,51 @@ def _passing_gate_values() -> list[dict[str, object]]:
     return values
 
 
+def _v2_calibration_value() -> dict[str, object]:
+    value = json.loads(
+        (ROOT / "eval/entity_linking/results/v07-el-calibration-v2-20260720-01.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    value.update(
+        schema_version="entity-linking-eval-result-v2",
+        run_id=CALIBRATION_RUN_ID,
+        database_id="vkt_v07_el_eval_calibration_v3_20260720_01",
+        g2_approval_commit=G2_APPROVAL_COMMIT,
+        g2_specification_tree_sha256=G2_SPECIFICATION_TREE_SHA256,
+        selection_reason="tie-higher-score",
+    )
+    for row in value["grid_results"]:
+        row["utility_question_execution_coverage"] = {
+            "numerator": 40,
+            "denominator": 40,
+            "value_micros": 1_000_000,
+        }
+    value["performance"].update(
+        linker_scenario="linker-mixed-10",
+        link_graph_scenario="link-graph-linked-10",
+        control_scenario="link-graph-linked-10",
+        linker_graph_execution_count=0,
+        link_graph_execution_count=30,
+    )
+    link_graph_samples = [sample + 1 for sample in value["performance"]["link_graph"]["samples_us"]]
+    ordered = sorted(link_graph_samples)
+    value["performance"]["link_graph"].update(
+        samples_us=link_graph_samples,
+        p50_us=ordered[14],
+        p95_us=ordered[28],
+        max_us=ordered[-1],
+    )
+    return value
+
+
 def _release_value() -> dict[str, object]:
     refs = [
         {
             "ordinal": ordinal,
-            "run_id": f"v07-el-post-freeze-v2-20260720-0{ordinal}",
+            "run_id": f"v07-el-post-freeze-v3-20260720-0{ordinal}",
             "artifact_ref": _artifact_ref_value(
-                f"eval/entity_linking/results/v07-el-post-freeze-v2-20260720-0{ordinal}.json"
+                f"eval/entity_linking/results/v07-el-post-freeze-v3-20260720-0{ordinal}.json"
             ),
         }
         for ordinal in (1, 2, 3)
@@ -129,11 +168,11 @@ def _release_value() -> dict[str, object]:
     ]
     identities = {field: True for field in IdentityTimeCleanupDecision.model_fields}
     return {
-        "schema_version": "entity-linking-release-evidence-v1",
+        "schema_version": "entity-linking-release-evidence-v2",
         "status": "passed",
         "g2_approval_commit": COMMIT,
         "g2_specification_tree_sha256": SHA,
-        "dataset_manifest_ref": _artifact_ref_value("eval/entity_linking/manifests/feasibility_v1.json"),
+        "dataset_manifest_ref": _artifact_ref_value("eval/entity_linking/manifests/feasibility_v2.json"),
         "dataset_content_sha256": SHA,
         "evaluation_config_sha256": SHA,
         "ontology_schema_set_hash": SHA,
@@ -148,9 +187,9 @@ def _release_value() -> dict[str, object]:
         "qdrant_fingerprint_sha256": SHA,
         "embedding_fingerprint_sha256": SHA,
         "calibration_ref": _artifact_ref_value(
-            "eval/entity_linking/results/v07-el-calibration-v2-20260720-01.json"
+            "eval/entity_linking/results/v07-el-calibration-v3-20260720-01.json"
         ),
-        "policy_ref": _artifact_ref_value("eval/entity_linking/link_policy_v1.json"),
+        "policy_ref": _artifact_ref_value("eval/entity_linking/link_policy_v2.json"),
         "post_freeze_refs": refs,
         "canonical_response_set_sha256_by_ordinal": [
             {
@@ -181,16 +220,49 @@ def test_fixed_dataset_is_canonical_complete_and_family_disjoint():
     assert dataset.manifest.counts.questions == 200
     assert dataset.manifest.counts.calibration_cases == 80
     assert dataset.manifest.counts.release_cases == 120
+    assert dataset.manifest.counts.calibration_safety_cases == 40
+    assert dataset.manifest.counts.calibration_utility_cases == 40
+    assert dataset.manifest.counts.release_safety_cases == 40
+    assert dataset.manifest.counts.release_utility_cases == 80
+    assert all(
+        len(case.decoy_chunk_keys) == (12 if case.cohort == "utility" else 0)
+        for case in dataset.cases
+    )
     assert dataset.manifest.counts.linkable_mentions >= 240
     assert dataset.manifest.counts.ambiguous_unlinkable_mentions >= 60
     assert min(dataset.manifest.release_category_counts.root.values()) >= 20
     assert min(dataset.manifest.release_stratum_counts.root.values()) >= 20
     assert len(dataset.dataset_content_sha256) == 64
     assert len(dataset.evaluation_config_sha256) == 64
+    chunks = {row.chunk_key: row for row in dataset.gold.chunks}
+    documents = {row.document_key: row for row in dataset.gold.documents}
+    for case in dataset.cases:
+        for chunk_key in case.decoy_chunk_keys:
+            chunk = chunks[chunk_key]
+            visible = f"{documents[chunk.document_key].title} {chunk.text}".casefold()
+            assert "gold" not in visible
+            assert "decoy" not in visible
+
+
+def test_calibration_dataset_load_does_not_score_release_holdout(monkeypatch):
+    import eval.entity_linking.runtime as runtime
+
+    observed_splits = []
+    original = runtime.recompute_case_categories
+
+    def record_split(case, gold):
+        observed_splits.append(case.split)
+        return original(case, gold)
+
+    monkeypatch.setattr(runtime, "recompute_case_categories", record_split)
+    runtime.load_dataset.cache_clear()
+    runtime.load_dataset(ROOT)
+    runtime.load_dataset.cache_clear()
+    assert observed_splits == ["calibration"] * 80
 
 
 def test_canonical_loader_rejects_pretty_json_duplicate_keys_crlf_and_extra(tmp_path):
-    source = ROOT / "eval/entity_linking/gold_v1.json"
+    source = ROOT / "eval/entity_linking/gold_v2.json"
     value = json.loads(source.read_text(encoding="utf-8"))
     pretty = tmp_path / "pretty.json"
     pretty.write_bytes((json.dumps(value, indent=2) + "\n").encode("utf-8"))
@@ -217,6 +289,10 @@ def test_reference_scorer_uses_integer_features_exact_first_and_stable_abstentio
     score = score_normalized_pair("alpha beta", "beta alpha")
     assert score.token_jaccard_micros == 1_000_000
     assert score.score_micros == 1_000_000
+    boundary = score_normalized_pair("star lab", "star laboratory")
+    assert boundary.boundary_omission_micros >= 850_000
+    abbreviation = score_normalized_pair("aramberor", "alderamberorbit")
+    assert abbreviation.ordered_abbreviation_micros >= 850_000
     candidate = EntityCandidate(
         entity_id="00000000-0000-0000-0000-000000000001",
         entity_key="candidate-alpha",
@@ -243,13 +319,30 @@ def test_conformance_grid_and_selection_are_deterministic():
     assert [row.grid_index for row in grid] == list(range(25))
     selected, reason = select_calibration_threshold(grid)
     assert reason in {
-        "max-non-exact-coverage",
+        "max-question-execution-coverage",
+        "tie-non-exact-coverage",
         "tie-higher-score",
         "tie-higher-margin",
         "no-valid-candidate",
     }
     assert (selected is None) == (reason == "no-valid-candidate")
+    assert selected == Threshold(
+        min_score_micros=920000,
+        min_margin_micros=200000,
+        candidate_floor_micros=500000,
+        max_candidates=10,
+    )
+    assert next(row for row in grid if row.thresholds == selected).utility_question_execution_coverage.numerator == 40
     assert len(dataset.conformance.decision_cases) == 30
+    selected_row = next(row for row in grid if row.thresholds == selected)
+    mutated = selected_row.model_dump(mode="json")
+    mutated["utility_question_execution_coverage"] = {
+        "numerator": 31,
+        "denominator": 40,
+        "value_micros": 775000,
+    }
+    with pytest.raises(ValidationError, match="selection eligibility"):
+        GridResult.model_validate(mutated)
 
 
 def test_dependency_closure_and_distribution_identity_are_exact():
@@ -361,9 +454,9 @@ def test_paired_bootstrap_is_exact_rational_and_reproducible():
 
 def test_qdrant_collection_and_service_origin_conformance_vectors():
     collection = qdrant_collection_identity(CALIBRATION_RUN_ID, "cal")
-    assert collection.collection_name == "vkt_v07_el_cal_bcd7c4ad8228"
+    assert collection.collection_name == "vkt_v07_el_cal_c8388773952f"
     assert collection.collection_name_sha256 == (
-        "d8bd57296c006011b66ed345b3b1fdb32957bca63bed01b2331f695a10a6f501"
+        "d6aedd17cc7a671053b580d8646a92716200b7f15a3a24268658156ea1b64166"
     )
     assert normalize_service_origin("HTTP://Example.COM", qdrant=True) == "http://example.com:80"
     assert (
@@ -399,7 +492,7 @@ def test_privacy_scanner_rejects_dataset_values_canaries_and_private_fields():
 
 def test_policy_approval_and_frozen_policy_contracts_are_strict():
     calibration_ref = _artifact_ref_value(
-        "eval/entity_linking/results/v07-el-calibration-v2-20260720-01.json"
+        "eval/entity_linking/results/v07-el-calibration-v3-20260720-01.json"
     )
     thresholds = {
         "min_score_micros": 850000,
@@ -409,7 +502,7 @@ def test_policy_approval_and_frozen_policy_contracts_are_strict():
     }
     approval = PolicyApprovalPayload.model_validate(
         {
-            "schema_version": "entity-linking-policy-approval-v1",
+            "schema_version": "entity-linking-policy-approval-v2",
             "calibration_ref": calibration_ref,
             "approved_thresholds": thresholds,
             "approved_by": "alice",
@@ -418,16 +511,16 @@ def test_policy_approval_and_frozen_policy_contracts_are_strict():
         }
     )
     policy_value = {
-        "schema_version": "entity-linking-policy-v1",
-        "policy_version": "entity-linking-policy-v1",
-        "algorithm_version": "lexical-score-v1",
+        "schema_version": "entity-linking-policy-v2",
+        "policy_version": "entity-linking-policy-v2",
+        "algorithm_version": "lexical-score-v2",
         "normalization_version": "normalize_graph_name_v1",
         "g2_approval_commit": COMMIT,
         "g2_specification_tree_sha256": SHA,
         "calibration_ref": calibration_ref,
         "approved_thresholds": thresholds,
         "approval_payload_sha256": canonical_sha256(approval),
-        "dataset_manifest_ref": _artifact_ref_value("eval/entity_linking/manifests/feasibility_v1.json"),
+        "dataset_manifest_ref": _artifact_ref_value("eval/entity_linking/manifests/feasibility_v2.json"),
         "dataset_content_sha256": SHA,
         "evaluation_config_sha256": SHA,
         "ontology_schema_set_hash": SHA,
@@ -473,9 +566,9 @@ def test_gate_decisions_reject_wrong_typed_pairs_order_and_derived_values():
 
     run_value = {
         "ordinal": 1,
-        "run_id": "v07-el-post-freeze-v2-20260720-01",
+        "run_id": "v07-el-post-freeze-v3-20260720-01",
         "artifact_ref": _artifact_ref_value(
-            "eval/entity_linking/results/v07-el-post-freeze-v2-20260720-01.json"
+            "eval/entity_linking/results/v07-el-post-freeze-v3-20260720-01.json"
         ),
         "gate_decisions": _passing_gate_values(),
         "all_passed": True,
@@ -486,12 +579,7 @@ def test_gate_decisions_reject_wrong_typed_pairs_order_and_derived_values():
             {**run_value, "gate_decisions": list(reversed(_passing_gate_values()))}
         )
 
-    calibration = load_canonical_json(
-        ROOT,
-        ROOT / "eval/entity_linking/results/v07-el-calibration-v1-20260717-01.json",
-        CalibrationArtifact,
-    )
-    assert isinstance(calibration, CalibrationArtifact)
+    calibration = CalibrationArtifact.model_validate(_v2_calibration_value())
     computed = build_gate_decisions(
         calibration.metrics,
         calibration.performance,
@@ -502,21 +590,17 @@ def test_gate_decisions_reject_wrong_typed_pairs_order_and_derived_values():
 
 
 def test_post_freeze_contract_requires_ordinal_policy_and_null_calibration_fields():
-    value = json.loads(
-        (ROOT / "eval/entity_linking/results/v07-el-calibration-v1-20260717-01.json").read_text(
-            encoding="utf-8"
-        )
-    )
+    value = _v2_calibration_value()
     value.update(
         phase="post_freeze_release",
         ordinal=1,
-        run_id="v07-el-post-freeze-v2-20260720-01",
-        database_id="vkt_v07_el_eval_post_freeze_20260720_01",
+        run_id="v07-el-post-freeze-v3-20260720-01",
+        database_id="vkt_v07_el_eval_post_freeze_v3_20260720_01",
         grid_results=None,
         candidate_thresholds=None,
         selection_reason=None,
-        policy_ref=_artifact_ref_value("eval/entity_linking/link_policy_v1.json"),
-        qdrant_collection=qdrant_collection_identity("v07-el-post-freeze-v2-20260720-01", "pf1").model_dump(
+        policy_ref=_artifact_ref_value("eval/entity_linking/link_policy_v2.json"),
+        qdrant_collection=qdrant_collection_identity("v07-el-post-freeze-v3-20260720-01", "pf1").model_dump(
             mode="json"
         ),
     )
@@ -526,6 +610,10 @@ def test_post_freeze_contract_requires_ordinal_policy_and_null_calibration_field
         PostFreezeArtifact.model_validate({**value, "ordinal": 4})
     with pytest.raises(ValidationError):
         PostFreezeArtifact.model_validate({**value, "grid_results": []})
+    copied = _v2_calibration_value()
+    copied["performance"]["link_graph"] = copied["performance"]["linker"]
+    with pytest.raises(ValidationError, match="independently measured"):
+        CalibrationArtifact.model_validate(copied)
 
 
 def test_release_evidence_rejects_reordered_refs_false_identity_and_extra_fields():
@@ -551,7 +639,9 @@ def test_release_evidence_rejects_reordered_refs_false_identity_and_extra_fields
 
 
 def test_invalidated_v1_calibration_is_rejected_before_policy_write():
-    policy_path = ROOT / "eval/entity_linking/link_policy_v1.json"
+    historical_policy_path = ROOT / "eval/entity_linking/link_policy_v1.json"
+    policy_path = ROOT / "eval/entity_linking/link_policy_v2.json"
+    assert historical_policy_path.is_file()
     assert not policy_path.exists()
     with pytest.raises(EntityLinkingEvalError, match="invalidated_calibration_artifact"):
         require_replacement_calibration_reference(
@@ -585,14 +675,15 @@ def test_complete_cli_surface_is_frozen_before_replacement_calibration():
 
 def test_no_policy_post_freeze_or_release_artifacts_exist_before_human_approval():
     base = ROOT / "eval/entity_linking"
-    assert not (base / "link_policy_v1.json").exists()
-    assert not (base / "release_evidence_v1.json").exists()
+    assert (base / "link_policy_v1.json").is_file()
+    assert not (base / "link_policy_v2.json").exists()
+    assert not (base / "release_evidence_v2.json").exists()
     results = base / "results"
     forbidden = (
-        "v07-el-calibration-v2-20260720-01.json",
-        "v07-el-post-freeze-v2-20260720-01.json",
-        "v07-el-post-freeze-v2-20260720-02.json",
-        "v07-el-post-freeze-v2-20260720-03.json",
+        "v07-el-calibration-v3-20260720-01.json",
+        "v07-el-post-freeze-v3-20260720-01.json",
+        "v07-el-post-freeze-v3-20260720-02.json",
+        "v07-el-post-freeze-v3-20260720-03.json",
     )
     assert all(not (results / name).exists() for name in forbidden)
 
