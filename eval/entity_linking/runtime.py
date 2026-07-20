@@ -126,8 +126,8 @@ from eval.entity_linking.reference_scorer import (
 )
 
 
-G2_APPROVAL_COMMIT = "fd324e785ba46d93c4a64960ff71729c68ae576a"
-G2_SPECIFICATION_TREE_SHA256 = "0fabe281b9b721fb4e5741e3b7eb4dd49cca1eebc548177da0c0e2ecf93f88a7"
+G2_APPROVAL_COMMIT = "62e310b351c900c9cd4e55cd25595b2775d312c7"
+G2_SPECIFICATION_TREE_SHA256 = "1dc50c143ca42dd64cbf98add7e727d112fe46504e82d6541422cc033814ed17"
 G1_COMMIT = "f40c5c84c3248639aa6603d43b6b306ad76d66fd"
 AUDIT_PRESERVATION_COMMIT = "155ef946c48272518c996458bc206039b6676c18"
 INVALIDATED_G2_APPROVAL_COMMIT = "75bf4141be743c1164bfa9841d0737509d7575fe"
@@ -139,15 +139,15 @@ INVALIDATED_CALIBRATION_FILE_SHA256 = "c35210075e179ebce197275041e0ff69403297185
 INVALIDATED_CALIBRATION_BLOB_OID = "4c1dc04cca1ddd874fa309ad0314ad24dfc0ea68"
 PRESERVED_GITATTRIBUTES_BLOB_OID = "3f5e0ee58b5d94db6fd2ed25511a9957130885f6"
 UUID_NAMESPACE = uuid.UUID("1bcb8d89-4423-563a-962d-670c026f6dc8")
-CALIBRATION_RUN_ID = "v07-el-calibration-v5-20260720-01"
-CALIBRATION_DATABASE_ID = "vkt_v07_el_eval_calibration_v5_20260720_01"
+CALIBRATION_RUN_ID = "v07-el-calibration-v6-20260720-01"
+CALIBRATION_DATABASE_ID = "vkt_v07_el_eval_calibration_v6_20260720_01"
 POST_FREEZE_IDENTITIES = (
-    (1, "v07-el-post-freeze-v5-20260720-01", "vkt_v07_el_eval_post_freeze_v5_20260720_01"),
-    (2, "v07-el-post-freeze-v5-20260720-02", "vkt_v07_el_eval_post_freeze_v5_20260720_02"),
-    (3, "v07-el-post-freeze-v5-20260720-03", "vkt_v07_el_eval_post_freeze_v5_20260720_03"),
+    (1, "v07-el-post-freeze-v6-20260720-01", "vkt_v07_el_eval_post_freeze_v6_20260720_01"),
+    (2, "v07-el-post-freeze-v6-20260720-02", "vkt_v07_el_eval_post_freeze_v6_20260720_02"),
+    (3, "v07-el-post-freeze-v6-20260720-03", "vkt_v07_el_eval_post_freeze_v6_20260720_03"),
 )
-POLICY_PATH = "eval/entity_linking/link_policy_v4.json"
-RELEASE_EVIDENCE_PATH = "eval/entity_linking/release_evidence_v4.json"
+POLICY_PATH = "eval/entity_linking/link_policy_v5.json"
+RELEASE_EVIDENCE_PATH = "eval/entity_linking/release_evidence_v5.json"
 EMBEDDING_PROBE_TEXT = "vkt-v07-entity-linking-identity-probe"
 EMBEDDING_PROBE_SHA256 = "4caad60c112bd93fda55714c91aef2762a3c5c5c0df2a09dc28e6296800cc61f"
 
@@ -254,6 +254,7 @@ HISTORICAL_ENTITY_LINKING_PATHS = (
     "eval/entity_linking/results/v07-el-post-freeze-v2-20260720-01.json",
     "eval/entity_linking/results/v07-el-calibration-v3-20260720-01.json",
     "eval/entity_linking/results/v07-el-calibration-v4-20260720-01.json",
+    "eval/entity_linking/results/v07-el-calibration-v5-20260720-01.json",
 )
 
 
@@ -4158,10 +4159,15 @@ async def collect_live_evaluation(
             db.info["entity_linking_entity_types"] = dataset.gold.entity_types
             for case in evaluation_cases:
                 before_candidate = sql_statement_count
-                candidate_results[case.case_id] = await run_candidate_case(
+                candidate_result = await run_candidate_case(
                     db, library, case, selected_threshold, seeded
                 )
-                sql_statement_count_max = max(sql_statement_count_max, sql_statement_count - before_candidate)
+                candidate_results[case.case_id] = candidate_result
+                if not candidate_result.graph_executed:
+                    sql_statement_count_max = max(
+                        sql_statement_count_max,
+                        sql_statement_count - before_candidate,
+                    )
                 dense_results[case.case_id] = await run_old_retrieval_control(
                     db,
                     library,
@@ -4199,12 +4205,8 @@ async def collect_live_evaluation(
                 if repetition >= 5:
                     linker_samples.append(result.linker_duration_us)
             for repetition in range(35):
-                before_candidate = sql_statement_count
                 result = await run_candidate_case(
                     db, library, link_graph_case, selected_threshold, seeded
-                )
-                sql_statement_count_max = max(
-                    sql_statement_count_max, sql_statement_count - before_candidate
                 )
                 if not result.graph_executed:
                     raise EntityLinkingEvalError("performance_fixture_not_executed")

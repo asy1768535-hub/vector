@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Literal, Sequence
 
 from app.services.graph_normalization import normalize_graph_name_v1
@@ -99,11 +100,19 @@ def prepare_normalized_value(value: str) -> PreparedLexicalValue:
     )
 
 
+@lru_cache(maxsize=10_000)
+def _prepare_candidate_normalized_value(value: str) -> PreparedLexicalValue:
+    return prepare_normalized_value(value)
+
+
 def prepare_candidates(
     candidates: Sequence[EntityCandidate],
 ) -> tuple[PreparedEntityCandidate, ...]:
     return tuple(
-        PreparedEntityCandidate(candidate=row, lexical=prepare_normalized_value(row.normalized_name))
+        PreparedEntityCandidate(
+            candidate=row,
+            lexical=_prepare_candidate_normalized_value(row.normalized_name),
+        )
         for row in candidates
     )
 
