@@ -3193,7 +3193,9 @@ async def seed_runtime_database(
                         "document_id": uuid_by_logical[row.document_key],
                         "library_id": primary_library_id,
                         "document_revision_id": uuid_by_logical[row.revision_key],
-                        "evidence_id": uuid_by_logical[f"evidence-{row.chunk_key.removeprefix('chunk-')}"],
+                        "evidence_id": uuid_by_logical.get(
+                            f"evidence-{row.chunk_key.removeprefix('chunk-')}"
+                        ),
                         "seq": row.seq,
                         "chunk_kind": "text",
                         "text": row.text,
