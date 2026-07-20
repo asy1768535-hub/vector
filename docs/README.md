@@ -1,5 +1,12 @@
 # 文档索引
 
+> **v0.7 corrective G2.6 (2026-07-20):** Post-freeze v7 ordinal 1 passed
+> safety, privacy, latency, and SQL gates but failed the unchanged retrieval utility
+> claim because v2 decoys left both old controls at perfect Evidence Recall. G2.6
+> preserves the full v7 chain as `NO_GO` evidence and permits a fresh family-disjoint
+> v3 benchmark with genuinely retrieval-competitive ordinary decoys and fresh v8
+> identities. Scorer, thresholds, gates, and default-off rollout remain unchanged.
+>
 > **v0.7 corrective G2.5 (2026-07-20):** Calibration v6 passed safety and SQL
 > attribution but showed that rebuilding a 6,000-row immutable publication projection
 > still lacked latency margin, while near-zero embedding components crossed a sign-only
