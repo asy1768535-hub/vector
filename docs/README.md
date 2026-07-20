@@ -1,5 +1,11 @@
 # 文档索引
 
+> **v0.7 corrective G2.4 (2026-07-20):** Calibration v5 validated stable embedding
+> identity but exposed insufficient linker latency margin and an SQL-budget attribution
+> defect. G2.4 permits a bounded canonical-feature cache, assigns the seven-statement
+> budget to the v0.7 linker only, preserves accepted v0.6 graph-query statement caps,
+> and uses fresh v6 identities. No quality or security gate is lowered.
+>
 > **v0.7 corrective G2.3 (2026-07-20):** Calibration v4 passed scorer, safety,
 > coverage, and latency checks but exposed two numerically equivalent embedding
 > replicas whose exact float hashes differ. G2.3 permits only a stable sign-bit probe
