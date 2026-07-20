@@ -1,5 +1,11 @@
 # 文档索引
 
+> **v0.7 corrective G2.6.1 (2026-07-20):** The first v8 calibration attempt
+> failed closed before artifact creation because the fixed linked performance fixture
+> classified mentions by feature but did not verify the selected score/margin. G2.6.1
+> keeps the 2/4/4 fixture mix and all dataset/scorer/gate bytes fixed, filters fixture
+> rows by the selected calibration decision, and reserves fresh v9 identities.
+>
 > **v0.7 corrective G2.6 (2026-07-20):** Post-freeze v7 ordinal 1 passed
 > safety, privacy, latency, and SQL gates but failed the unchanged retrieval utility
 > claim because v2 decoys left both old controls at perfect Evidence Recall. G2.6
