@@ -37,10 +37,12 @@ from app.api.v03_graph import router as v03_graph_router
 from app.api.v04_graph_extraction import router as v04_graph_extraction_router
 from app.api.v05_graph_publications import router as v05_graph_publications_router
 from app.api.v06_graph_retrieval import router as v06_graph_retrieval_router
+from app.api.v07_entity_linking import router as v07_entity_linking_router
 from app.auth.routes import build_auth_router
 from app.casbin.enforcer import get_enforcer
 from app.config import (
     settings,
+    validate_entity_linking_startup,
     validate_graph_extraction_startup,
     validate_graph_publication_startup,
     validate_graph_retrieval_startup,
@@ -99,6 +101,10 @@ def assert_graph_retrieval_startup_security() -> None:
     validate_graph_retrieval_startup(settings)
 
 
+def assert_entity_linking_startup_security() -> None:
+    validate_entity_linking_startup(settings)
+
+
 def resolve_console_ui_dir(root: Path) -> Path | None:
     """Resolve the configured console UI directory without implicit frontend fallback."""
     configured = Path(settings.console_ui_dir)
@@ -115,6 +121,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     assert_graph_extraction_startup_security()
     assert_graph_publication_startup_security()
     assert_graph_retrieval_startup_security()
+    assert_entity_linking_startup_security()
     # 预热 Casbin enforcer，确保 policy 已加载入内存
     get_enforcer()
     # 启动自检：embedding 服务 / Qdrant 配置错配时大声报（非 fatal，不阻断启动）
@@ -163,6 +170,7 @@ def create_app() -> FastAPI:
     app.include_router(v04_graph_extraction_router)
     app.include_router(v05_graph_publications_router)
     app.include_router(v06_graph_retrieval_router)
+    app.include_router(v07_entity_linking_router)
     app.include_router(retrieval_router)
     app.include_router(chat_router)
     app.include_router(admin_users_router)

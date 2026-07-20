@@ -1,7 +1,10 @@
 """集中配置：pydantic-settings 从 .env 加载，启动时类型校验。"""
 from __future__ import annotations
 
+import hashlib
+import json
 import math
+import re
 from functools import lru_cache
 from pathlib import Path
 
@@ -10,6 +13,41 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_ENTITY_LINKING_POLICY_FIELDS = {
+    "schema_version",
+    "policy_version",
+    "algorithm_version",
+    "normalization_version",
+    "g2_approval_commit",
+    "g2_specification_tree_sha256",
+    "calibration_ref",
+    "approved_thresholds",
+    "approval_payload_sha256",
+    "dataset_manifest_ref",
+    "dataset_content_sha256",
+    "evaluation_config_sha256",
+    "ontology_schema_set_hash",
+    "code_commit",
+    "evaluation_tree_sha256",
+    "accepted_dependency_closure_sha256",
+    "reference_scorer_sha256",
+    "external_distribution_set_sha256",
+    "control_config_sha256",
+    "environment_fingerprint_sha256",
+    "pg_cluster_fingerprint_sha256",
+    "qdrant_fingerprint_sha256",
+    "embedding_fingerprint_sha256",
+    "approved_by",
+    "approved_at",
+    "approval_reference",
+}
+_ENTITY_LINKING_THRESHOLD_FIELDS = {
+    "min_score_micros",
+    "min_margin_micros",
+    "candidate_floor_micros",
+    "max_candidates",
+}
 
 
 class Settings(BaseSettings):
@@ -287,6 +325,20 @@ class Settings(BaseSettings):
     graph_retrieval_max_evidence_per_fact: int = 20
     graph_retrieval_timeout_seconds: float = 3.0
 
+    # ---- v0.7 Publication-scoped Entity Linking (default fail closed) ----
+    entity_linking_enabled: bool = False
+    entity_linking_contract_version: str = "v1"
+    entity_linking_policy_version: str = "entity-linking-policy-v1"
+    entity_linking_policy_path: str = "eval/entity_linking/link_policy_v1.json"
+    entity_linking_policy_sha256: str = ""
+    entity_linking_min_score_micros: int = 950_000
+    entity_linking_min_margin_micros: int = 200_000
+    entity_linking_candidate_floor_micros: int = 500_000
+    entity_linking_max_mentions: int = 10
+    entity_linking_max_candidates: int = 10
+    entity_linking_max_publication_entities: int = 10_000
+    entity_linking_timeout_seconds: float = 2.0
+
 
 def validate_graph_extraction_startup(config: Settings) -> None:
     weights = {
@@ -382,6 +434,76 @@ def validate_graph_retrieval_startup(config: Settings) -> None:
         or config.graph_retrieval_timeout_seconds <= 0
     ):
         raise RuntimeError("[security] graph retrieval timeout must be finite and positive")
+
+
+def validate_entity_linking_startup(config: Settings) -> None:
+    if config.entity_linking_contract_version != "v1":
+        raise RuntimeError("[security] entity linking contract version must be v1")
+    if config.entity_linking_policy_version != "entity-linking-policy-v1":
+        raise RuntimeError("[security] entity linking policy version is invalid")
+    thresholds = (
+        config.entity_linking_min_score_micros,
+        config.entity_linking_min_margin_micros,
+    )
+    if any(value < 0 or value > 1_000_000 for value in thresholds):
+        raise RuntimeError("[security] entity linking thresholds must use valid micros")
+    if config.entity_linking_candidate_floor_micros != 500_000:
+        raise RuntimeError("[security] entity linking candidate floor must be 500000")
+    if config.entity_linking_max_mentions != 10:
+        raise RuntimeError("[security] entity linking max mentions must be 10")
+    if config.entity_linking_max_candidates != 10:
+        raise RuntimeError("[security] entity linking max candidates must be 10")
+    if config.entity_linking_max_publication_entities != 10_000:
+        raise RuntimeError(
+            "[security] entity linking max publication entities must be 10000"
+        )
+    if (
+        not math.isfinite(config.entity_linking_timeout_seconds)
+        or config.entity_linking_timeout_seconds <= 0
+        or config.entity_linking_timeout_seconds > 2.0
+    ):
+        raise RuntimeError(
+            "[security] entity linking timeout must be within (0, 2.0] seconds"
+        )
+    if not config.entity_linking_enabled:
+        return
+    if not _SHA256_RE.fullmatch(config.entity_linking_policy_sha256):
+        raise RuntimeError("[security] entity linking policy SHA-256 is required")
+    policy_path = Path(config.entity_linking_policy_path)
+    if not policy_path.is_absolute():
+        policy_path = BASE_DIR / policy_path
+    try:
+        policy_bytes = policy_path.read_bytes()
+        policy = json.loads(policy_bytes.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("[security] entity linking policy is unavailable") from exc
+    if hashlib.sha256(policy_bytes).hexdigest() != config.entity_linking_policy_sha256:
+        raise RuntimeError("[security] entity linking policy SHA-256 mismatch")
+    if not isinstance(policy, dict) or set(policy) != _ENTITY_LINKING_POLICY_FIELDS:
+        raise RuntimeError("[security] entity linking policy schema is invalid")
+    if (
+        policy.get("schema_version") != "entity-linking-policy-v1"
+        or policy.get("policy_version") != config.entity_linking_policy_version
+        or policy.get("algorithm_version") != "lexical-score-v1"
+        or policy.get("normalization_version") != "normalize_graph_name_v1"
+    ):
+        raise RuntimeError("[security] entity linking policy identity is invalid")
+    approved = policy.get("approved_thresholds")
+    if not isinstance(approved, dict) or set(approved) != _ENTITY_LINKING_THRESHOLD_FIELDS:
+        raise RuntimeError("[security] entity linking policy thresholds are invalid")
+    if any(isinstance(value, bool) or not isinstance(value, int) for value in approved.values()):
+        raise RuntimeError("[security] entity linking policy thresholds are invalid")
+    if (
+        approved["min_score_micros"]
+        not in {850_000, 880_000, 900_000, 920_000, 950_000}
+        or approved["min_margin_micros"]
+        not in {80_000, 100_000, 120_000, 150_000, 200_000}
+        or approved["candidate_floor_micros"] != 500_000
+        or approved["max_candidates"] != 10
+        or approved["min_score_micros"] != config.entity_linking_min_score_micros
+        or approved["min_margin_micros"] != config.entity_linking_min_margin_micros
+    ):
+        raise RuntimeError("[security] entity linking policy thresholds do not match runtime")
 
 
 @lru_cache(maxsize=1)
