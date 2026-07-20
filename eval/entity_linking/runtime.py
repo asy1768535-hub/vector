@@ -6,7 +6,6 @@ import hashlib
 import importlib.metadata
 import ipaddress
 import json
-import math
 import os
 import platform
 import random
@@ -16,7 +15,7 @@ import sys
 import time
 import tracemalloc
 import uuid
-from collections import Counter
+from collections import Counter, OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -126,8 +125,8 @@ from eval.entity_linking.reference_scorer import (
 )
 
 
-G2_APPROVAL_COMMIT = "62e310b351c900c9cd4e55cd25595b2775d312c7"
-G2_SPECIFICATION_TREE_SHA256 = "1dc50c143ca42dd64cbf98add7e727d112fe46504e82d6541422cc033814ed17"
+G2_APPROVAL_COMMIT = "59d53b20f0e3d71b4f83595afe97553c89cc4898"
+G2_SPECIFICATION_TREE_SHA256 = "099ce17bcd39b4240d26b949f42d152d9a16e996245ce43bc609af381026e1b1"
 G1_COMMIT = "f40c5c84c3248639aa6603d43b6b306ad76d66fd"
 AUDIT_PRESERVATION_COMMIT = "155ef946c48272518c996458bc206039b6676c18"
 INVALIDATED_G2_APPROVAL_COMMIT = "75bf4141be743c1164bfa9841d0737509d7575fe"
@@ -139,15 +138,15 @@ INVALIDATED_CALIBRATION_FILE_SHA256 = "c35210075e179ebce197275041e0ff69403297185
 INVALIDATED_CALIBRATION_BLOB_OID = "4c1dc04cca1ddd874fa309ad0314ad24dfc0ea68"
 PRESERVED_GITATTRIBUTES_BLOB_OID = "3f5e0ee58b5d94db6fd2ed25511a9957130885f6"
 UUID_NAMESPACE = uuid.UUID("1bcb8d89-4423-563a-962d-670c026f6dc8")
-CALIBRATION_RUN_ID = "v07-el-calibration-v6-20260720-01"
-CALIBRATION_DATABASE_ID = "vkt_v07_el_eval_calibration_v6_20260720_01"
+CALIBRATION_RUN_ID = "v07-el-calibration-v7-20260720-01"
+CALIBRATION_DATABASE_ID = "vkt_v07_el_eval_calibration_v7_20260720_01"
 POST_FREEZE_IDENTITIES = (
-    (1, "v07-el-post-freeze-v6-20260720-01", "vkt_v07_el_eval_post_freeze_v6_20260720_01"),
-    (2, "v07-el-post-freeze-v6-20260720-02", "vkt_v07_el_eval_post_freeze_v6_20260720_02"),
-    (3, "v07-el-post-freeze-v6-20260720-03", "vkt_v07_el_eval_post_freeze_v6_20260720_03"),
+    (1, "v07-el-post-freeze-v7-20260720-01", "vkt_v07_el_eval_post_freeze_v7_20260720_01"),
+    (2, "v07-el-post-freeze-v7-20260720-02", "vkt_v07_el_eval_post_freeze_v7_20260720_02"),
+    (3, "v07-el-post-freeze-v7-20260720-03", "vkt_v07_el_eval_post_freeze_v7_20260720_03"),
 )
-POLICY_PATH = "eval/entity_linking/link_policy_v5.json"
-RELEASE_EVIDENCE_PATH = "eval/entity_linking/release_evidence_v5.json"
+POLICY_PATH = "eval/entity_linking/link_policy_v6.json"
+RELEASE_EVIDENCE_PATH = "eval/entity_linking/release_evidence_v6.json"
 EMBEDDING_PROBE_TEXT = "vkt-v07-entity-linking-identity-probe"
 EMBEDDING_PROBE_SHA256 = "4caad60c112bd93fda55714c91aef2762a3c5c5c0df2a09dc28e6296800cc61f"
 
@@ -255,6 +254,7 @@ HISTORICAL_ENTITY_LINKING_PATHS = (
     "eval/entity_linking/results/v07-el-calibration-v3-20260720-01.json",
     "eval/entity_linking/results/v07-el-calibration-v4-20260720-01.json",
     "eval/entity_linking/results/v07-el-calibration-v5-20260720-01.json",
+    "eval/entity_linking/results/v07-el-calibration-v6-20260720-01.json",
 )
 
 
@@ -2700,16 +2700,19 @@ def qdrant_config() -> QdrantCollectionConfig:
 def _embedding_vector_sha256(vector: Sequence[Decimal | float | int]) -> str:
     if len(vector) != 1024:
         raise EntityLinkingEvalError("embedding_identity_mismatch")
-    encoded = bytearray(128)
+    deadzone = Decimal("0.005")
+    encoded = bytearray(256)
     for index, value in enumerate(vector):
         decimal_value = value if isinstance(value, Decimal) else Decimal(str(value))
         if not decimal_value.is_finite():
             raise EntityLinkingEvalError("embedding_identity_mismatch")
-        binary = float(decimal_value)
-        if not math.isfinite(binary):
-            raise EntityLinkingEvalError("embedding_identity_mismatch")
-        if binary >= 0:
-            encoded[index // 8] |= 1 << (7 - index % 8)
+        if decimal_value < -deadzone:
+            ternary = 0
+        elif decimal_value > deadzone:
+            ternary = 2
+        else:
+            ternary = 1
+        encoded[index // 4] |= ternary << (6 - 2 * (index % 4))
     return hashlib.sha256(bytes(encoded)).hexdigest()
 
 
@@ -2741,7 +2744,7 @@ async def _embedding_identity(base_url: str, model: str, api_key: str) -> Embedd
         "model": "bge-m3",
         "dimension": 1024,
         "probe_text_sha256": EMBEDDING_PROBE_SHA256,
-        "vector_encoding_version": "sign-bit-v1",
+        "vector_encoding_version": "ternary-deadzone-0.005-v1",
         "probe_vector_sha256": _embedding_vector_sha256(vector),
     }
     return EmbeddingIdentity(
@@ -3573,6 +3576,12 @@ class PublishedCandidateProjection:
     item_hash_by_entity_id: Mapping[str, str]
 
 
+_PROJECTION_CACHE_MAX_SIZE = 8
+_publication_projection_cache: OrderedDict[
+    tuple[uuid.UUID, uuid.UUID, uuid.UUID, str], PublishedCandidateProjection
+] = OrderedDict()
+
+
 @dataclass(frozen=True, slots=True)
 class CaseControlResult:
     evidence_keys: tuple[str, ...]
@@ -3614,6 +3623,26 @@ async def load_candidate_projection(
         ontology_version_id,
         expected_publication_id=expected_publication_id,
     )
+    cache_key = (
+        snapshot.library_id,
+        snapshot.ontology_version_id,
+        snapshot.publication_id,
+        snapshot.manifest_hash,
+    )
+    scope_key = cache_key[:2]
+    for existing_key in tuple(_publication_projection_cache):
+        if existing_key[:2] == scope_key and existing_key != cache_key:
+            _publication_projection_cache.pop(existing_key, None)
+    projection = _publication_projection_cache.get(cache_key)
+    if projection is not None:
+        _publication_projection_cache.move_to_end(cache_key)
+        try:
+            await assert_graph_snapshot_still_current(db, library, snapshot)
+        except Exception:
+            _publication_projection_cache.pop(cache_key, None)
+            raise
+        return snapshot, projection
+
     statement = (
         select(
             Entity.id,
@@ -3649,14 +3678,23 @@ async def load_candidate_projection(
         )
         for row in rows
     )
-    await assert_graph_snapshot_still_current(db, library, snapshot)
-    return snapshot, PublishedCandidateProjection(
+    projection = PublishedCandidateProjection(
         publication_id=snapshot.publication_id,
         ontology_version_id=snapshot.ontology_version_id,
         candidates=candidates,
         prepared_candidates=prepare_candidates(candidates),
         item_hash_by_entity_id={str(row.id): row.item_hash for row in rows},
     )
+    _publication_projection_cache[cache_key] = projection
+    _publication_projection_cache.move_to_end(cache_key)
+    while len(_publication_projection_cache) > _PROJECTION_CACHE_MAX_SIZE:
+        _publication_projection_cache.popitem(last=False)
+    try:
+        await assert_graph_snapshot_still_current(db, library, snapshot)
+    except Exception:
+        _publication_projection_cache.pop(cache_key, None)
+        raise
+    return snapshot, projection
 
 
 async def run_candidate_case(

@@ -881,7 +881,7 @@ class EmbeddingIdentity(StrictModel):
     model: Literal["bge-m3"]
     dimension: Literal[1024]
     probe_text_sha256: Literal["4caad60c112bd93fda55714c91aef2762a3c5c5c0df2a09dc28e6296800cc61f"]
-    vector_encoding_version: Literal["sign-bit-v1"]
+    vector_encoding_version: Literal["ternary-deadzone-0.005-v1"]
     probe_vector_sha256: Sha256
     embedding_fingerprint_sha256: Sha256
 

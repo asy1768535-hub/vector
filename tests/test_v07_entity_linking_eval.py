@@ -3,11 +3,17 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import uuid
+from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
+
+import app.services.graph_retrieval as graph_retrieval_module
+from app.services.graph_retrieval import HealthyGraphSnapshot
 
 from eval.entity_linking.contracts import (
     GATE_ID_ORDER,
@@ -43,6 +49,7 @@ from eval.entity_linking.runtime import (
     G2_SPECIFICATION_TREE_SHA256,
     EntityLinkingEvalError,
     _embedding_vector_sha256,
+    _publication_projection_cache,
     assert_private_data_absent,
     build_dependency_closure,
     build_gate_decisions,
@@ -50,13 +57,13 @@ from eval.entity_linking.runtime import (
     build_grid_results,
     external_distribution_records,
     load_dataset,
+    load_candidate_projection,
     normalize_service_origin,
     paired_stratified_bootstrap,
     qdrant_collection_identity,
     repository_module_is_local,
     select_calibration_threshold,
     upgrade_database,
-    verify_calibration_artifact,
     verify_g2_approval,
     require_replacement_calibration_reference,
 )
@@ -124,7 +131,7 @@ def _v2_calibration_value() -> dict[str, object]:
     value.update(
         schema_version="entity-linking-eval-result-v2",
         run_id=CALIBRATION_RUN_ID,
-        database_id="vkt_v07_el_eval_calibration_v6_20260720_01",
+        database_id="vkt_v07_el_eval_calibration_v7_20260720_01",
         g2_approval_commit=G2_APPROVAL_COMMIT,
         g2_specification_tree_sha256=G2_SPECIFICATION_TREE_SHA256,
         selection_reason="tie-higher-score",
@@ -151,7 +158,7 @@ def _v2_calibration_value() -> dict[str, object]:
         max_us=ordered[-1],
     )
     embedding = value["environment"]["embedding"]
-    embedding["vector_encoding_version"] = "sign-bit-v1"
+    embedding["vector_encoding_version"] = "ternary-deadzone-0.005-v1"
     embedding["embedding_fingerprint_sha256"] = canonical_sha256(
         {
             key: item
@@ -176,9 +183,9 @@ def _release_value() -> dict[str, object]:
     refs = [
         {
             "ordinal": ordinal,
-            "run_id": f"v07-el-post-freeze-v6-20260720-0{ordinal}",
+            "run_id": f"v07-el-post-freeze-v7-20260720-0{ordinal}",
             "artifact_ref": _artifact_ref_value(
-                f"eval/entity_linking/results/v07-el-post-freeze-v6-20260720-0{ordinal}.json"
+                f"eval/entity_linking/results/v07-el-post-freeze-v7-20260720-0{ordinal}.json"
             ),
         }
         for ordinal in (1, 2, 3)
@@ -212,9 +219,9 @@ def _release_value() -> dict[str, object]:
         "qdrant_fingerprint_sha256": SHA,
         "embedding_fingerprint_sha256": SHA,
         "calibration_ref": _artifact_ref_value(
-            "eval/entity_linking/results/v07-el-calibration-v6-20260720-01.json"
+            "eval/entity_linking/results/v07-el-calibration-v7-20260720-01.json"
         ),
-        "policy_ref": _artifact_ref_value("eval/entity_linking/link_policy_v5.json"),
+        "policy_ref": _artifact_ref_value("eval/entity_linking/link_policy_v6.json"),
         "post_freeze_refs": refs,
         "canonical_response_set_sha256_by_ordinal": [
             {
@@ -500,9 +507,9 @@ def test_paired_bootstrap_is_exact_rational_and_reproducible():
 
 def test_qdrant_collection_and_service_origin_conformance_vectors():
     collection = qdrant_collection_identity(CALIBRATION_RUN_ID, "cal")
-    assert collection.collection_name == "vkt_v07_el_cal_456e706ad19a"
+    assert collection.collection_name == "vkt_v07_el_cal_6b6029bbdded"
     assert collection.collection_name_sha256 == (
-        "bead1cce6aeea3c9fd36e21ee84f87d4e5302c5b45224ed6bad51f7f87da6238"
+        "c3d52e2d8a0a27ab16952ceeba3193609a8f8ac2ae9f2e48d9a30f1a2d5aa636"
     )
     assert normalize_service_origin("HTTP://Example.COM", qdrant=True) == "http://example.com:80"
     assert (
@@ -513,15 +520,164 @@ def test_qdrant_collection_and_service_origin_conformance_vectors():
         normalize_service_origin("http://user@example.com/", qdrant=True)
 
 
-def test_embedding_sign_identity_tolerates_magnitude_jitter_but_rejects_sign_and_dimension():
-    baseline = [0.25 if index % 2 == 0 else -0.25 for index in range(1024)]
-    jittered = [0.000001 if value > 0 else -0.000001 for value in baseline]
-    changed_sign = list(baseline)
-    changed_sign[511] *= -1
+def test_embedding_ternary_identity_has_stable_deadzone_order_and_dimension():
+    baseline = [-0.006, -0.005, 0.005, 0.006] + [0.0] * 1020
+    jittered = [-0.0061, -0.0049, 0.0049, 0.0061] + [0.0001] * 1020
+    crossed_deadzone = list(baseline)
+    crossed_deadzone[1] = -0.0051
     assert _embedding_vector_sha256(baseline) == _embedding_vector_sha256(jittered)
-    assert _embedding_vector_sha256(baseline) != _embedding_vector_sha256(changed_sign)
+    assert _embedding_vector_sha256(baseline) == (
+        "207f33e324840669ec8b52692a5e28534dd2ff05041a8eba350e9d7e712b7da9"
+    )
+    assert _embedding_vector_sha256(baseline) != _embedding_vector_sha256(crossed_deadzone)
     with pytest.raises(EntityLinkingEvalError, match="embedding_identity_mismatch"):
         _embedding_vector_sha256(baseline[:-1])
+    with pytest.raises(EntityLinkingEvalError, match="embedding_identity_mismatch"):
+        _embedding_vector_sha256([float("nan")] + baseline[1:])
+
+
+def test_publication_projection_cache_keys_evicts_and_preserves_fences(monkeypatch):
+    library_id = uuid.uuid4()
+    ontology_id = uuid.uuid4()
+    publication_id = uuid.uuid4()
+    entity_id = uuid.uuid4()
+    current = {
+        "snapshot": HealthyGraphSnapshot(
+            publication_id=publication_id,
+            library_id=library_id,
+            ontology_version_id=ontology_id,
+            manifest_version="graph-publication-manifest-v1",
+            manifest_hash="a" * 64,
+            activated_at=datetime.now(timezone.utc),
+            entity_count=1,
+            relation_count=0,
+        ),
+        "fence_error": False,
+    }
+    calls = {"snapshots": 0, "fences": 0}
+
+    async def load_snapshot(*args, **kwargs):
+        calls["snapshots"] += 1
+        return current["snapshot"]
+
+    async def end_fence(*args, **kwargs):
+        calls["fences"] += 1
+        if current["fence_error"]:
+            raise RuntimeError("publication changed")
+
+    class Result:
+        def all(self):
+            return [
+                SimpleNamespace(
+                    id=entity_id,
+                    canonical_name="Cache Candidate",
+                    normalized_name="cache candidate",
+                    entity_type_key="concept",
+                    item_hash="b" * 64,
+                )
+            ]
+
+    class Database:
+        def __init__(self):
+            self.execute_count = 0
+
+        async def execute(self, statement):
+            self.execute_count += 1
+            return Result()
+
+    monkeypatch.setattr(graph_retrieval_module, "load_healthy_graph_snapshot", load_snapshot)
+    monkeypatch.setattr(graph_retrieval_module, "assert_graph_snapshot_still_current", end_fence)
+    db = Database()
+    logical = {str(entity_id): "entity-cache-candidate"}
+
+    async def exercise():
+        first = await load_candidate_projection(
+            db, SimpleNamespace(id=library_id), ontology_id, publication_id, logical
+        )
+        second = await load_candidate_projection(
+            db, SimpleNamespace(id=library_id), ontology_id, publication_id, logical
+        )
+        assert first[1] is second[1]
+        assert db.execute_count == 1
+        assert calls == {"snapshots": 2, "fences": 2}
+
+        current["snapshot"] = replace(current["snapshot"], manifest_hash="c" * 64)
+        await load_candidate_projection(
+            db, SimpleNamespace(id=library_id), ontology_id, publication_id, logical
+        )
+        assert db.execute_count == 2
+        assert len(_publication_projection_cache) == 1
+        retained_snapshot = current["snapshot"]
+
+        added_snapshots = []
+        for index in range(7):
+            snapshot = HealthyGraphSnapshot(
+                publication_id=uuid.uuid4(),
+                library_id=uuid.uuid4(),
+                ontology_version_id=uuid.uuid4(),
+                manifest_version="graph-publication-manifest-v1",
+                manifest_hash=f"{index + 1:064x}",
+                activated_at=datetime.now(timezone.utc),
+                entity_count=1,
+                relation_count=0,
+            )
+            added_snapshots.append(snapshot)
+            current["snapshot"] = snapshot
+            await load_candidate_projection(
+                db,
+                SimpleNamespace(id=snapshot.library_id),
+                snapshot.ontology_version_id,
+                snapshot.publication_id,
+                logical,
+            )
+        assert len(_publication_projection_cache) == 8
+
+        current["snapshot"] = retained_snapshot
+        await load_candidate_projection(
+            db,
+            SimpleNamespace(id=retained_snapshot.library_id),
+            retained_snapshot.ontology_version_id,
+            retained_snapshot.publication_id,
+            logical,
+        )
+        assert db.execute_count == 9
+
+        newest_snapshot = replace(
+            retained_snapshot,
+            publication_id=uuid.uuid4(),
+            library_id=uuid.uuid4(),
+            ontology_version_id=uuid.uuid4(),
+            manifest_hash="f" * 64,
+        )
+        current["snapshot"] = newest_snapshot
+        await load_candidate_projection(
+            db,
+            SimpleNamespace(id=newest_snapshot.library_id),
+            newest_snapshot.ontology_version_id,
+            newest_snapshot.publication_id,
+            logical,
+        )
+        assert any(key[2] == retained_snapshot.publication_id for key in _publication_projection_cache)
+        assert not any(
+            key[2] == added_snapshots[0].publication_id for key in _publication_projection_cache
+        )
+
+        current["fence_error"] = True
+        with pytest.raises(RuntimeError, match="publication changed"):
+            await load_candidate_projection(
+                db,
+                SimpleNamespace(id=current["snapshot"].library_id),
+                current["snapshot"].ontology_version_id,
+                current["snapshot"].publication_id,
+                logical,
+            )
+        assert not any(key[2] == current["snapshot"].publication_id for key in _publication_projection_cache)
+
+    _publication_projection_cache.clear()
+    try:
+        asyncio.run(exercise())
+    finally:
+        _publication_projection_cache.clear()
 
 
 def test_privacy_scanner_rejects_dataset_values_canaries_and_private_fields():
@@ -549,7 +705,7 @@ def test_privacy_scanner_rejects_dataset_values_canaries_and_private_fields():
 
 def test_policy_approval_and_frozen_policy_contracts_are_strict():
     calibration_ref = _artifact_ref_value(
-        "eval/entity_linking/results/v07-el-calibration-v6-20260720-01.json"
+        "eval/entity_linking/results/v07-el-calibration-v7-20260720-01.json"
     )
     thresholds = {
         "min_score_micros": 850000,
@@ -623,9 +779,9 @@ def test_gate_decisions_reject_wrong_typed_pairs_order_and_derived_values():
 
     run_value = {
         "ordinal": 1,
-        "run_id": "v07-el-post-freeze-v6-20260720-01",
+        "run_id": "v07-el-post-freeze-v7-20260720-01",
         "artifact_ref": _artifact_ref_value(
-            "eval/entity_linking/results/v07-el-post-freeze-v6-20260720-01.json"
+            "eval/entity_linking/results/v07-el-post-freeze-v7-20260720-01.json"
         ),
         "gate_decisions": _passing_gate_values(),
         "all_passed": True,
@@ -651,13 +807,13 @@ def test_post_freeze_contract_requires_ordinal_policy_and_null_calibration_field
     value.update(
         phase="post_freeze_release",
         ordinal=1,
-        run_id="v07-el-post-freeze-v6-20260720-01",
-        database_id="vkt_v07_el_eval_post_freeze_v6_20260720_01",
+        run_id="v07-el-post-freeze-v7-20260720-01",
+        database_id="vkt_v07_el_eval_post_freeze_v7_20260720_01",
         grid_results=None,
         candidate_thresholds=None,
         selection_reason=None,
-        policy_ref=_artifact_ref_value("eval/entity_linking/link_policy_v5.json"),
-        qdrant_collection=qdrant_collection_identity("v07-el-post-freeze-v6-20260720-01", "pf1").model_dump(
+        policy_ref=_artifact_ref_value("eval/entity_linking/link_policy_v6.json"),
+        qdrant_collection=qdrant_collection_identity("v07-el-post-freeze-v7-20260720-01", "pf1").model_dump(
             mode="json"
         ),
     )
@@ -697,7 +853,7 @@ def test_release_evidence_rejects_reordered_refs_false_identity_and_extra_fields
 
 def test_invalidated_v1_calibration_is_rejected_before_policy_write():
     historical_policy_path = ROOT / "eval/entity_linking/link_policy_v1.json"
-    policy_path = ROOT / "eval/entity_linking/link_policy_v5.json"
+    policy_path = ROOT / "eval/entity_linking/link_policy_v6.json"
     assert historical_policy_path.is_file()
     assert not policy_path.exists()
     with pytest.raises(EntityLinkingEvalError, match="invalidated_calibration_artifact"):
@@ -733,8 +889,8 @@ def test_complete_cli_surface_is_frozen_before_replacement_calibration():
 def test_no_policy_post_freeze_or_release_artifacts_exist_before_human_approval():
     base = ROOT / "eval/entity_linking"
     assert (base / "link_policy_v1.json").is_file()
-    assert not (base / "link_policy_v5.json").exists()
-    assert not (base / "release_evidence_v5.json").exists()
+    assert not (base / "link_policy_v6.json").exists()
+    assert not (base / "release_evidence_v6.json").exists()
     results = base / "results"
     historical = results / "v07-el-calibration-v3-20260720-01.json"
     historical_value = json.loads(historical.read_text(encoding="utf-8"))
@@ -760,15 +916,18 @@ def test_no_policy_post_freeze_or_release_artifacts_exist_before_human_approval(
     assert hashlib.sha256(historical_v5.read_bytes()).hexdigest() == (
         "24d5d9bd4d2cbcca3cbc1d7dce77d3b6820b5c9679038bb4ed72e52c9ef53498"
     )
-    calibration = results / "v07-el-calibration-v6-20260720-01.json"
-    if calibration.exists():
-        asyncio.run(
-            verify_calibration_artifact(ROOT, calibration, require_live_absence=False)
-        )
+    historical_v6 = results / "v07-el-calibration-v6-20260720-01.json"
+    historical_v6_value = json.loads(historical_v6.read_text(encoding="utf-8"))
+    assert canonical_sha256(historical_v6_value) == (
+        "c2e4a2d37c1caf34446769037b799488314a832521f103fdbe11485805b416ac"
+    )
+    assert hashlib.sha256(historical_v6.read_bytes()).hexdigest() == (
+        "419052ec9c72a0f8bb4de3e58b5bb0b608063af07fd796aac4bd6a9bd035f5a3"
+    )
     forbidden = (
-        "v07-el-post-freeze-v6-20260720-01.json",
-        "v07-el-post-freeze-v6-20260720-02.json",
-        "v07-el-post-freeze-v6-20260720-03.json",
+        "v07-el-post-freeze-v7-20260720-01.json",
+        "v07-el-post-freeze-v7-20260720-02.json",
+        "v07-el-post-freeze-v7-20260720-03.json",
     )
     assert all(not (results / name).exists() for name in forbidden)
 
