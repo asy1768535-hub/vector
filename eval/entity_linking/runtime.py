@@ -11,7 +11,6 @@ import os
 import platform
 import random
 import re
-import struct
 import subprocess
 import sys
 import time
@@ -127,8 +126,8 @@ from eval.entity_linking.reference_scorer import (
 )
 
 
-G2_APPROVAL_COMMIT = "de9a4b514eb38156a2db5cf66edbed33b055fba3"
-G2_SPECIFICATION_TREE_SHA256 = "183175a0e8dd33a85f42af42f5a9b7389c935c51452bfef49fa52d1609d54612"
+G2_APPROVAL_COMMIT = "fd324e785ba46d93c4a64960ff71729c68ae576a"
+G2_SPECIFICATION_TREE_SHA256 = "0fabe281b9b721fb4e5741e3b7eb4dd49cca1eebc548177da0c0e2ecf93f88a7"
 G1_COMMIT = "f40c5c84c3248639aa6603d43b6b306ad76d66fd"
 AUDIT_PRESERVATION_COMMIT = "155ef946c48272518c996458bc206039b6676c18"
 INVALIDATED_G2_APPROVAL_COMMIT = "75bf4141be743c1164bfa9841d0737509d7575fe"
@@ -140,15 +139,15 @@ INVALIDATED_CALIBRATION_FILE_SHA256 = "c35210075e179ebce197275041e0ff69403297185
 INVALIDATED_CALIBRATION_BLOB_OID = "4c1dc04cca1ddd874fa309ad0314ad24dfc0ea68"
 PRESERVED_GITATTRIBUTES_BLOB_OID = "3f5e0ee58b5d94db6fd2ed25511a9957130885f6"
 UUID_NAMESPACE = uuid.UUID("1bcb8d89-4423-563a-962d-670c026f6dc8")
-CALIBRATION_RUN_ID = "v07-el-calibration-v4-20260720-01"
-CALIBRATION_DATABASE_ID = "vkt_v07_el_eval_calibration_v4_20260720_01"
+CALIBRATION_RUN_ID = "v07-el-calibration-v5-20260720-01"
+CALIBRATION_DATABASE_ID = "vkt_v07_el_eval_calibration_v5_20260720_01"
 POST_FREEZE_IDENTITIES = (
-    (1, "v07-el-post-freeze-v4-20260720-01", "vkt_v07_el_eval_post_freeze_v4_20260720_01"),
-    (2, "v07-el-post-freeze-v4-20260720-02", "vkt_v07_el_eval_post_freeze_v4_20260720_02"),
-    (3, "v07-el-post-freeze-v4-20260720-03", "vkt_v07_el_eval_post_freeze_v4_20260720_03"),
+    (1, "v07-el-post-freeze-v5-20260720-01", "vkt_v07_el_eval_post_freeze_v5_20260720_01"),
+    (2, "v07-el-post-freeze-v5-20260720-02", "vkt_v07_el_eval_post_freeze_v5_20260720_02"),
+    (3, "v07-el-post-freeze-v5-20260720-03", "vkt_v07_el_eval_post_freeze_v5_20260720_03"),
 )
-POLICY_PATH = "eval/entity_linking/link_policy_v3.json"
-RELEASE_EVIDENCE_PATH = "eval/entity_linking/release_evidence_v3.json"
+POLICY_PATH = "eval/entity_linking/link_policy_v4.json"
+RELEASE_EVIDENCE_PATH = "eval/entity_linking/release_evidence_v4.json"
 EMBEDDING_PROBE_TEXT = "vkt-v07-entity-linking-identity-probe"
 EMBEDDING_PROBE_SHA256 = "4caad60c112bd93fda55714c91aef2762a3c5c5c0df2a09dc28e6296800cc61f"
 
@@ -254,6 +253,7 @@ HISTORICAL_ENTITY_LINKING_PATHS = (
     "eval/entity_linking/link_policy_v1.json",
     "eval/entity_linking/results/v07-el-post-freeze-v2-20260720-01.json",
     "eval/entity_linking/results/v07-el-calibration-v3-20260720-01.json",
+    "eval/entity_linking/results/v07-el-calibration-v4-20260720-01.json",
 )
 
 
@@ -2699,15 +2699,16 @@ def qdrant_config() -> QdrantCollectionConfig:
 def _embedding_vector_sha256(vector: Sequence[Decimal | float | int]) -> str:
     if len(vector) != 1024:
         raise EntityLinkingEvalError("embedding_identity_mismatch")
-    encoded = bytearray()
-    for value in vector:
+    encoded = bytearray(128)
+    for index, value in enumerate(vector):
         decimal_value = value if isinstance(value, Decimal) else Decimal(str(value))
         if not decimal_value.is_finite():
             raise EntityLinkingEvalError("embedding_identity_mismatch")
         binary = float(decimal_value)
         if not math.isfinite(binary):
             raise EntityLinkingEvalError("embedding_identity_mismatch")
-        encoded.extend(struct.pack(">d", binary))
+        if binary >= 0:
+            encoded[index // 8] |= 1 << (7 - index % 8)
     return hashlib.sha256(bytes(encoded)).hexdigest()
 
 
@@ -2739,7 +2740,7 @@ async def _embedding_identity(base_url: str, model: str, api_key: str) -> Embedd
         "model": "bge-m3",
         "dimension": 1024,
         "probe_text_sha256": EMBEDDING_PROBE_SHA256,
-        "vector_encoding_version": "ieee754-binary64-be-v1",
+        "vector_encoding_version": "sign-bit-v1",
         "probe_vector_sha256": _embedding_vector_sha256(vector),
     }
     return EmbeddingIdentity(

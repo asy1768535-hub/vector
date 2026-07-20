@@ -40,6 +40,7 @@ from eval.entity_linking.runtime import (
     G2_APPROVAL_COMMIT,
     G2_SPECIFICATION_TREE_SHA256,
     EntityLinkingEvalError,
+    _embedding_vector_sha256,
     assert_private_data_absent,
     build_dependency_closure,
     build_gate_decisions,
@@ -121,7 +122,7 @@ def _v2_calibration_value() -> dict[str, object]:
     value.update(
         schema_version="entity-linking-eval-result-v2",
         run_id=CALIBRATION_RUN_ID,
-        database_id="vkt_v07_el_eval_calibration_v4_20260720_01",
+        database_id="vkt_v07_el_eval_calibration_v5_20260720_01",
         g2_approval_commit=G2_APPROVAL_COMMIT,
         g2_specification_tree_sha256=G2_SPECIFICATION_TREE_SHA256,
         selection_reason="tie-higher-score",
@@ -147,6 +148,25 @@ def _v2_calibration_value() -> dict[str, object]:
         p95_us=ordered[28],
         max_us=ordered[-1],
     )
+    embedding = value["environment"]["embedding"]
+    embedding["vector_encoding_version"] = "sign-bit-v1"
+    embedding["embedding_fingerprint_sha256"] = canonical_sha256(
+        {
+            key: item
+            for key, item in embedding.items()
+            if key != "embedding_fingerprint_sha256"
+        }
+    )
+    value["embedding_fingerprint_sha256"] = embedding["embedding_fingerprint_sha256"]
+    environment = value["environment"]
+    environment["environment_fingerprint_sha256"] = canonical_sha256(
+        {
+            key: item
+            for key, item in environment.items()
+            if key != "environment_fingerprint_sha256"
+        }
+    )
+    value["environment_fingerprint_sha256"] = environment["environment_fingerprint_sha256"]
     return value
 
 
@@ -154,9 +174,9 @@ def _release_value() -> dict[str, object]:
     refs = [
         {
             "ordinal": ordinal,
-            "run_id": f"v07-el-post-freeze-v4-20260720-0{ordinal}",
+            "run_id": f"v07-el-post-freeze-v5-20260720-0{ordinal}",
             "artifact_ref": _artifact_ref_value(
-                f"eval/entity_linking/results/v07-el-post-freeze-v4-20260720-0{ordinal}.json"
+                f"eval/entity_linking/results/v07-el-post-freeze-v5-20260720-0{ordinal}.json"
             ),
         }
         for ordinal in (1, 2, 3)
@@ -190,9 +210,9 @@ def _release_value() -> dict[str, object]:
         "qdrant_fingerprint_sha256": SHA,
         "embedding_fingerprint_sha256": SHA,
         "calibration_ref": _artifact_ref_value(
-            "eval/entity_linking/results/v07-el-calibration-v4-20260720-01.json"
+            "eval/entity_linking/results/v07-el-calibration-v5-20260720-01.json"
         ),
-        "policy_ref": _artifact_ref_value("eval/entity_linking/link_policy_v3.json"),
+        "policy_ref": _artifact_ref_value("eval/entity_linking/link_policy_v4.json"),
         "post_freeze_refs": refs,
         "canonical_response_set_sha256_by_ordinal": [
             {
@@ -457,9 +477,9 @@ def test_paired_bootstrap_is_exact_rational_and_reproducible():
 
 def test_qdrant_collection_and_service_origin_conformance_vectors():
     collection = qdrant_collection_identity(CALIBRATION_RUN_ID, "cal")
-    assert collection.collection_name == "vkt_v07_el_cal_f5b3da8848e7"
+    assert collection.collection_name == "vkt_v07_el_cal_dcbf57176f14"
     assert collection.collection_name_sha256 == (
-        "f25b15e7030f64372f0b55eecbe37cc8cecbc625d4b7523dc590a6539870c66d"
+        "dfda38761370bd1b0e914a2aac411cdb465f2dc5ac3a4dfcf9ec3cca9d536a94"
     )
     assert normalize_service_origin("HTTP://Example.COM", qdrant=True) == "http://example.com:80"
     assert (
@@ -468,6 +488,17 @@ def test_qdrant_collection_and_service_origin_conformance_vectors():
     )
     with pytest.raises(EntityLinkingEvalError):
         normalize_service_origin("http://user@example.com/", qdrant=True)
+
+
+def test_embedding_sign_identity_tolerates_magnitude_jitter_but_rejects_sign_and_dimension():
+    baseline = [0.25 if index % 2 == 0 else -0.25 for index in range(1024)]
+    jittered = [0.000001 if value > 0 else -0.000001 for value in baseline]
+    changed_sign = list(baseline)
+    changed_sign[511] *= -1
+    assert _embedding_vector_sha256(baseline) == _embedding_vector_sha256(jittered)
+    assert _embedding_vector_sha256(baseline) != _embedding_vector_sha256(changed_sign)
+    with pytest.raises(EntityLinkingEvalError, match="embedding_identity_mismatch"):
+        _embedding_vector_sha256(baseline[:-1])
 
 
 def test_privacy_scanner_rejects_dataset_values_canaries_and_private_fields():
@@ -495,7 +526,7 @@ def test_privacy_scanner_rejects_dataset_values_canaries_and_private_fields():
 
 def test_policy_approval_and_frozen_policy_contracts_are_strict():
     calibration_ref = _artifact_ref_value(
-        "eval/entity_linking/results/v07-el-calibration-v4-20260720-01.json"
+        "eval/entity_linking/results/v07-el-calibration-v5-20260720-01.json"
     )
     thresholds = {
         "min_score_micros": 850000,
@@ -569,9 +600,9 @@ def test_gate_decisions_reject_wrong_typed_pairs_order_and_derived_values():
 
     run_value = {
         "ordinal": 1,
-        "run_id": "v07-el-post-freeze-v4-20260720-01",
+        "run_id": "v07-el-post-freeze-v5-20260720-01",
         "artifact_ref": _artifact_ref_value(
-            "eval/entity_linking/results/v07-el-post-freeze-v4-20260720-01.json"
+            "eval/entity_linking/results/v07-el-post-freeze-v5-20260720-01.json"
         ),
         "gate_decisions": _passing_gate_values(),
         "all_passed": True,
@@ -597,13 +628,13 @@ def test_post_freeze_contract_requires_ordinal_policy_and_null_calibration_field
     value.update(
         phase="post_freeze_release",
         ordinal=1,
-        run_id="v07-el-post-freeze-v4-20260720-01",
-        database_id="vkt_v07_el_eval_post_freeze_v4_20260720_01",
+        run_id="v07-el-post-freeze-v5-20260720-01",
+        database_id="vkt_v07_el_eval_post_freeze_v5_20260720_01",
         grid_results=None,
         candidate_thresholds=None,
         selection_reason=None,
-        policy_ref=_artifact_ref_value("eval/entity_linking/link_policy_v3.json"),
-        qdrant_collection=qdrant_collection_identity("v07-el-post-freeze-v4-20260720-01", "pf1").model_dump(
+        policy_ref=_artifact_ref_value("eval/entity_linking/link_policy_v4.json"),
+        qdrant_collection=qdrant_collection_identity("v07-el-post-freeze-v5-20260720-01", "pf1").model_dump(
             mode="json"
         ),
     )
@@ -643,7 +674,7 @@ def test_release_evidence_rejects_reordered_refs_false_identity_and_extra_fields
 
 def test_invalidated_v1_calibration_is_rejected_before_policy_write():
     historical_policy_path = ROOT / "eval/entity_linking/link_policy_v1.json"
-    policy_path = ROOT / "eval/entity_linking/link_policy_v3.json"
+    policy_path = ROOT / "eval/entity_linking/link_policy_v4.json"
     assert historical_policy_path.is_file()
     assert not policy_path.exists()
     with pytest.raises(EntityLinkingEvalError, match="invalidated_calibration_artifact"):
@@ -679,8 +710,8 @@ def test_complete_cli_surface_is_frozen_before_replacement_calibration():
 def test_no_policy_post_freeze_or_release_artifacts_exist_before_human_approval():
     base = ROOT / "eval/entity_linking"
     assert (base / "link_policy_v1.json").is_file()
-    assert not (base / "link_policy_v3.json").exists()
-    assert not (base / "release_evidence_v3.json").exists()
+    assert not (base / "link_policy_v4.json").exists()
+    assert not (base / "release_evidence_v4.json").exists()
     results = base / "results"
     historical = results / "v07-el-calibration-v3-20260720-01.json"
     historical_value = json.loads(historical.read_text(encoding="utf-8"))
@@ -690,15 +721,23 @@ def test_no_policy_post_freeze_or_release_artifacts_exist_before_human_approval(
     assert hashlib.sha256(historical.read_bytes()).hexdigest() == (
         "e912cc72b818fc21f374fda11f4d859bf931accd5fc71759a7f6d46d45591411"
     )
-    calibration = results / "v07-el-calibration-v4-20260720-01.json"
+    historical_v4 = results / "v07-el-calibration-v4-20260720-01.json"
+    historical_v4_value = json.loads(historical_v4.read_text(encoding="utf-8"))
+    assert canonical_sha256(historical_v4_value) == (
+        "4eea72699aee9cc4f09b4a1ca9a279240be0d0b071ea424c4b012ba50b36bad7"
+    )
+    assert hashlib.sha256(historical_v4.read_bytes()).hexdigest() == (
+        "f1ba27f37fb6a019939373bf045897f22c0e01f0be9b2f8aa5578a11abe196f0"
+    )
+    calibration = results / "v07-el-calibration-v5-20260720-01.json"
     if calibration.exists():
         asyncio.run(
             verify_calibration_artifact(ROOT, calibration, require_live_absence=False)
         )
     forbidden = (
-        "v07-el-post-freeze-v4-20260720-01.json",
-        "v07-el-post-freeze-v4-20260720-02.json",
-        "v07-el-post-freeze-v4-20260720-03.json",
+        "v07-el-post-freeze-v5-20260720-01.json",
+        "v07-el-post-freeze-v5-20260720-02.json",
+        "v07-el-post-freeze-v5-20260720-03.json",
     )
     assert all(not (results / name).exists() for name in forbidden)
 
