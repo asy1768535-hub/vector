@@ -4,10 +4,11 @@ import hashlib
 import json
 import math
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, RootModel, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, RootModel, model_validator
 
 from app.services.graph_canonical import canonical_graph_json_v1
 
@@ -24,7 +25,18 @@ GitCommit = Annotated[str, Field(pattern=GIT_COMMIT_RE.pattern)]
 LogicalKey = Annotated[str, Field(pattern=LOGICAL_KEY_RE.pattern)]
 RunId = Annotated[str, Field(pattern=RUN_ID_RE.pattern)]
 DatabaseId = Annotated[str, Field(pattern=DATABASE_ID_RE.pattern)]
-UtcTimestamp = Annotated[str, Field(pattern=UTC_RE.pattern)]
+
+
+def _validate_utc_timestamp(value: str) -> str:
+    datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ")
+    return value
+
+
+UtcTimestamp = Annotated[
+    str,
+    Field(pattern=UTC_RE.pattern),
+    AfterValidator(_validate_utc_timestamp),
+]
 
 CATEGORY_ORDER = (
     "exact-canonical",
@@ -45,6 +57,34 @@ STRATUM_ORDER = (
     "one-hop-latin-mixed",
     "two-hop-cjk",
     "two-hop-latin-mixed",
+)
+GATE_ID_ORDER = (
+    "wrong-auto-link-count",
+    "auto-link-precision",
+    "exact-regression-accuracy",
+    "scope-safety",
+    "property-privacy",
+    "privacy-leak-count",
+    "publication-membership-failures",
+    "ambiguous-unlinkable-false-auto-links",
+    "candidate-recall-at-5",
+    "overall-link-recall",
+    "non-exact-link-recall",
+    "link-recall-gain-vs-exact",
+    "abstention-accuracy",
+    "evidence-recall-gain",
+    "complete-support-gain",
+    "evidence-precision-regression",
+    "any-gold-gain",
+    "bootstrap-ci-lower",
+    "linker-p95",
+    "link-graph-p95",
+    "link-graph-ratio",
+    "timeout-count",
+    "sql-statement-budget",
+    "per-mention-sql",
+    "projection-rows",
+    "deterministic-response-hash",
 )
 EXTERNAL_DISTRIBUTION_VERSIONS = (
     ("alembic", "1.18.4"),
@@ -696,6 +736,17 @@ class LatencySummary(StrictModel):
     p95_us: int = Field(ge=0)
     max_us: int = Field(ge=0)
 
+    @model_validator(mode="after")
+    def validate_percentiles(self) -> LatencySummary:
+        ordered = sorted(self.samples_us)
+        if (self.p50_us, self.p95_us, self.max_us) != (
+            ordered[14],
+            ordered[28],
+            ordered[-1],
+        ):
+            raise ValueError("latency percentile invariant failed")
+        return self
+
 
 class Performance(StrictModel):
     linker: LatencySummary
@@ -724,6 +775,12 @@ class QdrantCollectionConfig(StrictModel):
     scalar_quantile: ReducedRational
     scalar_always_ram: Literal[True]
 
+    @model_validator(mode="after")
+    def validate_quantile(self) -> QdrantCollectionConfig:
+        if self.scalar_quantile != ReducedRational(numerator=99, denominator=100):
+            raise ValueError("qdrant scalar quantile mismatch")
+        return self
+
 
 class QdrantIdentity(StrictModel):
     identity_version: Literal["entity-linking-qdrant-identity-v1"]
@@ -733,6 +790,16 @@ class QdrantIdentity(StrictModel):
     collection_config: QdrantCollectionConfig
     collection_config_sha256: Sha256
     qdrant_fingerprint_sha256: Sha256
+
+    @model_validator(mode="after")
+    def validate_hashes(self) -> QdrantIdentity:
+        config = self.collection_config.model_dump(mode="json")
+        projection = self.model_dump(mode="json", exclude={"qdrant_fingerprint_sha256"})
+        if self.collection_config_sha256 != canonical_sha256(
+            config
+        ) or self.qdrant_fingerprint_sha256 != canonical_sha256(projection):
+            raise ValueError("qdrant identity hash mismatch")
+        return self
 
 
 class QdrantCollection(StrictModel):
@@ -753,6 +820,13 @@ class EmbeddingIdentity(StrictModel):
     vector_encoding_version: Literal["ieee754-binary64-be-v1"]
     probe_vector_sha256: Sha256
     embedding_fingerprint_sha256: Sha256
+
+    @model_validator(mode="after")
+    def validate_fingerprint(self) -> EmbeddingIdentity:
+        projection = self.model_dump(mode="json", exclude={"embedding_fingerprint_sha256"})
+        if self.embedding_fingerprint_sha256 != canonical_sha256(projection):
+            raise ValueError("embedding identity hash mismatch")
+        return self
 
 
 class EnvironmentRecord(StrictModel):
@@ -783,6 +857,9 @@ class EnvironmentRecord(StrictModel):
         records = [record.model_dump(mode="json") for record in self.external_distribution_records]
         if canonical_sha256(records) != self.external_distribution_set_sha256:
             raise ValueError("external distribution set hash mismatch")
+        projection = self.model_dump(mode="json", exclude={"environment_fingerprint_sha256"})
+        if self.environment_fingerprint_sha256 != canonical_sha256(projection):
+            raise ValueError("environment fingerprint mismatch")
         return self
 
 
@@ -838,6 +915,351 @@ class CalibrationArtifact(StrictModel):
     qdrant_collection_created: Literal[True]
     qdrant_cleanup_succeeded: Literal[True]
     policy_ref: None
+
+    @model_validator(mode="after")
+    def validate_artifact_invariants(self) -> CalibrationArtifact:
+        selected = self.candidate_thresholds is not None
+        if selected != (self.status == "passed"):
+            raise ValueError("calibration status/threshold invariant failed")
+        if not selected and self.selection_reason != "no-valid-candidate":
+            raise ValueError("calibration no-go reason mismatch")
+        if selected and self.selection_reason == "no-valid-candidate":
+            raise ValueError("calibration selected reason mismatch")
+        if self.finished_at <= self.started_at:
+            raise ValueError("calibration timestamp order invalid")
+        if (
+            self.pg_cluster_fingerprint_sha256 != self.environment.pg_cluster_fingerprint_sha256
+            or self.qdrant_fingerprint_sha256 != self.environment.qdrant.qdrant_fingerprint_sha256
+            or self.embedding_fingerprint_sha256 != self.environment.embedding.embedding_fingerprint_sha256
+            or self.environment_fingerprint_sha256 != self.environment.environment_fingerprint_sha256
+        ):
+            raise ValueError("calibration environment identity mismatch")
+        if tuple(row.grid_index for row in self.grid_results) != tuple(range(25)):
+            raise ValueError("calibration grid order invalid")
+        threshold_pairs = tuple(
+            (row.thresholds.min_score_micros, row.thresholds.min_margin_micros) for row in self.grid_results
+        )
+        if len(set(threshold_pairs)) != 25:
+            raise ValueError("calibration grid threshold duplicate")
+        responses = [row.model_dump(mode="json") for row in self.ordered_response_hashes]
+        if self.canonical_response_set_sha256 != canonical_sha256(responses):
+            raise ValueError("calibration response set hash mismatch")
+        return self
+
+
+class PolicyApprovalPayload(StrictModel):
+    schema_version: Literal["entity-linking-policy-approval-v1"]
+    calibration_ref: ArtifactRef
+    approved_thresholds: Threshold
+    approved_by: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9 ._:/#-]{0,127}$",
+    )
+    approved_at: UtcTimestamp
+    approval_reference: str = Field(
+        min_length=1,
+        max_length=256,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9 ._:/#-]{0,255}$",
+    )
+
+
+class FrozenPolicy(StrictModel):
+    schema_version: Literal["entity-linking-policy-v1"]
+    policy_version: Literal["entity-linking-policy-v1"]
+    algorithm_version: Literal["lexical-score-v1"]
+    normalization_version: Literal["normalize_graph_name_v1"]
+    g2_approval_commit: GitCommit
+    g2_specification_tree_sha256: Sha256
+    calibration_ref: ArtifactRef
+    approved_thresholds: Threshold
+    approval_payload_sha256: Sha256
+    dataset_manifest_ref: ArtifactRef
+    dataset_content_sha256: Sha256
+    evaluation_config_sha256: Sha256
+    ontology_schema_set_hash: Sha256
+    code_commit: GitCommit
+    evaluation_tree_sha256: Sha256
+    accepted_dependency_closure_sha256: Sha256
+    reference_scorer_sha256: Sha256
+    external_distribution_set_sha256: Sha256
+    control_config_sha256: Sha256
+    environment_fingerprint_sha256: Sha256
+    pg_cluster_fingerprint_sha256: Sha256
+    qdrant_fingerprint_sha256: Sha256
+    embedding_fingerprint_sha256: Sha256
+    approved_by: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9 ._:/#-]{0,127}$",
+    )
+    approved_at: UtcTimestamp
+    approval_reference: str = Field(
+        min_length=1,
+        max_length=256,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9 ._:/#-]{0,255}$",
+    )
+
+
+class PostFreezeArtifact(StrictModel):
+    schema_version: Literal["entity-linking-eval-result-v1"]
+    phase: Literal["post_freeze_release"]
+    status: Literal["passed", "no_go"]
+    ordinal: Literal[1, 2, 3]
+    run_id: RunId
+    database_id: DatabaseId
+    started_at: UtcTimestamp
+    finished_at: UtcTimestamp
+    g2_approval_commit: GitCommit
+    g2_specification_tree_sha256: Sha256
+    code_commit: GitCommit
+    evaluation_tree_sha256: Sha256
+    accepted_dependency_closure_sha256: Sha256
+    reference_scorer_sha256: Sha256
+    external_distribution_set_sha256: Sha256
+    dataset_manifest_ref: ArtifactRef
+    dataset_content_sha256: Sha256
+    evaluation_config_sha256: Sha256
+    ontology_schema_set_hash: Sha256
+    environment_fingerprint_sha256: Sha256
+    environment: EnvironmentRecord
+    pg_cluster_fingerprint_sha256: Sha256
+    qdrant_fingerprint_sha256: Sha256
+    embedding_fingerprint_sha256: Sha256
+    qdrant_collection: QdrantCollection
+    control_config_sha256: Sha256
+    grid_results: None
+    candidate_thresholds: None
+    selection_reason: None
+    metrics: Metrics
+    category_counts: CategoryCounts
+    stratum_counts: StratumCounts
+    performance: Performance
+    ordered_response_hashes: tuple[CaseResponseHash, ...] = Field(min_length=1)
+    canonical_response_set_sha256: Sha256
+    database_created: Literal[True]
+    database_cleanup_succeeded: Literal[True]
+    qdrant_collection_created: Literal[True]
+    qdrant_cleanup_succeeded: Literal[True]
+    policy_ref: ArtifactRef
+
+    @model_validator(mode="after")
+    def validate_artifact_invariants(self) -> PostFreezeArtifact:
+        if self.finished_at <= self.started_at:
+            raise ValueError("post-freeze timestamp order invalid")
+        if (
+            self.pg_cluster_fingerprint_sha256 != self.environment.pg_cluster_fingerprint_sha256
+            or self.qdrant_fingerprint_sha256 != self.environment.qdrant.qdrant_fingerprint_sha256
+            or self.embedding_fingerprint_sha256 != self.environment.embedding.embedding_fingerprint_sha256
+            or self.environment_fingerprint_sha256 != self.environment.environment_fingerprint_sha256
+        ):
+            raise ValueError("post-freeze environment identity mismatch")
+        responses = [row.model_dump(mode="json") for row in self.ordered_response_hashes]
+        if self.canonical_response_set_sha256 != canonical_sha256(responses):
+            raise ValueError("post-freeze response set hash mismatch")
+        return self
+
+
+GateId = Literal[
+    "wrong-auto-link-count",
+    "auto-link-precision",
+    "exact-regression-accuracy",
+    "scope-safety",
+    "property-privacy",
+    "privacy-leak-count",
+    "publication-membership-failures",
+    "ambiguous-unlinkable-false-auto-links",
+    "candidate-recall-at-5",
+    "overall-link-recall",
+    "non-exact-link-recall",
+    "link-recall-gain-vs-exact",
+    "abstention-accuracy",
+    "evidence-recall-gain",
+    "complete-support-gain",
+    "evidence-precision-regression",
+    "any-gold-gain",
+    "bootstrap-ci-lower",
+    "linker-p95",
+    "link-graph-p95",
+    "link-graph-ratio",
+    "timeout-count",
+    "sql-statement-budget",
+    "per-mention-sql",
+    "projection-rows",
+    "deterministic-response-hash",
+]
+
+
+class GateDecision(StrictModel):
+    gate_id: GateId
+    value_type: Literal["integer", "rational", "boolean", "sha256"]
+    comparison: Literal["eq", "ge", "le", "gt", "all_equal"]
+    observed_integer: int | None
+    threshold_integer: int | None
+    observed_rational: ReducedRational | None
+    threshold_rational: ReducedRational | None
+    observed_boolean: bool | None
+    threshold_boolean: bool | None
+    observed_sha256: Sha256 | None
+    threshold_sha256: Sha256 | None
+    passed: bool
+
+    @model_validator(mode="after")
+    def validate_typed_pair_and_result(self) -> GateDecision:
+        pairs = {
+            "integer": (self.observed_integer, self.threshold_integer),
+            "rational": (self.observed_rational, self.threshold_rational),
+            "boolean": (self.observed_boolean, self.threshold_boolean),
+            "sha256": (self.observed_sha256, self.threshold_sha256),
+        }
+        if any(
+            (left is None) != (kind != self.value_type) or (right is None) != (kind != self.value_type)
+            for kind, (left, right) in pairs.items()
+        ):
+            raise ValueError("gate typed pair invariant failed")
+        observed, threshold = pairs[self.value_type]
+        if self.value_type == "integer":
+            if self.comparison not in {"eq", "ge", "le"}:
+                raise ValueError("integer gate comparison invalid")
+            expected = {
+                "eq": observed == threshold,
+                "ge": observed >= threshold,
+                "le": observed <= threshold,
+            }[self.comparison]
+        elif self.value_type == "rational":
+            if self.comparison not in {"eq", "ge", "le", "gt"}:
+                raise ValueError("rational gate comparison invalid")
+            assert isinstance(observed, ReducedRational)
+            assert isinstance(threshold, ReducedRational)
+            left = observed.numerator * threshold.denominator
+            right = threshold.numerator * observed.denominator
+            expected = {
+                "eq": left == right,
+                "ge": left >= right,
+                "le": left <= right,
+                "gt": left > right,
+            }[self.comparison]
+        elif self.value_type == "boolean":
+            if self.comparison != "eq":
+                raise ValueError("boolean gate comparison invalid")
+            expected = observed == threshold
+        else:
+            if self.comparison not in {"eq", "all_equal"}:
+                raise ValueError("sha256 gate comparison invalid")
+            expected = observed == threshold
+        if self.passed != expected:
+            raise ValueError("gate decision result mismatch")
+        return self
+
+
+class OrdinalArtifactRef(StrictModel):
+    ordinal: Literal[1, 2, 3]
+    run_id: RunId
+    artifact_ref: ArtifactRef
+
+
+class OrdinalResponseHash(StrictModel):
+    ordinal: Literal[1, 2, 3]
+    run_id: RunId
+    canonical_response_set_sha256: Sha256
+
+
+class RunGateDecision(StrictModel):
+    ordinal: Literal[1, 2, 3]
+    run_id: RunId
+    artifact_ref: ArtifactRef
+    gate_decisions: tuple[GateDecision, ...] = Field(min_length=26, max_length=26)
+    all_passed: bool
+
+    @model_validator(mode="after")
+    def validate_decisions(self) -> RunGateDecision:
+        if tuple(row.gate_id for row in self.gate_decisions) != GATE_ID_ORDER:
+            raise ValueError("run gate decision order invalid")
+        if self.all_passed != all(row.passed for row in self.gate_decisions):
+            raise ValueError("run all-passed invariant failed")
+        return self
+
+
+class IdentityTimeCleanupDecision(StrictModel):
+    g2_approval_commit_valid: bool
+    g2_specification_tree_match: bool
+    artifact_reference_hashes_match: bool
+    code_identities_match: bool
+    dependency_closures_match: bool
+    external_distribution_sets_match: bool
+    dataset_identities_match: bool
+    control_identities_match: bool
+    environment_fingerprints_match: bool
+    pg_cluster_fingerprints_match: bool
+    qdrant_fingerprints_match: bool
+    embedding_fingerprints_match: bool
+    run_ids_unique: bool
+    database_ids_unique: bool
+    ordinals_exact: bool
+    policy_after_calibration: bool
+    runs_after_policy: bool
+    runs_finish_after_start: bool
+    all_database_cleanup_succeeded: bool
+    all_qdrant_cleanup_succeeded: bool
+    all_databases_live_absent_same_cluster: bool
+    all_qdrant_collections_live_absent: bool
+    canonical_response_sets_equal: bool
+    privacy_scans_passed: bool
+    protected_paths_zero_drift: bool
+    openapi_has_no_v07: bool
+    alembic_head_is_0023: bool
+    mandatory_live_tests_non_skipped: bool
+
+
+class ReleaseEvidence(StrictModel):
+    schema_version: Literal["entity-linking-release-evidence-v1"]
+    status: Literal["passed", "no_go"]
+    g2_approval_commit: GitCommit
+    g2_specification_tree_sha256: Sha256
+    dataset_manifest_ref: ArtifactRef
+    dataset_content_sha256: Sha256
+    evaluation_config_sha256: Sha256
+    ontology_schema_set_hash: Sha256
+    code_commit: GitCommit
+    evaluation_tree_sha256: Sha256
+    accepted_dependency_closure_sha256: Sha256
+    reference_scorer_sha256: Sha256
+    external_distribution_set_sha256: Sha256
+    control_config_sha256: Sha256
+    environment_fingerprint_sha256: Sha256
+    pg_cluster_fingerprint_sha256: Sha256
+    qdrant_fingerprint_sha256: Sha256
+    embedding_fingerprint_sha256: Sha256
+    calibration_ref: ArtifactRef
+    policy_ref: ArtifactRef
+    post_freeze_refs: tuple[OrdinalArtifactRef, ...] = Field(min_length=3, max_length=3)
+    canonical_response_set_sha256_by_ordinal: tuple[OrdinalResponseHash, ...] = Field(
+        min_length=3, max_length=3
+    )
+    run_gate_decisions: tuple[RunGateDecision, ...] = Field(min_length=3, max_length=3)
+    identity_time_cleanup_decisions: IdentityTimeCleanupDecision
+    final_hard_and_decision: Literal["GO_ELIGIBLE", "NO_GO"]
+
+    @model_validator(mode="after")
+    def validate_release_decision(self) -> ReleaseEvidence:
+        expected_ordinals = (1, 2, 3)
+        arrays = (
+            self.post_freeze_refs,
+            self.canonical_response_set_sha256_by_ordinal,
+            self.run_gate_decisions,
+        )
+        if any(tuple(row.ordinal for row in rows) != expected_ordinals for rows in arrays):
+            raise ValueError("release ordinal order invalid")
+        expected_runs = tuple(row.run_id for row in self.post_freeze_refs)
+        if any(tuple(row.run_id for row in rows) != expected_runs for rows in arrays[1:]):
+            raise ValueError("release run reference mismatch")
+        decisions = self.identity_time_cleanup_decisions.model_dump(mode="json")
+        eligible = all(row.all_passed for row in self.run_gate_decisions) and all(decisions.values())
+        if (self.status == "passed") != eligible or (
+            self.final_hard_and_decision == "GO_ELIGIBLE"
+        ) != eligible:
+            raise ValueError("release final decision invariant failed")
+        return self
 
 
 def canonical_sha256(value: Any) -> str:

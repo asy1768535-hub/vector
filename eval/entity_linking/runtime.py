@@ -35,6 +35,7 @@ from app.services.graph_canonical import canonical_graph_json_v1
 from app.services.graph_normalization import normalize_graph_name_v1
 from eval.entity_linking.contracts import (
     CATEGORY_ORDER,
+    GATE_ID_ORDER,
     STRATUM_ORDER,
     ArtifactRef,
     BootstrapResult,
@@ -53,11 +54,14 @@ from eval.entity_linking.contracts import (
     EXTERNAL_DISTRIBUTION_VERSIONS,
     ExternalDistributionRecord,
     FeasibilityManifest,
+    FrozenPolicy,
     FeatureCase,
     FeatureExpected,
     GoldDataset,
     GoldUtilityRecord,
     GridResult,
+    GateDecision,
+    IdentityTimeCleanupDecision,
     IntrinsicMetrics,
     LatencySummary,
     LibraryRecord,
@@ -69,22 +73,28 @@ from eval.entity_linking.contracts import (
     OrderingCase,
     PerformanceFixture,
     Performance,
+    PolicyApprovalPayload,
+    PostFreezeArtifact,
     PrivacyCanaryRecord,
     PublicationRecord,
     QdrantCollection,
     QdrantCollectionConfig,
     QdrantIdentity,
     ReducedRational,
+    ReleaseEvidence,
     RelationRecord,
     RelationTypeRecord,
     RevisionRecord,
     ScopeSchemaHash,
     StratumCounts,
     SignedGain,
+    RunGateDecision,
     Threshold,
     ThresholdGrid,
     UtilityGains,
     UtilityMetrics,
+    OrdinalArtifactRef,
+    OrdinalResponseHash,
     CaseResponseHash,
     EnvironmentRecord,
     BootstrapConfig,
@@ -94,8 +104,10 @@ from eval.entity_linking.contracts import (
     ChunkRecord,
     artifact_ref,
     canonical_sha256,
+    exact_file_sha256,
     load_canonical_json,
     load_canonical_jsonl,
+    parse_json_bytes,
 )
 from eval.entity_linking.reference_scorer import (
     EntityCandidate,
@@ -110,12 +122,28 @@ from eval.entity_linking.reference_scorer import (
 )
 
 
-G2_APPROVAL_COMMIT = "75bf4141be743c1164bfa9841d0737509d7575fe"
-G2_SPECIFICATION_TREE_SHA256 = "b5cde88a6705b1da9053dd36bef46ec2b096b7bd18555b65b5c3ff6fab908075"
+G2_APPROVAL_COMMIT = "97507e010934c63f18fc06cb3d5098d1dfe28a11"
+G2_SPECIFICATION_TREE_SHA256 = "360b4d6ae30cfa53ec77901436841c0ad48dfa1228c09ddcb112448a0e67d55c"
 G1_COMMIT = "f40c5c84c3248639aa6603d43b6b306ad76d66fd"
+AUDIT_PRESERVATION_COMMIT = "155ef946c48272518c996458bc206039b6676c18"
+INVALIDATED_G2_APPROVAL_COMMIT = "75bf4141be743c1164bfa9841d0737509d7575fe"
+INVALIDATED_G2_SPECIFICATION_TREE_SHA256 = "b5cde88a6705b1da9053dd36bef46ec2b096b7bd18555b65b5c3ff6fab908075"
+INCOMPLETE_IMPLEMENTATION_COMMIT = "4217498277706ceb1ee2b60d25d593cbc80ef45f"
+INVALIDATED_CALIBRATION_PATH = "eval/entity_linking/results/v07-el-calibration-v1-20260717-01.json"
+INVALIDATED_CALIBRATION_CANONICAL_SHA256 = "96757dcd901439828b61605c473a34c2c838ed6755db6f129d030561b156894d"
+INVALIDATED_CALIBRATION_FILE_SHA256 = "c35210075e179ebce197275041e0ff69403297185ec2ebcc16a663d7611e9225"
+INVALIDATED_CALIBRATION_BLOB_OID = "4c1dc04cca1ddd874fa309ad0314ad24dfc0ea68"
+PRESERVED_GITATTRIBUTES_BLOB_OID = "3f5e0ee58b5d94db6fd2ed25511a9957130885f6"
 UUID_NAMESPACE = uuid.UUID("1bcb8d89-4423-563a-962d-670c026f6dc8")
-CALIBRATION_RUN_ID = "v07-el-calibration-v1-20260717-01"
-CALIBRATION_DATABASE_ID = "vkt_v07_el_eval_calibration_20260717_01"
+CALIBRATION_RUN_ID = "v07-el-calibration-v2-20260720-01"
+CALIBRATION_DATABASE_ID = "vkt_v07_el_eval_calibration_20260720_01"
+POST_FREEZE_IDENTITIES = (
+    (1, "v07-el-post-freeze-v2-20260720-01", "vkt_v07_el_eval_post_freeze_20260720_01"),
+    (2, "v07-el-post-freeze-v2-20260720-02", "vkt_v07_el_eval_post_freeze_20260720_02"),
+    (3, "v07-el-post-freeze-v2-20260720-03", "vkt_v07_el_eval_post_freeze_20260720_03"),
+)
+POLICY_PATH = "eval/entity_linking/link_policy_v1.json"
+RELEASE_EVIDENCE_PATH = "eval/entity_linking/release_evidence_v1.json"
 EMBEDDING_PROBE_TEXT = "vkt-v07-entity-linking-identity-probe"
 EMBEDDING_PROBE_SHA256 = "4caad60c112bd93fda55714c91aef2762a3c5c5c0df2a09dc28e6296800cc61f"
 
@@ -174,6 +202,41 @@ EXCLUDED_USER_PATHS = (
     "_verify_baseline.py",
     "docs/codex-handoff.md",
 )
+G2_SPECIFICATION_PATHS = (
+    ".gitattributes",
+    "docs/superpowers/specs/2026-07-17-v0.7-publication-scoped-entity-linking.md",
+    "docs/superpowers/plans/2026-07-17-v0.7-publication-scoped-entity-linking-g2.md",
+    "docs/testing/acceptance/v0.7-entity-linking-corrective-audit.md",
+    "docs/testing/acceptance/v0.7-entity-linking-database-change-incident.md",
+)
+G2_APPROVAL_PATHS = (
+    "docs/README.md",
+    "docs/superpowers/plans/2026-07-17-v0.7-publication-scoped-entity-linking-g2.md",
+    "docs/testing/acceptance/v0.7-entity-linking-corrective-audit.md",
+    "docs/testing/acceptance/v0.7-entity-linking-database-change-incident.md",
+)
+AUDIT_PRESERVATION_PATHS = (".gitattributes", INVALIDATED_CALIBRATION_PATH)
+LF_CONTRACT_PATHS = (
+    ".gitattributes",
+    "docs/superpowers/specs/2026-07-17-v0.7-publication-scoped-entity-linking.md",
+    "docs/superpowers/plans/2026-07-17-v0.7-publication-scoped-entity-linking-g2.md",
+    "docs/testing/acceptance/v0.7-entity-linking-corrective-audit.md",
+    "docs/testing/acceptance/v0.7-entity-linking-database-change-incident.md",
+    "docs/testing/acceptance/v0.7-entity-linking-feasibility.md",
+    "eval/entity_linking/contracts.py",
+    "eval/entity_linking/gold_v1.json",
+    "eval/entity_linking/results/v07-el-calibration-v1-20260717-01.json",
+    "scripts/entity_linking_feasibility.py",
+    "tests/test_v07_entity_linking_eval.py",
+    "tests/test_v07_entity_linking_eval_pg.py",
+)
+PHASE_OUTPUT_PATHS = (
+    INVALIDATED_CALIBRATION_PATH,
+    f"eval/entity_linking/results/{CALIBRATION_RUN_ID}.json",
+    POLICY_PATH,
+    *(f"eval/entity_linking/results/{run_id}.json" for _, run_id, _ in POST_FREEZE_IDENTITIES),
+    RELEASE_EVIDENCE_PATH,
+)
 
 
 class EntityLinkingEvalError(RuntimeError):
@@ -211,28 +274,57 @@ def _git(root: Path, *args: str, allow_failure: bool = False) -> str:
     return result.stdout.strip()
 
 
-def verify_g2_approval(root: Path) -> dict[str, str]:
-    head = _git(root, "rev-parse", "HEAD")
-    if _git(root, "merge-base", "--is-ancestor", G2_APPROVAL_COMMIT, head, allow_failure=True) != "":
-        pass
+def _require_ancestor(root: Path, ancestor: str, descendant: str) -> None:
     result = subprocess.run(
-        ("git", "merge-base", "--is-ancestor", G2_APPROVAL_COMMIT, head), cwd=root, check=False
+        ("git", "merge-base", "--is-ancestor", ancestor, descendant),
+        cwd=root,
+        capture_output=True,
+        check=False,
     )
     if result.returncode:
         raise EntityLinkingEvalError("g2_approval_commit_invalid")
-    g1_result = subprocess.run(
-        ("git", "merge-base", "--is-ancestor", G1_COMMIT, G2_APPROVAL_COMMIT), cwd=root, check=False
+
+
+def _audit_field(document: str, name: str) -> str:
+    match = re.search(rf"(?m)^{re.escape(name)}:\s*\n\s+([^\r\n]+)$", document)
+    if match is None:
+        raise EntityLinkingEvalError("invalidated_calibration_artifact")
+    return match.group(1).strip()
+
+
+def verify_g2_approval(root: Path) -> dict[str, str]:
+    head = _git(root, "rev-parse", "HEAD")
+    if not re.fullmatch(r"[0-9a-f]{40}", head):
+        raise EntityLinkingEvalError("g2_approval_commit_invalid")
+    _require_ancestor(root, AUDIT_PRESERVATION_COMMIT, G2_APPROVAL_COMMIT)
+    _require_ancestor(root, G1_COMMIT, G2_APPROVAL_COMMIT)
+    _require_ancestor(root, G2_APPROVAL_COMMIT, head)
+
+    preservation_paths = set(
+        _git(
+            root,
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            AUDIT_PRESERVATION_COMMIT,
+        ).splitlines()
     )
-    if g1_result.returncode:
+    approval_paths = set(
+        _git(
+            root,
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            G2_APPROVAL_COMMIT,
+        ).splitlines()
+    )
+    if preservation_paths != set(AUDIT_PRESERVATION_PATHS) or approval_paths != set(G2_APPROVAL_PATHS):
         raise EntityLinkingEvalError("g2_approval_commit_invalid")
 
     records: list[dict[str, str]] = []
-    for relative in sorted(
-        (
-            "docs/superpowers/specs/2026-07-17-v0.7-publication-scoped-entity-linking.md",
-            "docs/superpowers/plans/2026-07-17-v0.7-publication-scoped-entity-linking-g2.md",
-        )
-    ):
+    for relative in sorted(G2_SPECIFICATION_PATHS):
         oid = _git(root, "rev-parse", f"{G2_APPROVAL_COMMIT}:{relative}")
         body = subprocess.check_output(("git", "cat-file", "blob", oid), cwd=root)
         if (root / relative).read_bytes() != body:
@@ -247,6 +339,67 @@ def verify_g2_approval(root: Path) -> dict[str, str]:
     specification_hash = canonical_sha256(records)
     if specification_hash != G2_SPECIFICATION_TREE_SHA256:
         raise EntityLinkingEvalError("g2_specification_tree_drift")
+
+    audit = (root / G2_SPECIFICATION_PATHS[3]).read_text(encoding="utf-8")
+    incident = (root / G2_SPECIFICATION_PATHS[4]).read_text(encoding="utf-8")
+    expected_audit_fields = {
+        "previous_g2_approval_commit": INVALIDATED_G2_APPROVAL_COMMIT,
+        "previous_g2_specification_tree_sha256": INVALIDATED_G2_SPECIFICATION_TREE_SHA256,
+        "incomplete_g3_implementation_commit": INCOMPLETE_IMPLEMENTATION_COMMIT,
+        "repository_relative_path": INVALIDATED_CALIBRATION_PATH,
+        "canonical_sha256": INVALIDATED_CALIBRATION_CANONICAL_SHA256,
+        "exact_file_sha256": INVALIDATED_CALIBRATION_FILE_SHA256,
+        "workflow_status": "invalidated_audit_only",
+        "audit_preservation_commit": AUDIT_PRESERVATION_COMMIT,
+        "preserved_artifact_git_blob_oid": INVALIDATED_CALIBRATION_BLOB_OID,
+        "preserved_gitattributes_git_blob_oid": PRESERVED_GITATTRIBUTES_BLOB_OID,
+    }
+    if any(_audit_field(audit, key) != value for key, value in expected_audit_fields.items()):
+        raise EntityLinkingEvalError("invalidated_calibration_artifact")
+    required_incident_values = (
+        "> **Status:** CLOSED_REBUILT",
+        "environment_classification: non_production_non_shared_acceptance",
+        "disposition: rebuilt_from_template0_to_0023_and_smoke_checked",
+        "upgrade_pre_authorized: false",
+        "post_event_disposition_authorized: true",
+        "incident_gate: PASSED",
+    )
+    if any(value not in incident for value in required_incident_values):
+        raise EntityLinkingEvalError("g2_approval_commit_invalid")
+
+    preserved_artifact_oid = _git(
+        root, "rev-parse", f"{AUDIT_PRESERVATION_COMMIT}:{INVALIDATED_CALIBRATION_PATH}"
+    )
+    preserved_attributes_oid = _git(root, "rev-parse", f"{AUDIT_PRESERVATION_COMMIT}:.gitattributes")
+    invalidated_path = root / INVALIDATED_CALIBRATION_PATH
+    current_artifact_oid = _git(root, "hash-object", "--no-filters", "--", INVALIDATED_CALIBRATION_PATH)
+    if (
+        preserved_artifact_oid != INVALIDATED_CALIBRATION_BLOB_OID
+        or current_artifact_oid != INVALIDATED_CALIBRATION_BLOB_OID
+        or preserved_attributes_oid != PRESERVED_GITATTRIBUTES_BLOB_OID
+        or exact_file_sha256(invalidated_path) != INVALIDATED_CALIBRATION_FILE_SHA256
+    ):
+        raise EntityLinkingEvalError("invalidated_calibration_artifact")
+    payload = invalidated_path.read_bytes()
+    if not payload.endswith(b"\n"):
+        raise EntityLinkingEvalError("invalidated_calibration_artifact")
+    invalidated_value = parse_json_bytes(payload[:-1])
+    if canonical_sha256(invalidated_value) != INVALIDATED_CALIBRATION_CANONICAL_SHA256:
+        raise EntityLinkingEvalError("invalidated_calibration_artifact")
+
+    attributes = _git(root, "check-attr", "text", "eol", "--", *LF_CONTRACT_PATHS)
+    observed_attributes: dict[tuple[str, str], str] = {}
+    for line in attributes.splitlines():
+        parts = line.split(": ", 2)
+        if len(parts) != 3:
+            raise EntityLinkingEvalError("g2_specification_tree_drift")
+        observed_attributes[(parts[0].replace("\\", "/"), parts[1])] = parts[2]
+    if any(
+        observed_attributes.get((path, "text")) != "set" or observed_attributes.get((path, "eol")) != "lf"
+        for path in LF_CONTRACT_PATHS
+    ):
+        raise EntityLinkingEvalError("g2_specification_tree_drift")
+
     protected = _git(root, "diff", "--name-only", G2_APPROVAL_COMMIT, "--", *PROTECTED_PATHS)
     if protected:
         raise EntityLinkingEvalError("scope_drift_detected")
@@ -1880,6 +2033,11 @@ def load_dataset(root: Path) -> LoadedDataset:
     assert isinstance(gold, GoldDataset)
     assert isinstance(conformance, ConformanceDataset)
     assert isinstance(manifest, FeasibilityManifest)
+    if (
+        manifest.g2_approval_commit != G2_APPROVAL_COMMIT
+        or manifest.g2_specification_tree_sha256 != G2_SPECIFICATION_TREE_SHA256
+    ):
+        raise EntityLinkingEvalError("g2_specification_tree_drift")
     typed_cases = tuple(case for case in cases if isinstance(case, EvaluationCase))
     if len(typed_cases) != len(cases):
         raise ValueError("case type mismatch")
@@ -2533,7 +2691,7 @@ async def drop_database(admin_dsn: str, database_id: str) -> None:
 
 def upgrade_database(root: Path, dsn: str) -> None:
     url = make_url(dsn)
-    if not all((url.host, url.port, url.username, url.password, url.database)):
+    if not all((url.host, url.port, url.username, url.database)):
         raise EntityLinkingEvalError("postgres_dsn_required")
     environment = os.environ.copy()
     environment.update(
@@ -2541,7 +2699,7 @@ def upgrade_database(root: Path, dsn: str) -> None:
             "DB_HOST": url.host,
             "DB_PORT": str(url.port),
             "DB_USER": url.username,
-            "DB_PASSWORD": url.password,
+            "DB_PASSWORD": url.password or "",
             "DB_NAME": url.database,
         }
     )
@@ -3648,16 +3806,31 @@ async def collect_live_evaluation(
     embedding_api_key: str,
     embedding_calls: int,
     qdrant_calls: int,
+    phase: str,
+    policy_thresholds: Threshold | None = None,
 ) -> LiveEvaluationMaterial:
     from sqlalchemy import event, select
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
     from app.models.library import Library
 
-    grid_results = build_grid_results(dataset)
-    selected_threshold, selection_reason = select_calibration_threshold(grid_results)
-    if selected_threshold is None:
-        raise EntityLinkingEvalError("calibration_no_valid_candidate")
+    if phase == "calibration":
+        if policy_thresholds is not None:
+            raise EntityLinkingEvalError("artifact_schema_variant_invalid")
+        evaluation_cases = tuple(case for case in dataset.cases if case.split == "calibration")
+        grid_results = build_grid_results(dataset)
+        selected_threshold, selection_reason = select_calibration_threshold(grid_results)
+        if selected_threshold is None:
+            raise EntityLinkingEvalError("calibration_no_valid_candidate")
+    elif phase == "post_freeze_release":
+        if policy_thresholds is None:
+            raise EntityLinkingEvalError("policy_required")
+        evaluation_cases = tuple(case for case in dataset.cases if case.split == "release")
+        grid_results = ()
+        selected_threshold = policy_thresholds
+        selection_reason = "policy"
+    else:
+        raise EntityLinkingEvalError("artifact_schema_variant_invalid")
     engine = create_async_engine(dsn, pool_size=8, max_overflow=4)
     Session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     candidate_results: dict[str, CandidateCaseResult] = {}
@@ -3679,7 +3852,7 @@ async def collect_live_evaluation(
                 await db.execute(select(Library).where(Library.id == seeded.primary_library_id))
             ).scalar_one()
             db.info["entity_linking_entity_types"] = dataset.gold.entity_types
-            for case in dataset.cases:
+            for case in evaluation_cases:
                 before_candidate = sql_statement_count
                 candidate_results[case.case_id] = await run_candidate_case(
                     db, library, case, selected_threshold, seeded
@@ -3718,14 +3891,14 @@ async def collect_live_evaluation(
     dense_evidence = {key: value.evidence_keys for key, value in dense_results.items()}
     hybrid_evidence = {key: value.evidence_keys for key, value in hybrid_results.items()}
     candidate_utility = _utility_metrics(
-        dataset.cases,
+        evaluation_cases,
         candidate_evidence,
         relation_by_case=candidate_relations,
         node_by_case=candidate_nodes,
     )
-    dense_utility = _utility_metrics(dataset.cases, dense_evidence)
-    hybrid_utility = _utility_metrics(dataset.cases, hybrid_evidence)
-    intrinsic = _build_intrinsic_metrics(dataset.cases, candidate_results, exact_results)
+    dense_utility = _utility_metrics(evaluation_cases, dense_evidence)
+    hybrid_utility = _utility_metrics(evaluation_cases, hybrid_evidence)
+    intrinsic = _build_intrinsic_metrics(evaluation_cases, candidate_results, exact_results)
 
     evidence_control, evidence_value = _best_control(
         dense_utility.evidence_recall_at_10, hybrid_utility.evidence_recall_at_10
@@ -3741,12 +3914,11 @@ async def collect_live_evaluation(
         dense_utility.question_with_any_gold_evidence,
         hybrid_utility.question_with_any_gold_evidence,
     )
-    release = tuple(case for case in dataset.cases if case.split == "release")
     selected_control_evidence = dense_evidence if evidence_control == "dense" else hybrid_evidence
     candidate_recall_by_case = {}
     control_recall_by_case = {}
     strata = {}
-    for case in release:
+    for case in evaluation_cases:
         gold = set(case.gold_utility.evidence_keys)
         candidate_recall_by_case[case.case_id] = int(
             rate_metric(len(gold & set(candidate_evidence[case.case_id])), len(gold))["value_micros"] or 0
@@ -3796,7 +3968,7 @@ async def collect_live_evaluation(
         hybrid_utility=hybrid_utility,
         utility_gains=utility_gains,
     )
-    measured_cases = dataset.cases[5:35]
+    measured_cases = evaluation_cases[5:35]
     performance = Performance(
         linker=_latency_summary(
             [candidate_results[case.case_id].linker_duration_us for case in measured_cases]
@@ -3813,8 +3985,8 @@ async def collect_live_evaluation(
         memory_high_water_bytes=peak_memory,
         request_timeout_count=0,
         timeout_rollback_reused=True,
-        embedding_call_count=embedding_calls + len(dataset.cases) * 2,
-        qdrant_call_count=qdrant_calls + len(dataset.cases) * 2,
+        embedding_call_count=embedding_calls + len(evaluation_cases) * 2,
+        qdrant_call_count=qdrant_calls + len(evaluation_cases) * 2,
     )
     response_hashes = tuple(
         CaseResponseHash(
@@ -3827,8 +3999,7 @@ async def collect_live_evaluation(
             dense_evidence_set_sha256=canonical_sha256(list(dense_results[case.case_id].evidence_keys)),
             hybrid_evidence_set_sha256=canonical_sha256(list(hybrid_results[case.case_id].evidence_keys)),
         )
-        for case in dataset.cases
-        if case.split == "calibration"
+        for case in evaluation_cases
     )
     return LiveEvaluationMaterial(
         grid_results=grid_results,
@@ -3843,8 +4014,16 @@ async def collect_live_evaluation(
     )
 
 
-def implementation_identity(root: Path) -> tuple[str, str]:
-    verify_g2_approval(root)
+def _current_evaluation_tree_sha256(root: Path) -> str:
+    workspace_status = _git(root, "status", "--porcelain", "--untracked-files=all")
+    dirty_paths: set[str] = set()
+    for line in workspace_status.splitlines():
+        path_field = line[3:]
+        for path in path_field.split(" -> "):
+            dirty_paths.add(path.replace("\\", "/"))
+    allowed_dirty_paths = set(G3_IMPLEMENTATION_PATHS) | set(PHASE_OUTPUT_PATHS) | set(EXCLUDED_USER_PATHS)
+    if dirty_paths - allowed_dirty_paths:
+        raise EntityLinkingEvalError("scope_drift_detected")
     status = _git(
         root,
         "status",
@@ -3858,9 +4037,11 @@ def implementation_identity(root: Path) -> tuple[str, str]:
     tracked = set(_git(root, "ls-files", "--", *G3_IMPLEMENTATION_PATHS).splitlines())
     if tracked != set(G3_IMPLEMENTATION_PATHS):
         raise EntityLinkingEvalError("implementation_tree_untracked")
-    unexpected = set(_git(root, "ls-files", "eval/entity_linking").splitlines()) - {
-        path for path in G3_IMPLEMENTATION_PATHS if path.startswith("eval/entity_linking/")
-    }
+    unexpected = (
+        set(_git(root, "ls-files", "eval/entity_linking").splitlines())
+        - {path for path in G3_IMPLEMENTATION_PATHS if path.startswith("eval/entity_linking/")}
+        - set(PHASE_OUTPUT_PATHS)
+    )
     if unexpected:
         raise EntityLinkingEvalError("scope_drift_detected")
     records = [
@@ -3870,10 +4051,16 @@ def implementation_identity(root: Path) -> tuple[str, str]:
         }
         for path in sorted(G3_IMPLEMENTATION_PATHS)
     ]
+    return canonical_sha256(records)
+
+
+def implementation_identity(root: Path) -> tuple[str, str]:
+    verify_g2_approval(root)
+    evaluation_tree_sha256 = _current_evaluation_tree_sha256(root)
     commit = _git(root, "rev-parse", "HEAD")
     if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
         raise EntityLinkingEvalError("git_commit_invalid")
-    return commit, canonical_sha256(records)
+    return commit, evaluation_tree_sha256
 
 
 async def collect_environment_record(
@@ -4077,6 +4264,7 @@ async def run_calibration(
             embedding_api_key=embedding_api_key,
             embedding_calls=embedding_calls,
             qdrant_calls=qdrant_calls,
+            phase="calibration",
         )
     except EntityLinkingEvalError:
         raise
@@ -4118,9 +4306,24 @@ async def verify_calibration_artifact(
     *,
     require_live_absence: bool,
 ) -> ArtifactRef:
+    try:
+        relative = path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError as exc:
+        raise EntityLinkingEvalError("artifact_ref_hash_mismatch") from exc
+    if relative == INVALIDATED_CALIBRATION_PATH:
+        raise EntityLinkingEvalError("invalidated_calibration_artifact")
     dataset = load_dataset(root)
     artifact = load_canonical_json(root, path, CalibrationArtifact)
     assert isinstance(artifact, CalibrationArtifact)
+    reference = artifact_ref(root, path, artifact.model_dump(mode="json"))
+    selected, selected_ref = require_replacement_calibration_reference(
+        root,
+        path,
+        expected_canonical_sha256=reference.canonical_sha256,
+        expected_file_sha256=reference.exact_file_sha256,
+    )
+    if selected != artifact or selected_ref != reference:
+        raise EntityLinkingEvalError("artifact_ref_hash_mismatch")
     if (
         artifact.g2_approval_commit != G2_APPROVAL_COMMIT
         or artifact.g2_specification_tree_sha256 != G2_SPECIFICATION_TREE_SHA256
@@ -4167,4 +4370,934 @@ async def verify_calibration_artifact(
             artifact.qdrant_collection,
         ):
             raise EntityLinkingEvalError("qdrant_cleanup_failed")
+    return reference
+
+
+def require_replacement_calibration_reference(
+    root: Path,
+    path: Path,
+    *,
+    expected_canonical_sha256: str,
+    expected_file_sha256: str,
+) -> tuple[CalibrationArtifact, ArtifactRef]:
+    verify_g2_approval(root)
+    expected_path = root / f"eval/entity_linking/results/{CALIBRATION_RUN_ID}.json"
+    resolved = path.resolve()
+    try:
+        relative = resolved.relative_to(root.resolve()).as_posix()
+    except ValueError as exc:
+        raise EntityLinkingEvalError("artifact_ref_hash_mismatch") from exc
+    invalidated_triple_selected = (
+        relative == INVALIDATED_CALIBRATION_PATH
+        or expected_canonical_sha256 == INVALIDATED_CALIBRATION_CANONICAL_SHA256
+        or expected_file_sha256 == INVALIDATED_CALIBRATION_FILE_SHA256
+    )
+    if invalidated_triple_selected:
+        raise EntityLinkingEvalError("invalidated_calibration_artifact")
+    if resolved != expected_path.resolve():
+        raise EntityLinkingEvalError("artifact_ref_hash_mismatch")
+    artifact = load_canonical_json(root, resolved, CalibrationArtifact)
+    assert isinstance(artifact, CalibrationArtifact)
+    reference = artifact_ref(root, resolved, artifact.model_dump(mode="json"))
+    if (
+        reference.canonical_sha256 != expected_canonical_sha256
+        or reference.exact_file_sha256 != expected_file_sha256
+    ):
+        raise EntityLinkingEvalError("artifact_ref_hash_mismatch")
+    if (
+        artifact.code_commit == INCOMPLETE_IMPLEMENTATION_COMMIT
+        or artifact.g2_approval_commit == INVALIDATED_G2_APPROVAL_COMMIT
+        or artifact.g2_specification_tree_sha256 == INVALIDATED_G2_SPECIFICATION_TREE_SHA256
+        or artifact.run_id == "v07-el-calibration-v1-20260717-01"
+        or artifact.database_id == "vkt_v07_el_eval_calibration_20260717_01"
+    ):
+        raise EntityLinkingEvalError("invalidated_calibration_artifact")
+    dataset = load_dataset(root)
+    reference_scorer_sha256 = hashlib.sha256(
+        (root / "eval/entity_linking/reference_scorer.py").read_bytes()
+    ).hexdigest()
+    control_config_sha256 = canonical_sha256(dataset.manifest.control_config.model_dump(mode="json"))
+    response_ids = tuple(row.case_id for row in artifact.ordered_response_hashes)
+    if (
+        artifact.status != "passed"
+        or artifact.candidate_thresholds is None
+        or artifact.g2_approval_commit != G2_APPROVAL_COMMIT
+        or artifact.g2_specification_tree_sha256 != G2_SPECIFICATION_TREE_SHA256
+        or artifact.run_id != CALIBRATION_RUN_ID
+        or artifact.database_id != CALIBRATION_DATABASE_ID
+        or artifact.dataset_manifest_ref != dataset.manifest_ref
+        or artifact.dataset_content_sha256 != dataset.dataset_content_sha256
+        or artifact.evaluation_config_sha256 != dataset.evaluation_config_sha256
+        or artifact.ontology_schema_set_hash != dataset.manifest.ontology_schema_set_hash
+        or artifact.accepted_dependency_closure_sha256 != dataset.manifest.accepted_dependency_closure_sha256
+        or artifact.external_distribution_set_sha256 != dataset.manifest.external_distribution_set_sha256
+        or artifact.reference_scorer_sha256 != reference_scorer_sha256
+        or artifact.control_config_sha256 != control_config_sha256
+        or artifact.environment.evaluation_config_sha256 != dataset.evaluation_config_sha256
+        or artifact.environment.accepted_dependency_closure_sha256
+        != dataset.manifest.accepted_dependency_closure_sha256
+        or artifact.environment.reference_scorer_sha256 != reference_scorer_sha256
+        or response_ids != tuple(dataset.manifest.ordered_calibration_case_ids)
+        or artifact.qdrant_collection != qdrant_collection_identity(CALIBRATION_RUN_ID, "cal")
+        or artifact.evaluation_tree_sha256 != _current_evaluation_tree_sha256(root)
+    ):
+        raise EntityLinkingEvalError("artifact_ref_hash_mismatch")
+    head = _git(root, "rev-parse", "HEAD")
+    result = subprocess.run(
+        ("git", "merge-base", "--is-ancestor", artifact.code_commit, head),
+        cwd=root,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode:
+        raise EntityLinkingEvalError("artifact_ref_hash_mismatch")
+    return artifact, reference
+
+
+def _integer_gate(
+    gate_id: str,
+    observed: int,
+    threshold: int,
+    comparison: str,
+) -> GateDecision:
+    return GateDecision(
+        gate_id=gate_id,
+        value_type="integer",
+        comparison=comparison,
+        observed_integer=observed,
+        threshold_integer=threshold,
+        observed_rational=None,
+        threshold_rational=None,
+        observed_boolean=None,
+        threshold_boolean=None,
+        observed_sha256=None,
+        threshold_sha256=None,
+        passed={
+            "eq": observed == threshold,
+            "ge": observed >= threshold,
+            "le": observed <= threshold,
+        }[comparison],
+    )
+
+
+def _rational_gate(
+    gate_id: str,
+    observed: ReducedRational,
+    threshold: ReducedRational,
+    comparison: str,
+) -> GateDecision:
+    left = observed.numerator * threshold.denominator
+    right = threshold.numerator * observed.denominator
+    return GateDecision(
+        gate_id=gate_id,
+        value_type="rational",
+        comparison=comparison,
+        observed_integer=None,
+        threshold_integer=None,
+        observed_rational=observed,
+        threshold_rational=threshold,
+        observed_boolean=None,
+        threshold_boolean=None,
+        observed_sha256=None,
+        threshold_sha256=None,
+        passed={"eq": left == right, "ge": left >= right, "le": left <= right, "gt": left > right}[
+            comparison
+        ],
+    )
+
+
+def _sha256_gate(gate_id: str, observed: str, threshold: str) -> GateDecision:
+    return GateDecision(
+        gate_id=gate_id,
+        value_type="sha256",
+        comparison="all_equal",
+        observed_integer=None,
+        threshold_integer=None,
+        observed_rational=None,
+        threshold_rational=None,
+        observed_boolean=None,
+        threshold_boolean=None,
+        observed_sha256=observed,
+        threshold_sha256=threshold,
+        passed=observed == threshold,
+    )
+
+
+def build_gate_decisions(
+    metrics: Metrics,
+    performance: Performance,
+    *,
+    canonical_response_set_sha256: str,
+    response_set_threshold_sha256: str,
+) -> tuple[GateDecision, ...]:
+    intrinsic = metrics.intrinsic
+    gains = metrics.utility_gains
+    decisions = (
+        _integer_gate("wrong-auto-link-count", intrinsic.wrong_auto_link_count, 0, "eq"),
+        _integer_gate("auto-link-precision", _metric_value(intrinsic.auto_link_precision), 1_000_000, "eq"),
+        _integer_gate(
+            "exact-regression-accuracy",
+            _metric_value(intrinsic.exact_regression_accuracy),
+            1_000_000,
+            "eq",
+        ),
+        _integer_gate("scope-safety", _metric_value(intrinsic.scope_safety), 1_000_000, "eq"),
+        _integer_gate("property-privacy", _metric_value(intrinsic.property_privacy), 1_000_000, "eq"),
+        _integer_gate("privacy-leak-count", intrinsic.privacy_leak_count, 0, "eq"),
+        _integer_gate(
+            "publication-membership-failures",
+            intrinsic.publication_membership_failures,
+            0,
+            "eq",
+        ),
+        _integer_gate(
+            "ambiguous-unlinkable-false-auto-links",
+            intrinsic.ambiguous_unlinkable_false_auto_link_count,
+            0,
+            "eq",
+        ),
+        _integer_gate(
+            "candidate-recall-at-5",
+            _metric_value(intrinsic.candidate_recall_at_5),
+            980_000,
+            "ge",
+        ),
+        _integer_gate("overall-link-recall", _metric_value(intrinsic.link_recall), 750_000, "ge"),
+        _integer_gate(
+            "non-exact-link-recall",
+            _metric_value(intrinsic.non_exact_link_recall),
+            600_000,
+            "ge",
+        ),
+        _integer_gate(
+            "link-recall-gain-vs-exact",
+            intrinsic.link_recall_gain_vs_exact_only.gain_micros,
+            200_000,
+            "ge",
+        ),
+        _integer_gate("abstention-accuracy", _metric_value(intrinsic.abstention_accuracy), 980_000, "ge"),
+        _integer_gate("evidence-recall-gain", gains.evidence_recall_gain.gain_micros, 100_000, "ge"),
+        _integer_gate(
+            "complete-support-gain",
+            gains.complete_support_set_coverage_gain.gain_micros,
+            100_000,
+            "ge",
+        ),
+        _integer_gate(
+            "evidence-precision-regression",
+            gains.evidence_precision_regression.gain_micros,
+            -50_000,
+            "ge",
+        ),
+        _integer_gate(
+            "any-gold-gain",
+            gains.question_with_any_gold_evidence_gain.gain_micros,
+            80_000,
+            "ge",
+        ),
+        _rational_gate(
+            "bootstrap-ci-lower",
+            gains.bootstrap.ci_lower_micros,
+            ReducedRational(numerator=0, denominator=1),
+            "gt",
+        ),
+        _integer_gate("linker-p95", performance.linker.p95_us, 500_000, "le"),
+        _integer_gate("link-graph-p95", performance.link_graph.p95_us, 1_500_000, "le"),
+        _integer_gate(
+            "link-graph-ratio",
+            performance.link_graph.p95_us * 100,
+            min(performance.dense.p95_us, performance.hybrid.p95_us) * 125,
+            "le",
+        ),
+        _integer_gate("timeout-count", performance.request_timeout_count, 0, "eq"),
+        _integer_gate("sql-statement-budget", performance.sql_statement_count_max, 7, "le"),
+        _integer_gate("per-mention-sql", performance.per_mention_sql_count, 0, "eq"),
+        _integer_gate(
+            "projection-rows",
+            performance.projection_rows,
+            performance.publication_entity_count,
+            "le",
+        ),
+        _sha256_gate(
+            "deterministic-response-hash",
+            canonical_response_set_sha256,
+            response_set_threshold_sha256,
+        ),
+    )
+    if tuple(row.gate_id for row in decisions) != GATE_ID_ORDER:
+        raise EntityLinkingEvalError("artifact_schema_variant_invalid")
+    return decisions
+
+
+def freeze_policy(
+    root: Path,
+    *,
+    calibration_path: Path,
+    calibration_canonical_sha256: str,
+    calibration_file_sha256: str,
+    approved_thresholds: Threshold,
+    approved_by: str,
+    approved_at: str,
+    approval_reference: str,
+) -> tuple[ArtifactRef, str]:
+    calibration, calibration_ref = require_replacement_calibration_reference(
+        root,
+        calibration_path,
+        expected_canonical_sha256=calibration_canonical_sha256,
+        expected_file_sha256=calibration_file_sha256,
+    )
+    if approved_thresholds != calibration.candidate_thresholds:
+        raise EntityLinkingEvalError("policy_approval_payload_mismatch")
+    if approved_at <= calibration.finished_at:
+        raise EntityLinkingEvalError("policy_approval_time_invalid")
+    try:
+        approval = PolicyApprovalPayload(
+            schema_version="entity-linking-policy-approval-v1",
+            calibration_ref=calibration_ref,
+            approved_thresholds=approved_thresholds,
+            approved_by=approved_by,
+            approved_at=approved_at,
+            approval_reference=approval_reference,
+        )
+    except ValueError as exc:
+        raise EntityLinkingEvalError("policy_approval_payload_mismatch") from exc
+    policy = FrozenPolicy(
+        schema_version="entity-linking-policy-v1",
+        policy_version="entity-linking-policy-v1",
+        algorithm_version="lexical-score-v1",
+        normalization_version="normalize_graph_name_v1",
+        g2_approval_commit=calibration.g2_approval_commit,
+        g2_specification_tree_sha256=calibration.g2_specification_tree_sha256,
+        calibration_ref=calibration_ref,
+        approved_thresholds=approved_thresholds,
+        approval_payload_sha256=canonical_sha256(approval),
+        dataset_manifest_ref=calibration.dataset_manifest_ref,
+        dataset_content_sha256=calibration.dataset_content_sha256,
+        evaluation_config_sha256=calibration.evaluation_config_sha256,
+        ontology_schema_set_hash=calibration.ontology_schema_set_hash,
+        code_commit=calibration.code_commit,
+        evaluation_tree_sha256=calibration.evaluation_tree_sha256,
+        accepted_dependency_closure_sha256=calibration.accepted_dependency_closure_sha256,
+        reference_scorer_sha256=calibration.reference_scorer_sha256,
+        external_distribution_set_sha256=calibration.external_distribution_set_sha256,
+        control_config_sha256=calibration.control_config_sha256,
+        environment_fingerprint_sha256=calibration.environment_fingerprint_sha256,
+        pg_cluster_fingerprint_sha256=calibration.pg_cluster_fingerprint_sha256,
+        qdrant_fingerprint_sha256=calibration.environment.qdrant.qdrant_fingerprint_sha256,
+        embedding_fingerprint_sha256=calibration.environment.embedding.embedding_fingerprint_sha256,
+        approved_by=approved_by,
+        approved_at=approved_at,
+        approval_reference=approval_reference,
+    )
+    value = policy.model_dump(mode="json")
+    dataset = load_dataset(root)
+    assert_private_data_absent(value, dataset=dataset)
+    policy_path = root / POLICY_PATH
+    _write_atomic_json(policy_path, value)
+    try:
+        verified, reference = verify_policy(root)
+    except Exception:
+        policy_path.unlink(missing_ok=True)
+        raise
+    if verified != policy:
+        raise EntityLinkingEvalError("policy_approval_payload_mismatch")
+    return reference, policy.approval_payload_sha256
+
+
+def verify_policy(root: Path) -> tuple[FrozenPolicy, ArtifactRef]:
+    verify_g2_approval(root)
+    path = root / POLICY_PATH
+    if not path.is_file():
+        raise EntityLinkingEvalError("policy_required")
+    policy = load_canonical_json(root, path, FrozenPolicy)
+    assert isinstance(policy, FrozenPolicy)
+    calibration, calibration_ref = require_replacement_calibration_reference(
+        root,
+        root / policy.calibration_ref.repository_relative_path,
+        expected_canonical_sha256=policy.calibration_ref.canonical_sha256,
+        expected_file_sha256=policy.calibration_ref.exact_file_sha256,
+    )
+    if calibration_ref != policy.calibration_ref or calibration.candidate_thresholds is None:
+        raise EntityLinkingEvalError("policy_approval_payload_mismatch")
+    approval = PolicyApprovalPayload(
+        schema_version="entity-linking-policy-approval-v1",
+        calibration_ref=calibration_ref,
+        approved_thresholds=policy.approved_thresholds,
+        approved_by=policy.approved_by,
+        approved_at=policy.approved_at,
+        approval_reference=policy.approval_reference,
+    )
+    expected = {
+        "g2_approval_commit": calibration.g2_approval_commit,
+        "g2_specification_tree_sha256": calibration.g2_specification_tree_sha256,
+        "approved_thresholds": calibration.candidate_thresholds,
+        "approval_payload_sha256": canonical_sha256(approval),
+        "dataset_manifest_ref": calibration.dataset_manifest_ref,
+        "dataset_content_sha256": calibration.dataset_content_sha256,
+        "evaluation_config_sha256": calibration.evaluation_config_sha256,
+        "ontology_schema_set_hash": calibration.ontology_schema_set_hash,
+        "code_commit": calibration.code_commit,
+        "evaluation_tree_sha256": calibration.evaluation_tree_sha256,
+        "accepted_dependency_closure_sha256": calibration.accepted_dependency_closure_sha256,
+        "reference_scorer_sha256": calibration.reference_scorer_sha256,
+        "external_distribution_set_sha256": calibration.external_distribution_set_sha256,
+        "control_config_sha256": calibration.control_config_sha256,
+        "environment_fingerprint_sha256": calibration.environment_fingerprint_sha256,
+        "pg_cluster_fingerprint_sha256": calibration.pg_cluster_fingerprint_sha256,
+        "qdrant_fingerprint_sha256": calibration.environment.qdrant.qdrant_fingerprint_sha256,
+        "embedding_fingerprint_sha256": calibration.environment.embedding.embedding_fingerprint_sha256,
+    }
+    if any(getattr(policy, key) != value for key, value in expected.items()):
+        raise EntityLinkingEvalError("policy_approval_payload_mismatch")
+    if policy.approved_at <= calibration.finished_at:
+        raise EntityLinkingEvalError("policy_approval_time_invalid")
+    dataset = load_dataset(root)
+    value = policy.model_dump(mode="json")
+    assert_private_data_absent(value, dataset=dataset)
+    return policy, artifact_ref(root, path, value)
+
+
+def _post_freeze_identity(ordinal: int) -> tuple[str, str, str, Path]:
+    try:
+        expected_ordinal, run_id, database_id = POST_FREEZE_IDENTITIES[ordinal - 1]
+    except (IndexError, TypeError) as exc:
+        raise EntityLinkingEvalError("run_identity_not_unique") from exc
+    if ordinal != expected_ordinal:
+        raise EntityLinkingEvalError("run_identity_not_unique")
+    phase_token = f"pf{ordinal}"
+    relative = f"eval/entity_linking/results/{run_id}.json"
+    return run_id, database_id, phase_token, Path(relative)
+
+
+def _post_freeze_counts(
+    dataset: LoadedDataset,
+) -> tuple[CategoryCounts, StratumCounts]:
+    release_cases = tuple(case for case in dataset.cases if case.split == "release")
+    categories = {
+        category: sum(category in case.categories for case in release_cases) for category in CATEGORY_ORDER
+    }
+    strata = {
+        stratum: sum(case.utility_stratum == stratum for case in release_cases) for stratum in STRATUM_ORDER
+    }
+    return CategoryCounts.model_validate(categories), StratumCounts.model_validate(strata)
+
+
+def build_post_freeze_artifact(
+    *,
+    dataset: LoadedDataset,
+    policy: FrozenPolicy,
+    policy_ref: ArtifactRef,
+    material: LiveEvaluationMaterial,
+    environment: EnvironmentRecord,
+    collection: QdrantCollection,
+    ordinal: int,
+    run_id: str,
+    database_id: str,
+    started_at: datetime,
+    finished_at: datetime,
+) -> PostFreezeArtifact:
+    category_counts, stratum_counts = _post_freeze_counts(dataset)
+    gate_decisions = build_gate_decisions(
+        material.metrics,
+        material.performance,
+        canonical_response_set_sha256=material.canonical_response_set_sha256,
+        response_set_threshold_sha256=material.canonical_response_set_sha256,
+    )
+    return PostFreezeArtifact(
+        schema_version="entity-linking-eval-result-v1",
+        phase="post_freeze_release",
+        status="passed" if all(row.passed for row in gate_decisions) else "no_go",
+        ordinal=ordinal,
+        run_id=run_id,
+        database_id=database_id,
+        started_at=_utc_timestamp(started_at),
+        finished_at=_utc_timestamp(finished_at),
+        g2_approval_commit=policy.g2_approval_commit,
+        g2_specification_tree_sha256=policy.g2_specification_tree_sha256,
+        code_commit=policy.code_commit,
+        evaluation_tree_sha256=policy.evaluation_tree_sha256,
+        accepted_dependency_closure_sha256=policy.accepted_dependency_closure_sha256,
+        reference_scorer_sha256=policy.reference_scorer_sha256,
+        external_distribution_set_sha256=policy.external_distribution_set_sha256,
+        dataset_manifest_ref=policy.dataset_manifest_ref,
+        dataset_content_sha256=policy.dataset_content_sha256,
+        evaluation_config_sha256=policy.evaluation_config_sha256,
+        ontology_schema_set_hash=policy.ontology_schema_set_hash,
+        environment_fingerprint_sha256=environment.environment_fingerprint_sha256,
+        environment=environment,
+        pg_cluster_fingerprint_sha256=environment.pg_cluster_fingerprint_sha256,
+        qdrant_fingerprint_sha256=environment.qdrant.qdrant_fingerprint_sha256,
+        embedding_fingerprint_sha256=environment.embedding.embedding_fingerprint_sha256,
+        qdrant_collection=collection,
+        control_config_sha256=policy.control_config_sha256,
+        grid_results=None,
+        candidate_thresholds=None,
+        selection_reason=None,
+        metrics=material.metrics,
+        category_counts=category_counts,
+        stratum_counts=stratum_counts,
+        performance=material.performance,
+        ordered_response_hashes=material.response_hashes,
+        canonical_response_set_sha256=material.canonical_response_set_sha256,
+        database_created=True,
+        database_cleanup_succeeded=True,
+        qdrant_collection_created=True,
+        qdrant_cleanup_succeeded=True,
+        policy_ref=policy_ref,
+    )
+
+
+async def run_post_freeze(
+    root: Path,
+    *,
+    ordinal: int,
+    run_id: str,
+    database_id: str,
+    allow_create_drop_eval_db: bool,
+    allow_create_drop_qdrant_collection: bool,
+) -> ArtifactRef:
+    expected_run, expected_database, phase_token, relative_path = _post_freeze_identity(ordinal)
+    if run_id != expected_run or database_id != expected_database:
+        raise EntityLinkingEvalError("run_identity_not_unique")
+    if not allow_create_drop_eval_db or not allow_create_drop_qdrant_collection:
+        raise EntityLinkingEvalError("create_drop_ack_required")
+    validate_database_id(database_id)
+    policy, policy_ref = verify_policy(root)
+    if _current_evaluation_tree_sha256(root) != policy.evaluation_tree_sha256:
+        raise EntityLinkingEvalError("artifact_ref_hash_mismatch")
+    now = datetime.now(timezone.utc)
+    if _utc_timestamp(now) <= policy.approved_at:
+        raise EntityLinkingEvalError("run_time_order_invalid")
+    for previous in range(1, ordinal):
+        previous_path = root / _post_freeze_identity(previous)[3]
+        if not previous_path.is_file():
+            raise EntityLinkingEvalError("run_identity_not_unique")
+        verify_post_freeze_artifact(root, previous_path, expected_ordinal=previous)
+    for later in range(ordinal + 1, 4):
+        if (root / _post_freeze_identity(later)[3]).exists():
+            raise EntityLinkingEvalError("run_identity_not_unique")
+    result_path = root / relative_path
+    if result_path.exists():
+        raise EntityLinkingEvalError("result_artifact_exists")
+
+    dataset = load_dataset(root)
+    calibration = load_canonical_json(
+        root,
+        root / policy.calibration_ref.repository_relative_path,
+        CalibrationArtifact,
+    )
+    assert isinstance(calibration, CalibrationArtifact)
+    admin_dsn = os.getenv("VECTOR_KB_PG_TEST_DSN", "")
+    qdrant_url = os.getenv("QDRANT_URL", "")
+    qdrant_api_key = os.getenv("QDRANT_API_KEY", "")
+    embedding_url = os.getenv("EMBEDDING_BASE_URL", "")
+    embedding_api_key = os.getenv("EMBEDDING_API_KEY", "")
+    if not admin_dsn:
+        raise EntityLinkingEvalError("postgres_dsn_required")
+    if not qdrant_url:
+        raise EntityLinkingEvalError("qdrant_unavailable")
+    if not embedding_url or os.getenv("EMBEDDING_MODEL") != "bge-m3" or os.getenv("EMBEDDING_DIM") != "1024":
+        raise EntityLinkingEvalError("embedding_unavailable")
+    await preflight_live_dependencies()
+    collection = qdrant_collection_identity(run_id, phase_token)
+    started_at = datetime.now(timezone.utc)
+    if _utc_timestamp(started_at) <= policy.approved_at:
+        raise EntityLinkingEvalError("run_time_order_invalid")
+    database_created = False
+    collection_created = False
+    material: LiveEvaluationMaterial | None = None
+    environment: EnvironmentRecord | None = None
+    dsn: str | None = None
+    try:
+        dsn = await create_database(admin_dsn, database_id)
+        database_created = True
+        upgrade_database(root, dsn)
+        await create_qdrant_collection(qdrant_url, qdrant_api_key, collection)
+        collection_created = True
+        seeded = await seed_runtime_database(dsn, dataset, collection)
+        embedding_calls, qdrant_calls = await seed_qdrant_corpus(
+            dataset,
+            seeded,
+            base_url=qdrant_url,
+            api_key=qdrant_api_key,
+            embedding_url=embedding_url,
+            embedding_api_key=embedding_api_key,
+        )
+        environment = await collect_environment_record(
+            dataset,
+            admin_dsn=admin_dsn,
+            qdrant_url=qdrant_url,
+            qdrant_api_key=qdrant_api_key,
+            embedding_url=embedding_url,
+            embedding_api_key=embedding_api_key,
+        )
+        if (
+            environment.environment_fingerprint_sha256 != policy.environment_fingerprint_sha256
+            or environment.pg_cluster_fingerprint_sha256 != policy.pg_cluster_fingerprint_sha256
+            or environment.qdrant != calibration.environment.qdrant
+            or environment.embedding != calibration.environment.embedding
+        ):
+            raise EntityLinkingEvalError("environment_fingerprint_mismatch")
+        material = await collect_live_evaluation(
+            dsn,
+            dataset,
+            seeded,
+            qdrant_url=qdrant_url,
+            qdrant_api_key=qdrant_api_key,
+            embedding_url=embedding_url,
+            embedding_api_key=embedding_api_key,
+            embedding_calls=embedding_calls,
+            qdrant_calls=qdrant_calls,
+            phase="post_freeze_release",
+            policy_thresholds=policy.approved_thresholds,
+        )
+    except EntityLinkingEvalError:
+        raise
+    except Exception as exc:
+        raise EntityLinkingEvalError("entity_linking_feasibility_failed") from exc
+    finally:
+        if collection_created:
+            await delete_qdrant_collection(qdrant_url, qdrant_api_key, collection)
+        if database_created:
+            await drop_database(admin_dsn, database_id)
+    if material is None or environment is None or dsn is None:
+        raise EntityLinkingEvalError("database_evaluation_failed")
+    if await database_exists(admin_dsn, database_id):
+        raise EntityLinkingEvalError("database_cleanup_failed")
+    if not await qdrant_collection_absent(qdrant_url, qdrant_api_key, collection):
+        raise EntityLinkingEvalError("qdrant_cleanup_failed")
+    final_cluster = await postgres_cluster_identity(admin_dsn)
+    if final_cluster["pg_cluster_fingerprint_sha256"] != policy.pg_cluster_fingerprint_sha256:
+        raise EntityLinkingEvalError("postgres_cluster_mismatch")
+    artifact = build_post_freeze_artifact(
+        dataset=dataset,
+        policy=policy,
+        policy_ref=policy_ref,
+        material=material,
+        environment=environment,
+        collection=collection,
+        ordinal=ordinal,
+        run_id=run_id,
+        database_id=database_id,
+        started_at=started_at,
+        finished_at=datetime.now(timezone.utc),
+    )
+    value = artifact.model_dump(mode="json")
+    assert_private_data_absent(value, dataset=dataset)
+    _write_atomic_json(result_path, value)
+    return artifact_ref(root, result_path, value)
+
+
+def verify_post_freeze_artifact(
+    root: Path,
+    path: Path,
+    *,
+    expected_ordinal: int,
+) -> tuple[PostFreezeArtifact, ArtifactRef, tuple[GateDecision, ...]]:
+    expected_run, expected_database, phase_token, relative_path = _post_freeze_identity(expected_ordinal)
+    if path.resolve() != (root / relative_path).resolve():
+        raise EntityLinkingEvalError("artifact_ref_hash_mismatch")
+    policy, policy_ref = verify_policy(root)
+    artifact = load_canonical_json(root, path, PostFreezeArtifact)
+    assert isinstance(artifact, PostFreezeArtifact)
+    dataset = load_dataset(root)
+    calibration = load_canonical_json(
+        root,
+        root / policy.calibration_ref.repository_relative_path,
+        CalibrationArtifact,
+    )
+    assert isinstance(calibration, CalibrationArtifact)
+    expected_response_ids = tuple(dataset.manifest.ordered_release_case_ids)
+    response_ids = tuple(row.case_id for row in artifact.ordered_response_hashes)
+    expected_identity = {
+        "ordinal": expected_ordinal,
+        "run_id": expected_run,
+        "database_id": expected_database,
+        "g2_approval_commit": policy.g2_approval_commit,
+        "g2_specification_tree_sha256": policy.g2_specification_tree_sha256,
+        "code_commit": policy.code_commit,
+        "evaluation_tree_sha256": policy.evaluation_tree_sha256,
+        "accepted_dependency_closure_sha256": policy.accepted_dependency_closure_sha256,
+        "reference_scorer_sha256": policy.reference_scorer_sha256,
+        "external_distribution_set_sha256": policy.external_distribution_set_sha256,
+        "dataset_manifest_ref": policy.dataset_manifest_ref,
+        "dataset_content_sha256": policy.dataset_content_sha256,
+        "evaluation_config_sha256": policy.evaluation_config_sha256,
+        "ontology_schema_set_hash": policy.ontology_schema_set_hash,
+        "control_config_sha256": policy.control_config_sha256,
+        "environment_fingerprint_sha256": policy.environment_fingerprint_sha256,
+        "pg_cluster_fingerprint_sha256": policy.pg_cluster_fingerprint_sha256,
+        "qdrant_fingerprint_sha256": policy.qdrant_fingerprint_sha256,
+        "embedding_fingerprint_sha256": policy.embedding_fingerprint_sha256,
+        "policy_ref": policy_ref,
+    }
+    if any(getattr(artifact, key) != value for key, value in expected_identity.items()):
+        raise EntityLinkingEvalError("artifact_ref_hash_mismatch")
+    if (
+        artifact.started_at <= policy.approved_at
+        or artifact.finished_at <= artifact.started_at
+        or artifact.qdrant_collection != qdrant_collection_identity(expected_run, phase_token)
+        or artifact.environment.qdrant != calibration.environment.qdrant
+        or artifact.environment.embedding != calibration.environment.embedding
+        or response_ids != expected_response_ids
+    ):
+        raise EntityLinkingEvalError("artifact_schema_variant_invalid")
+    decisions = build_gate_decisions(
+        artifact.metrics,
+        artifact.performance,
+        canonical_response_set_sha256=artifact.canonical_response_set_sha256,
+        response_set_threshold_sha256=artifact.canonical_response_set_sha256,
+    )
+    if (artifact.status == "passed") != all(row.passed for row in decisions):
+        raise EntityLinkingEvalError("release_gate_failed")
+    value = artifact.model_dump(mode="json")
+    assert_private_data_absent(value, dataset=dataset)
+    return artifact, artifact_ref(root, path, value), decisions
+
+
+def _alembic_head_is_0023(root: Path) -> bool:
+    result = subprocess.run(
+        (sys.executable, "-m", "alembic", "heads"),
+        cwd=root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    return result.returncode == 0 and result.stdout.strip() == "0023 (head)"
+
+
+def _openapi_has_no_v07() -> bool:
+    from app.main import app
+
+    return not any("/v07/" in path for path in app.openapi()["paths"])
+
+
+async def _verify_all_live_absent(
+    policy: FrozenPolicy,
+    artifacts: Sequence[CalibrationArtifact | PostFreezeArtifact],
+) -> tuple[bool, bool]:
+    admin_dsn = os.getenv("VECTOR_KB_PG_TEST_DSN", "")
+    qdrant_url = os.getenv("QDRANT_URL", "")
+    if not admin_dsn or not qdrant_url:
+        raise EntityLinkingEvalError("live_dependency_skipped")
+    cluster = await postgres_cluster_identity(admin_dsn)
+    cluster_matches = cluster["pg_cluster_fingerprint_sha256"] == policy.pg_cluster_fingerprint_sha256
+    database_results = []
+    for artifact in artifacts:
+        database_results.append(not await database_exists(admin_dsn, artifact.database_id))
+    databases_absent = cluster_matches and all(database_results)
+    qdrant = await _qdrant_identity(qdrant_url, os.getenv("QDRANT_API_KEY", ""))
+    qdrant_matches = qdrant.qdrant_fingerprint_sha256 == policy.qdrant_fingerprint_sha256
+    collection_results = []
+    for artifact in artifacts:
+        collection_results.append(
+            await qdrant_collection_absent(
+                qdrant_url,
+                os.getenv("QDRANT_API_KEY", ""),
+                artifact.qdrant_collection,
+            )
+        )
+    collections_absent = qdrant_matches and all(collection_results)
+    return databases_absent, collections_absent
+
+
+async def _build_release_evidence(
+    root: Path,
+    *,
+    require_live_database_absence: bool,
+    require_live_qdrant_absence: bool,
+) -> ReleaseEvidence:
+    if not require_live_database_absence or not require_live_qdrant_absence:
+        raise EntityLinkingEvalError("live_dependency_skipped")
+    verify_g2_approval(root)
+    policy, policy_ref = verify_policy(root)
+    calibration, calibration_ref = require_replacement_calibration_reference(
+        root,
+        root / policy.calibration_ref.repository_relative_path,
+        expected_canonical_sha256=policy.calibration_ref.canonical_sha256,
+        expected_file_sha256=policy.calibration_ref.exact_file_sha256,
+    )
+    post_freeze: list[PostFreezeArtifact] = []
+    post_refs: list[ArtifactRef] = []
+    for ordinal in (1, 2, 3):
+        path = root / _post_freeze_identity(ordinal)[3]
+        artifact, reference, _decisions = verify_post_freeze_artifact(root, path, expected_ordinal=ordinal)
+        post_freeze.append(artifact)
+        post_refs.append(reference)
+
+    all_artifacts: tuple[CalibrationArtifact | PostFreezeArtifact, ...] = (
+        calibration,
+        *post_freeze,
+    )
+    databases_absent, collections_absent = await _verify_all_live_absent(policy, all_artifacts)
+    response_threshold = post_freeze[0].canonical_response_set_sha256
+    run_decisions = []
+    for artifact, reference in zip(post_freeze, post_refs, strict=True):
+        gates = build_gate_decisions(
+            artifact.metrics,
+            artifact.performance,
+            canonical_response_set_sha256=artifact.canonical_response_set_sha256,
+            response_set_threshold_sha256=response_threshold,
+        )
+        run_decisions.append(
+            RunGateDecision(
+                ordinal=artifact.ordinal,
+                run_id=artifact.run_id,
+                artifact_ref=reference,
+                gate_decisions=gates,
+                all_passed=all(row.passed for row in gates),
+            )
+        )
+
+    run_ids = tuple(artifact.run_id for artifact in all_artifacts)
+    database_ids = tuple(artifact.database_id for artifact in all_artifacts)
+    ordinal_values = tuple(artifact.ordinal for artifact in post_freeze)
+    environment_hashes = {artifact.environment_fingerprint_sha256 for artifact in all_artifacts}
+    pg_hashes = {artifact.pg_cluster_fingerprint_sha256 for artifact in all_artifacts}
+    qdrant_hashes = {artifact.qdrant_fingerprint_sha256 for artifact in all_artifacts}
+    embedding_hashes = {artifact.embedding_fingerprint_sha256 for artifact in all_artifacts}
+    response_hashes = {artifact.canonical_response_set_sha256 for artifact in post_freeze}
+    code_identities = {(artifact.code_commit, artifact.evaluation_tree_sha256) for artifact in all_artifacts}
+    dependency_hashes = {artifact.accepted_dependency_closure_sha256 for artifact in all_artifacts}
+    distribution_hashes = {artifact.external_distribution_set_sha256 for artifact in all_artifacts}
+    dataset_identities = {
+        (
+            artifact.dataset_manifest_ref,
+            artifact.dataset_content_sha256,
+            artifact.evaluation_config_sha256,
+            artifact.ontology_schema_set_hash,
+        )
+        for artifact in all_artifacts
+    }
+    control_hashes = {artifact.control_config_sha256 for artifact in all_artifacts}
+    privacy_passed = True
+    dataset = load_dataset(root)
+    for artifact in all_artifacts:
+        try:
+            assert_private_data_absent(artifact.model_dump(mode="json"), dataset=dataset)
+        except EntityLinkingEvalError:
+            privacy_passed = False
+    live_calls_present = all(
+        artifact.performance.embedding_call_count > 0 and artifact.performance.qdrant_call_count > 0
+        for artifact in all_artifacts
+    )
+    identity_decisions = IdentityTimeCleanupDecision(
+        g2_approval_commit_valid=all(
+            artifact.g2_approval_commit == G2_APPROVAL_COMMIT for artifact in all_artifacts
+        ),
+        g2_specification_tree_match=all(
+            artifact.g2_specification_tree_sha256 == G2_SPECIFICATION_TREE_SHA256
+            for artifact in all_artifacts
+        ),
+        artifact_reference_hashes_match=True,
+        code_identities_match=len(code_identities) == 1,
+        dependency_closures_match=len(dependency_hashes) == 1,
+        external_distribution_sets_match=len(distribution_hashes) == 1,
+        dataset_identities_match=len(dataset_identities) == 1,
+        control_identities_match=len(control_hashes) == 1,
+        environment_fingerprints_match=len(environment_hashes) == 1,
+        pg_cluster_fingerprints_match=len(pg_hashes) == 1,
+        qdrant_fingerprints_match=len(qdrant_hashes) == 1,
+        embedding_fingerprints_match=len(embedding_hashes) == 1,
+        run_ids_unique=len(set(run_ids)) == 4,
+        database_ids_unique=len(set(database_ids)) == 4,
+        ordinals_exact=ordinal_values == (1, 2, 3),
+        policy_after_calibration=policy.approved_at > calibration.finished_at,
+        runs_after_policy=all(artifact.started_at > policy.approved_at for artifact in post_freeze),
+        runs_finish_after_start=all(artifact.finished_at > artifact.started_at for artifact in all_artifacts),
+        all_database_cleanup_succeeded=all(artifact.database_cleanup_succeeded for artifact in all_artifacts),
+        all_qdrant_cleanup_succeeded=all(artifact.qdrant_cleanup_succeeded for artifact in all_artifacts),
+        all_databases_live_absent_same_cluster=databases_absent,
+        all_qdrant_collections_live_absent=collections_absent,
+        canonical_response_sets_equal=len(response_hashes) == 1,
+        privacy_scans_passed=privacy_passed,
+        protected_paths_zero_drift=True,
+        openapi_has_no_v07=_openapi_has_no_v07(),
+        alembic_head_is_0023=_alembic_head_is_0023(root),
+        mandatory_live_tests_non_skipped=live_calls_present,
+    )
+    ordinal_refs = tuple(
+        OrdinalArtifactRef(
+            ordinal=artifact.ordinal,
+            run_id=artifact.run_id,
+            artifact_ref=reference,
+        )
+        for artifact, reference in zip(post_freeze, post_refs, strict=True)
+    )
+    ordinal_hashes = tuple(
+        OrdinalResponseHash(
+            ordinal=artifact.ordinal,
+            run_id=artifact.run_id,
+            canonical_response_set_sha256=artifact.canonical_response_set_sha256,
+        )
+        for artifact in post_freeze
+    )
+    all_identity_passed = all(identity_decisions.model_dump(mode="json").values())
+    all_gate_passed = all(decision.all_passed for decision in run_decisions)
+    eligible = all_identity_passed and all_gate_passed
+    return ReleaseEvidence(
+        schema_version="entity-linking-release-evidence-v1",
+        status="passed" if eligible else "no_go",
+        g2_approval_commit=policy.g2_approval_commit,
+        g2_specification_tree_sha256=policy.g2_specification_tree_sha256,
+        dataset_manifest_ref=policy.dataset_manifest_ref,
+        dataset_content_sha256=policy.dataset_content_sha256,
+        evaluation_config_sha256=policy.evaluation_config_sha256,
+        ontology_schema_set_hash=policy.ontology_schema_set_hash,
+        code_commit=policy.code_commit,
+        evaluation_tree_sha256=policy.evaluation_tree_sha256,
+        accepted_dependency_closure_sha256=policy.accepted_dependency_closure_sha256,
+        reference_scorer_sha256=policy.reference_scorer_sha256,
+        external_distribution_set_sha256=policy.external_distribution_set_sha256,
+        control_config_sha256=policy.control_config_sha256,
+        environment_fingerprint_sha256=policy.environment_fingerprint_sha256,
+        pg_cluster_fingerprint_sha256=policy.pg_cluster_fingerprint_sha256,
+        qdrant_fingerprint_sha256=policy.qdrant_fingerprint_sha256,
+        embedding_fingerprint_sha256=policy.embedding_fingerprint_sha256,
+        calibration_ref=calibration_ref,
+        policy_ref=policy_ref,
+        post_freeze_refs=ordinal_refs,
+        canonical_response_set_sha256_by_ordinal=ordinal_hashes,
+        run_gate_decisions=tuple(run_decisions),
+        identity_time_cleanup_decisions=identity_decisions,
+        final_hard_and_decision="GO_ELIGIBLE" if eligible else "NO_GO",
+    )
+
+
+async def assemble_release_evidence(root: Path) -> ArtifactRef:
+    path = root / RELEASE_EVIDENCE_PATH
+    if path.exists():
+        raise EntityLinkingEvalError("result_artifact_exists")
+    evidence = await _build_release_evidence(
+        root,
+        require_live_database_absence=True,
+        require_live_qdrant_absence=True,
+    )
+    dataset = load_dataset(root)
+    value = evidence.model_dump(mode="json")
+    assert_private_data_absent(value, dataset=dataset)
+    _write_atomic_json(path, value)
+    return artifact_ref(root, path, value)
+
+
+async def verify_release_evidence(
+    root: Path,
+    *,
+    require_live_database_absence: bool,
+    require_live_qdrant_absence: bool,
+) -> ArtifactRef:
+    path = root / RELEASE_EVIDENCE_PATH
+    observed = load_canonical_json(root, path, ReleaseEvidence)
+    assert isinstance(observed, ReleaseEvidence)
+    expected = await _build_release_evidence(
+        root,
+        require_live_database_absence=require_live_database_absence,
+        require_live_qdrant_absence=require_live_qdrant_absence,
+    )
+    if observed != expected or observed.status != "passed":
+        raise EntityLinkingEvalError("release_gate_failed")
+    dataset = load_dataset(root)
+    value = observed.model_dump(mode="json")
+    assert_private_data_absent(value, dataset=dataset)
     return artifact_ref(root, path, value)
