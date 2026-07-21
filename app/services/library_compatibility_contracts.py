@@ -15,6 +15,9 @@ EMBEDDING_PROFILE_VERSION = "embedding-v1"
 EMBEDDING_PROBE_CONTRACT_VERSION = "embedding-probe-v1"
 RETRIEVAL_PROFILE_VERSION = "retrieval-v1"
 GRAPH_PROFILE_VERSION = "graph-v1"
+FEDERATED_RETRIEVAL_CONTRACT_VERSION = "federated-retrieval-v1"
+FEDERATED_FUSION_CONTRACT_VERSION = "federated-rank-rrf-v1"
+FEDERATED_RRF_K = 60
 PROBE_TEXTS = (
     "vector knowledge compatibility probe alpha 2026",
     "vector knowledge compatibility probe beta evidence graph",

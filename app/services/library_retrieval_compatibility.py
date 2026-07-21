@@ -7,11 +7,14 @@ from app.config import settings
 from app.models.library import Library
 from app.services import llm_query_rewrite, query_rewrite
 from app.services import rerank as rerank_service
-from app.services.graph_canonical import canonical_graph_value_hash_v1
 from app.services.library_compatibility_contracts import (
+    FEDERATED_FUSION_CONTRACT_VERSION,
+    FEDERATED_RETRIEVAL_CONTRACT_VERSION,
+    FEDERATED_RRF_K,
     RETRIEVAL_PROFILE_VERSION,
     CompatibilityFingerprint,
 )
+from app.services.graph_canonical import canonical_graph_value_hash_v1
 
 
 def _optional_endpoint_hash(value: str) -> str | None:
@@ -98,6 +101,13 @@ def build_retrieval_profile(library: Library) -> CompatibilityFingerprint:
             "latency_budget_ms": settings.visibility_latency_budget_ms,
         },
         "source_enrichment_contract": "post_visibility_enrichment_v1",
+        "federation": {
+            "contract_version": FEDERATED_RETRIEVAL_CONTRACT_VERSION,
+            "fusion_contract_version": FEDERATED_FUSION_CONTRACT_VERSION,
+            "rrf_k": FEDERATED_RRF_K,
+            "score_input": "local_rank_only_v1",
+            "tie_break": "selection_order_local_rank_hit_id_v1",
+        },
     }
     return CompatibilityFingerprint(
         RETRIEVAL_PROFILE_VERSION,
