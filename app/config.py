@@ -172,6 +172,7 @@ class Settings(BaseSettings):
     organization_authorization_enabled: bool = False
     cross_library_compatibility_enabled: bool = False
     federated_retrieval_enabled: bool = False
+    personal_library_scopes_enabled: bool = False
 
     # ---- 文件导入 ----
     # /import-file 单次上传字节上限（默认 50MiB），超出 413，避免一次性 read 打爆内存。
@@ -769,6 +770,17 @@ def validate_federated_retrieval_startup(config: Settings) -> None:
     ):
         raise RuntimeError(
             "[security] Federated retrieval requires Organization authorization "
+            "and cross-Library compatibility"
+        )
+
+
+def validate_personal_library_scopes_startup(config: Settings) -> None:
+    if config.personal_library_scopes_enabled and not (
+        config.organization_authorization_enabled
+        and config.cross_library_compatibility_enabled
+    ):
+        raise RuntimeError(
+            "[security] Personal Library scopes require Organization authorization "
             "and cross-Library compatibility"
         )
 

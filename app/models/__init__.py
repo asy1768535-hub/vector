@@ -50,6 +50,7 @@ from app.models.relation_type_constraint import RelationTypeConstraint
 from app.models.service_heartbeat import ServiceHeartbeat
 from app.models.sync_source import SyncSource
 from app.models.user import User
+from app.models.user_library_scope import UserLibraryScope, UserLibraryScopeItem
 
 __all__ = [
     "ApiKey",
@@ -107,4 +108,6 @@ __all__ = [
     "ServiceHeartbeat",
     "SyncSource",
     "User",
+    "UserLibraryScope",
+    "UserLibraryScopeItem",
 ]

@@ -254,7 +254,9 @@ def test_0032_orm_migration_and_offline_sql_are_exactly_reversible():
     script = ScriptDirectory.from_config(Config("alembic.ini"))
     migration = script.get_revision("0032")
     assert migration is not None and migration.down_revision == "0031"
-    assert script.get_heads() == ["0032"]
+    next_migration = script.get_revision("0033")
+    assert next_migration is not None and next_migration.down_revision == "0032"
+    assert script.get_heads() == ["0033"]
     upgrade = _offline("upgrade", "0031:0032")
     downgrade = _offline("downgrade", "0032:0031")
     assert upgrade.count("add column embedding_probe_") == 6
