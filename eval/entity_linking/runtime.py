@@ -10,6 +10,7 @@ import os
 import platform
 import random
 import re
+import struct
 import subprocess
 import sys
 import time
@@ -125,8 +126,8 @@ from eval.entity_linking.reference_scorer import (
 )
 
 
-G2_APPROVAL_COMMIT = "64fa00b3ce1c8a32e4f281575efd99bee2032d27"
-G2_SPECIFICATION_TREE_SHA256 = "eb1fad254b21e4ea8946f5d51e43ef56c5814f96d35a788444665086bdf7c813"
+G2_APPROVAL_COMMIT = "57eef637e5fd5d0ccc42404d4440420b5fe95c93"
+G2_SPECIFICATION_TREE_SHA256 = "5d86fedfb53f7afc0f781e190d25319f9ad945d4ba55aa6f63af5d5fa3372f1f"
 G1_COMMIT = "f40c5c84c3248639aa6603d43b6b306ad76d66fd"
 AUDIT_PRESERVATION_COMMIT = "155ef946c48272518c996458bc206039b6676c18"
 INVALIDATED_G2_APPROVAL_COMMIT = "75bf4141be743c1164bfa9841d0737509d7575fe"
@@ -139,17 +140,34 @@ INVALIDATED_CALIBRATION_BLOB_OID = "4c1dc04cca1ddd874fa309ad0314ad24dfc0ea68"
 PRESERVED_GITATTRIBUTES_BLOB_OID = "3f5e0ee58b5d94db6fd2ed25511a9957130885f6"
 UUID_NAMESPACE = uuid.UUID("47eb7b81-7cac-42be-976d-92d8a009a325")
 SCORER_CONFORMANCE_UUID_NAMESPACE = uuid.UUID("1bcb8d89-4423-563a-962d-670c026f6dc8")
-CALIBRATION_RUN_ID = "v07-el-calibration-v11-20260721-01"
-CALIBRATION_DATABASE_ID = "vkt_v07_el_eval_calibration_v11_20260721_01"
+CALIBRATION_RUN_ID = "v07-el-calibration-v12-20260721-01"
+CALIBRATION_DATABASE_ID = "vkt_v07_el_eval_calibration_v12_20260721_01"
 POST_FREEZE_IDENTITIES = (
-    (1, "v07-el-post-freeze-v11-20260721-01", "vkt_v07_el_eval_post_freeze_v11_20260721_01"),
-    (2, "v07-el-post-freeze-v11-20260721-02", "vkt_v07_el_eval_post_freeze_v11_20260721_02"),
-    (3, "v07-el-post-freeze-v11-20260721-03", "vkt_v07_el_eval_post_freeze_v11_20260721_03"),
+    (1, "v07-el-post-freeze-v12-20260721-01", "vkt_v07_el_eval_post_freeze_v12_20260721_01"),
+    (2, "v07-el-post-freeze-v12-20260721-02", "vkt_v07_el_eval_post_freeze_v12_20260721_02"),
+    (3, "v07-el-post-freeze-v12-20260721-03", "vkt_v07_el_eval_post_freeze_v12_20260721_03"),
 )
-POLICY_PATH = "eval/entity_linking/link_policy_v10.json"
-RELEASE_EVIDENCE_PATH = "eval/entity_linking/release_evidence_v10.json"
+POLICY_PATH = "eval/entity_linking/link_policy_v11.json"
+RELEASE_EVIDENCE_PATH = "eval/entity_linking/release_evidence_v11.json"
 EMBEDDING_PROBE_TEXT = "vkt-v07-entity-linking-identity-probe"
 EMBEDDING_PROBE_SHA256 = "4caad60c112bd93fda55714c91aef2762a3c5c5c0df2a09dc28e6296800cc61f"
+EMBEDDING_DETERMINISM_PROBES = (
+    "deterministic embedding probe alpha",
+    "public retrieval stability checkpoint",
+    "cross-language vector consistency 2026",
+    "检索稳定性公开探针",
+    "公开向量一致性检查",
+    "alpha beta gamma delta epsilon zeta eta theta",
+    "punctuation probe: alpha/beta; gamma-delta (epsilon).",
+    "bounded exact retrieval control with stable ordering",
+)
+EMBEDDING_DETERMINISM_PROBE_TEXTS_SHA256 = (
+    "84e98f3ccece28683758bbf21c6272faa673a66ec1efc047937e2026f5d3e907"
+)
+EMBEDDING_DETERMINISM_RESULT_SHA256 = (
+    "688c070c4db9b8ccaf59161c1120e49ce8c2c7ded288169c305772f2d3b27c55"
+)
+EMBEDDING_DETERMINISM_REPETITIONS = 8
 CONTROL_RETRIEVAL_CANDIDATE_K = 50
 
 DEPENDENCY_ROOT_MODULES = (
@@ -176,10 +194,10 @@ G3_IMPLEMENTATION_PATHS = (
     "eval/entity_linking/reference_scorer.py",
     "eval/entity_linking/runtime.py",
     "eval/entity_linking/README.md",
-    "eval/entity_linking/gold_v4.json",
-    "eval/entity_linking/cases_v4.jsonl",
+    "eval/entity_linking/gold_v5.json",
+    "eval/entity_linking/cases_v5.jsonl",
     "eval/entity_linking/conformance_v2.json",
-    "eval/entity_linking/manifests/feasibility_v4.json",
+    "eval/entity_linking/manifests/feasibility_v5.json",
     "scripts/entity_linking_feasibility.py",
     "tests/test_v07_entity_linking_eval.py",
     "tests/test_v07_entity_linking_eval_pg.py",
@@ -217,7 +235,6 @@ G2_SPECIFICATION_PATHS = (
     "docs/testing/acceptance/v0.7-entity-linking-database-change-incident.md",
 )
 G2_APPROVAL_PATHS = (
-    ".gitattributes",
     "docs/README.md",
     "docs/superpowers/specs/2026-07-17-v0.7-publication-scoped-entity-linking.md",
     "docs/superpowers/plans/2026-07-17-v0.7-publication-scoped-entity-linking-g2.md",
@@ -243,6 +260,9 @@ LF_CONTRACT_PATHS = (
     "eval/entity_linking/gold_v4.json",
     "eval/entity_linking/cases_v4.jsonl",
     "eval/entity_linking/manifests/feasibility_v4.json",
+    "eval/entity_linking/gold_v5.json",
+    "eval/entity_linking/cases_v5.jsonl",
+    "eval/entity_linking/manifests/feasibility_v5.json",
     "eval/entity_linking/results/v07-el-calibration-v1-20260717-01.json",
     "scripts/entity_linking_feasibility.py",
     "tests/test_v07_entity_linking_eval.py",
@@ -283,6 +303,15 @@ HISTORICAL_ENTITY_LINKING_PATHS = (
     "eval/entity_linking/results/v07-el-post-freeze-v9-20260720-02.json",
     "eval/entity_linking/results/v07-el-post-freeze-v9-20260720-03.json",
     "eval/entity_linking/release_evidence_v8.json",
+    "eval/entity_linking/gold_v4.json",
+    "eval/entity_linking/cases_v4.jsonl",
+    "eval/entity_linking/manifests/feasibility_v4.json",
+    "eval/entity_linking/results/v07-el-calibration-v11-20260721-01.json",
+    "eval/entity_linking/link_policy_v10.json",
+    "eval/entity_linking/results/v07-el-post-freeze-v11-20260721-01.json",
+    "eval/entity_linking/results/v07-el-post-freeze-v11-20260721-02.json",
+    "eval/entity_linking/results/v07-el-post-freeze-v11-20260721-03.json",
+    "eval/entity_linking/release_evidence_v10.json",
 )
 
 
@@ -643,30 +672,30 @@ def _entity(
 
 
 def _case_prefix(index: int) -> str:
-    return f"v4-{index:03d}"
+    return f"v5-{index:03d}"
 
 
 _CALIBRATION_ROOTS = (
-    "Axiom", "Brumal", "Cypher", "Dorsal", "Eolian",
-    "Fractal", "Gimbal", "Halcyon", "Isobar", "Jovian",
+    "Avenor", "Brisell", "Caldren", "Dovira", "Elsanor",
+    "Feryn", "Galdor", "Havren", "Ilyra", "Jorven",
 )
 _RELEASE_ROOTS = (
-    "Krypton", "Liminal", "Monadic", "Nacre", "Orphic",
-    "Penumbral", "Quasar", "Radian", "Sidereal", "Tesseral",
+    "Kaldra", "Lioren", "Mavros", "Neryth", "Orlena",
+    "Pryven", "Quenor", "Raviel", "Soreth", "Tavren",
 )
 _FAMILY_MODIFIERS = (
-    "Umbral", "Verdant", "Warden", "Xenial", "Yarrow", "Zephyr",
-    "Aureate", "Beryl", "Cerulean", "Diurnal", "Equinox", "Fulcrum",
+    "Ashenvale", "Bluehaven", "Clearwater", "Dawnridge", "Elmshore", "Foxglade",
+    "Graymont", "Highfield", "Ironwood", "Junefield", "Kingswell", "Lightmere",
 )
 _CALIBRATION_CJK_ROOTS = (
-    "青岬", "玄浦", "赤峰", "白泽", "金泉", "玉溪", "松原", "竹岭", "桂湾", "兰洲",
+    "云岬", "星浦", "雾岭", "澄湾", "翠原", "霁川", "曦谷", "岚泽", "鹤汀", "鹭洲",
 )
 _RELEASE_CJK_ROOTS = (
-    "银沙", "丹岳", "桐川", "荷港", "石林", "雪谷", "月潭", "日泉", "风台", "雨城",
+    "珀港", "琉山", "泉岛", "森桥", "霞原", "潮岭", "锦湾", "澜谷", "岩浦", "晨泽",
 )
 _CJK_MODIFIERS = (
-    "研策", "智造", "数联", "云算", "新创", "协同",
-    "拓维", "经纬", "融汇", "启明", "远航", "卓越",
+    "数研", "联创", "智汇", "云策", "新维", "协同",
+    "拓界", "经略", "融合", "启航", "远见", "卓越",
 )
 
 
@@ -790,7 +819,7 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
                 document_key=document_key,
                 library_key="library-primary",
                 title=f"{family_label} published relation record",
-                external_id=f"synthetic-v4-{index:03d}",
+                external_id=f"synthetic-v5-{index:03d}",
                 status="ready",
             )
         )
@@ -986,7 +1015,7 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
             )
         elif group == 3:
             outside_key = f"entity-{suffix}-outside"
-            outside_name = f"externalcodev4{index:03d}"
+            outside_name = f"externalcodev5{index:03d}"
             entities[outside_key] = _entity(
                 outside_key,
                 outside_name,
@@ -1099,7 +1128,7 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
                         document_key=decoy_document_key,
                         library_key="library-primary",
                         title=decoy_title,
-                        external_id=f"synthetic-v4-decoy-{index:03d}-{marker:02d}",
+                        external_id=f"synthetic-v5-decoy-{index:03d}-{marker:02d}",
                         status="ready",
                     )
                 )
@@ -1219,24 +1248,24 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
             canary_key="canary-credential",
             key_marker="synthetic-credential-shaped-key",
             value_marker="synthetic-credential-shaped-value",
-            target_rows=("entity-v4-000-seed",),
+            target_rows=("entity-v5-000-seed",),
         ),
         PrivacyCanaryRecord(
             canary_key="canary-properties",
             key_marker="synthetic-private-properties-key",
             value_marker="synthetic-private-properties-value",
-            target_rows=("entity-v4-000-seed",),
+            target_rows=("entity-v5-000-seed",),
         ),
         PrivacyCanaryRecord(
             canary_key="canary-source",
             key_marker="synthetic-source-like-key",
             value_marker="synthetic-source-like-value",
-            target_rows=("relation-v4-000-a",),
+            target_rows=("relation-v5-000-a",),
         ),
     )
     gold = GoldDataset(
         schema_version="entity-linking-gold-v2",
-        dataset_id="feasibility-v4",
+        dataset_id="feasibility-v5",
         uuid_namespace=str(UUID_NAMESPACE),
         libraries=libraries,
         ontologies=ontologies,
@@ -1872,10 +1901,10 @@ def write_static_dataset(root: Path) -> FeasibilityManifest:
     gold, cases = build_static_gold_and_cases()
     conformance = build_conformance_dataset()
     base = root / "eval/entity_linking"
-    gold_path = base / "gold_v4.json"
-    cases_path = base / "cases_v4.jsonl"
+    gold_path = base / "gold_v5.json"
+    cases_path = base / "cases_v5.jsonl"
     conformance_path = base / "conformance_v2.json"
-    manifest_path = base / "manifests/feasibility_v4.json"
+    manifest_path = base / "manifests/feasibility_v5.json"
     _write_json(gold_path, gold.model_dump(mode="json"))
     _write_jsonl(cases_path, [case.model_dump(mode="json") for case in cases])
     _write_json(conformance_path, conformance.model_dump(mode="json"))
@@ -1903,7 +1932,7 @@ def write_static_dataset(root: Path) -> FeasibilityManifest:
     control, metric, grid, bootstrap, performance = _fixed_controls()
     manifest = FeasibilityManifest(
         schema_version="entity-linking-feasibility-manifest-v2",
-        dataset_id="feasibility-v4",
+        dataset_id="feasibility-v5",
         g2_approval_commit=G2_APPROVAL_COMMIT,
         g2_specification_tree_sha256=G2_SPECIFICATION_TREE_SHA256,
         gold_ref=gold_ref,
@@ -2314,7 +2343,7 @@ def _validate_historical_family_disjoint(
     ):
         current_values = values_for(current_cases, field)
         historical_values = values_for(historical_cases, field)
-        if current_values & historical_values or any("v4" not in value for value in current_values):
+        if current_values & historical_values or any("v5" not in value for value in current_values):
             raise EntityLinkingEvalError("family_split_overlap")
 
 
@@ -2322,10 +2351,10 @@ def _validate_historical_family_disjoint(
 def load_dataset(root: Path) -> LoadedDataset:
     verify_g2_approval(root)
     base = root / "eval/entity_linking"
-    gold_path = base / "gold_v4.json"
-    cases_path = base / "cases_v4.jsonl"
+    gold_path = base / "gold_v5.json"
+    cases_path = base / "cases_v5.jsonl"
     conformance_path = base / "conformance_v2.json"
-    manifest_path = base / "manifests/feasibility_v4.json"
+    manifest_path = base / "manifests/feasibility_v5.json"
     gold = load_canonical_json(root, gold_path, GoldDataset)
     cases = load_canonical_jsonl(root, cases_path, EvaluationCase)
     conformance = load_canonical_json(root, conformance_path, ConformanceDataset)
@@ -2345,7 +2374,7 @@ def load_dataset(root: Path) -> LoadedDataset:
     _validate_families(typed_cases)
     historical_cases = tuple(
         case
-        for path in (base / "cases_v2.jsonl", base / "cases_v3.jsonl")
+        for path in (base / "cases_v2.jsonl", base / "cases_v3.jsonl", base / "cases_v4.jsonl")
         for case in load_canonical_jsonl(root, path, EvaluationCase)
         if isinstance(case, EvaluationCase)
     )
@@ -2429,7 +2458,7 @@ def load_dataset(root: Path) -> LoadedDataset:
             "cases_schema_version": "entity-linking-case-v2",
             "conformance_content_sha256": manifest.conformance_ref.canonical_sha256,
             "conformance_schema_version": conformance.schema_version,
-            "dataset_id": "feasibility-v4",
+            "dataset_id": "feasibility-v5",
             "gold_content_sha256": manifest.gold_ref.canonical_sha256,
             "gold_schema_version": gold.schema_version,
         }
@@ -2863,16 +2892,22 @@ def _embedding_vector_sha256(vector: Sequence[Decimal | float | int]) -> str:
     return hashlib.sha256(bytes(encoded)).hexdigest()
 
 
-async def _embedding_identity(base_url: str, model: str, api_key: str) -> EmbeddingIdentity:
-    if model != "bge-m3":
+def _embedding_vector_float32_sha256(vector: Sequence[Decimal | float | int]) -> str:
+    if len(vector) != 1024:
         raise EntityLinkingEvalError("embedding_identity_mismatch")
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
-    async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
-        response = await client.post(
-            base_url,
-            json={"model": model, "input": [EMBEDDING_PROBE_TEXT]},
-            headers=headers,
-        )
+    encoded = bytearray()
+    for value in vector:
+        decimal_value = value if isinstance(value, Decimal) else Decimal(str(value))
+        if not decimal_value.is_finite():
+            raise EntityLinkingEvalError("embedding_identity_mismatch")
+        try:
+            encoded.extend(struct.pack("!f", float(decimal_value)))
+        except (OverflowError, ValueError, struct.error) as exc:
+            raise EntityLinkingEvalError("embedding_identity_mismatch") from exc
+    return hashlib.sha256(bytes(encoded)).hexdigest()
+
+
+def _embedding_response_vector(response: httpx.Response) -> list[Decimal | float | int]:
     if response.status_code != 200:
         raise EntityLinkingEvalError("embedding_unavailable")
     try:
@@ -2883,6 +2918,60 @@ async def _embedding_identity(base_url: str, model: str, api_key: str) -> Embedd
         raise EntityLinkingEvalError("embedding_identity_mismatch") from exc
     if len(data) != 1 or not isinstance(vector, list) or len(vector) != 1024:
         raise EntityLinkingEvalError("embedding_identity_mismatch")
+    return vector
+
+
+async def _embedding_determinism_preflight(
+    base_url: str,
+    model: str,
+    api_key: str,
+) -> dict[str, Any]:
+    if (
+        model != "bge-m3"
+        or canonical_sha256(EMBEDDING_DETERMINISM_PROBES)
+        != EMBEDDING_DETERMINISM_PROBE_TEXTS_SHA256
+    ):
+        raise EntityLinkingEvalError("embedding_determinism_probe_mismatch")
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+    probe_hashes: list[tuple[str, ...]] = []
+    async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
+        for probe in EMBEDDING_DETERMINISM_PROBES:
+            hashes: list[str] = []
+            for _ in range(EMBEDDING_DETERMINISM_REPETITIONS):
+                response = await client.post(
+                    base_url,
+                    json={"model": model, "input": [probe]},
+                    headers=headers,
+                )
+                hashes.append(_embedding_vector_float32_sha256(_embedding_response_vector(response)))
+            probe_hashes.append(tuple(hashes))
+    if any(len(set(hashes)) != 1 for hashes in probe_hashes):
+        raise EntityLinkingEvalError("embedding_nondeterministic")
+    result_sha256 = hashlib.sha256(
+        "".join(hashes[0] for hashes in probe_hashes).encode("ascii")
+    ).hexdigest()
+    if result_sha256 != EMBEDDING_DETERMINISM_RESULT_SHA256:
+        raise EntityLinkingEvalError("embedding_determinism_probe_mismatch")
+    return {
+        "probe_count": len(EMBEDDING_DETERMINISM_PROBES),
+        "repetitions_per_probe": EMBEDDING_DETERMINISM_REPETITIONS,
+        "stable_call_count": len(EMBEDDING_DETERMINISM_PROBES)
+        * EMBEDDING_DETERMINISM_REPETITIONS,
+        "probe_set_sha256": result_sha256,
+    }
+
+
+async def _embedding_identity(base_url: str, model: str, api_key: str) -> EmbeddingIdentity:
+    if model != "bge-m3":
+        raise EntityLinkingEvalError("embedding_identity_mismatch")
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+    async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
+        response = await client.post(
+            base_url,
+            json={"model": model, "input": [EMBEDDING_PROBE_TEXT]},
+            headers=headers,
+        )
+    vector = _embedding_response_vector(response)
     origin_hash = hashlib.sha256(normalize_service_origin(base_url, qdrant=False).encode("utf-8")).hexdigest()
     projection = {
         "identity_version": "entity-linking-embedding-identity-v1",
@@ -2993,6 +3082,11 @@ async def preflight_live_dependencies() -> dict[str, Any]:
         raise EntityLinkingEvalError("qdrant_unavailable")
     if not embedding_url or model != "bge-m3" or dimension != "1024":
         raise EntityLinkingEvalError("embedding_unavailable")
+    embedding_determinism = await _embedding_determinism_preflight(
+        embedding_url,
+        model,
+        os.getenv("EMBEDDING_API_KEY", ""),
+    )
     postgres, qdrant, embedding = await asyncio.gather(
         postgres_cluster_identity(admin_dsn),
         _qdrant_identity(qdrant_url, os.getenv("QDRANT_API_KEY", "")),
@@ -3010,6 +3104,13 @@ async def preflight_live_dependencies() -> dict[str, Any]:
         "qdrant": "passed",
         "qdrant_fingerprint_sha256": qdrant.qdrant_fingerprint_sha256,
         "embedding": "passed",
+        "embedding_determinism": "passed",
+        "embedding_determinism_probe_count": embedding_determinism["probe_count"],
+        "embedding_determinism_repetitions_per_probe": embedding_determinism[
+            "repetitions_per_probe"
+        ],
+        "embedding_determinism_stable_call_count": embedding_determinism["stable_call_count"],
+        "embedding_determinism_probe_set_sha256": embedding_determinism["probe_set_sha256"],
         "status": "passed",
     }
 

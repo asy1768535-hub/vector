@@ -233,7 +233,7 @@ class PrivacyCanaryRecord(StrictModel):
 
 class GoldDataset(StrictModel):
     schema_version: Literal["entity-linking-gold-v2"]
-    dataset_id: Literal["feasibility-v4"]
+    dataset_id: Literal["feasibility-v5"]
     uuid_namespace: str
     libraries: tuple[LibraryRecord, ...]
     ontologies: tuple[OntologyRecord, ...]
@@ -577,7 +577,7 @@ def _validate_external_distribution_records(
 
 class FeasibilityManifest(StrictModel):
     schema_version: Literal["entity-linking-feasibility-manifest-v2"]
-    dataset_id: Literal["feasibility-v4"]
+    dataset_id: Literal["feasibility-v5"]
     g2_approval_commit: GitCommit
     g2_specification_tree_sha256: Sha256
     gold_ref: ArtifactRef
