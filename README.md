@@ -140,6 +140,13 @@ python -m app.workers.knowledge_artifacts --watch  # v0.8 Summary/Outline Worker
 # 6. 后台：浏览器开 http://<host>:8100/console/
 ```
 
+Remote immutable revision-file storage is optional. Local storage is built in; configured
+MinIO or Alibaba OSS deployments install their lazy SDK adapters with:
+
+```bash
+pip install -e ".[object-storage]"
+```
+
 详见 [docs/04 快速开始](./docs/04-quickstart.md)。
 
 ## 10. 数据库迁移与首次管理员

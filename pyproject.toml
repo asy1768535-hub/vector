@@ -39,6 +39,10 @@ ocr = [
     "pypdfium2",
     "Pillow>=10",
 ]
+object-storage = [
+    "minio>=7.2",
+    "oss2>=2.18",
+]
 
 [build-system]
 requires = ["setuptools>=68"]

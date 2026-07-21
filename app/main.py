@@ -42,6 +42,7 @@ from app.auth.routes import build_auth_router
 from app.casbin.enforcer import get_enforcer
 from app.config import (
     settings,
+    validate_revision_file_storage_startup,
     validate_entity_linking_startup,
     validate_graph_extraction_startup,
     validate_knowledge_artifact_startup,
@@ -98,6 +99,23 @@ def assert_knowledge_artifact_startup_security() -> None:
     validate_knowledge_artifact_startup(settings)
 
 
+def assert_revision_file_storage_startup_security() -> None:
+    validate_revision_file_storage_startup(settings)
+    if (
+        settings.revision_file_storage_enabled
+        and settings.document_storage_provider == "local"
+    ):
+        from app.services.object_storage import build_object_storage_adapter
+        from app.services.object_storage_contracts import ObjectStorageError
+
+        try:
+            build_object_storage_adapter(settings)
+        except ObjectStorageError:
+            raise RuntimeError(
+                "[security] local document storage root is invalid"
+            ) from None
+
+
 def assert_graph_publication_startup_security() -> None:
     validate_graph_publication_startup(settings)
 
@@ -125,6 +143,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     assert_startup_security()
     assert_graph_extraction_startup_security()
     assert_knowledge_artifact_startup_security()
+    assert_revision_file_storage_startup_security()
     assert_graph_publication_startup_security()
     assert_graph_retrieval_startup_security()
     assert_entity_linking_startup_security()

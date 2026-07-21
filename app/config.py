@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import math
 import re
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlparse
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -173,6 +175,16 @@ class Settings(BaseSettings):
     max_import_file_bytes: int = 50 * 1024 * 1024
     # 原始上传文件持久化目录（相对路径基于仓库根目录）。
     document_files_dir: str = "storage/document_files"
+    revision_file_storage_enabled: bool = False
+    document_storage_provider: str = "local"
+    document_storage_endpoint_ref: str = "primary"
+    document_storage_endpoint_url: str = ""
+    document_storage_bucket: str = ""
+    document_storage_access_key: SecretStr = SecretStr("")
+    document_storage_secret_key: SecretStr = SecretStr("")
+    document_storage_region: str = ""
+    document_storage_max_read_bytes: int = 50 * 1024 * 1024
+    document_storage_signed_url_seconds: int = 300
 
     # ---- 检索可见性过滤（#6 批次 A，revision 维度）----
     retrieval_consistency_filter: bool = True   # 总开关；关掉则不回查 PG（灰度/回滚用）
@@ -468,6 +480,58 @@ def validate_knowledge_artifact_startup(config: Settings) -> None:
     if not config.knowledge_artifact_api_key.get_secret_value().strip():
         raise RuntimeError(
             "[security] KNOWLEDGE_ARTIFACT_API_KEY is required for model generation"
+        )
+
+
+def validate_revision_file_storage_startup(config: Settings) -> None:
+    if not config.revision_file_storage_enabled:
+        return
+    if config.document_storage_max_read_bytes <= 0:
+        raise RuntimeError("[security] document storage read limit must be positive")
+    if not 30 <= config.document_storage_signed_url_seconds <= 3_600:
+        raise RuntimeError(
+            "[security] document storage signed URL lifetime must be within 30..3600 seconds"
+        )
+    if not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}",
+        config.document_storage_endpoint_ref,
+    ):
+        raise RuntimeError("[security] document storage endpoint reference is invalid")
+    if config.document_storage_provider not in {"local", "minio", "oss"}:
+        raise RuntimeError("[security] document storage provider is unsupported")
+    if not config.enable_evidence_write_path:
+        raise RuntimeError(
+            "[security] revision file storage requires the evidence Revision write path"
+        )
+    if config.document_storage_provider == "local":
+        if not config.document_files_dir.strip():
+            raise RuntimeError("[security] local document storage root is required")
+        return
+    parsed = urlparse(config.document_storage_endpoint_url)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise RuntimeError("[security] remote document storage endpoint is invalid")
+    if config.document_storage_provider == "oss" and parsed.scheme != "https":
+        raise RuntimeError("[security] OSS document storage requires HTTPS")
+    if not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._-]{0,254}", config.document_storage_bucket
+    ):
+        raise RuntimeError("[security] remote document storage bucket is invalid")
+    if not config.document_storage_access_key.get_secret_value().strip() or not (
+        config.document_storage_secret_key.get_secret_value().strip()
+    ):
+        raise RuntimeError("[security] remote document storage credentials are required")
+    dependency = "minio" if config.document_storage_provider == "minio" else "oss2"
+    if importlib.util.find_spec(dependency) is None:
+        raise RuntimeError(
+            f"[security] document storage optional dependency '{dependency}' is required"
         )
 
 
