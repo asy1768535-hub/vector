@@ -6,7 +6,8 @@
 > a cutoff tie cohort had completed inside an expanded probe. No holdout was opened and
 > all resources were removed. G2.7.1 corrects that bounded completion test without
 > changing Top 50, the 201 hard bound, scorer, thresholds, dataset, or gates, and reserves
-> fresh v11 run/database/policy identities.
+> fresh v11 run/database/policy identities. The corrected production client and its
+> regression test are explicitly LF-bound for reproducible clean-checkout hashes.
 >
 > **v0.7 corrective G2.7 (2026-07-21):** Calibration v9, policy v8, and all
 > three post-freeze v9 runs are immutable individually passing evidence, while
