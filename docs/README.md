@@ -1,5 +1,14 @@
 # 文档索引
 
+> **v0.7 release-evidence v10 (2026-07-21):** All three post-freeze v11 runs
+> passed 26/26 gates, but release evidence v10 is immutable `NO_GO` because dense
+> and hybrid logical response hashes changed across runs. Candidate and exact-only
+> hashes were identical. Repeated public probes proved the reachable bge-m3 service
+> returns multiple float32 vectors for identical input; connection reuse, ternary/
+> binary projection, and fixed-batch median did not make a public probe suite stable.
+> Further calibration is blocked until a deterministic embedding endpoint passes the
+> full-float preflight contract. No v4 holdout result may tune that correction.
+>
 > **v0.7 corrective G2.7.1 (2026-07-21):** The first v10 calibration attempt
 > passed live dependency preflight and the non-skipped integration test, then failed
 > closed before artifact creation when hybrid exact retrieval could not recognize that
