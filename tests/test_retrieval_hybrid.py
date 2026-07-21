@@ -6,6 +6,8 @@ import uuid
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from app.schemas.dify import DifyRetrievalRequest, DifyRetrievalResponse
 from app.services import retrieval as R
 
@@ -119,6 +121,56 @@ def test_rrf_fusion_stable_and_keyword_only_enters():
     assert "vector_score" not in by["c"].metadata        # keyword-only 无 vector_score
     assert by["a"].metadata["vector_score"] == 0.9       # dense 命中保留最高向量分
     assert by["c"].metadata["rrf_score"] > 0
+
+
+def test_rrf_ties_are_stable_across_input_order():
+    dense = [_dense("b", 0.8), _dense("a", 0.8)]
+    keyword = [_kw("d", 0.7), _kw("c", 0.7)]
+
+    first = R._rrf_fuse(dense, keyword, k=60)
+    second = R._rrf_fuse(list(reversed(dense)), list(reversed(keyword)), k=60)
+
+    assert [item["id"] for item in first] == [item["id"] for item in second]
+    assert [item["id"] for item in first] == ["a", "c", "b", "d"]
+
+
+def test_deterministic_dense_control_uses_exact_pool_of_50():
+    with patch.object(R.embedding, "embed_one", new=AsyncMock(return_value=[0.1] * 8)), \
+         patch.object(R.qdrant, "search", new=AsyncMock(return_value=[])) as search, \
+         patch.object(R.rerank_svc, "is_configured", return_value=False), \
+         patch.object(R.rerank_svc, "rank_candidates", new=AsyncMock(return_value=([], {}))):
+        asyncio.run(
+            R.run_retrieval(
+                collection="c",
+                embedding_model="m",
+                embedding_base_url=None,
+                request=_req(top_k=10),
+                retrieval_mode="dense",
+                candidate_k=50,
+                exact_vector_search=True,
+            )
+        )
+
+    assert search.await_args.kwargs["limit"] == 50
+    assert search.await_args.kwargs["exact"] is True
+
+
+@pytest.mark.parametrize("candidate_k", [0, 201])
+def test_candidate_pool_is_positive_and_bounded(candidate_k, monkeypatch):
+    monkeypatch.setattr(R.settings, "visibility_overfetch_max", 200)
+
+    with pytest.raises(ValueError, match="candidate_k"):
+        asyncio.run(
+            R.run_retrieval(
+                collection="c",
+                embedding_model="m",
+                embedding_base_url=None,
+                request=_req(top_k=10),
+                retrieval_mode="dense",
+                candidate_k=candidate_k,
+                exact_vector_search=True,
+            )
+        )
 
 
 # ── rerank 在融合后执行 ──────────────────────────────────────────────────────

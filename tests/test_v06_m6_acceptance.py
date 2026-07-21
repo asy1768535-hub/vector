@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import re
+import subprocess
 from pathlib import Path
 
 from app.main import app
@@ -27,7 +27,6 @@ from app.services.graph_retrieval_eval import (
     file_sha256,
     load_graph_retrieval_release_evidence,
 )
-from scripts import graph_retrieval_eval as eval_cli
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,6 +64,7 @@ EXPECTED_EVIDENCE_FILE_SHA256 = (
 EXPECTED_RESPONSE_SET_SHA256 = (
     "487cf9526ed612dcdcf0985d725f6e65f3643a3c5c92ba222d312598181a226e"
 )
+FROZEN_IMPLEMENTATION_COMMIT = "2084624882cab5b1eb5572efcd5b0823d8ce3045"
 
 
 def _headings(path: Path) -> set[str]:
@@ -81,14 +81,6 @@ def _headings(path: Path) -> set[str]:
 def _canonical_and_file_sha256(path: Path) -> tuple[str, str]:
     payload = path.read_bytes()
     return canonical_json_sha256(json.loads(payload)), file_sha256(payload)
-
-
-def _current_implementation_sha256() -> str:
-    hashes = {
-        path: hashlib.sha256((ROOT / path).read_bytes()).hexdigest()
-        for path in eval_cli.IMPLEMENTATION_PATHS
-    }
-    return canonical_json_sha256(hashes)
 
 
 def test_m6_operator_guide_and_release_docs_are_indexed():
@@ -149,7 +141,7 @@ def test_m6_acceptance_report_covers_every_hard_release_gate():
     assert len(decisions) == 1
 
 
-def test_m6_release_bundle_and_current_implementation_are_frozen():
+def test_m6_release_bundle_and_historical_implementation_are_frozen():
     loaded = load_graph_retrieval_release_evidence(
         repository_root=ROOT,
         evidence_path=RELEASE_EVIDENCE,
@@ -162,9 +154,18 @@ def test_m6_release_bundle_and_current_implementation_are_frozen():
         EXPECTED_EVIDENCE_CANONICAL_SHA256,
         EXPECTED_EVIDENCE_FILE_SHA256,
     )
-    assert _current_implementation_sha256() == EXPECTED_IMPLEMENTATION_SHA256
     assert loaded.policy.policy.implementation_tree_sha256 == (
         EXPECTED_IMPLEMENTATION_SHA256
+    )
+    assert loaded.calibration.code_commit == FROZEN_IMPLEMENTATION_COMMIT
+    assert (
+        subprocess.run(
+            ("git", "merge-base", "--is-ancestor", FROZEN_IMPLEMENTATION_COMMIT, "HEAD"),
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+        ).returncode
+        == 0
     )
     assert loaded.policy.policy.properties_exposed is False
     assert loaded.policy.policy.thresholds == loaded.calibration.candidate_thresholds

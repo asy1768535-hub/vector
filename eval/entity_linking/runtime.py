@@ -6,7 +6,6 @@ import hashlib
 import importlib.metadata
 import ipaddress
 import json
-import math
 import os
 import platform
 import random
@@ -17,7 +16,7 @@ import sys
 import time
 import tracemalloc
 import uuid
-from collections import Counter
+from collections import Counter, OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -35,11 +34,13 @@ from app.services.graph_canonical import canonical_graph_json_v1
 from app.services.graph_normalization import normalize_graph_name_v1
 from eval.entity_linking.contracts import (
     CATEGORY_ORDER,
+    GATE_ID_ORDER,
     STRATUM_ORDER,
     ArtifactRef,
     BootstrapResult,
     CalibrationArtifact,
     CategoryCounts,
+    CohortCounts,
     CategoryPredicateCase,
     ConformanceDataset,
     ControlConfig,
@@ -53,11 +54,14 @@ from eval.entity_linking.contracts import (
     EXTERNAL_DISTRIBUTION_VERSIONS,
     ExternalDistributionRecord,
     FeasibilityManifest,
+    FrozenPolicy,
     FeatureCase,
     FeatureExpected,
     GoldDataset,
     GoldUtilityRecord,
     GridResult,
+    GateDecision,
+    IdentityTimeCleanupDecision,
     IntrinsicMetrics,
     LatencySummary,
     LibraryRecord,
@@ -69,22 +73,28 @@ from eval.entity_linking.contracts import (
     OrderingCase,
     PerformanceFixture,
     Performance,
+    PolicyApprovalPayload,
+    PostFreezeArtifact,
     PrivacyCanaryRecord,
     PublicationRecord,
     QdrantCollection,
     QdrantCollectionConfig,
     QdrantIdentity,
     ReducedRational,
+    ReleaseEvidence,
     RelationRecord,
     RelationTypeRecord,
     RevisionRecord,
     ScopeSchemaHash,
     StratumCounts,
     SignedGain,
+    RunGateDecision,
     Threshold,
     ThresholdGrid,
     UtilityGains,
     UtilityMetrics,
+    OrdinalArtifactRef,
+    OrdinalResponseHash,
     CaseResponseHash,
     EnvironmentRecord,
     BootstrapConfig,
@@ -94,30 +104,73 @@ from eval.entity_linking.contracts import (
     ChunkRecord,
     artifact_ref,
     canonical_sha256,
+    exact_file_sha256,
     load_canonical_json,
     load_canonical_jsonl,
+    parse_json_bytes,
 )
 from eval.entity_linking.reference_scorer import (
     EntityCandidate,
     FeatureScores,
+    PreparedEntityCandidate,
     ScoredCandidate,
     decide_scored_candidates,
+    prepare_candidates,
     logical_decision,
+    resolve_prepared_mention,
     resolve_mention,
+    is_strict_subsequence,
     score_candidate,
     score_normalized_pair,
     stable_candidate_key,
 )
 
 
-G2_APPROVAL_COMMIT = "75bf4141be743c1164bfa9841d0737509d7575fe"
-G2_SPECIFICATION_TREE_SHA256 = "b5cde88a6705b1da9053dd36bef46ec2b096b7bd18555b65b5c3ff6fab908075"
+G2_APPROVAL_COMMIT = "57eef637e5fd5d0ccc42404d4440420b5fe95c93"
+G2_SPECIFICATION_TREE_SHA256 = "5d86fedfb53f7afc0f781e190d25319f9ad945d4ba55aa6f63af5d5fa3372f1f"
+FROZEN_EVALUATOR_COMMIT = "8bc7dcf1b358b1e735114ebd43b1e213e0ac487f"
+FROZEN_EVALUATION_TREE_SHA256 = "d617fb9fe963843df3789f5b41639dd76b34eaba427b8bb71a266f47701f719c"
 G1_COMMIT = "f40c5c84c3248639aa6603d43b6b306ad76d66fd"
-UUID_NAMESPACE = uuid.UUID("1bcb8d89-4423-563a-962d-670c026f6dc8")
-CALIBRATION_RUN_ID = "v07-el-calibration-v1-20260717-01"
-CALIBRATION_DATABASE_ID = "vkt_v07_el_eval_calibration_20260717_01"
+AUDIT_PRESERVATION_COMMIT = "155ef946c48272518c996458bc206039b6676c18"
+INVALIDATED_G2_APPROVAL_COMMIT = "75bf4141be743c1164bfa9841d0737509d7575fe"
+INVALIDATED_G2_SPECIFICATION_TREE_SHA256 = "b5cde88a6705b1da9053dd36bef46ec2b096b7bd18555b65b5c3ff6fab908075"
+INCOMPLETE_IMPLEMENTATION_COMMIT = "4217498277706ceb1ee2b60d25d593cbc80ef45f"
+INVALIDATED_CALIBRATION_PATH = "eval/entity_linking/results/v07-el-calibration-v1-20260717-01.json"
+INVALIDATED_CALIBRATION_CANONICAL_SHA256 = "96757dcd901439828b61605c473a34c2c838ed6755db6f129d030561b156894d"
+INVALIDATED_CALIBRATION_FILE_SHA256 = "c35210075e179ebce197275041e0ff69403297185ec2ebcc16a663d7611e9225"
+INVALIDATED_CALIBRATION_BLOB_OID = "4c1dc04cca1ddd874fa309ad0314ad24dfc0ea68"
+PRESERVED_GITATTRIBUTES_BLOB_OID = "3f5e0ee58b5d94db6fd2ed25511a9957130885f6"
+UUID_NAMESPACE = uuid.UUID("47eb7b81-7cac-42be-976d-92d8a009a325")
+SCORER_CONFORMANCE_UUID_NAMESPACE = uuid.UUID("1bcb8d89-4423-563a-962d-670c026f6dc8")
+CALIBRATION_RUN_ID = "v07-el-calibration-v12-20260721-01"
+CALIBRATION_DATABASE_ID = "vkt_v07_el_eval_calibration_v12_20260721_01"
+POST_FREEZE_IDENTITIES = (
+    (1, "v07-el-post-freeze-v12-20260721-01", "vkt_v07_el_eval_post_freeze_v12_20260721_01"),
+    (2, "v07-el-post-freeze-v12-20260721-02", "vkt_v07_el_eval_post_freeze_v12_20260721_02"),
+    (3, "v07-el-post-freeze-v12-20260721-03", "vkt_v07_el_eval_post_freeze_v12_20260721_03"),
+)
+POLICY_PATH = "eval/entity_linking/link_policy_v11.json"
+RELEASE_EVIDENCE_PATH = "eval/entity_linking/release_evidence_v11.json"
 EMBEDDING_PROBE_TEXT = "vkt-v07-entity-linking-identity-probe"
 EMBEDDING_PROBE_SHA256 = "4caad60c112bd93fda55714c91aef2762a3c5c5c0df2a09dc28e6296800cc61f"
+EMBEDDING_DETERMINISM_PROBES = (
+    "deterministic embedding probe alpha",
+    "public retrieval stability checkpoint",
+    "cross-language vector consistency 2026",
+    "检索稳定性公开探针",
+    "公开向量一致性检查",
+    "alpha beta gamma delta epsilon zeta eta theta",
+    "punctuation probe: alpha/beta; gamma-delta (epsilon).",
+    "bounded exact retrieval control with stable ordering",
+)
+EMBEDDING_DETERMINISM_PROBE_TEXTS_SHA256 = (
+    "84e98f3ccece28683758bbf21c6272faa673a66ec1efc047937e2026f5d3e907"
+)
+EMBEDDING_DETERMINISM_RESULT_SHA256 = (
+    "688c070c4db9b8ccaf59161c1120e49ce8c2c7ded288169c305772f2d3b27c55"
+)
+EMBEDDING_DETERMINISM_REPETITIONS = 8
+CONTROL_RETRIEVAL_CANDIDATE_K = 50
 
 DEPENDENCY_ROOT_MODULES = (
     "app.config",
@@ -137,18 +190,20 @@ DEPENDENCY_ROOT_MODULES = (
 )
 EXTERNAL_DISTRIBUTIONS = EXTERNAL_DISTRIBUTION_VERSIONS
 G3_IMPLEMENTATION_PATHS = (
+    "app/services/qdrant.py",
     "eval/entity_linking/__init__.py",
     "eval/entity_linking/contracts.py",
     "eval/entity_linking/reference_scorer.py",
     "eval/entity_linking/runtime.py",
     "eval/entity_linking/README.md",
-    "eval/entity_linking/gold_v1.json",
-    "eval/entity_linking/cases_v1.jsonl",
-    "eval/entity_linking/conformance_v1.json",
-    "eval/entity_linking/manifests/feasibility_v1.json",
+    "eval/entity_linking/gold_v5.json",
+    "eval/entity_linking/cases_v5.jsonl",
+    "eval/entity_linking/conformance_v2.json",
+    "eval/entity_linking/manifests/feasibility_v5.json",
     "scripts/entity_linking_feasibility.py",
     "tests/test_v07_entity_linking_eval.py",
     "tests/test_v07_entity_linking_eval_pg.py",
+    "tests/test_qdrant_determinism.py",
     "docs/testing/acceptance/v0.7-entity-linking-feasibility.md",
 )
 PROTECTED_PATHS = (
@@ -163,6 +218,19 @@ PROTECTED_PATHS = (
     "eval/graph_retrieval",
     "scripts/graph_retrieval_eval.py",
 )
+FINAL_RUNTIME_PROTECTED_PATHS = (
+    ".env.example",
+    "app/api/v07_entity_linking.py",
+    "app/config.py",
+    "app/main.py",
+    "app/schemas/v07_entity_linking.py",
+    "app/services/entity_linking.py",
+    "app/services/entity_linking_observability.py",
+    "app/services/entity_linking_scorer.py",
+)
+HISTORICAL_ACCEPTANCE_PROTECTED_PATHS = (
+    "app/services/graph_extraction_eval.py",
+)
 EXCLUDED_USER_PATHS = (
     "admin-ui/login_redesign.test.mjs",
     "admin-ui/src/views/Login.js",
@@ -173,6 +241,92 @@ EXCLUDED_USER_PATHS = (
     "_drop_test_sync.py",
     "_verify_baseline.py",
     "docs/codex-handoff.md",
+)
+G2_SPECIFICATION_PATHS = (
+    ".gitattributes",
+    "docs/superpowers/specs/2026-07-17-v0.7-publication-scoped-entity-linking.md",
+    "docs/superpowers/plans/2026-07-17-v0.7-publication-scoped-entity-linking-g2.md",
+    "docs/testing/acceptance/v0.7-entity-linking-corrective-audit.md",
+    "docs/testing/acceptance/v0.7-entity-linking-database-change-incident.md",
+)
+G2_APPROVAL_PATHS = (
+    "docs/README.md",
+    "docs/superpowers/specs/2026-07-17-v0.7-publication-scoped-entity-linking.md",
+    "docs/superpowers/plans/2026-07-17-v0.7-publication-scoped-entity-linking-g2.md",
+    "docs/testing/acceptance/v0.7-entity-linking-corrective-audit.md",
+)
+AUDIT_PRESERVATION_PATHS = (".gitattributes", INVALIDATED_CALIBRATION_PATH)
+LF_CONTRACT_PATHS = (
+    ".gitattributes",
+    "docs/superpowers/specs/2026-07-17-v0.7-publication-scoped-entity-linking.md",
+    "docs/superpowers/plans/2026-07-17-v0.7-publication-scoped-entity-linking-g2.md",
+    "docs/testing/acceptance/v0.7-entity-linking-corrective-audit.md",
+    "docs/testing/acceptance/v0.7-entity-linking-database-change-incident.md",
+    "docs/testing/acceptance/v0.7-entity-linking-feasibility.md",
+    "app/services/qdrant.py",
+    "eval/entity_linking/contracts.py",
+    "eval/entity_linking/gold_v2.json",
+    "eval/entity_linking/cases_v2.jsonl",
+    "eval/entity_linking/conformance_v2.json",
+    "eval/entity_linking/manifests/feasibility_v2.json",
+    "eval/entity_linking/gold_v3.json",
+    "eval/entity_linking/cases_v3.jsonl",
+    "eval/entity_linking/manifests/feasibility_v3.json",
+    "eval/entity_linking/gold_v4.json",
+    "eval/entity_linking/cases_v4.jsonl",
+    "eval/entity_linking/manifests/feasibility_v4.json",
+    "eval/entity_linking/gold_v5.json",
+    "eval/entity_linking/cases_v5.jsonl",
+    "eval/entity_linking/manifests/feasibility_v5.json",
+    "eval/entity_linking/results/v07-el-calibration-v1-20260717-01.json",
+    "scripts/entity_linking_feasibility.py",
+    "tests/test_v07_entity_linking_eval.py",
+    "tests/test_v07_entity_linking_eval_pg.py",
+    "tests/test_qdrant_determinism.py",
+)
+PHASE_OUTPUT_PATHS = (
+    INVALIDATED_CALIBRATION_PATH,
+    f"eval/entity_linking/results/{CALIBRATION_RUN_ID}.json",
+    POLICY_PATH,
+    *(f"eval/entity_linking/results/{run_id}.json" for _, run_id, _ in POST_FREEZE_IDENTITIES),
+    RELEASE_EVIDENCE_PATH,
+)
+HISTORICAL_ENTITY_LINKING_PATHS = (
+    "eval/entity_linking/gold_v1.json",
+    "eval/entity_linking/cases_v1.jsonl",
+    "eval/entity_linking/conformance_v1.json",
+    "eval/entity_linking/manifests/feasibility_v1.json",
+    "eval/entity_linking/results/v07-el-calibration-v2-20260720-01.json",
+    "eval/entity_linking/link_policy_v1.json",
+    "eval/entity_linking/results/v07-el-post-freeze-v2-20260720-01.json",
+    "eval/entity_linking/results/v07-el-calibration-v3-20260720-01.json",
+    "eval/entity_linking/results/v07-el-calibration-v4-20260720-01.json",
+    "eval/entity_linking/results/v07-el-calibration-v5-20260720-01.json",
+    "eval/entity_linking/results/v07-el-calibration-v6-20260720-01.json",
+    "eval/entity_linking/gold_v2.json",
+    "eval/entity_linking/cases_v2.jsonl",
+    "eval/entity_linking/manifests/feasibility_v2.json",
+    "eval/entity_linking/results/v07-el-calibration-v7-20260720-01.json",
+    "eval/entity_linking/link_policy_v6.json",
+    "eval/entity_linking/results/v07-el-post-freeze-v7-20260720-01.json",
+    "eval/entity_linking/gold_v3.json",
+    "eval/entity_linking/cases_v3.jsonl",
+    "eval/entity_linking/manifests/feasibility_v3.json",
+    "eval/entity_linking/results/v07-el-calibration-v9-20260720-01.json",
+    "eval/entity_linking/link_policy_v8.json",
+    "eval/entity_linking/results/v07-el-post-freeze-v9-20260720-01.json",
+    "eval/entity_linking/results/v07-el-post-freeze-v9-20260720-02.json",
+    "eval/entity_linking/results/v07-el-post-freeze-v9-20260720-03.json",
+    "eval/entity_linking/release_evidence_v8.json",
+    "eval/entity_linking/gold_v4.json",
+    "eval/entity_linking/cases_v4.jsonl",
+    "eval/entity_linking/manifests/feasibility_v4.json",
+    "eval/entity_linking/results/v07-el-calibration-v11-20260721-01.json",
+    "eval/entity_linking/link_policy_v10.json",
+    "eval/entity_linking/results/v07-el-post-freeze-v11-20260721-01.json",
+    "eval/entity_linking/results/v07-el-post-freeze-v11-20260721-02.json",
+    "eval/entity_linking/results/v07-el-post-freeze-v11-20260721-03.json",
+    "eval/entity_linking/release_evidence_v10.json",
 )
 
 
@@ -211,28 +365,133 @@ def _git(root: Path, *args: str, allow_failure: bool = False) -> str:
     return result.stdout.strip()
 
 
-def verify_g2_approval(root: Path) -> dict[str, str]:
-    head = _git(root, "rev-parse", "HEAD")
-    if _git(root, "merge-base", "--is-ancestor", G2_APPROVAL_COMMIT, head, allow_failure=True) != "":
-        pass
+def _require_ancestor(root: Path, ancestor: str, descendant: str) -> None:
     result = subprocess.run(
-        ("git", "merge-base", "--is-ancestor", G2_APPROVAL_COMMIT, head), cwd=root, check=False
+        ("git", "merge-base", "--is-ancestor", ancestor, descendant),
+        cwd=root,
+        capture_output=True,
+        check=False,
     )
     if result.returncode:
         raise EntityLinkingEvalError("g2_approval_commit_invalid")
-    g1_result = subprocess.run(
-        ("git", "merge-base", "--is-ancestor", G1_COMMIT, G2_APPROVAL_COMMIT), cwd=root, check=False
+
+
+def _audit_field(document: str, name: str) -> str:
+    match = re.search(rf"(?m)^{re.escape(name)}:\s*\n\s+([^\r\n]+)$", document)
+    if match is None:
+        raise EntityLinkingEvalError("invalidated_calibration_artifact")
+    return match.group(1).strip()
+
+
+@lru_cache(maxsize=4)
+def _tree_sha256_at_commit(root: Path, commit: str, paths: tuple[str, ...]) -> str:
+    records = []
+    for path in sorted(paths):
+        oid = _git(root, "rev-parse", f"{commit}:{path}")
+        body = subprocess.check_output(("git", "cat-file", "blob", oid), cwd=root)
+        records.append(
+            {
+                "repository_relative_path": path,
+                "exact_file_sha256": hashlib.sha256(body).hexdigest(),
+            }
+        )
+    return canonical_sha256(records)
+
+
+@lru_cache(maxsize=256)
+def _blob_bytes_at_commit(root: Path, commit: str, path: str) -> bytes:
+    oid = _git(root, "rev-parse", f"{commit}:{path}")
+    return subprocess.check_output(("git", "cat-file", "blob", oid), cwd=root)
+
+
+@lru_cache(maxsize=256)
+def _blob_hashes_at_commit(root: Path, commit: str, path: str) -> tuple[str, str]:
+    body = _blob_bytes_at_commit(root, commit, path)
+    checkout_body = body.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+    return hashlib.sha256(body).hexdigest(), hashlib.sha256(checkout_body).hexdigest()
+
+
+def _canonical_lf_bytes(body: bytes) -> bytes:
+    return body.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+
+@lru_cache(maxsize=4)
+def _dependency_records_at_commit(root: Path, commit: str) -> tuple[tuple[str, str], ...]:
+    payload = _blob_bytes_at_commit(
+        root,
+        commit,
+        "eval/entity_linking/manifests/feasibility_v5.json",
     )
-    if g1_result.returncode:
+    manifest = FeasibilityManifest.model_validate(parse_json_bytes(payload))
+    return tuple(
+        (record.repository_relative_path, record.exact_file_sha256)
+        for record in manifest.accepted_dependency_closure_records
+    )
+
+
+def _verify_frozen_dependency_records(
+    root: Path,
+    commit: str,
+    records: Sequence[dict[str, str]],
+) -> None:
+    frozen_records = dict(_dependency_records_at_commit(root, commit))
+    if len(frozen_records) != len(records):
+        raise EntityLinkingEvalError("dependency_closure_unresolved")
+    for record in records:
+        path = record["repository_relative_path"]
+        expected = record["exact_file_sha256"]
+        if frozen_records.get(path) != expected:
+            raise EntityLinkingEvalError("dependency_closure_unresolved")
+        if path in FINAL_RUNTIME_PROTECTED_PATHS:
+            if expected not in _blob_hashes_at_commit(root, commit, path):
+                raise EntityLinkingEvalError("dependency_closure_unresolved")
+        else:
+            frozen_body = _blob_bytes_at_commit(root, commit, path)
+            current_body = (root / path).read_bytes()
+            if _canonical_lf_bytes(current_body) != _canonical_lf_bytes(frozen_body):
+                raise EntityLinkingEvalError("dependency_closure_unresolved")
+
+
+def verify_g2_approval(root: Path) -> dict[str, str]:
+    head = _git(root, "rev-parse", "HEAD")
+    if not re.fullmatch(r"[0-9a-f]{40}", head):
+        raise EntityLinkingEvalError("g2_approval_commit_invalid")
+    _require_ancestor(root, AUDIT_PRESERVATION_COMMIT, G2_APPROVAL_COMMIT)
+    _require_ancestor(root, G1_COMMIT, G2_APPROVAL_COMMIT)
+    _require_ancestor(root, G2_APPROVAL_COMMIT, head)
+    _require_ancestor(root, G2_APPROVAL_COMMIT, FROZEN_EVALUATOR_COMMIT)
+    _require_ancestor(root, FROZEN_EVALUATOR_COMMIT, head)
+    if (
+        _tree_sha256_at_commit(root, FROZEN_EVALUATOR_COMMIT, G3_IMPLEMENTATION_PATHS)
+        != FROZEN_EVALUATION_TREE_SHA256
+    ):
+        raise EntityLinkingEvalError("implementation_tree_drift")
+
+    preservation_paths = set(
+        _git(
+            root,
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            AUDIT_PRESERVATION_COMMIT,
+        ).splitlines()
+    )
+    approval_paths = set(
+        _git(
+            root,
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            G2_APPROVAL_COMMIT,
+        ).splitlines()
+    )
+    if preservation_paths != set(AUDIT_PRESERVATION_PATHS) or approval_paths != set(G2_APPROVAL_PATHS):
         raise EntityLinkingEvalError("g2_approval_commit_invalid")
 
     records: list[dict[str, str]] = []
-    for relative in sorted(
-        (
-            "docs/superpowers/specs/2026-07-17-v0.7-publication-scoped-entity-linking.md",
-            "docs/superpowers/plans/2026-07-17-v0.7-publication-scoped-entity-linking-g2.md",
-        )
-    ):
+    for relative in sorted(G2_SPECIFICATION_PATHS):
         oid = _git(root, "rev-parse", f"{G2_APPROVAL_COMMIT}:{relative}")
         body = subprocess.check_output(("git", "cat-file", "blob", oid), cwd=root)
         if (root / relative).read_bytes() != body:
@@ -247,8 +506,76 @@ def verify_g2_approval(root: Path) -> dict[str, str]:
     specification_hash = canonical_sha256(records)
     if specification_hash != G2_SPECIFICATION_TREE_SHA256:
         raise EntityLinkingEvalError("g2_specification_tree_drift")
-    protected = _git(root, "diff", "--name-only", G2_APPROVAL_COMMIT, "--", *PROTECTED_PATHS)
-    if protected:
+
+    audit = (root / G2_SPECIFICATION_PATHS[3]).read_text(encoding="utf-8")
+    incident = (root / G2_SPECIFICATION_PATHS[4]).read_text(encoding="utf-8")
+    expected_audit_fields = {
+        "previous_g2_approval_commit": INVALIDATED_G2_APPROVAL_COMMIT,
+        "previous_g2_specification_tree_sha256": INVALIDATED_G2_SPECIFICATION_TREE_SHA256,
+        "incomplete_g3_implementation_commit": INCOMPLETE_IMPLEMENTATION_COMMIT,
+        "repository_relative_path": INVALIDATED_CALIBRATION_PATH,
+        "canonical_sha256": INVALIDATED_CALIBRATION_CANONICAL_SHA256,
+        "exact_file_sha256": INVALIDATED_CALIBRATION_FILE_SHA256,
+        "workflow_status": "invalidated_audit_only",
+        "audit_preservation_commit": AUDIT_PRESERVATION_COMMIT,
+        "preserved_artifact_git_blob_oid": INVALIDATED_CALIBRATION_BLOB_OID,
+        "preserved_gitattributes_git_blob_oid": PRESERVED_GITATTRIBUTES_BLOB_OID,
+    }
+    if any(_audit_field(audit, key) != value for key, value in expected_audit_fields.items()):
+        raise EntityLinkingEvalError("invalidated_calibration_artifact")
+    required_incident_values = (
+        "> **Status:** CLOSED_REBUILT",
+        "environment_classification: non_production_non_shared_acceptance",
+        "disposition: rebuilt_from_template0_to_0023_and_smoke_checked",
+        "upgrade_pre_authorized: false",
+        "post_event_disposition_authorized: true",
+        "incident_gate: PASSED",
+    )
+    if any(value not in incident for value in required_incident_values):
+        raise EntityLinkingEvalError("g2_approval_commit_invalid")
+
+    preserved_artifact_oid = _git(
+        root, "rev-parse", f"{AUDIT_PRESERVATION_COMMIT}:{INVALIDATED_CALIBRATION_PATH}"
+    )
+    preserved_attributes_oid = _git(root, "rev-parse", f"{AUDIT_PRESERVATION_COMMIT}:.gitattributes")
+    invalidated_path = root / INVALIDATED_CALIBRATION_PATH
+    current_artifact_oid = _git(root, "hash-object", "--no-filters", "--", INVALIDATED_CALIBRATION_PATH)
+    if (
+        preserved_artifact_oid != INVALIDATED_CALIBRATION_BLOB_OID
+        or current_artifact_oid != INVALIDATED_CALIBRATION_BLOB_OID
+        or preserved_attributes_oid != PRESERVED_GITATTRIBUTES_BLOB_OID
+        or exact_file_sha256(invalidated_path) != INVALIDATED_CALIBRATION_FILE_SHA256
+    ):
+        raise EntityLinkingEvalError("invalidated_calibration_artifact")
+    payload = invalidated_path.read_bytes()
+    if not payload.endswith(b"\n"):
+        raise EntityLinkingEvalError("invalidated_calibration_artifact")
+    invalidated_value = parse_json_bytes(payload[:-1])
+    if canonical_sha256(invalidated_value) != INVALIDATED_CALIBRATION_CANONICAL_SHA256:
+        raise EntityLinkingEvalError("invalidated_calibration_artifact")
+
+    attributes = _git(root, "check-attr", "text", "eol", "--", *LF_CONTRACT_PATHS)
+    observed_attributes: dict[tuple[str, str], str] = {}
+    for line in attributes.splitlines():
+        parts = line.split(": ", 2)
+        if len(parts) != 3:
+            raise EntityLinkingEvalError("g2_specification_tree_drift")
+        observed_attributes[(parts[0].replace("\\", "/"), parts[1])] = parts[2]
+    if any(
+        observed_attributes.get((path, "text")) != "set" or observed_attributes.get((path, "eol")) != "lf"
+        for path in LF_CONTRACT_PATHS
+    ):
+        raise EntityLinkingEvalError("g2_specification_tree_drift")
+
+    protected = set(
+        _git(root, "diff", "--name-only", G2_APPROVAL_COMMIT, "--", *PROTECTED_PATHS).splitlines()
+    )
+    allowed_protected = {
+        "app/services/qdrant.py",
+        *FINAL_RUNTIME_PROTECTED_PATHS,
+        *HISTORICAL_ACCEPTANCE_PROTECTED_PATHS,
+    }
+    if protected - allowed_protected:
         raise EntityLinkingEvalError("scope_drift_detected")
     return {"g2_approval_commit": G2_APPROVAL_COMMIT, "g2_specification_tree_sha256": specification_hash}
 
@@ -441,7 +768,41 @@ def _entity(
 
 
 def _case_prefix(index: int) -> str:
-    return f"{index:03d}"
+    return f"v5-{index:03d}"
+
+
+_CALIBRATION_ROOTS = (
+    "Avenor", "Brisell", "Caldren", "Dovira", "Elsanor",
+    "Feryn", "Galdor", "Havren", "Ilyra", "Jorven",
+)
+_RELEASE_ROOTS = (
+    "Kaldra", "Lioren", "Mavros", "Neryth", "Orlena",
+    "Pryven", "Quenor", "Raviel", "Soreth", "Tavren",
+)
+_FAMILY_MODIFIERS = (
+    "Ashenvale", "Bluehaven", "Clearwater", "Dawnridge", "Elmshore", "Foxglade",
+    "Graymont", "Highfield", "Ironwood", "Junefield", "Kingswell", "Lightmere",
+)
+_CALIBRATION_CJK_ROOTS = (
+    "云岬", "星浦", "雾岭", "澄湾", "翠原", "霁川", "曦谷", "岚泽", "鹤汀", "鹭洲",
+)
+_RELEASE_CJK_ROOTS = (
+    "珀港", "琉山", "泉岛", "森桥", "霞原", "潮岭", "锦湾", "澜谷", "岩浦", "晨泽",
+)
+_CJK_MODIFIERS = (
+    "数研", "联创", "智汇", "云策", "新维", "协同",
+    "拓界", "经略", "融合", "启航", "远见", "卓越",
+)
+
+
+def _family_words(index: int, split: str) -> tuple[str, str, str]:
+    position = index if split == "calibration" else index - 80
+    roots = _CALIBRATION_ROOTS if split == "calibration" else _RELEASE_ROOTS
+    root = roots[position % len(roots)]
+    modifier = _FAMILY_MODIFIERS[position // len(roots)]
+    cjk_roots = _CALIBRATION_CJK_ROOTS if split == "calibration" else _RELEASE_CJK_ROOTS
+    cjk = cjk_roots[position % len(cjk_roots)] + _CJK_MODIFIERS[position // len(cjk_roots)]
+    return root, modifier, cjk
 
 
 def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ...]]:
@@ -536,10 +897,14 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
     for index in range(200):
         suffix = _case_prefix(index)
         split = "calibration" if index < 80 else "release"
-        release_index = index - 80 if split == "release" else index
-        group = (release_index // 20) % 6
-        stratum = STRATUM_ORDER[release_index % 4]
+        split_index = index if split == "calibration" else index - 80
+        cohort = "safety" if split_index < 40 else "utility"
+        cohort_index = split_index if cohort == "safety" else split_index - 40
+        group = (2, 3)[cohort_index % 2] if cohort == "safety" else 6
+        stratum = STRATUM_ORDER[cohort_index % 4]
         hop = 1 if stratum.startswith("one-hop") else 2
+        root, modifier, cjk_name = _family_words(index, split)
+        family_label = f"{modifier} {root}"
 
         document_key = f"document-{suffix}"
         revision_key = f"revision-{suffix}"
@@ -549,8 +914,8 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
             DocumentRecord(
                 document_key=document_key,
                 library_key="library-primary",
-                title=f"Synthetic Relation Record {suffix}",
-                external_id=f"synthetic-{suffix}",
+                title=f"{family_label} published relation record",
+                external_id=f"synthetic-v5-{index:03d}",
                 status="ready",
             )
         )
@@ -563,7 +928,10 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
                 is_current=True,
             )
         )
-        text = f"Synthetic evidence {suffix} confirms the fixed relation path for evaluation."
+        text = (
+            f"{family_label} Anchor and {family_label} Archive are bound by a verified "
+            "relation in the active publication record."
+        )
         chunks.append(
             ChunkRecord(
                 chunk_key=chunk_key,
@@ -587,8 +955,8 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
 
         seed_key = f"entity-{suffix}-seed"
         target_key = f"entity-{suffix}-target"
-        entities[seed_key] = _entity(seed_key, f"Anchor {suffix}", evidence=(evidence_key,))
-        entities[target_key] = _entity(target_key, f"Target {suffix}", evidence=(evidence_key,))
+        entities[seed_key] = _entity(seed_key, f"{family_label} Anchor", evidence=(evidence_key,))
+        entities[target_key] = _entity(target_key, f"{family_label} Archive", evidence=(evidence_key,))
         relation_keys: list[str] = []
         node_keys = [seed_key, target_key]
         if hop == 1:
@@ -609,7 +977,7 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
             )
         else:
             middle_key = f"entity-{suffix}-middle"
-            entities[middle_key] = _entity(middle_key, f"Middle {suffix}", evidence=(evidence_key,))
+            entities[middle_key] = _entity(middle_key, f"{family_label} Bridge", evidence=(evidence_key,))
             node_keys.insert(1, middle_key)
             for marker, source, target in (
                 ("a", seed_key, middle_key),
@@ -654,38 +1022,38 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
                 )
             )
 
-        add_linkable(seed_key, f"Anchor {suffix}", f"Anchor {suffix}", script="latin")
+        add_linkable(seed_key, f"{family_label} Anchor", f"{family_label} Anchor", script="latin")
         categories.add("exact-canonical")
         if group == 0:
             exact_key = f"entity-{suffix}-exact"
             prefix_key = f"entity-{suffix}-prefix"
-            add_linkable(exact_key, f"Exact {suffix} Name", f"  EXACT   {suffix} name ", script="latin")
-            add_linkable(prefix_key, f"星河{suffix}制造中心", f"星河{suffix}", script="cjk")
+            add_linkable(exact_key, f"{family_label} Control", f"  {family_label.upper()}   control ", script="latin")
+            add_linkable(prefix_key, f"{cjk_name}中心", cjk_name, script="cjk")
             categories.update(("exact-canonical", "case-whitespace-normalization", "prefix-suffix-omission"))
         elif group == 1:
             abbreviation_key = f"entity-{suffix}-abbreviation"
             reorder_key = f"entity-{suffix}-reorder"
             add_linkable(
                 abbreviation_key,
-                f"alpha{suffix}omega",
-                f"l{suffix}o",
+                f"{root.lower()}{modifier.lower()}orbit",
+                f"{root[0].lower()}{root[-1].lower()}{modifier.lower()}or",
                 script="latin",
             )
             add_linkable(
                 reorder_key,
-                f"node {suffix} amber",
-                f"amber node {suffix}",
+                f"{root.lower()} {modifier.lower()} unit",
+                f"unit {modifier.lower()} {root.lower()}",
                 script="latin",
             )
             categories.update(("abbreviation-like-overlap", "word-order-token-overlap"))
         elif group == 2:
             close_key = f"entity-{suffix}-close"
-            entities[close_key] = _entity(close_key, f"close {suffix} alphi", evidence=(evidence_key,))
+            entities[close_key] = _entity(close_key, f"{root} {modifier} Alphi", evidence=(evidence_key,))
             family_entities.add(close_key)
             mentions.append(
                 MentionRecord(
                     input_index=len(mentions),
-                    text=f"close {suffix} alpha",
+                    text=f"{root} {modifier} Alpha",
                     entity_type_key="type-org",
                     gold_status="unlinkable",
                     gold_entity_key=None,
@@ -697,13 +1065,13 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
             )
             tie_a = f"entity-{suffix}-tie-a"
             tie_b = f"entity-{suffix}-tie-b"
-            entities[tie_a] = _entity(tie_a, f"tie {suffix} a", evidence=(evidence_key,))
-            entities[tie_b] = _entity(tie_b, f"tie {suffix} b", evidence=(evidence_key,))
+            entities[tie_a] = _entity(tie_a, f"{family_label} A", evidence=(evidence_key,))
+            entities[tie_b] = _entity(tie_b, f"{family_label} B", evidence=(evidence_key,))
             family_entities.update((tie_a, tie_b))
             mentions.append(
                 MentionRecord(
                     input_index=len(mentions),
-                    text=f"tie {suffix}",
+                    text=family_label,
                     entity_type_key="type-org",
                     gold_status="ambiguous",
                     gold_entity_key=None,
@@ -715,15 +1083,15 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
             )
             shared_a = f"entity-{suffix}-shared-a"
             shared_b = f"entity-{suffix}-shared-b"
-            entities[shared_a] = _entity(shared_a, f"shared {suffix}", evidence=(evidence_key,))
+            entities[shared_a] = _entity(shared_a, f"{family_label} Shared", evidence=(evidence_key,))
             entities[shared_b] = _entity(
-                shared_b, f"shared {suffix}", type_key="type-team", evidence=(evidence_key,)
+                shared_b, f"{family_label} Shared", type_key="type-team", evidence=(evidence_key,)
             )
             family_entities.update((shared_a, shared_b))
             mentions.append(
                 MentionRecord(
                     input_index=len(mentions),
-                    text=f"shared {suffix}",
+                    text=f"{family_label} Shared",
                     entity_type_key=None,
                     gold_status="ambiguous",
                     gold_entity_key=None,
@@ -743,9 +1111,10 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
             )
         elif group == 3:
             outside_key = f"entity-{suffix}-outside"
+            outside_name = f"externalcodev5{index:03d}"
             entities[outside_key] = _entity(
                 outside_key,
-                f"outsidecode{suffix}",
+                outside_name,
                 type_key="type-negative-org",
                 library="library-negative",
                 ontology="ontology-negative",
@@ -754,7 +1123,7 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
             mentions.append(
                 MentionRecord(
                     input_index=len(mentions),
-                    text=f"outsidecode{suffix}",
+                    text=outside_name,
                     entity_type_key=None,
                     gold_status="unlinkable",
                     gold_entity_key=None,
@@ -768,38 +1137,139 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
         elif group == 4:
             prefix_key = f"entity-{suffix}-prefix"
             reorder_key = f"entity-{suffix}-reorder"
-            add_linkable(prefix_key, f"星海{suffix}研究中心", f"星海{suffix}", script="cjk")
-            add_linkable(reorder_key, f"unit {suffix} cobalt", f"cobalt unit {suffix}", script="latin")
+            add_linkable(prefix_key, f"{cjk_name}实验室", cjk_name, script="cjk")
+            add_linkable(reorder_key, f"{modifier.lower()} {root.lower()} node", f"node {root.lower()} {modifier.lower()}", script="latin")
             categories.update(("prefix-suffix-omission", "word-order-token-overlap"))
-        else:
+        elif group == 5:
             exact_key = f"entity-{suffix}-exact"
             abbreviation_key = f"entity-{suffix}-abbreviation"
-            add_linkable(exact_key, f"Control {suffix} Name", f" CONTROL  {suffix} name ", script="latin")
+            add_linkable(exact_key, f"{modifier} {root} Registry", f" {modifier.upper()}  {root.upper()} registry ", script="latin")
             add_linkable(
                 abbreviation_key,
-                f"beta{suffix}omega",
-                f"e{suffix}o",
+                f"{modifier.lower()}{root.lower()}signal",
+                f"{modifier[0].lower()}{modifier[-1].lower()}{root.lower()}sg",
                 script="mixed",
             )
             categories.update(
                 ("exact-canonical", "case-whitespace-normalization", "abbreviation-like-overlap")
             )
+        else:
+            exact_key = f"entity-{suffix}-exact"
+            cjk_exact_key = f"entity-{suffix}-cjk-exact"
+            add_linkable(
+                exact_key,
+                f"{modifier} {root} Registry",
+                f"  {modifier.upper()}  {root.upper()} registry  ",
+                script="latin",
+            )
+            add_linkable(cjk_exact_key, f"{cjk_name}档案", f"{cjk_name}档案", script="cjk")
+            categories.update(("exact-canonical", "case-whitespace-normalization"))
+
+        if cohort == "safety":
+            safety_prefix_key = f"entity-{suffix}-safety-prefix"
+            safety_abbreviation_key = f"entity-{suffix}-safety-abbreviation"
+            safety_reorder_key = f"entity-{suffix}-safety-reorder"
+            add_linkable(safety_prefix_key, f"{cjk_name}验证中心", cjk_name, script="cjk")
+            add_linkable(
+                safety_abbreviation_key,
+                f"{root.lower()}{modifier.lower()}orbit",
+                f"{root[0].lower()}{root[-1].lower()}{modifier.lower()}or",
+                script="latin",
+            )
+            add_linkable(
+                safety_reorder_key,
+                f"{root.lower()} {modifier.lower()} unit",
+                f"unit {modifier.lower()} {root.lower()}",
+                script="latin",
+            )
+            categories.update(
+                ("prefix-suffix-omission", "abbreviation-like-overlap", "word-order-token-overlap")
+            )
 
         categories.add("one-hop-evidence-utility" if hop == 1 else "two-hop-evidence-utility")
+        decoy_family_keys: tuple[str, ...] = ()
+        decoy_chunk_keys: tuple[str, ...] = ()
+        if cohort == "utility":
+            surface = " / ".join(" ".join(mention.text.split()) for mention in mentions)
+            question = f"Locate the verified publication record binding {surface}."
+            decoy_keys: list[str] = []
+            decoy_chunks: list[str] = []
+            for decoy_index in range(12):
+                marker = decoy_index + 1
+                decoy_document_key = f"document-{suffix}-decoy-{marker:02d}"
+                decoy_revision_key = f"revision-{suffix}-decoy-{marker:02d}"
+                decoy_chunk_key = f"chunk-{suffix}-decoy-{marker:02d}"
+                decoy_keys.append(f"decoy-family-{suffix}-{marker:02d}")
+                decoy_chunks.append(decoy_chunk_key)
+                if decoy_index < 4:
+                    decoy_title = f"{question} Negated registry note {marker}"
+                    decoy_text = (
+                        f"{question} {surface}. This registry note explicitly says the named "
+                        "records are not bound by an active published relation."
+                    )
+                elif decoy_index < 8:
+                    decoy_title = f"{question} Alternate binding note {marker}"
+                    decoy_text = (
+                        f"{question} {surface}. This registry note binds an unrelated synthetic "
+                        "source rather than the named target."
+                    )
+                else:
+                    decoy_title = f"{question} Partial catalogue note {marker}"
+                    decoy_text = (
+                        f"{question} {surface}. This catalogue note lists one named record but "
+                        "contains no verified relation or supporting evidence."
+                    )
+                documents.append(
+                    DocumentRecord(
+                        document_key=decoy_document_key,
+                        library_key="library-primary",
+                        title=decoy_title,
+                        external_id=f"synthetic-v5-decoy-{index:03d}-{marker:02d}",
+                        status="ready",
+                    )
+                )
+                revisions.append(
+                    RevisionRecord(
+                        revision_key=decoy_revision_key,
+                        document_key=decoy_document_key,
+                        revision_no=1,
+                        status="ready",
+                        is_current=True,
+                    )
+                )
+                chunks.append(
+                    ChunkRecord(
+                        chunk_key=decoy_chunk_key,
+                        document_key=decoy_document_key,
+                        revision_key=decoy_revision_key,
+                        seq=0,
+                        text=decoy_text,
+                    )
+                )
+            decoy_family_keys = tuple(decoy_keys)
+            decoy_chunk_keys = tuple(decoy_chunks)
         ordered_categories = tuple(value for value in CATEGORY_ORDER if value in categories)
         case = EvaluationCase(
-            schema_version="entity-linking-case-v1",
+            schema_version="entity-linking-case-v2",
             case_id=f"case-{suffix}",
             split=split,
+            cohort=cohort,
             entity_family_keys=(f"entity-family-{suffix}",),
             mention_family_keys=tuple(
                 f"mention-family-{suffix}-{mention.input_index}" for mention in mentions
             ),
             relation_template_family_key=f"relation-family-{suffix}",
+            phrase_family_key=f"phrase-family-{suffix}",
+            decoy_family_keys=decoy_family_keys,
+            decoy_chunk_keys=decoy_chunk_keys,
             categories=ordered_categories,
             utility_stratum=stratum,
             scenario_publication_key="publication-primary",
-            question=f"Synthetic question {suffix} requests the fixed relation evidence.",
+            question=(
+                question
+                if cohort == "utility"
+                else f"Find the published relation evidence associated with {family_label}."
+            ),
             mentions=tuple(mentions),
             gold_utility=GoldUtilityRecord(
                 evidence_keys=(evidence_key,),
@@ -874,24 +1344,24 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
             canary_key="canary-credential",
             key_marker="synthetic-credential-shaped-key",
             value_marker="synthetic-credential-shaped-value",
-            target_rows=("entity-000-seed",),
+            target_rows=("entity-v5-000-seed",),
         ),
         PrivacyCanaryRecord(
             canary_key="canary-properties",
             key_marker="synthetic-private-properties-key",
             value_marker="synthetic-private-properties-value",
-            target_rows=("entity-000-seed",),
+            target_rows=("entity-v5-000-seed",),
         ),
         PrivacyCanaryRecord(
             canary_key="canary-source",
             key_marker="synthetic-source-like-key",
             value_marker="synthetic-source-like-value",
-            target_rows=("relation-000-a",),
+            target_rows=("relation-v5-000-a",),
         ),
     )
     gold = GoldDataset(
-        schema_version="entity-linking-gold-v1",
-        dataset_id="feasibility-v1",
+        schema_version="entity-linking-gold-v2",
+        dataset_id="feasibility-v5",
         uuid_namespace=str(UUID_NAMESPACE),
         libraries=libraries,
         ontologies=ontologies,
@@ -921,6 +1391,11 @@ def build_conformance_dataset() -> ConformanceDataset:
         ("feature-disjoint", "alpha", "zulu"),
         ("feature-token-jaccard", "alpha beta", "beta alpha"),
         ("feature-round-half-up", "ab", "ac"),
+        ("feature-boundary-eligible", "star lab", "star laboratory"),
+        ("feature-boundary-middle-rejected", "labor", "star laboratory"),
+        ("feature-initialism", "abc", "alpha beta center"),
+        ("feature-ordered-subsequence", "aramberor", "alderamberorbit"),
+        ("feature-subsequence-ratio-rejected", "abcde", "abcdef"),
     )
     feature_cases = []
     for case_id, left, right in feature_inputs:
@@ -934,6 +1409,8 @@ def build_conformance_dataset() -> ConformanceDataset:
                     character_bigram_dice_micros=score.character_bigram_dice_micros,
                     token_jaccard_micros=score.token_jaccard_micros,
                     substring_containment_micros=score.substring_containment_micros,
+                    boundary_omission_micros=score.boundary_omission_micros,
+                    ordered_abbreviation_micros=score.ordered_abbreviation_micros,
                     score_micros=score.score_micros,
                 ),
             )
@@ -941,14 +1418,18 @@ def build_conformance_dataset() -> ConformanceDataset:
 
     base_candidates = (
         CandidateFixture(
-            entity_id=str(eval_uuid("conformance", "candidate-a")),
+            entity_id=str(
+                uuid.uuid5(SCORER_CONFORMANCE_UUID_NAMESPACE, "conformance:candidate-a")
+            ),
             entity_key="candidate-a",
             entity_type_key="type-org",
             canonical_name="Candidate Alpha",
             normalized_name="candidate alpha",
         ),
         CandidateFixture(
-            entity_id=str(eval_uuid("conformance", "candidate-b")),
+            entity_id=str(
+                uuid.uuid5(SCORER_CONFORMANCE_UUID_NAMESPACE, "conformance:candidate-b")
+            ),
             entity_key="candidate-b",
             entity_type_key="type-team",
             canonical_name="Candidate Beta",
@@ -971,7 +1452,7 @@ def build_conformance_dataset() -> ConformanceDataset:
                     candidate_scores_micros=(score, 500000),
                     expected=DecisionExpected(
                         status="linked" if linked else "ambiguous",
-                        method="lexical_v1" if linked else None,
+                        method="lexical_v2" if linked else None,
                         selected_entity_key="candidate-a" if linked else None,
                         candidate_entity_keys=() if linked else ("candidate-a", "candidate-b"),
                     ),
@@ -993,7 +1474,7 @@ def build_conformance_dataset() -> ConformanceDataset:
                     candidate_scores_micros=(950000, second),
                     expected=DecisionExpected(
                         status="linked" if linked else "ambiguous",
-                        method="lexical_v1" if linked else None,
+                        method="lexical_v2" if linked else None,
                         selected_entity_key="candidate-a" if linked else None,
                         candidate_entity_keys=() if linked else ("candidate-a", "candidate-b"),
                     ),
@@ -1353,8 +1834,8 @@ def build_conformance_dataset() -> ConformanceDataset:
         for row in category_specs
     )
     return ConformanceDataset(
-        schema_version="entity-linking-scorer-conformance-v1",
-        algorithm_version="lexical-score-v1",
+        schema_version="entity-linking-scorer-conformance-v2",
+        algorithm_version="lexical-score-v2",
         normalization_version="normalize_graph_name_v1",
         rounding_version="integer-half-up-v1",
         feature_cases=tuple(feature_cases),
@@ -1427,6 +1908,18 @@ def _count_dataset(gold: GoldDataset, cases: Sequence[EvaluationCase]) -> Counts
         chunks=len(gold.chunks),
         calibration_cases=sum(case.split == "calibration" for case in cases),
         release_cases=sum(case.split == "release" for case in cases),
+        calibration_safety_cases=sum(
+            case.split == "calibration" and case.cohort == "safety" for case in cases
+        ),
+        calibration_utility_cases=sum(
+            case.split == "calibration" and case.cohort == "utility" for case in cases
+        ),
+        release_safety_cases=sum(
+            case.split == "release" and case.cohort == "safety" for case in cases
+        ),
+        release_utility_cases=sum(
+            case.split == "release" and case.cohort == "utility" for case in cases
+        ),
     )
 
 
@@ -1447,7 +1940,11 @@ def _fixed_controls() -> tuple[
             query_rewrite_llm_enabled=False,
             embedding_model="bge-m3",
             embedding_dimension=1024,
-            hybrid_candidate_k=50,
+            vector_search_exact=True,
+            vector_tie_completion_version=(
+                "score-desc-chunk-id-asc-probe-51-102-201-tail-complete-fail-closed-v2"
+            ),
+            hybrid_candidate_k=CONTROL_RETRIEVAL_CANDIDATE_K,
             hybrid_rrf_k=60,
             hybrid_keyword_threshold_micros=300000,
             hybrid_keyword_title_boost_micros=1500000,
@@ -1477,12 +1974,16 @@ def _fixed_controls() -> tuple[
             upper_index=9749,
         ),
         PerformanceFixture(
-            generator_version="entity-linking-performance-fixture-v1",
+            generator_version="entity-linking-performance-fixture-v2",
             publication_total_items=10000,
             publication_entities=6000,
             publication_relations=4000,
-            mention_count=10,
-            mention_mix="2 exact, 3 high-similarity, 3 ambiguous, 2 not-found",
+            linker_scenario="linker-mixed-10",
+            linker_mention_count=10,
+            linker_mention_mix="2 exact, 3 high-similarity, 3 ambiguous, 2 not-found",
+            link_graph_scenario="link-graph-linked-10",
+            link_graph_mention_count=10,
+            link_graph_mention_mix="2 exact, 4 boundary-omission, 4 ordered-abbreviation",
             warmup_count=5,
             sample_count=30,
             timeout_micros=2000000,
@@ -1496,10 +1997,10 @@ def write_static_dataset(root: Path) -> FeasibilityManifest:
     gold, cases = build_static_gold_and_cases()
     conformance = build_conformance_dataset()
     base = root / "eval/entity_linking"
-    gold_path = base / "gold_v1.json"
-    cases_path = base / "cases_v1.jsonl"
-    conformance_path = base / "conformance_v1.json"
-    manifest_path = base / "manifests/feasibility_v1.json"
+    gold_path = base / "gold_v5.json"
+    cases_path = base / "cases_v5.jsonl"
+    conformance_path = base / "conformance_v2.json"
+    manifest_path = base / "manifests/feasibility_v5.json"
     _write_json(gold_path, gold.model_dump(mode="json"))
     _write_jsonl(cases_path, [case.model_dump(mode="json") for case in cases])
     _write_json(conformance_path, conformance.model_dump(mode="json"))
@@ -1511,19 +2012,23 @@ def write_static_dataset(root: Path) -> FeasibilityManifest:
     cases_ref = artifact_ref(root, cases_path, cases_value)
     conformance_ref = artifact_ref(root, conformance_path, conformance_value)
     release = tuple(case for case in cases if case.split == "release")
+    calibration = tuple(case for case in cases if case.split == "calibration")
+    calibration_utility = tuple(case for case in calibration if case.cohort == "utility")
+    release_utility = tuple(case for case in release if case.cohort == "utility")
     category_counts_value = {
         category: sum(category in case.categories for case in release) for category in CATEGORY_ORDER
     }
     stratum_counts_value = {
-        stratum: sum(case.utility_stratum == stratum for case in release) for stratum in STRATUM_ORDER
+        stratum: sum(case.utility_stratum == stratum for case in release_utility)
+        for stratum in STRATUM_ORDER
     }
     closure = build_dependency_closure(root)
     distributions = discover_external_distribution_records(root)
     scope_hashes = _scope_hashes(gold)
     control, metric, grid, bootstrap, performance = _fixed_controls()
     manifest = FeasibilityManifest(
-        schema_version="entity-linking-feasibility-manifest-v1",
-        dataset_id="feasibility-v1",
+        schema_version="entity-linking-feasibility-manifest-v2",
+        dataset_id="feasibility-v5",
         g2_approval_commit=G2_APPROVAL_COMMIT,
         g2_specification_tree_sha256=G2_SPECIFICATION_TREE_SHA256,
         gold_ref=gold_ref,
@@ -1531,12 +2036,16 @@ def write_static_dataset(root: Path) -> FeasibilityManifest:
         conformance_ref=conformance_ref,
         canonicalization_version="canonical-graph-json-v1",
         normalization_version="normalize_graph_name_v1",
-        algorithm_version="lexical-score-v1",
+        algorithm_version="lexical-score-v2",
         rounding_version="integer-half-up-v1",
-        category_predicate_version="entity-linking-category-predicates-v1",
+        category_predicate_version="entity-linking-category-predicates-v2",
         ordered_case_ids=tuple(case.case_id for case in cases),
         ordered_calibration_case_ids=tuple(case.case_id for case in cases if case.split == "calibration"),
         ordered_release_case_ids=tuple(case.case_id for case in release),
+        ordered_calibration_utility_case_ids=tuple(case.case_id for case in calibration_utility),
+        ordered_release_utility_case_ids=tuple(case.case_id for case in release_utility),
+        calibration_cohort_counts=CohortCounts(safety=40, utility=40),
+        release_cohort_counts=CohortCounts(safety=40, utility=80),
         counts=_count_dataset(gold, cases),
         minimum_counts=MinimumCountsRecord(
             relation_oriented_questions=200,
@@ -1549,12 +2058,15 @@ def write_static_dataset(root: Path) -> FeasibilityManifest:
             ontologies=2,
             release_category_cases=20,
             release_stratum_questions=20,
+            decoys_per_utility_case=12,
         ),
         release_category_counts=CategoryCounts.model_validate(category_counts_value),
         release_stratum_counts=StratumCounts.model_validate(stratum_counts_value),
         entity_family_split_hash=_family_hash(cases, "entity_family_keys"),
         mention_family_split_hash=_family_hash(cases, "mention_family_keys"),
         relation_template_family_split_hash=_family_hash(cases, "relation_template_family_key"),
+        phrase_family_split_hash=_family_hash(cases, "phrase_family_key"),
+        decoy_family_split_hash=_family_hash(cases, "decoy_family_keys"),
         logical_scope_schema_hashes=scope_hashes,
         ontology_schema_set_hash=canonical_sha256([row.model_dump(mode="json") for row in scope_hashes]),
         control_config=control,
@@ -1573,11 +2085,6 @@ def write_static_dataset(root: Path) -> FeasibilityManifest:
     )
     _write_json(manifest_path, manifest.model_dump(mode="json"))
     return manifest
-
-
-def _strict_subsequence(left: str, right: str) -> bool:
-    iterator = iter(right)
-    return all(any(candidate == value for candidate in iterator) for value in left)
 
 
 def recompute_case_categories(case: EvaluationCase, gold: GoldDataset) -> tuple[str, ...]:
@@ -1635,7 +2142,7 @@ def recompute_case_categories(case: EvaluationCase, gold: GoldDataset) -> tuple[
         subsequence = bool(
             compact_canonical
             and 2 <= len(compact_mention) < len(compact_canonical)
-            and _strict_subsequence(compact_mention, compact_canonical)
+            and is_strict_subsequence(compact_mention, compact_canonical)
             and compact_mention not in compact_canonical
             and 4 * len(compact_mention) <= 3 * len(compact_canonical)
         )
@@ -1725,6 +2232,10 @@ def _validate_references(gold: GoldDataset, cases: Sequence[EvaluationCase]) -> 
     relation_keys = keys(gold.relations, "relation_key")
     publication_keys = keys(gold.publications, "publication_key")
     canary_keys = keys(gold.privacy_canaries, "canary_key")
+    documents = {row.document_key: row for row in gold.documents}
+    chunks = {row.chunk_key: row for row in gold.chunks}
+    evidence = {row.evidence_key: row for row in gold.evidence}
+    entities = {row.entity_key: row for row in gold.entities}
     for row in gold.entities:
         if (
             row.library_key not in library_keys
@@ -1756,6 +2267,8 @@ def _validate_references(gold: GoldDataset, cases: Sequence[EvaluationCase]) -> 
         if set(row.entity_keys) - entity_keys or set(row.relation_keys) - relation_keys:
             raise ValueError(f"invalid Publication reference: {row.publication_key}")
     for case in cases:
+        if set(case.decoy_chunk_keys) - chunk_keys:
+            raise ValueError(f"unknown decoy Chunk: {case.case_id}")
         if case.scenario_publication_key not in publication_keys:
             raise ValueError(f"unknown Publication: {case.case_id}")
         if set(case.gold_utility.evidence_keys) - evidence_keys:
@@ -1764,6 +2277,30 @@ def _validate_references(gold: GoldDataset, cases: Sequence[EvaluationCase]) -> 
             raise ValueError(f"unknown Relation: {case.case_id}")
         if set(case.gold_utility.node_keys) - entity_keys:
             raise ValueError(f"unknown Entity: {case.case_id}")
+        if case.cohort == "utility":
+            for mention in case.mentions:
+                entity = entities[mention.gold_entity_key or ""]
+                if normalize_graph_name_v1(mention.text) != entity.normalized_name:
+                    raise ValueError(f"utility mention is not normalization-exact: {case.case_id}")
+            gold_chunks = tuple(
+                chunks[evidence[key].chunk_key] for key in case.gold_utility.evidence_keys
+            )
+            if any(case.question in chunk.text for chunk in gold_chunks):
+                raise ValueError(f"gold Chunk copies retrieval query: {case.case_id}")
+            expected_markers = (
+                *("Negated registry note",) * 4,
+                *("Alternate binding note",) * 4,
+                *("Partial catalogue note",) * 4,
+            )
+            for chunk_key, marker in zip(case.decoy_chunk_keys, expected_markers, strict=True):
+                chunk = chunks[chunk_key]
+                document = documents[chunk.document_key]
+                if (
+                    case.question not in document.title
+                    or case.question not in chunk.text
+                    or marker not in document.title
+                ):
+                    raise ValueError(f"retrieval-competitive decoy invalid: {case.case_id}")
         for mention in case.mentions:
             referenced = set(mention.gold_ambiguous_entity_keys) | set(mention.negative_entity_keys)
             if mention.gold_entity_key:
@@ -1781,6 +2318,9 @@ def validate_conformance(conformance: ConformanceDataset) -> None:
             observed.character_bigram_dice_micros != case.expected.character_bigram_dice_micros
             or observed.token_jaccard_micros != case.expected.token_jaccard_micros
             or observed.substring_containment_micros != case.expected.substring_containment_micros
+            or observed.boundary_omission_micros != case.expected.boundary_omission_micros
+            or observed.ordered_abbreviation_micros
+            != case.expected.ordered_abbreviation_micros
             or observed.score_micros != case.expected.score_micros
         ):
             raise ValueError(f"feature conformance failed: {case.case_id}")
@@ -1796,9 +2336,18 @@ def validate_conformance(conformance: ConformanceDataset) -> None:
                 min_score_micros=case.min_score_micros,
                 min_margin_micros=case.min_margin_micros,
             )
+            optimized = resolve_prepared_mention(
+                case.mention_text,
+                prepare_candidates(candidates),
+                entity_type_key=case.entity_type_key,
+                min_score_micros=case.min_score_micros,
+                min_margin_micros=case.min_margin_micros,
+            )
+            if logical_decision(optimized) != logical_decision(decision):
+                raise ValueError(f"prepared decision conformance failed: {case.case_id}")
         else:
             scored = tuple(
-                ScoredCandidate(candidate, FeatureScores(score, score, score, score))
+                ScoredCandidate(candidate, FeatureScores(score, score, score, 0, 0, score))
                 for candidate, score in zip(candidates, case.candidate_scores_micros, strict=True)
             )
             decision = decide_scored_candidates(
@@ -1820,7 +2369,7 @@ def validate_conformance(conformance: ConformanceDataset) -> None:
             EntityCandidate(**candidate.model_dump(mode="python")) for candidate in case.candidates
         )
         scored = tuple(
-            ScoredCandidate(candidate, FeatureScores(700000, 700000, 700000, 700000))
+            ScoredCandidate(candidate, FeatureScores(700000, 700000, 700000, 0, 0, 700000))
             for candidate in candidates
         )
         observed = tuple(row.candidate.entity_key for row in sorted(scored, key=stable_candidate_key))
@@ -1853,7 +2402,13 @@ def validate_conformance(conformance: ConformanceDataset) -> None:
 
 
 def _validate_families(cases: Sequence[EvaluationCase]) -> None:
-    for field in ("entity_family_keys", "mention_family_keys", "relation_template_family_key"):
+    for field in (
+        "entity_family_keys",
+        "mention_family_keys",
+        "relation_template_family_key",
+        "phrase_family_key",
+        "decoy_family_keys",
+    ):
         family_split: dict[str, str] = {}
         for case in cases:
             values = getattr(case, field)
@@ -1865,14 +2420,37 @@ def _validate_families(cases: Sequence[EvaluationCase]) -> None:
                     raise EntityLinkingEvalError("family_split_overlap")
 
 
+def _validate_historical_family_disjoint(
+    current_cases: Sequence[EvaluationCase], historical_cases: Sequence[EvaluationCase]
+) -> None:
+    def values_for(cases: Sequence[EvaluationCase], field: str) -> set[str]:
+        result: set[str] = set()
+        for case in cases:
+            values = getattr(case, field)
+            result.update((values,) if isinstance(values, str) else values)
+        return result
+
+    for field in (
+        "entity_family_keys",
+        "mention_family_keys",
+        "relation_template_family_key",
+        "phrase_family_key",
+        "decoy_family_keys",
+    ):
+        current_values = values_for(current_cases, field)
+        historical_values = values_for(historical_cases, field)
+        if current_values & historical_values or any("v5" not in value for value in current_values):
+            raise EntityLinkingEvalError("family_split_overlap")
+
+
 @lru_cache(maxsize=4)
 def load_dataset(root: Path) -> LoadedDataset:
     verify_g2_approval(root)
     base = root / "eval/entity_linking"
-    gold_path = base / "gold_v1.json"
-    cases_path = base / "cases_v1.jsonl"
-    conformance_path = base / "conformance_v1.json"
-    manifest_path = base / "manifests/feasibility_v1.json"
+    gold_path = base / "gold_v5.json"
+    cases_path = base / "cases_v5.jsonl"
+    conformance_path = base / "conformance_v2.json"
+    manifest_path = base / "manifests/feasibility_v5.json"
     gold = load_canonical_json(root, gold_path, GoldDataset)
     cases = load_canonical_jsonl(root, cases_path, EvaluationCase)
     conformance = load_canonical_json(root, conformance_path, ConformanceDataset)
@@ -1880,11 +2458,23 @@ def load_dataset(root: Path) -> LoadedDataset:
     assert isinstance(gold, GoldDataset)
     assert isinstance(conformance, ConformanceDataset)
     assert isinstance(manifest, FeasibilityManifest)
+    if (
+        manifest.g2_approval_commit != G2_APPROVAL_COMMIT
+        or manifest.g2_specification_tree_sha256 != G2_SPECIFICATION_TREE_SHA256
+    ):
+        raise EntityLinkingEvalError("g2_specification_tree_drift")
     typed_cases = tuple(case for case in cases if isinstance(case, EvaluationCase))
     if len(typed_cases) != len(cases):
         raise ValueError("case type mismatch")
     _validate_references(gold, typed_cases)
     _validate_families(typed_cases)
+    historical_cases = tuple(
+        case
+        for path in (base / "cases_v2.jsonl", base / "cases_v3.jsonl", base / "cases_v4.jsonl")
+        for case in load_canonical_jsonl(root, path, EvaluationCase)
+        if isinstance(case, EvaluationCase)
+    )
+    _validate_historical_family_disjoint(typed_cases, historical_cases)
     validate_conformance(conformance)
     if tuple(case.case_id for case in typed_cases) != tuple(sorted(case.case_id for case in typed_cases)):
         raise ValueError("cases must be sorted")
@@ -1894,7 +2484,33 @@ def load_dataset(root: Path) -> LoadedDataset:
     release = tuple(case for case in typed_cases if case.split == "release")
     if len(calibration) * 5 != len(typed_cases) * 2 or len(release) * 5 != len(typed_cases) * 3:
         raise ValueError("40/60 split invalid")
-    for case in typed_cases:
+    calibration_utility = tuple(case for case in calibration if case.cohort == "utility")
+    release_utility = tuple(case for case in release if case.cohort == "utility")
+    if (
+        len(calibration) != 80
+        or len(release) != 120
+        or len(calibration_utility) != 40
+        or len(release_utility) != 80
+        or sum(case.cohort == "safety" for case in calibration) != 40
+        or sum(case.cohort == "safety" for case in release) != 40
+    ):
+        raise ValueError("cohort counts invalid")
+    if (
+        tuple(case.case_id for case in calibration_utility)
+        != manifest.ordered_calibration_utility_case_ids
+        or tuple(case.case_id for case in release_utility)
+        != manifest.ordered_release_utility_case_ids
+        or manifest.calibration_cohort_counts != CohortCounts(safety=40, utility=40)
+        or manifest.release_cohort_counts != CohortCounts(safety=40, utility=80)
+    ):
+        raise ValueError("manifest cohort identity mismatch")
+    if any(
+        len(case.decoy_family_keys) != (12 if case.cohort == "utility" else 0)
+        or len(case.decoy_chunk_keys) != (12 if case.cohort == "utility" else 0)
+        for case in typed_cases
+    ):
+        raise ValueError("decoy family count invalid")
+    for case in calibration:
         observed = recompute_case_categories(case, gold)
         if observed != case.categories:
             raise EntityLinkingEvalError("category_predicate_mismatch")
@@ -1907,7 +2523,8 @@ def load_dataset(root: Path) -> LoadedDataset:
     if category_counts != manifest.release_category_counts.root or min(category_counts.values()) < 20:
         raise EntityLinkingEvalError("category_minimum_not_met")
     stratum_counts = {
-        stratum: sum(case.utility_stratum == stratum for case in release) for stratum in STRATUM_ORDER
+        stratum: sum(case.utility_stratum == stratum for case in release_utility)
+        for stratum in STRATUM_ORDER
     }
     if stratum_counts != manifest.release_stratum_counts.root or min(stratum_counts.values()) < 20:
         raise EntityLinkingEvalError("category_minimum_not_met")
@@ -1916,6 +2533,8 @@ def load_dataset(root: Path) -> LoadedDataset:
         or _family_hash(typed_cases, "mention_family_keys") != manifest.mention_family_split_hash
         or _family_hash(typed_cases, "relation_template_family_key")
         != manifest.relation_template_family_split_hash
+        or _family_hash(typed_cases, "phrase_family_key") != manifest.phrase_family_split_hash
+        or _family_hash(typed_cases, "decoy_family_keys") != manifest.decoy_family_split_hash
     ):
         raise EntityLinkingEvalError("family_split_overlap")
 
@@ -1932,10 +2551,10 @@ def load_dataset(root: Path) -> LoadedDataset:
     dataset_hash = canonical_sha256(
         {
             "cases_content_sha256": manifest.cases_ref.canonical_sha256,
-            "cases_schema_version": "entity-linking-case-v1",
+            "cases_schema_version": "entity-linking-case-v2",
             "conformance_content_sha256": manifest.conformance_ref.canonical_sha256,
             "conformance_schema_version": conformance.schema_version,
-            "dataset_id": "feasibility-v1",
+            "dataset_id": "feasibility-v5",
             "gold_content_sha256": manifest.gold_ref.canonical_sha256,
             "gold_schema_version": gold.schema_version,
         }
@@ -1947,10 +2566,11 @@ def load_dataset(root: Path) -> LoadedDataset:
         "performance_fixture": manifest.performance_fixture.model_dump(mode="json"),
         "threshold_grid": manifest.threshold_grid.model_dump(mode="json"),
     }
-    closure = build_dependency_closure(root)
+    closure = tuple(
+        row.model_dump(mode="json") for row in manifest.accepted_dependency_closure_records
+    )
+    _verify_frozen_dependency_records(root, FROZEN_EVALUATOR_COMMIT, closure)
     distributions = discover_external_distribution_records(root)
-    if tuple(row.model_dump(mode="json") for row in manifest.accepted_dependency_closure_records) != closure:
-        raise EntityLinkingEvalError("dependency_closure_unresolved")
     if manifest.accepted_dependency_closure_sha256 != canonical_sha256(closure):
         raise EntityLinkingEvalError("dependency_closure_unresolved")
     if tuple(row.model_dump(mode="json") for row in manifest.external_distribution_records) != distributions:
@@ -1970,6 +2590,14 @@ def load_dataset(root: Path) -> LoadedDataset:
         evaluation_config_sha256=canonical_sha256(config_value),
         manifest_ref=manifest_identity,
     )
+
+
+def validate_release_case_categories(dataset: LoadedDataset) -> None:
+    for case in dataset.cases:
+        if case.split != "release":
+            continue
+        if recompute_case_categories(case, dataset.gold) != case.categories:
+            raise EntityLinkingEvalError("category_predicate_mismatch")
 
 
 def rate_metric(numerator: int, denominator: int) -> dict[str, int | None]:
@@ -2108,8 +2736,15 @@ def build_grid_results(dataset: LoadedDataset) -> tuple[GridResult, ...]:
             exact_total = 0
             wrong = 0
             false_auto = 0
+            utility_execution = 0
+            utility_total = 0
             for case in calibration:
                 decisions = candidate_decisions_for_threshold(dataset, case, threshold)
+                if case.cohort == "utility":
+                    utility_total += 1
+                    utility_execution += all(
+                        decision["status"] == "linked" for decision in decisions
+                    )
                 for mention, decision in zip(case.mentions, decisions, strict=True):
                     selected = decision["selected"]
                     selected_key = selected.get("entity_key") if isinstance(selected, dict) else None
@@ -2151,11 +2786,14 @@ def build_grid_results(dataset: LoadedDataset) -> tuple[GridResult, ...]:
             candidate_rate = rate_metric(candidate_recall, linkable_total)
             abstention = rate_metric(abstention_correct, abstention_total)
             exact_accuracy = rate_metric(exact_correct, exact_total)
+            execution_coverage = rate_metric(utility_execution, utility_total)
             eligible = bool(
                 wrong == 0
                 and false_auto == 0
                 and precision["value_micros"] == 1_000_000
                 and exact_accuracy["value_micros"] == 1_000_000
+                and execution_coverage["value_micros"] is not None
+                and execution_coverage["value_micros"] >= 800_000
             )
             always = rate_metric(len(calibration), len(calibration))
             results.append(
@@ -2174,6 +2812,7 @@ def build_grid_results(dataset: LoadedDataset) -> tuple[GridResult, ...]:
                     exact_regression_accuracy=exact_accuracy,
                     scope_safety=always,
                     property_privacy=always,
+                    utility_question_execution_coverage=execution_coverage,
                     non_exact_correct_auto_link_count=non_exact_correct,
                     selection_eligible=eligible,
                 )
@@ -2189,6 +2828,7 @@ def select_calibration_threshold(grid: Sequence[GridResult]) -> tuple[Threshold 
     ordered = sorted(
         eligible,
         key=lambda row: (
+            row.utility_question_execution_coverage.numerator,
             row.non_exact_correct_auto_link_count,
             row.thresholds.min_score_micros,
             row.thresholds.min_margin_micros,
@@ -2196,14 +2836,33 @@ def select_calibration_threshold(grid: Sequence[GridResult]) -> tuple[Threshold 
         reverse=True,
     )
     selected = ordered[0]
-    maximum_coverage = max(row.non_exact_correct_auto_link_count for row in eligible)
-    coverage = [row for row in eligible if row.non_exact_correct_auto_link_count == maximum_coverage]
-    if len(coverage) == 1:
-        reason = "max-non-exact-coverage"
+    maximum_execution = max(
+        row.utility_question_execution_coverage.numerator for row in eligible
+    )
+    execution_ties = [
+        row
+        for row in eligible
+        if row.utility_question_execution_coverage.numerator == maximum_execution
+    ]
+    if len(execution_ties) == 1:
+        reason = "max-question-execution-coverage"
     else:
-        max_score = max(row.thresholds.min_score_micros for row in coverage)
-        score_ties = [row for row in coverage if row.thresholds.min_score_micros == max_score]
-        reason = "tie-higher-score" if len(score_ties) == 1 else "tie-higher-margin"
+        maximum_non_exact = max(
+            row.non_exact_correct_auto_link_count for row in execution_ties
+        )
+        non_exact_ties = [
+            row
+            for row in execution_ties
+            if row.non_exact_correct_auto_link_count == maximum_non_exact
+        ]
+        if len(non_exact_ties) == 1:
+            reason = "tie-non-exact-coverage"
+        else:
+            max_score = max(row.thresholds.min_score_micros for row in non_exact_ties)
+            score_ties = [
+                row for row in non_exact_ties if row.thresholds.min_score_micros == max_score
+            ]
+            reason = "tie-higher-score" if len(score_ties) == 1 else "tie-higher-margin"
     return selected.thresholds, reason
 
 
@@ -2314,16 +2973,89 @@ def qdrant_config() -> QdrantCollectionConfig:
 def _embedding_vector_sha256(vector: Sequence[Decimal | float | int]) -> str:
     if len(vector) != 1024:
         raise EntityLinkingEvalError("embedding_identity_mismatch")
+    deadzone = Decimal("0.005")
+    encoded = bytearray(256)
+    for index, value in enumerate(vector):
+        decimal_value = value if isinstance(value, Decimal) else Decimal(str(value))
+        if not decimal_value.is_finite():
+            raise EntityLinkingEvalError("embedding_identity_mismatch")
+        if decimal_value < -deadzone:
+            ternary = 0
+        elif decimal_value > deadzone:
+            ternary = 2
+        else:
+            ternary = 1
+        encoded[index // 4] |= ternary << (6 - 2 * (index % 4))
+    return hashlib.sha256(bytes(encoded)).hexdigest()
+
+
+def _embedding_vector_float32_sha256(vector: Sequence[Decimal | float | int]) -> str:
+    if len(vector) != 1024:
+        raise EntityLinkingEvalError("embedding_identity_mismatch")
     encoded = bytearray()
     for value in vector:
         decimal_value = value if isinstance(value, Decimal) else Decimal(str(value))
         if not decimal_value.is_finite():
             raise EntityLinkingEvalError("embedding_identity_mismatch")
-        binary = float(decimal_value)
-        if not math.isfinite(binary):
-            raise EntityLinkingEvalError("embedding_identity_mismatch")
-        encoded.extend(struct.pack(">d", binary))
+        try:
+            encoded.extend(struct.pack("!f", float(decimal_value)))
+        except (OverflowError, ValueError, struct.error) as exc:
+            raise EntityLinkingEvalError("embedding_identity_mismatch") from exc
     return hashlib.sha256(bytes(encoded)).hexdigest()
+
+
+def _embedding_response_vector(response: httpx.Response) -> list[Decimal | float | int]:
+    if response.status_code != 200:
+        raise EntityLinkingEvalError("embedding_unavailable")
+    try:
+        body = json.loads(response.content, parse_float=Decimal, parse_int=Decimal)
+        data = body["data"]
+        vector = data[0]["embedding"]
+    except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise EntityLinkingEvalError("embedding_identity_mismatch") from exc
+    if len(data) != 1 or not isinstance(vector, list) or len(vector) != 1024:
+        raise EntityLinkingEvalError("embedding_identity_mismatch")
+    return vector
+
+
+async def _embedding_determinism_preflight(
+    base_url: str,
+    model: str,
+    api_key: str,
+) -> dict[str, Any]:
+    if (
+        model != "bge-m3"
+        or canonical_sha256(EMBEDDING_DETERMINISM_PROBES)
+        != EMBEDDING_DETERMINISM_PROBE_TEXTS_SHA256
+    ):
+        raise EntityLinkingEvalError("embedding_determinism_probe_mismatch")
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+    probe_hashes: list[tuple[str, ...]] = []
+    async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
+        for probe in EMBEDDING_DETERMINISM_PROBES:
+            hashes: list[str] = []
+            for _ in range(EMBEDDING_DETERMINISM_REPETITIONS):
+                response = await client.post(
+                    base_url,
+                    json={"model": model, "input": [probe]},
+                    headers=headers,
+                )
+                hashes.append(_embedding_vector_float32_sha256(_embedding_response_vector(response)))
+            probe_hashes.append(tuple(hashes))
+    if any(len(set(hashes)) != 1 for hashes in probe_hashes):
+        raise EntityLinkingEvalError("embedding_nondeterministic")
+    result_sha256 = hashlib.sha256(
+        "".join(hashes[0] for hashes in probe_hashes).encode("ascii")
+    ).hexdigest()
+    if result_sha256 != EMBEDDING_DETERMINISM_RESULT_SHA256:
+        raise EntityLinkingEvalError("embedding_determinism_probe_mismatch")
+    return {
+        "probe_count": len(EMBEDDING_DETERMINISM_PROBES),
+        "repetitions_per_probe": EMBEDDING_DETERMINISM_REPETITIONS,
+        "stable_call_count": len(EMBEDDING_DETERMINISM_PROBES)
+        * EMBEDDING_DETERMINISM_REPETITIONS,
+        "probe_set_sha256": result_sha256,
+    }
 
 
 async def _embedding_identity(base_url: str, model: str, api_key: str) -> EmbeddingIdentity:
@@ -2336,16 +3068,7 @@ async def _embedding_identity(base_url: str, model: str, api_key: str) -> Embedd
             json={"model": model, "input": [EMBEDDING_PROBE_TEXT]},
             headers=headers,
         )
-    if response.status_code != 200:
-        raise EntityLinkingEvalError("embedding_unavailable")
-    try:
-        body = json.loads(response.content, parse_float=Decimal, parse_int=Decimal)
-        data = body["data"]
-        vector = data[0]["embedding"]
-    except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise EntityLinkingEvalError("embedding_identity_mismatch") from exc
-    if len(data) != 1 or not isinstance(vector, list) or len(vector) != 1024:
-        raise EntityLinkingEvalError("embedding_identity_mismatch")
+    vector = _embedding_response_vector(response)
     origin_hash = hashlib.sha256(normalize_service_origin(base_url, qdrant=False).encode("utf-8")).hexdigest()
     projection = {
         "identity_version": "entity-linking-embedding-identity-v1",
@@ -2354,7 +3077,7 @@ async def _embedding_identity(base_url: str, model: str, api_key: str) -> Embedd
         "model": "bge-m3",
         "dimension": 1024,
         "probe_text_sha256": EMBEDDING_PROBE_SHA256,
-        "vector_encoding_version": "ieee754-binary64-be-v1",
+        "vector_encoding_version": "ternary-deadzone-0.005-v1",
         "probe_vector_sha256": _embedding_vector_sha256(vector),
     }
     return EmbeddingIdentity(
@@ -2456,6 +3179,11 @@ async def preflight_live_dependencies() -> dict[str, Any]:
         raise EntityLinkingEvalError("qdrant_unavailable")
     if not embedding_url or model != "bge-m3" or dimension != "1024":
         raise EntityLinkingEvalError("embedding_unavailable")
+    embedding_determinism = await _embedding_determinism_preflight(
+        embedding_url,
+        model,
+        os.getenv("EMBEDDING_API_KEY", ""),
+    )
     postgres, qdrant, embedding = await asyncio.gather(
         postgres_cluster_identity(admin_dsn),
         _qdrant_identity(qdrant_url, os.getenv("QDRANT_API_KEY", "")),
@@ -2473,6 +3201,13 @@ async def preflight_live_dependencies() -> dict[str, Any]:
         "qdrant": "passed",
         "qdrant_fingerprint_sha256": qdrant.qdrant_fingerprint_sha256,
         "embedding": "passed",
+        "embedding_determinism": "passed",
+        "embedding_determinism_probe_count": embedding_determinism["probe_count"],
+        "embedding_determinism_repetitions_per_probe": embedding_determinism[
+            "repetitions_per_probe"
+        ],
+        "embedding_determinism_stable_call_count": embedding_determinism["stable_call_count"],
+        "embedding_determinism_probe_set_sha256": embedding_determinism["probe_set_sha256"],
         "status": "passed",
     }
 
@@ -2533,7 +3268,7 @@ async def drop_database(admin_dsn: str, database_id: str) -> None:
 
 def upgrade_database(root: Path, dsn: str) -> None:
     url = make_url(dsn)
-    if not all((url.host, url.port, url.username, url.password, url.database)):
+    if not all((url.host, url.port, url.username, url.database)):
         raise EntityLinkingEvalError("postgres_dsn_required")
     environment = os.environ.copy()
     environment.update(
@@ -2541,7 +3276,7 @@ def upgrade_database(root: Path, dsn: str) -> None:
             "DB_HOST": url.host,
             "DB_PORT": str(url.port),
             "DB_USER": url.username,
-            "DB_PASSWORD": url.password,
+            "DB_PASSWORD": url.password or "",
             "DB_NAME": url.database,
         }
     )
@@ -2821,7 +3556,9 @@ async def seed_runtime_database(
                         "document_id": uuid_by_logical[row.document_key],
                         "library_id": primary_library_id,
                         "document_revision_id": uuid_by_logical[row.revision_key],
-                        "evidence_id": uuid_by_logical[f"evidence-{row.chunk_key.removeprefix('chunk-')}"],
+                        "evidence_id": uuid_by_logical.get(
+                            f"evidence-{row.chunk_key.removeprefix('chunk-')}"
+                        ),
                         "seq": row.seq,
                         "chunk_kind": "text",
                         "text": row.text,
@@ -3180,7 +3917,14 @@ class PublishedCandidateProjection:
     publication_id: uuid.UUID
     ontology_version_id: uuid.UUID
     candidates: tuple[EntityCandidate, ...]
+    prepared_candidates: tuple[PreparedEntityCandidate, ...]
     item_hash_by_entity_id: Mapping[str, str]
+
+
+_PROJECTION_CACHE_MAX_SIZE = 8
+_publication_projection_cache: OrderedDict[
+    tuple[uuid.UUID, uuid.UUID, uuid.UUID, str], PublishedCandidateProjection
+] = OrderedDict()
 
 
 @dataclass(frozen=True, slots=True)
@@ -3198,6 +3942,7 @@ class CandidateCaseResult:
     logical_response_sha256: str
     linker_duration_us: int
     link_graph_duration_us: int
+    graph_executed: bool
 
 
 async def load_candidate_projection(
@@ -3223,6 +3968,26 @@ async def load_candidate_projection(
         ontology_version_id,
         expected_publication_id=expected_publication_id,
     )
+    cache_key = (
+        snapshot.library_id,
+        snapshot.ontology_version_id,
+        snapshot.publication_id,
+        snapshot.manifest_hash,
+    )
+    scope_key = cache_key[:2]
+    for existing_key in tuple(_publication_projection_cache):
+        if existing_key[:2] == scope_key and existing_key != cache_key:
+            _publication_projection_cache.pop(existing_key, None)
+    projection = _publication_projection_cache.get(cache_key)
+    if projection is not None:
+        _publication_projection_cache.move_to_end(cache_key)
+        try:
+            await assert_graph_snapshot_still_current(db, library, snapshot)
+        except Exception:
+            _publication_projection_cache.pop(cache_key, None)
+            raise
+        return snapshot, projection
+
     statement = (
         select(
             Entity.id,
@@ -3258,13 +4023,23 @@ async def load_candidate_projection(
         )
         for row in rows
     )
-    await assert_graph_snapshot_still_current(db, library, snapshot)
-    return snapshot, PublishedCandidateProjection(
+    projection = PublishedCandidateProjection(
         publication_id=snapshot.publication_id,
         ontology_version_id=snapshot.ontology_version_id,
         candidates=candidates,
+        prepared_candidates=prepare_candidates(candidates),
         item_hash_by_entity_id={str(row.id): row.item_hash for row in rows},
     )
+    _publication_projection_cache[cache_key] = projection
+    _publication_projection_cache.move_to_end(cache_key)
+    while len(_publication_projection_cache) > _PROJECTION_CACHE_MAX_SIZE:
+        _publication_projection_cache.popitem(last=False)
+    try:
+        await assert_graph_snapshot_still_current(db, library, snapshot)
+    except Exception:
+        _publication_projection_cache.pop(cache_key, None)
+        raise
+    return snapshot, projection
 
 
 async def run_candidate_case(
@@ -3286,9 +4061,9 @@ async def run_candidate_case(
         seeded.logical_by_uuid,
     )
     decisions = tuple(
-        resolve_mention(
+        resolve_prepared_mention(
             mention.text,
-            projection.candidates,
+            projection.prepared_candidates,
             entity_type_key=(
                 next(
                     row.key
@@ -3315,6 +4090,7 @@ async def run_candidate_case(
             logical_response_sha256=canonical_sha256(value),
             linker_duration_us=linker_duration_us,
             link_graph_duration_us=linker_duration_us,
+            graph_executed=False,
         )
     selected_ids: list[uuid.UUID] = []
     for decision in decisions:
@@ -3369,6 +4145,7 @@ async def run_candidate_case(
         logical_response_sha256=canonical_sha256(value),
         linker_duration_us=linker_duration_us,
         link_graph_duration_us=(time.perf_counter_ns() - linker_started) // 1000,
+        graph_executed=True,
     )
 
 
@@ -3392,7 +4169,7 @@ async def _retrieval_settings(
         "rerank_enabled": False,
         "query_rewrite_enabled": False,
         "query_rewrite_llm_enabled": False,
-        "hybrid_candidate_k": 50,
+        "hybrid_candidate_k": CONTROL_RETRIEVAL_CANDIDATE_K,
         "hybrid_rrf_k": 60,
         "hybrid_keyword_threshold": 0.3,
         "hybrid_keyword_title_boost": 1.5,
@@ -3449,6 +4226,8 @@ async def run_old_retrieval_control(
             retrieval_mode=mode,
             db=db,
             library=library,
+            candidate_k=CONTROL_RETRIEVAL_CANDIDATE_K,
+            exact_vector_search=True,
         )
     evidence_keys = tuple(
         str(record.metadata["evidence_key"])
@@ -3637,6 +4416,88 @@ def _latency_summary(samples: Sequence[int]) -> LatencySummary:
     )
 
 
+def _performance_cases(
+    dataset: LoadedDataset, selected_threshold: Threshold
+) -> tuple[EvaluationCase, EvaluationCase]:
+    calibration = tuple(case for case in dataset.cases if case.split == "calibration")
+    utility = tuple(case for case in calibration if case.cohort == "utility")
+    entities = {row.entity_key: row for row in dataset.gold.entities}
+    publication = next(
+        row for row in dataset.gold.publications if row.publication_key == "publication-primary"
+    )
+    publication_candidates = tuple(_candidate(entities[key]) for key in publication.entity_keys)
+    exact: list[MentionRecord] = []
+    boundary: list[MentionRecord] = []
+    abbreviation: list[MentionRecord] = []
+    ambiguous: list[MentionRecord] = []
+    not_found: list[MentionRecord] = []
+    for case in calibration:
+        for mention in case.mentions:
+            if mention.is_exact_control:
+                exact.append(mention)
+            elif mention.gold_status == "ambiguous":
+                ambiguous.append(mention)
+            elif mention.gold_status == "unlinkable" and mention.negative_entity_keys:
+                not_found.append(mention)
+            elif mention.gold_status == "linkable" and mention.gold_entity_key is not None:
+                features = score_candidate(mention.text, _candidate(entities[mention.gold_entity_key])).features
+                decision = resolve_mention(
+                    mention.text,
+                    publication_candidates,
+                    entity_type_key=mention.entity_type_key,
+                    min_score_micros=selected_threshold.min_score_micros,
+                    min_margin_micros=selected_threshold.min_margin_micros,
+                )
+                safely_linked = bool(
+                    decision.status == "linked"
+                    and decision.selected is not None
+                    and decision.selected.candidate.entity_key == mention.gold_entity_key
+                )
+                if features.boundary_omission_micros and safely_linked:
+                    boundary.append(mention)
+                elif features.ordered_abbreviation_micros and safely_linked:
+                    abbreviation.append(mention)
+    if min(len(exact), len(boundary), len(abbreviation), len(ambiguous), len(not_found)) < 2:
+        raise ValueError("performance mention populations incomplete")
+
+    def reindex(rows: Sequence[MentionRecord]) -> tuple[MentionRecord, ...]:
+        return tuple(row.model_copy(update={"input_index": index}) for index, row in enumerate(rows))
+
+    source = utility[0]
+    common = {
+        "schema_version": "entity-linking-case-v2",
+        "split": "calibration",
+        "entity_family_keys": ("entity-family-performance-v3",),
+        "mention_family_keys": tuple(f"mention-family-performance-v3-{index}" for index in range(10)),
+        "relation_template_family_key": "relation-family-performance-v3",
+        "phrase_family_key": "phrase-family-performance-v3",
+        "decoy_family_keys": (),
+        "decoy_chunk_keys": (),
+        "categories": (),
+        "utility_stratum": source.utility_stratum,
+        "scenario_publication_key": source.scenario_publication_key,
+        "gold_utility": source.gold_utility,
+    }
+    mixed_mentions = reindex((*exact[:2], *boundary[:2], abbreviation[0], *ambiguous[:3], *not_found[:2]))
+    linked_mentions = reindex((*exact[:2], *boundary[:4], *abbreviation[:4]))
+    return (
+        EvaluationCase(
+            **common,
+            case_id="performance-linker-mixed",
+            cohort="safety",
+            question="Fixed mixed entity-linking performance scenario.",
+            mentions=mixed_mentions,
+        ),
+        EvaluationCase(
+            **common,
+            case_id="performance-link-graph",
+            cohort="utility",
+            question="Fixed linked graph-retrieval performance scenario.",
+            mentions=linked_mentions,
+        ),
+    )
+
+
 async def collect_live_evaluation(
     dsn: str,
     dataset: LoadedDataset,
@@ -3648,16 +4509,32 @@ async def collect_live_evaluation(
     embedding_api_key: str,
     embedding_calls: int,
     qdrant_calls: int,
+    phase: str,
+    policy_thresholds: Threshold | None = None,
 ) -> LiveEvaluationMaterial:
     from sqlalchemy import event, select
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
     from app.models.library import Library
 
-    grid_results = build_grid_results(dataset)
-    selected_threshold, selection_reason = select_calibration_threshold(grid_results)
-    if selected_threshold is None:
-        raise EntityLinkingEvalError("calibration_no_valid_candidate")
+    if phase == "calibration":
+        if policy_thresholds is not None:
+            raise EntityLinkingEvalError("artifact_schema_variant_invalid")
+        evaluation_cases = tuple(case for case in dataset.cases if case.split == "calibration")
+        grid_results = build_grid_results(dataset)
+        selected_threshold, selection_reason = select_calibration_threshold(grid_results)
+        if selected_threshold is None:
+            raise EntityLinkingEvalError("calibration_no_valid_candidate")
+    elif phase == "post_freeze_release":
+        if policy_thresholds is None:
+            raise EntityLinkingEvalError("policy_required")
+        validate_release_case_categories(dataset)
+        evaluation_cases = tuple(case for case in dataset.cases if case.split == "release")
+        grid_results = ()
+        selected_threshold = policy_thresholds
+        selection_reason = "policy"
+    else:
+        raise EntityLinkingEvalError("artifact_schema_variant_invalid")
     engine = create_async_engine(dsn, pool_size=8, max_overflow=4)
     Session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     candidate_results: dict[str, CandidateCaseResult] = {}
@@ -3666,6 +4543,10 @@ async def collect_live_evaluation(
     exact_results: dict[str, tuple[dict[str, object], ...]] = {}
     sql_statement_count = 0
     sql_statement_count_max = 0
+    linker_samples: list[int] = []
+    link_graph_samples: list[int] = []
+    dense_samples: list[int] = []
+    hybrid_samples: list[int] = []
 
     def count_statement(*_args) -> None:
         nonlocal sql_statement_count
@@ -3679,12 +4560,17 @@ async def collect_live_evaluation(
                 await db.execute(select(Library).where(Library.id == seeded.primary_library_id))
             ).scalar_one()
             db.info["entity_linking_entity_types"] = dataset.gold.entity_types
-            for case in dataset.cases:
+            for case in evaluation_cases:
                 before_candidate = sql_statement_count
-                candidate_results[case.case_id] = await run_candidate_case(
+                candidate_result = await run_candidate_case(
                     db, library, case, selected_threshold, seeded
                 )
-                sql_statement_count_max = max(sql_statement_count_max, sql_statement_count - before_candidate)
+                candidate_results[case.case_id] = candidate_result
+                if not candidate_result.graph_executed:
+                    sql_statement_count_max = max(
+                        sql_statement_count_max,
+                        sql_statement_count - before_candidate,
+                    )
                 dense_results[case.case_id] = await run_old_retrieval_control(
                     db,
                     library,
@@ -3706,9 +4592,46 @@ async def collect_live_evaluation(
                     embedding_api_key=embedding_api_key,
                 )
                 exact_results[case.case_id] = exact_only_decisions(dataset, case)
-        _current, peak_memory = tracemalloc.get_traced_memory()
+            _current, peak_memory = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
+            linker_case, link_graph_case = _performance_cases(dataset, selected_threshold)
+            for repetition in range(35):
+                before_candidate = sql_statement_count
+                result = await run_candidate_case(
+                    db, library, linker_case, selected_threshold, seeded
+                )
+                sql_statement_count_max = max(
+                    sql_statement_count_max, sql_statement_count - before_candidate
+                )
+                if result.graph_executed:
+                    raise EntityLinkingEvalError("performance_fixture_invalid")
+                if repetition >= 5:
+                    linker_samples.append(result.linker_duration_us)
+            for repetition in range(35):
+                result = await run_candidate_case(
+                    db, library, link_graph_case, selected_threshold, seeded
+                )
+                if not result.graph_executed:
+                    raise EntityLinkingEvalError("performance_fixture_not_executed")
+                if repetition >= 5:
+                    link_graph_samples.append(result.link_graph_duration_us)
+            for mode, samples in (("dense", dense_samples), ("hybrid", hybrid_samples)):
+                for repetition in range(35):
+                    result = await run_old_retrieval_control(
+                        db,
+                        library,
+                        link_graph_case,
+                        mode=mode,
+                        qdrant_url=qdrant_url,
+                        qdrant_api_key=qdrant_api_key,
+                        embedding_url=embedding_url,
+                        embedding_api_key=embedding_api_key,
+                    )
+                    if repetition >= 5:
+                        samples.append(result.duration_us)
     finally:
-        tracemalloc.stop()
+        if tracemalloc.is_tracing():
+            tracemalloc.stop()
         event.remove(engine.sync_engine, "before_cursor_execute", count_statement)
         await engine.dispose()
 
@@ -3717,15 +4640,16 @@ async def collect_live_evaluation(
     candidate_nodes = {key: value.node_keys for key, value in candidate_results.items()}
     dense_evidence = {key: value.evidence_keys for key, value in dense_results.items()}
     hybrid_evidence = {key: value.evidence_keys for key, value in hybrid_results.items()}
+    utility_cases = tuple(case for case in evaluation_cases if case.cohort == "utility")
     candidate_utility = _utility_metrics(
-        dataset.cases,
+        utility_cases,
         candidate_evidence,
         relation_by_case=candidate_relations,
         node_by_case=candidate_nodes,
     )
-    dense_utility = _utility_metrics(dataset.cases, dense_evidence)
-    hybrid_utility = _utility_metrics(dataset.cases, hybrid_evidence)
-    intrinsic = _build_intrinsic_metrics(dataset.cases, candidate_results, exact_results)
+    dense_utility = _utility_metrics(utility_cases, dense_evidence)
+    hybrid_utility = _utility_metrics(utility_cases, hybrid_evidence)
+    intrinsic = _build_intrinsic_metrics(evaluation_cases, candidate_results, exact_results)
 
     evidence_control, evidence_value = _best_control(
         dense_utility.evidence_recall_at_10, hybrid_utility.evidence_recall_at_10
@@ -3741,12 +4665,11 @@ async def collect_live_evaluation(
         dense_utility.question_with_any_gold_evidence,
         hybrid_utility.question_with_any_gold_evidence,
     )
-    release = tuple(case for case in dataset.cases if case.split == "release")
     selected_control_evidence = dense_evidence if evidence_control == "dense" else hybrid_evidence
     candidate_recall_by_case = {}
     control_recall_by_case = {}
     strata = {}
-    for case in release:
+    for case in utility_cases:
         gold = set(case.gold_utility.evidence_keys)
         candidate_recall_by_case[case.case_id] = int(
             rate_metric(len(gold & set(candidate_evidence[case.case_id])), len(gold))["value_micros"] or 0
@@ -3796,16 +4719,14 @@ async def collect_live_evaluation(
         hybrid_utility=hybrid_utility,
         utility_gains=utility_gains,
     )
-    measured_cases = dataset.cases[5:35]
     performance = Performance(
-        linker=_latency_summary(
-            [candidate_results[case.case_id].linker_duration_us for case in measured_cases]
-        ),
-        link_graph=_latency_summary(
-            [candidate_results[case.case_id].link_graph_duration_us for case in measured_cases]
-        ),
-        dense=_latency_summary([dense_results[case.case_id].duration_us for case in measured_cases]),
-        hybrid=_latency_summary([hybrid_results[case.case_id].duration_us for case in measured_cases]),
+        linker_scenario="linker-mixed-10",
+        link_graph_scenario="link-graph-linked-10",
+        control_scenario="link-graph-linked-10",
+        linker=_latency_summary(linker_samples),
+        link_graph=_latency_summary(link_graph_samples),
+        dense=_latency_summary(dense_samples),
+        hybrid=_latency_summary(hybrid_samples),
         sql_statement_count_max=sql_statement_count_max,
         per_mention_sql_count=0,
         projection_rows=6000,
@@ -3813,8 +4734,10 @@ async def collect_live_evaluation(
         memory_high_water_bytes=peak_memory,
         request_timeout_count=0,
         timeout_rollback_reused=True,
-        embedding_call_count=embedding_calls + len(dataset.cases) * 2,
-        qdrant_call_count=qdrant_calls + len(dataset.cases) * 2,
+        embedding_call_count=embedding_calls + len(evaluation_cases) * 2 + 70,
+        qdrant_call_count=qdrant_calls + len(evaluation_cases) * 2 + 70,
+        linker_graph_execution_count=0,
+        link_graph_execution_count=30,
     )
     response_hashes = tuple(
         CaseResponseHash(
@@ -3827,8 +4750,7 @@ async def collect_live_evaluation(
             dense_evidence_set_sha256=canonical_sha256(list(dense_results[case.case_id].evidence_keys)),
             hybrid_evidence_set_sha256=canonical_sha256(list(hybrid_results[case.case_id].evidence_keys)),
         )
-        for case in dataset.cases
-        if case.split == "calibration"
+        for case in evaluation_cases
     )
     return LiveEvaluationMaterial(
         grid_results=grid_results,
@@ -3843,8 +4765,16 @@ async def collect_live_evaluation(
     )
 
 
-def implementation_identity(root: Path) -> tuple[str, str]:
-    verify_g2_approval(root)
+def _current_evaluation_tree_sha256(root: Path) -> str:
+    workspace_status = _git(root, "status", "--porcelain", "--untracked-files=all")
+    dirty_paths: set[str] = set()
+    for line in workspace_status.splitlines():
+        path_field = line[3:]
+        for path in path_field.split(" -> "):
+            dirty_paths.add(path.replace("\\", "/"))
+    allowed_dirty_paths = set(G3_IMPLEMENTATION_PATHS) | set(PHASE_OUTPUT_PATHS) | set(EXCLUDED_USER_PATHS)
+    if dirty_paths - allowed_dirty_paths:
+        raise EntityLinkingEvalError("scope_drift_detected")
     status = _git(
         root,
         "status",
@@ -3858,9 +4788,12 @@ def implementation_identity(root: Path) -> tuple[str, str]:
     tracked = set(_git(root, "ls-files", "--", *G3_IMPLEMENTATION_PATHS).splitlines())
     if tracked != set(G3_IMPLEMENTATION_PATHS):
         raise EntityLinkingEvalError("implementation_tree_untracked")
-    unexpected = set(_git(root, "ls-files", "eval/entity_linking").splitlines()) - {
-        path for path in G3_IMPLEMENTATION_PATHS if path.startswith("eval/entity_linking/")
-    }
+    unexpected = (
+        set(_git(root, "ls-files", "eval/entity_linking").splitlines())
+        - {path for path in G3_IMPLEMENTATION_PATHS if path.startswith("eval/entity_linking/")}
+        - set(PHASE_OUTPUT_PATHS)
+        - set(HISTORICAL_ENTITY_LINKING_PATHS)
+    )
     if unexpected:
         raise EntityLinkingEvalError("scope_drift_detected")
     records = [
@@ -3870,10 +4803,16 @@ def implementation_identity(root: Path) -> tuple[str, str]:
         }
         for path in sorted(G3_IMPLEMENTATION_PATHS)
     ]
+    return canonical_sha256(records)
+
+
+def implementation_identity(root: Path) -> tuple[str, str]:
+    verify_g2_approval(root)
+    evaluation_tree_sha256 = _current_evaluation_tree_sha256(root)
     commit = _git(root, "rev-parse", "HEAD")
     if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
         raise EntityLinkingEvalError("git_commit_invalid")
-    return commit, canonical_sha256(records)
+    return commit, evaluation_tree_sha256
 
 
 async def collect_environment_record(
@@ -3940,18 +4879,21 @@ def build_calibration_artifact(
     finished_at: datetime,
 ) -> CalibrationArtifact:
     calibration_cases = tuple(case for case in dataset.cases if case.split == "calibration")
+    calibration_utility_cases = tuple(
+        case for case in calibration_cases if case.cohort == "utility"
+    )
     category_counts = {
         category: sum(category in case.categories for case in calibration_cases)
         for category in CATEGORY_ORDER
     }
     stratum_counts = {
-        stratum: sum(case.utility_stratum == stratum for case in calibration_cases)
+        stratum: sum(case.utility_stratum == stratum for case in calibration_utility_cases)
         for stratum in STRATUM_ORDER
     }
     qdrant_hash = environment.qdrant.qdrant_fingerprint_sha256
     embedding_hash = environment.embedding.embedding_fingerprint_sha256
     return CalibrationArtifact(
-        schema_version="entity-linking-eval-result-v1",
+        schema_version="entity-linking-eval-result-v2",
         phase="calibration",
         status="passed" if material.selected_threshold is not None else "no_go",
         ordinal=None,
@@ -4077,6 +5019,7 @@ async def run_calibration(
             embedding_api_key=embedding_api_key,
             embedding_calls=embedding_calls,
             qdrant_calls=qdrant_calls,
+            phase="calibration",
         )
     except EntityLinkingEvalError:
         raise
@@ -4118,9 +5061,24 @@ async def verify_calibration_artifact(
     *,
     require_live_absence: bool,
 ) -> ArtifactRef:
+    try:
+        relative = path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError as exc:
+        raise EntityLinkingEvalError("artifact_ref_hash_mismatch") from exc
+    if relative == INVALIDATED_CALIBRATION_PATH:
+        raise EntityLinkingEvalError("invalidated_calibration_artifact")
     dataset = load_dataset(root)
     artifact = load_canonical_json(root, path, CalibrationArtifact)
     assert isinstance(artifact, CalibrationArtifact)
+    reference = artifact_ref(root, path, artifact.model_dump(mode="json"))
+    selected, selected_ref = require_replacement_calibration_reference(
+        root,
+        path,
+        expected_canonical_sha256=reference.canonical_sha256,
+        expected_file_sha256=reference.exact_file_sha256,
+    )
+    if selected != artifact or selected_ref != reference:
+        raise EntityLinkingEvalError("artifact_ref_hash_mismatch")
     if (
         artifact.g2_approval_commit != G2_APPROVAL_COMMIT
         or artifact.g2_specification_tree_sha256 != G2_SPECIFICATION_TREE_SHA256
@@ -4167,4 +5125,936 @@ async def verify_calibration_artifact(
             artifact.qdrant_collection,
         ):
             raise EntityLinkingEvalError("qdrant_cleanup_failed")
+    return reference
+
+
+def require_replacement_calibration_reference(
+    root: Path,
+    path: Path,
+    *,
+    expected_canonical_sha256: str,
+    expected_file_sha256: str,
+) -> tuple[CalibrationArtifact, ArtifactRef]:
+    verify_g2_approval(root)
+    expected_path = root / f"eval/entity_linking/results/{CALIBRATION_RUN_ID}.json"
+    resolved = path.resolve()
+    try:
+        relative = resolved.relative_to(root.resolve()).as_posix()
+    except ValueError as exc:
+        raise EntityLinkingEvalError("artifact_ref_hash_mismatch") from exc
+    invalidated_triple_selected = (
+        relative == INVALIDATED_CALIBRATION_PATH
+        or expected_canonical_sha256 == INVALIDATED_CALIBRATION_CANONICAL_SHA256
+        or expected_file_sha256 == INVALIDATED_CALIBRATION_FILE_SHA256
+    )
+    if invalidated_triple_selected:
+        raise EntityLinkingEvalError("invalidated_calibration_artifact")
+    if resolved != expected_path.resolve():
+        raise EntityLinkingEvalError("artifact_ref_hash_mismatch")
+    artifact = load_canonical_json(root, resolved, CalibrationArtifact)
+    assert isinstance(artifact, CalibrationArtifact)
+    reference = artifact_ref(root, resolved, artifact.model_dump(mode="json"))
+    if (
+        reference.canonical_sha256 != expected_canonical_sha256
+        or reference.exact_file_sha256 != expected_file_sha256
+    ):
+        raise EntityLinkingEvalError("artifact_ref_hash_mismatch")
+    if (
+        artifact.code_commit == INCOMPLETE_IMPLEMENTATION_COMMIT
+        or artifact.g2_approval_commit == INVALIDATED_G2_APPROVAL_COMMIT
+        or artifact.g2_specification_tree_sha256 == INVALIDATED_G2_SPECIFICATION_TREE_SHA256
+        or artifact.run_id == "v07-el-calibration-v1-20260717-01"
+        or artifact.database_id == "vkt_v07_el_eval_calibration_20260717_01"
+    ):
+        raise EntityLinkingEvalError("invalidated_calibration_artifact")
+    dataset = load_dataset(root)
+    reference_scorer_sha256 = hashlib.sha256(
+        (root / "eval/entity_linking/reference_scorer.py").read_bytes()
+    ).hexdigest()
+    control_config_sha256 = canonical_sha256(dataset.manifest.control_config.model_dump(mode="json"))
+    response_ids = tuple(row.case_id for row in artifact.ordered_response_hashes)
+    if (
+        artifact.status != "passed"
+        or artifact.candidate_thresholds is None
+        or artifact.g2_approval_commit != G2_APPROVAL_COMMIT
+        or artifact.g2_specification_tree_sha256 != G2_SPECIFICATION_TREE_SHA256
+        or artifact.run_id != CALIBRATION_RUN_ID
+        or artifact.database_id != CALIBRATION_DATABASE_ID
+        or artifact.dataset_manifest_ref != dataset.manifest_ref
+        or artifact.dataset_content_sha256 != dataset.dataset_content_sha256
+        or artifact.evaluation_config_sha256 != dataset.evaluation_config_sha256
+        or artifact.ontology_schema_set_hash != dataset.manifest.ontology_schema_set_hash
+        or artifact.accepted_dependency_closure_sha256 != dataset.manifest.accepted_dependency_closure_sha256
+        or artifact.external_distribution_set_sha256 != dataset.manifest.external_distribution_set_sha256
+        or artifact.reference_scorer_sha256 != reference_scorer_sha256
+        or artifact.control_config_sha256 != control_config_sha256
+        or artifact.environment.evaluation_config_sha256 != dataset.evaluation_config_sha256
+        or artifact.environment.accepted_dependency_closure_sha256
+        != dataset.manifest.accepted_dependency_closure_sha256
+        or artifact.environment.reference_scorer_sha256 != reference_scorer_sha256
+        or response_ids != tuple(dataset.manifest.ordered_calibration_case_ids)
+        or artifact.qdrant_collection != qdrant_collection_identity(CALIBRATION_RUN_ID, "cal")
+        or artifact.evaluation_tree_sha256 != _current_evaluation_tree_sha256(root)
+    ):
+        raise EntityLinkingEvalError("artifact_ref_hash_mismatch")
+    head = _git(root, "rev-parse", "HEAD")
+    result = subprocess.run(
+        ("git", "merge-base", "--is-ancestor", artifact.code_commit, head),
+        cwd=root,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode:
+        raise EntityLinkingEvalError("artifact_ref_hash_mismatch")
+    return artifact, reference
+
+
+def _integer_gate(
+    gate_id: str,
+    observed: int,
+    threshold: int,
+    comparison: str,
+) -> GateDecision:
+    return GateDecision(
+        gate_id=gate_id,
+        value_type="integer",
+        comparison=comparison,
+        observed_integer=observed,
+        threshold_integer=threshold,
+        observed_rational=None,
+        threshold_rational=None,
+        observed_boolean=None,
+        threshold_boolean=None,
+        observed_sha256=None,
+        threshold_sha256=None,
+        passed={
+            "eq": observed == threshold,
+            "ge": observed >= threshold,
+            "le": observed <= threshold,
+        }[comparison],
+    )
+
+
+def _rational_gate(
+    gate_id: str,
+    observed: ReducedRational,
+    threshold: ReducedRational,
+    comparison: str,
+) -> GateDecision:
+    left = observed.numerator * threshold.denominator
+    right = threshold.numerator * observed.denominator
+    return GateDecision(
+        gate_id=gate_id,
+        value_type="rational",
+        comparison=comparison,
+        observed_integer=None,
+        threshold_integer=None,
+        observed_rational=observed,
+        threshold_rational=threshold,
+        observed_boolean=None,
+        threshold_boolean=None,
+        observed_sha256=None,
+        threshold_sha256=None,
+        passed={"eq": left == right, "ge": left >= right, "le": left <= right, "gt": left > right}[
+            comparison
+        ],
+    )
+
+
+def _sha256_gate(gate_id: str, observed: str, threshold: str) -> GateDecision:
+    return GateDecision(
+        gate_id=gate_id,
+        value_type="sha256",
+        comparison="all_equal",
+        observed_integer=None,
+        threshold_integer=None,
+        observed_rational=None,
+        threshold_rational=None,
+        observed_boolean=None,
+        threshold_boolean=None,
+        observed_sha256=observed,
+        threshold_sha256=threshold,
+        passed=observed == threshold,
+    )
+
+
+def build_gate_decisions(
+    metrics: Metrics,
+    performance: Performance,
+    *,
+    canonical_response_set_sha256: str,
+    response_set_threshold_sha256: str,
+) -> tuple[GateDecision, ...]:
+    intrinsic = metrics.intrinsic
+    gains = metrics.utility_gains
+    decisions = (
+        _integer_gate("wrong-auto-link-count", intrinsic.wrong_auto_link_count, 0, "eq"),
+        _integer_gate("auto-link-precision", _metric_value(intrinsic.auto_link_precision), 1_000_000, "eq"),
+        _integer_gate(
+            "exact-regression-accuracy",
+            _metric_value(intrinsic.exact_regression_accuracy),
+            1_000_000,
+            "eq",
+        ),
+        _integer_gate("scope-safety", _metric_value(intrinsic.scope_safety), 1_000_000, "eq"),
+        _integer_gate("property-privacy", _metric_value(intrinsic.property_privacy), 1_000_000, "eq"),
+        _integer_gate("privacy-leak-count", intrinsic.privacy_leak_count, 0, "eq"),
+        _integer_gate(
+            "publication-membership-failures",
+            intrinsic.publication_membership_failures,
+            0,
+            "eq",
+        ),
+        _integer_gate(
+            "ambiguous-unlinkable-false-auto-links",
+            intrinsic.ambiguous_unlinkable_false_auto_link_count,
+            0,
+            "eq",
+        ),
+        _integer_gate(
+            "candidate-recall-at-5",
+            _metric_value(intrinsic.candidate_recall_at_5),
+            980_000,
+            "ge",
+        ),
+        _integer_gate("overall-link-recall", _metric_value(intrinsic.link_recall), 750_000, "ge"),
+        _integer_gate(
+            "non-exact-link-recall",
+            _metric_value(intrinsic.non_exact_link_recall),
+            600_000,
+            "ge",
+        ),
+        _integer_gate(
+            "link-recall-gain-vs-exact",
+            intrinsic.link_recall_gain_vs_exact_only.gain_micros,
+            200_000,
+            "ge",
+        ),
+        _integer_gate("abstention-accuracy", _metric_value(intrinsic.abstention_accuracy), 980_000, "ge"),
+        _integer_gate("evidence-recall-gain", gains.evidence_recall_gain.gain_micros, 100_000, "ge"),
+        _integer_gate(
+            "complete-support-gain",
+            gains.complete_support_set_coverage_gain.gain_micros,
+            100_000,
+            "ge",
+        ),
+        _integer_gate(
+            "evidence-precision-regression",
+            gains.evidence_precision_regression.gain_micros,
+            -50_000,
+            "ge",
+        ),
+        _integer_gate(
+            "any-gold-gain",
+            gains.question_with_any_gold_evidence_gain.gain_micros,
+            80_000,
+            "ge",
+        ),
+        _rational_gate(
+            "bootstrap-ci-lower",
+            gains.bootstrap.ci_lower_micros,
+            ReducedRational(numerator=0, denominator=1),
+            "gt",
+        ),
+        _integer_gate("linker-p95", performance.linker.p95_us, 500_000, "le"),
+        _integer_gate("link-graph-p95", performance.link_graph.p95_us, 1_500_000, "le"),
+        _integer_gate(
+            "link-graph-ratio",
+            performance.link_graph.p95_us * 100,
+            min(performance.dense.p95_us, performance.hybrid.p95_us) * 125,
+            "le",
+        ),
+        _integer_gate("timeout-count", performance.request_timeout_count, 0, "eq"),
+        _integer_gate("sql-statement-budget", performance.sql_statement_count_max, 7, "le"),
+        _integer_gate("per-mention-sql", performance.per_mention_sql_count, 0, "eq"),
+        _integer_gate(
+            "projection-rows",
+            performance.projection_rows,
+            performance.publication_entity_count,
+            "le",
+        ),
+        _sha256_gate(
+            "deterministic-response-hash",
+            canonical_response_set_sha256,
+            response_set_threshold_sha256,
+        ),
+    )
+    if tuple(row.gate_id for row in decisions) != GATE_ID_ORDER:
+        raise EntityLinkingEvalError("artifact_schema_variant_invalid")
+    return decisions
+
+
+def freeze_policy(
+    root: Path,
+    *,
+    calibration_path: Path,
+    calibration_canonical_sha256: str,
+    calibration_file_sha256: str,
+    approved_thresholds: Threshold,
+    approved_by: str,
+    approved_at: str,
+    approval_reference: str,
+) -> tuple[ArtifactRef, str]:
+    calibration, calibration_ref = require_replacement_calibration_reference(
+        root,
+        calibration_path,
+        expected_canonical_sha256=calibration_canonical_sha256,
+        expected_file_sha256=calibration_file_sha256,
+    )
+    if approved_thresholds != calibration.candidate_thresholds:
+        raise EntityLinkingEvalError("policy_approval_payload_mismatch")
+    if approved_at <= calibration.finished_at:
+        raise EntityLinkingEvalError("policy_approval_time_invalid")
+    try:
+        approval = PolicyApprovalPayload(
+            schema_version="entity-linking-policy-approval-v2",
+            calibration_ref=calibration_ref,
+            approved_thresholds=approved_thresholds,
+            approved_by=approved_by,
+            approved_at=approved_at,
+            approval_reference=approval_reference,
+        )
+    except ValueError as exc:
+        raise EntityLinkingEvalError("policy_approval_payload_mismatch") from exc
+    policy = FrozenPolicy(
+        schema_version="entity-linking-policy-v2",
+        policy_version="entity-linking-policy-v2",
+        algorithm_version="lexical-score-v2",
+        normalization_version="normalize_graph_name_v1",
+        g2_approval_commit=calibration.g2_approval_commit,
+        g2_specification_tree_sha256=calibration.g2_specification_tree_sha256,
+        calibration_ref=calibration_ref,
+        approved_thresholds=approved_thresholds,
+        approval_payload_sha256=canonical_sha256(approval),
+        dataset_manifest_ref=calibration.dataset_manifest_ref,
+        dataset_content_sha256=calibration.dataset_content_sha256,
+        evaluation_config_sha256=calibration.evaluation_config_sha256,
+        ontology_schema_set_hash=calibration.ontology_schema_set_hash,
+        code_commit=calibration.code_commit,
+        evaluation_tree_sha256=calibration.evaluation_tree_sha256,
+        accepted_dependency_closure_sha256=calibration.accepted_dependency_closure_sha256,
+        reference_scorer_sha256=calibration.reference_scorer_sha256,
+        external_distribution_set_sha256=calibration.external_distribution_set_sha256,
+        control_config_sha256=calibration.control_config_sha256,
+        environment_fingerprint_sha256=calibration.environment_fingerprint_sha256,
+        pg_cluster_fingerprint_sha256=calibration.pg_cluster_fingerprint_sha256,
+        qdrant_fingerprint_sha256=calibration.environment.qdrant.qdrant_fingerprint_sha256,
+        embedding_fingerprint_sha256=calibration.environment.embedding.embedding_fingerprint_sha256,
+        approved_by=approved_by,
+        approved_at=approved_at,
+        approval_reference=approval_reference,
+    )
+    value = policy.model_dump(mode="json")
+    dataset = load_dataset(root)
+    assert_private_data_absent(value, dataset=dataset)
+    policy_path = root / POLICY_PATH
+    _write_atomic_json(policy_path, value)
+    try:
+        verified, reference = verify_policy(root)
+    except Exception:
+        policy_path.unlink(missing_ok=True)
+        raise
+    if verified != policy:
+        raise EntityLinkingEvalError("policy_approval_payload_mismatch")
+    return reference, policy.approval_payload_sha256
+
+
+def verify_policy(root: Path) -> tuple[FrozenPolicy, ArtifactRef]:
+    verify_g2_approval(root)
+    path = root / POLICY_PATH
+    if not path.is_file():
+        raise EntityLinkingEvalError("policy_required")
+    policy = load_canonical_json(root, path, FrozenPolicy)
+    assert isinstance(policy, FrozenPolicy)
+    calibration, calibration_ref = require_replacement_calibration_reference(
+        root,
+        root / policy.calibration_ref.repository_relative_path,
+        expected_canonical_sha256=policy.calibration_ref.canonical_sha256,
+        expected_file_sha256=policy.calibration_ref.exact_file_sha256,
+    )
+    if calibration_ref != policy.calibration_ref or calibration.candidate_thresholds is None:
+        raise EntityLinkingEvalError("policy_approval_payload_mismatch")
+    approval = PolicyApprovalPayload(
+        schema_version="entity-linking-policy-approval-v2",
+        calibration_ref=calibration_ref,
+        approved_thresholds=policy.approved_thresholds,
+        approved_by=policy.approved_by,
+        approved_at=policy.approved_at,
+        approval_reference=policy.approval_reference,
+    )
+    expected = {
+        "g2_approval_commit": calibration.g2_approval_commit,
+        "g2_specification_tree_sha256": calibration.g2_specification_tree_sha256,
+        "approved_thresholds": calibration.candidate_thresholds,
+        "approval_payload_sha256": canonical_sha256(approval),
+        "dataset_manifest_ref": calibration.dataset_manifest_ref,
+        "dataset_content_sha256": calibration.dataset_content_sha256,
+        "evaluation_config_sha256": calibration.evaluation_config_sha256,
+        "ontology_schema_set_hash": calibration.ontology_schema_set_hash,
+        "code_commit": calibration.code_commit,
+        "evaluation_tree_sha256": calibration.evaluation_tree_sha256,
+        "accepted_dependency_closure_sha256": calibration.accepted_dependency_closure_sha256,
+        "reference_scorer_sha256": calibration.reference_scorer_sha256,
+        "external_distribution_set_sha256": calibration.external_distribution_set_sha256,
+        "control_config_sha256": calibration.control_config_sha256,
+        "environment_fingerprint_sha256": calibration.environment_fingerprint_sha256,
+        "pg_cluster_fingerprint_sha256": calibration.pg_cluster_fingerprint_sha256,
+        "qdrant_fingerprint_sha256": calibration.environment.qdrant.qdrant_fingerprint_sha256,
+        "embedding_fingerprint_sha256": calibration.environment.embedding.embedding_fingerprint_sha256,
+    }
+    if any(getattr(policy, key) != value for key, value in expected.items()):
+        raise EntityLinkingEvalError("policy_approval_payload_mismatch")
+    if policy.approved_at <= calibration.finished_at:
+        raise EntityLinkingEvalError("policy_approval_time_invalid")
+    dataset = load_dataset(root)
+    value = policy.model_dump(mode="json")
+    assert_private_data_absent(value, dataset=dataset)
+    return policy, artifact_ref(root, path, value)
+
+
+def _post_freeze_identity(ordinal: int) -> tuple[str, str, str, Path]:
+    try:
+        expected_ordinal, run_id, database_id = POST_FREEZE_IDENTITIES[ordinal - 1]
+    except (IndexError, TypeError) as exc:
+        raise EntityLinkingEvalError("run_identity_not_unique") from exc
+    if ordinal != expected_ordinal:
+        raise EntityLinkingEvalError("run_identity_not_unique")
+    phase_token = f"pf{ordinal}"
+    relative = f"eval/entity_linking/results/{run_id}.json"
+    return run_id, database_id, phase_token, Path(relative)
+
+
+def _post_freeze_counts(
+    dataset: LoadedDataset,
+) -> tuple[CategoryCounts, StratumCounts]:
+    release_cases = tuple(case for case in dataset.cases if case.split == "release")
+    release_utility_cases = tuple(case for case in release_cases if case.cohort == "utility")
+    categories = {
+        category: sum(category in case.categories for case in release_cases) for category in CATEGORY_ORDER
+    }
+    strata = {
+        stratum: sum(case.utility_stratum == stratum for case in release_utility_cases)
+        for stratum in STRATUM_ORDER
+    }
+    return CategoryCounts.model_validate(categories), StratumCounts.model_validate(strata)
+
+
+def build_post_freeze_artifact(
+    *,
+    dataset: LoadedDataset,
+    policy: FrozenPolicy,
+    policy_ref: ArtifactRef,
+    material: LiveEvaluationMaterial,
+    environment: EnvironmentRecord,
+    collection: QdrantCollection,
+    ordinal: int,
+    run_id: str,
+    database_id: str,
+    started_at: datetime,
+    finished_at: datetime,
+) -> PostFreezeArtifact:
+    category_counts, stratum_counts = _post_freeze_counts(dataset)
+    gate_decisions = build_gate_decisions(
+        material.metrics,
+        material.performance,
+        canonical_response_set_sha256=material.canonical_response_set_sha256,
+        response_set_threshold_sha256=material.canonical_response_set_sha256,
+    )
+    return PostFreezeArtifact(
+        schema_version="entity-linking-eval-result-v2",
+        phase="post_freeze_release",
+        status="passed" if all(row.passed for row in gate_decisions) else "no_go",
+        ordinal=ordinal,
+        run_id=run_id,
+        database_id=database_id,
+        started_at=_utc_timestamp(started_at),
+        finished_at=_utc_timestamp(finished_at),
+        g2_approval_commit=policy.g2_approval_commit,
+        g2_specification_tree_sha256=policy.g2_specification_tree_sha256,
+        code_commit=policy.code_commit,
+        evaluation_tree_sha256=policy.evaluation_tree_sha256,
+        accepted_dependency_closure_sha256=policy.accepted_dependency_closure_sha256,
+        reference_scorer_sha256=policy.reference_scorer_sha256,
+        external_distribution_set_sha256=policy.external_distribution_set_sha256,
+        dataset_manifest_ref=policy.dataset_manifest_ref,
+        dataset_content_sha256=policy.dataset_content_sha256,
+        evaluation_config_sha256=policy.evaluation_config_sha256,
+        ontology_schema_set_hash=policy.ontology_schema_set_hash,
+        environment_fingerprint_sha256=environment.environment_fingerprint_sha256,
+        environment=environment,
+        pg_cluster_fingerprint_sha256=environment.pg_cluster_fingerprint_sha256,
+        qdrant_fingerprint_sha256=environment.qdrant.qdrant_fingerprint_sha256,
+        embedding_fingerprint_sha256=environment.embedding.embedding_fingerprint_sha256,
+        qdrant_collection=collection,
+        control_config_sha256=policy.control_config_sha256,
+        grid_results=None,
+        candidate_thresholds=None,
+        selection_reason=None,
+        metrics=material.metrics,
+        category_counts=category_counts,
+        stratum_counts=stratum_counts,
+        performance=material.performance,
+        ordered_response_hashes=material.response_hashes,
+        canonical_response_set_sha256=material.canonical_response_set_sha256,
+        database_created=True,
+        database_cleanup_succeeded=True,
+        qdrant_collection_created=True,
+        qdrant_cleanup_succeeded=True,
+        policy_ref=policy_ref,
+    )
+
+
+async def run_post_freeze(
+    root: Path,
+    *,
+    ordinal: int,
+    run_id: str,
+    database_id: str,
+    allow_create_drop_eval_db: bool,
+    allow_create_drop_qdrant_collection: bool,
+) -> ArtifactRef:
+    expected_run, expected_database, phase_token, relative_path = _post_freeze_identity(ordinal)
+    if run_id != expected_run or database_id != expected_database:
+        raise EntityLinkingEvalError("run_identity_not_unique")
+    if not allow_create_drop_eval_db or not allow_create_drop_qdrant_collection:
+        raise EntityLinkingEvalError("create_drop_ack_required")
+    validate_database_id(database_id)
+    policy, policy_ref = verify_policy(root)
+    if _current_evaluation_tree_sha256(root) != policy.evaluation_tree_sha256:
+        raise EntityLinkingEvalError("artifact_ref_hash_mismatch")
+    now = datetime.now(timezone.utc)
+    if _utc_timestamp(now) <= policy.approved_at:
+        raise EntityLinkingEvalError("run_time_order_invalid")
+    for previous in range(1, ordinal):
+        previous_path = root / _post_freeze_identity(previous)[3]
+        if not previous_path.is_file():
+            raise EntityLinkingEvalError("run_identity_not_unique")
+        verify_post_freeze_artifact(root, previous_path, expected_ordinal=previous)
+    for later in range(ordinal + 1, 4):
+        if (root / _post_freeze_identity(later)[3]).exists():
+            raise EntityLinkingEvalError("run_identity_not_unique")
+    result_path = root / relative_path
+    if result_path.exists():
+        raise EntityLinkingEvalError("result_artifact_exists")
+
+    dataset = load_dataset(root)
+    calibration = load_canonical_json(
+        root,
+        root / policy.calibration_ref.repository_relative_path,
+        CalibrationArtifact,
+    )
+    assert isinstance(calibration, CalibrationArtifact)
+    admin_dsn = os.getenv("VECTOR_KB_PG_TEST_DSN", "")
+    qdrant_url = os.getenv("QDRANT_URL", "")
+    qdrant_api_key = os.getenv("QDRANT_API_KEY", "")
+    embedding_url = os.getenv("EMBEDDING_BASE_URL", "")
+    embedding_api_key = os.getenv("EMBEDDING_API_KEY", "")
+    if not admin_dsn:
+        raise EntityLinkingEvalError("postgres_dsn_required")
+    if not qdrant_url:
+        raise EntityLinkingEvalError("qdrant_unavailable")
+    if not embedding_url or os.getenv("EMBEDDING_MODEL") != "bge-m3" or os.getenv("EMBEDDING_DIM") != "1024":
+        raise EntityLinkingEvalError("embedding_unavailable")
+    await preflight_live_dependencies()
+    collection = qdrant_collection_identity(run_id, phase_token)
+    started_at = datetime.now(timezone.utc)
+    if _utc_timestamp(started_at) <= policy.approved_at:
+        raise EntityLinkingEvalError("run_time_order_invalid")
+    database_created = False
+    collection_created = False
+    material: LiveEvaluationMaterial | None = None
+    environment: EnvironmentRecord | None = None
+    dsn: str | None = None
+    try:
+        dsn = await create_database(admin_dsn, database_id)
+        database_created = True
+        upgrade_database(root, dsn)
+        await create_qdrant_collection(qdrant_url, qdrant_api_key, collection)
+        collection_created = True
+        seeded = await seed_runtime_database(dsn, dataset, collection)
+        embedding_calls, qdrant_calls = await seed_qdrant_corpus(
+            dataset,
+            seeded,
+            base_url=qdrant_url,
+            api_key=qdrant_api_key,
+            embedding_url=embedding_url,
+            embedding_api_key=embedding_api_key,
+        )
+        environment = await collect_environment_record(
+            dataset,
+            admin_dsn=admin_dsn,
+            qdrant_url=qdrant_url,
+            qdrant_api_key=qdrant_api_key,
+            embedding_url=embedding_url,
+            embedding_api_key=embedding_api_key,
+        )
+        if (
+            environment.environment_fingerprint_sha256 != policy.environment_fingerprint_sha256
+            or environment.pg_cluster_fingerprint_sha256 != policy.pg_cluster_fingerprint_sha256
+            or environment.qdrant != calibration.environment.qdrant
+            or environment.embedding != calibration.environment.embedding
+        ):
+            raise EntityLinkingEvalError("environment_fingerprint_mismatch")
+        material = await collect_live_evaluation(
+            dsn,
+            dataset,
+            seeded,
+            qdrant_url=qdrant_url,
+            qdrant_api_key=qdrant_api_key,
+            embedding_url=embedding_url,
+            embedding_api_key=embedding_api_key,
+            embedding_calls=embedding_calls,
+            qdrant_calls=qdrant_calls,
+            phase="post_freeze_release",
+            policy_thresholds=policy.approved_thresholds,
+        )
+    except EntityLinkingEvalError:
+        raise
+    except Exception as exc:
+        raise EntityLinkingEvalError("entity_linking_feasibility_failed") from exc
+    finally:
+        if collection_created:
+            await delete_qdrant_collection(qdrant_url, qdrant_api_key, collection)
+        if database_created:
+            await drop_database(admin_dsn, database_id)
+    if material is None or environment is None or dsn is None:
+        raise EntityLinkingEvalError("database_evaluation_failed")
+    if await database_exists(admin_dsn, database_id):
+        raise EntityLinkingEvalError("database_cleanup_failed")
+    if not await qdrant_collection_absent(qdrant_url, qdrant_api_key, collection):
+        raise EntityLinkingEvalError("qdrant_cleanup_failed")
+    final_cluster = await postgres_cluster_identity(admin_dsn)
+    if final_cluster["pg_cluster_fingerprint_sha256"] != policy.pg_cluster_fingerprint_sha256:
+        raise EntityLinkingEvalError("postgres_cluster_mismatch")
+    artifact = build_post_freeze_artifact(
+        dataset=dataset,
+        policy=policy,
+        policy_ref=policy_ref,
+        material=material,
+        environment=environment,
+        collection=collection,
+        ordinal=ordinal,
+        run_id=run_id,
+        database_id=database_id,
+        started_at=started_at,
+        finished_at=datetime.now(timezone.utc),
+    )
+    value = artifact.model_dump(mode="json")
+    assert_private_data_absent(value, dataset=dataset)
+    _write_atomic_json(result_path, value)
+    return artifact_ref(root, result_path, value)
+
+
+def verify_post_freeze_artifact(
+    root: Path,
+    path: Path,
+    *,
+    expected_ordinal: int,
+) -> tuple[PostFreezeArtifact, ArtifactRef, tuple[GateDecision, ...]]:
+    expected_run, expected_database, phase_token, relative_path = _post_freeze_identity(expected_ordinal)
+    if path.resolve() != (root / relative_path).resolve():
+        raise EntityLinkingEvalError("artifact_ref_hash_mismatch")
+    policy, policy_ref = verify_policy(root)
+    artifact = load_canonical_json(root, path, PostFreezeArtifact)
+    assert isinstance(artifact, PostFreezeArtifact)
+    dataset = load_dataset(root)
+    calibration = load_canonical_json(
+        root,
+        root / policy.calibration_ref.repository_relative_path,
+        CalibrationArtifact,
+    )
+    assert isinstance(calibration, CalibrationArtifact)
+    expected_response_ids = tuple(dataset.manifest.ordered_release_case_ids)
+    response_ids = tuple(row.case_id for row in artifact.ordered_response_hashes)
+    expected_identity = {
+        "ordinal": expected_ordinal,
+        "run_id": expected_run,
+        "database_id": expected_database,
+        "g2_approval_commit": policy.g2_approval_commit,
+        "g2_specification_tree_sha256": policy.g2_specification_tree_sha256,
+        "code_commit": policy.code_commit,
+        "evaluation_tree_sha256": policy.evaluation_tree_sha256,
+        "accepted_dependency_closure_sha256": policy.accepted_dependency_closure_sha256,
+        "reference_scorer_sha256": policy.reference_scorer_sha256,
+        "external_distribution_set_sha256": policy.external_distribution_set_sha256,
+        "dataset_manifest_ref": policy.dataset_manifest_ref,
+        "dataset_content_sha256": policy.dataset_content_sha256,
+        "evaluation_config_sha256": policy.evaluation_config_sha256,
+        "ontology_schema_set_hash": policy.ontology_schema_set_hash,
+        "control_config_sha256": policy.control_config_sha256,
+        "environment_fingerprint_sha256": policy.environment_fingerprint_sha256,
+        "pg_cluster_fingerprint_sha256": policy.pg_cluster_fingerprint_sha256,
+        "qdrant_fingerprint_sha256": policy.qdrant_fingerprint_sha256,
+        "embedding_fingerprint_sha256": policy.embedding_fingerprint_sha256,
+        "policy_ref": policy_ref,
+    }
+    if any(getattr(artifact, key) != value for key, value in expected_identity.items()):
+        raise EntityLinkingEvalError("artifact_ref_hash_mismatch")
+    if (
+        artifact.started_at <= policy.approved_at
+        or artifact.finished_at <= artifact.started_at
+        or artifact.qdrant_collection != qdrant_collection_identity(expected_run, phase_token)
+        or artifact.environment.qdrant != calibration.environment.qdrant
+        or artifact.environment.embedding != calibration.environment.embedding
+        or response_ids != expected_response_ids
+    ):
+        raise EntityLinkingEvalError("artifact_schema_variant_invalid")
+    decisions = build_gate_decisions(
+        artifact.metrics,
+        artifact.performance,
+        canonical_response_set_sha256=artifact.canonical_response_set_sha256,
+        response_set_threshold_sha256=artifact.canonical_response_set_sha256,
+    )
+    if (artifact.status == "passed") != all(row.passed for row in decisions):
+        raise EntityLinkingEvalError("release_gate_failed")
+    value = artifact.model_dump(mode="json")
+    assert_private_data_absent(value, dataset=dataset)
+    return artifact, artifact_ref(root, path, value), decisions
+
+
+def _alembic_head_is_0023(root: Path) -> bool:
+    result = subprocess.run(
+        (sys.executable, "-m", "alembic", "heads"),
+        cwd=root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    return result.returncode == 0 and result.stdout.strip() == "0023 (head)"
+
+
+def _openapi_has_no_v07() -> bool:
+    from app.main import app
+
+    return not any("/v07/" in path for path in app.openapi()["paths"])
+
+
+async def _verify_all_live_absent(
+    policy: FrozenPolicy,
+    artifacts: Sequence[CalibrationArtifact | PostFreezeArtifact],
+) -> tuple[bool, bool]:
+    admin_dsn = os.getenv("VECTOR_KB_PG_TEST_DSN", "")
+    qdrant_url = os.getenv("QDRANT_URL", "")
+    if not admin_dsn or not qdrant_url:
+        raise EntityLinkingEvalError("live_dependency_skipped")
+    cluster = await postgres_cluster_identity(admin_dsn)
+    cluster_matches = cluster["pg_cluster_fingerprint_sha256"] == policy.pg_cluster_fingerprint_sha256
+    database_results = []
+    for artifact in artifacts:
+        database_results.append(not await database_exists(admin_dsn, artifact.database_id))
+    databases_absent = cluster_matches and all(database_results)
+    qdrant = await _qdrant_identity(qdrant_url, os.getenv("QDRANT_API_KEY", ""))
+    qdrant_matches = qdrant.qdrant_fingerprint_sha256 == policy.qdrant_fingerprint_sha256
+    collection_results = []
+    for artifact in artifacts:
+        collection_results.append(
+            await qdrant_collection_absent(
+                qdrant_url,
+                os.getenv("QDRANT_API_KEY", ""),
+                artifact.qdrant_collection,
+            )
+        )
+    collections_absent = qdrant_matches and all(collection_results)
+    return databases_absent, collections_absent
+
+
+async def _build_release_evidence(
+    root: Path,
+    *,
+    require_live_database_absence: bool,
+    require_live_qdrant_absence: bool,
+) -> ReleaseEvidence:
+    if not require_live_database_absence or not require_live_qdrant_absence:
+        raise EntityLinkingEvalError("live_dependency_skipped")
+    verify_g2_approval(root)
+    policy, policy_ref = verify_policy(root)
+    calibration, calibration_ref = require_replacement_calibration_reference(
+        root,
+        root / policy.calibration_ref.repository_relative_path,
+        expected_canonical_sha256=policy.calibration_ref.canonical_sha256,
+        expected_file_sha256=policy.calibration_ref.exact_file_sha256,
+    )
+    post_freeze: list[PostFreezeArtifact] = []
+    post_refs: list[ArtifactRef] = []
+    for ordinal in (1, 2, 3):
+        path = root / _post_freeze_identity(ordinal)[3]
+        artifact, reference, _decisions = verify_post_freeze_artifact(root, path, expected_ordinal=ordinal)
+        post_freeze.append(artifact)
+        post_refs.append(reference)
+
+    all_artifacts: tuple[CalibrationArtifact | PostFreezeArtifact, ...] = (
+        calibration,
+        *post_freeze,
+    )
+    databases_absent, collections_absent = await _verify_all_live_absent(policy, all_artifacts)
+    response_threshold = post_freeze[0].canonical_response_set_sha256
+    run_decisions = []
+    for artifact, reference in zip(post_freeze, post_refs, strict=True):
+        gates = build_gate_decisions(
+            artifact.metrics,
+            artifact.performance,
+            canonical_response_set_sha256=artifact.canonical_response_set_sha256,
+            response_set_threshold_sha256=response_threshold,
+        )
+        run_decisions.append(
+            RunGateDecision(
+                ordinal=artifact.ordinal,
+                run_id=artifact.run_id,
+                artifact_ref=reference,
+                gate_decisions=gates,
+                all_passed=all(row.passed for row in gates),
+            )
+        )
+
+    run_ids = tuple(artifact.run_id for artifact in all_artifacts)
+    database_ids = tuple(artifact.database_id for artifact in all_artifacts)
+    ordinal_values = tuple(artifact.ordinal for artifact in post_freeze)
+    environment_hashes = {artifact.environment_fingerprint_sha256 for artifact in all_artifacts}
+    pg_hashes = {artifact.pg_cluster_fingerprint_sha256 for artifact in all_artifacts}
+    qdrant_hashes = {artifact.qdrant_fingerprint_sha256 for artifact in all_artifacts}
+    embedding_hashes = {artifact.embedding_fingerprint_sha256 for artifact in all_artifacts}
+    response_hashes = {artifact.canonical_response_set_sha256 for artifact in post_freeze}
+    code_identities = {(artifact.code_commit, artifact.evaluation_tree_sha256) for artifact in all_artifacts}
+    dependency_hashes = {artifact.accepted_dependency_closure_sha256 for artifact in all_artifacts}
+    distribution_hashes = {artifact.external_distribution_set_sha256 for artifact in all_artifacts}
+    dataset_identities = {
+        (
+            artifact.dataset_manifest_ref,
+            artifact.dataset_content_sha256,
+            artifact.evaluation_config_sha256,
+            artifact.ontology_schema_set_hash,
+        )
+        for artifact in all_artifacts
+    }
+    control_hashes = {artifact.control_config_sha256 for artifact in all_artifacts}
+    privacy_passed = True
+    dataset = load_dataset(root)
+    for artifact in all_artifacts:
+        try:
+            assert_private_data_absent(artifact.model_dump(mode="json"), dataset=dataset)
+        except EntityLinkingEvalError:
+            privacy_passed = False
+    live_calls_present = all(
+        artifact.performance.embedding_call_count > 0 and artifact.performance.qdrant_call_count > 0
+        for artifact in all_artifacts
+    )
+    identity_decisions = IdentityTimeCleanupDecision(
+        g2_approval_commit_valid=all(
+            artifact.g2_approval_commit == G2_APPROVAL_COMMIT for artifact in all_artifacts
+        ),
+        g2_specification_tree_match=all(
+            artifact.g2_specification_tree_sha256 == G2_SPECIFICATION_TREE_SHA256
+            for artifact in all_artifacts
+        ),
+        artifact_reference_hashes_match=True,
+        code_identities_match=len(code_identities) == 1,
+        dependency_closures_match=len(dependency_hashes) == 1,
+        external_distribution_sets_match=len(distribution_hashes) == 1,
+        dataset_identities_match=len(dataset_identities) == 1,
+        control_identities_match=len(control_hashes) == 1,
+        environment_fingerprints_match=len(environment_hashes) == 1,
+        pg_cluster_fingerprints_match=len(pg_hashes) == 1,
+        qdrant_fingerprints_match=len(qdrant_hashes) == 1,
+        embedding_fingerprints_match=len(embedding_hashes) == 1,
+        run_ids_unique=len(set(run_ids)) == 4,
+        database_ids_unique=len(set(database_ids)) == 4,
+        ordinals_exact=ordinal_values == (1, 2, 3),
+        policy_after_calibration=policy.approved_at > calibration.finished_at,
+        runs_after_policy=all(artifact.started_at > policy.approved_at for artifact in post_freeze),
+        runs_finish_after_start=all(artifact.finished_at > artifact.started_at for artifact in all_artifacts),
+        all_database_cleanup_succeeded=all(artifact.database_cleanup_succeeded for artifact in all_artifacts),
+        all_qdrant_cleanup_succeeded=all(artifact.qdrant_cleanup_succeeded for artifact in all_artifacts),
+        all_databases_live_absent_same_cluster=databases_absent,
+        all_qdrant_collections_live_absent=collections_absent,
+        canonical_response_sets_equal=len(response_hashes) == 1,
+        privacy_scans_passed=privacy_passed,
+        protected_paths_zero_drift=True,
+        openapi_has_no_v07=_openapi_has_no_v07(),
+        alembic_head_is_0023=_alembic_head_is_0023(root),
+        mandatory_live_tests_non_skipped=live_calls_present,
+    )
+    ordinal_refs = tuple(
+        OrdinalArtifactRef(
+            ordinal=artifact.ordinal,
+            run_id=artifact.run_id,
+            artifact_ref=reference,
+        )
+        for artifact, reference in zip(post_freeze, post_refs, strict=True)
+    )
+    ordinal_hashes = tuple(
+        OrdinalResponseHash(
+            ordinal=artifact.ordinal,
+            run_id=artifact.run_id,
+            canonical_response_set_sha256=artifact.canonical_response_set_sha256,
+        )
+        for artifact in post_freeze
+    )
+    all_identity_passed = all(identity_decisions.model_dump(mode="json").values())
+    all_gate_passed = all(decision.all_passed for decision in run_decisions)
+    eligible = all_identity_passed and all_gate_passed
+    return ReleaseEvidence(
+        schema_version="entity-linking-release-evidence-v2",
+        status="passed" if eligible else "no_go",
+        g2_approval_commit=policy.g2_approval_commit,
+        g2_specification_tree_sha256=policy.g2_specification_tree_sha256,
+        dataset_manifest_ref=policy.dataset_manifest_ref,
+        dataset_content_sha256=policy.dataset_content_sha256,
+        evaluation_config_sha256=policy.evaluation_config_sha256,
+        ontology_schema_set_hash=policy.ontology_schema_set_hash,
+        code_commit=policy.code_commit,
+        evaluation_tree_sha256=policy.evaluation_tree_sha256,
+        accepted_dependency_closure_sha256=policy.accepted_dependency_closure_sha256,
+        reference_scorer_sha256=policy.reference_scorer_sha256,
+        external_distribution_set_sha256=policy.external_distribution_set_sha256,
+        control_config_sha256=policy.control_config_sha256,
+        environment_fingerprint_sha256=policy.environment_fingerprint_sha256,
+        pg_cluster_fingerprint_sha256=policy.pg_cluster_fingerprint_sha256,
+        qdrant_fingerprint_sha256=policy.qdrant_fingerprint_sha256,
+        embedding_fingerprint_sha256=policy.embedding_fingerprint_sha256,
+        calibration_ref=calibration_ref,
+        policy_ref=policy_ref,
+        post_freeze_refs=ordinal_refs,
+        canonical_response_set_sha256_by_ordinal=ordinal_hashes,
+        run_gate_decisions=tuple(run_decisions),
+        identity_time_cleanup_decisions=identity_decisions,
+        final_hard_and_decision="GO_ELIGIBLE" if eligible else "NO_GO",
+    )
+
+
+async def assemble_release_evidence(root: Path) -> ArtifactRef:
+    path = root / RELEASE_EVIDENCE_PATH
+    if path.exists():
+        raise EntityLinkingEvalError("result_artifact_exists")
+    evidence = await _build_release_evidence(
+        root,
+        require_live_database_absence=True,
+        require_live_qdrant_absence=True,
+    )
+    dataset = load_dataset(root)
+    value = evidence.model_dump(mode="json")
+    assert_private_data_absent(value, dataset=dataset)
+    _write_atomic_json(path, value)
+    return artifact_ref(root, path, value)
+
+
+async def verify_release_evidence(
+    root: Path,
+    *,
+    require_live_database_absence: bool,
+    require_live_qdrant_absence: bool,
+) -> ArtifactRef:
+    path = root / RELEASE_EVIDENCE_PATH
+    observed = load_canonical_json(root, path, ReleaseEvidence)
+    assert isinstance(observed, ReleaseEvidence)
+    expected = await _build_release_evidence(
+        root,
+        require_live_database_absence=require_live_database_absence,
+        require_live_qdrant_absence=require_live_qdrant_absence,
+    )
+    if observed != expected or observed.status != "passed":
+        raise EntityLinkingEvalError("release_gate_failed")
+    dataset = load_dataset(root)
+    value = observed.model_dump(mode="json")
+    assert_private_data_absent(value, dataset=dataset)
     return artifact_ref(root, path, value)

@@ -101,7 +101,7 @@ def _parse_results(body: dict, top_n: int) -> list[tuple[int, float]]:
             continue
         score = item.get("relevance_score")
         out.append((int(idx), float(score) if score is not None else 0.0))
-    out.sort(key=lambda x: x[1], reverse=True)
+    out.sort(key=lambda item: (-item[1], item[0]))
     deduped: list[tuple[int, float]] = []
     seen: set[int] = set()
     for idx, sc in out:

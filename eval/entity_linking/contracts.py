@@ -4,10 +4,11 @@ import hashlib
 import json
 import math
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, RootModel, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, RootModel, model_validator
 
 from app.services.graph_canonical import canonical_graph_json_v1
 
@@ -24,7 +25,18 @@ GitCommit = Annotated[str, Field(pattern=GIT_COMMIT_RE.pattern)]
 LogicalKey = Annotated[str, Field(pattern=LOGICAL_KEY_RE.pattern)]
 RunId = Annotated[str, Field(pattern=RUN_ID_RE.pattern)]
 DatabaseId = Annotated[str, Field(pattern=DATABASE_ID_RE.pattern)]
-UtcTimestamp = Annotated[str, Field(pattern=UTC_RE.pattern)]
+
+
+def _validate_utc_timestamp(value: str) -> str:
+    datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ")
+    return value
+
+
+UtcTimestamp = Annotated[
+    str,
+    Field(pattern=UTC_RE.pattern),
+    AfterValidator(_validate_utc_timestamp),
+]
 
 CATEGORY_ORDER = (
     "exact-canonical",
@@ -45,6 +57,34 @@ STRATUM_ORDER = (
     "one-hop-latin-mixed",
     "two-hop-cjk",
     "two-hop-latin-mixed",
+)
+GATE_ID_ORDER = (
+    "wrong-auto-link-count",
+    "auto-link-precision",
+    "exact-regression-accuracy",
+    "scope-safety",
+    "property-privacy",
+    "privacy-leak-count",
+    "publication-membership-failures",
+    "ambiguous-unlinkable-false-auto-links",
+    "candidate-recall-at-5",
+    "overall-link-recall",
+    "non-exact-link-recall",
+    "link-recall-gain-vs-exact",
+    "abstention-accuracy",
+    "evidence-recall-gain",
+    "complete-support-gain",
+    "evidence-precision-regression",
+    "any-gold-gain",
+    "bootstrap-ci-lower",
+    "linker-p95",
+    "link-graph-p95",
+    "link-graph-ratio",
+    "timeout-count",
+    "sql-statement-budget",
+    "per-mention-sql",
+    "projection-rows",
+    "deterministic-response-hash",
 )
 EXTERNAL_DISTRIBUTION_VERSIONS = (
     ("alembic", "1.18.4"),
@@ -192,8 +232,8 @@ class PrivacyCanaryRecord(StrictModel):
 
 
 class GoldDataset(StrictModel):
-    schema_version: Literal["entity-linking-gold-v1"]
-    dataset_id: Literal["feasibility-v1"]
+    schema_version: Literal["entity-linking-gold-v2"]
+    dataset_id: Literal["feasibility-v5"]
     uuid_namespace: str
     libraries: tuple[LibraryRecord, ...]
     ontologies: tuple[OntologyRecord, ...]
@@ -242,12 +282,16 @@ class GoldUtilityRecord(StrictModel):
 
 
 class EvaluationCase(StrictModel):
-    schema_version: Literal["entity-linking-case-v1"]
+    schema_version: Literal["entity-linking-case-v2"]
     case_id: LogicalKey
     split: Literal["calibration", "release"]
+    cohort: Literal["safety", "utility"]
     entity_family_keys: tuple[LogicalKey, ...]
     mention_family_keys: tuple[LogicalKey, ...]
     relation_template_family_key: LogicalKey
+    phrase_family_key: LogicalKey
+    decoy_family_keys: tuple[LogicalKey, ...]
+    decoy_chunk_keys: tuple[LogicalKey, ...]
     categories: tuple[str, ...]
     utility_stratum: Literal["one-hop-cjk", "one-hop-latin-mixed", "two-hop-cjk", "two-hop-latin-mixed"]
     scenario_publication_key: LogicalKey
@@ -265,6 +309,10 @@ class EvaluationCase(StrictModel):
         expected_hop = 1 if self.utility_stratum.startswith("one-hop") else 2
         if self.gold_utility.hop != expected_hop:
             raise ValueError("utility stratum/hop mismatch")
+        if self.cohort == "utility" and any(
+            mention.gold_status != "linkable" for mention in self.mentions
+        ):
+            raise ValueError("utility cases require only linkable mentions")
         return self
 
 
@@ -272,6 +320,8 @@ class FeatureExpected(StrictModel):
     character_bigram_dice_micros: int = Field(ge=0, le=1_000_000)
     token_jaccard_micros: int = Field(ge=0, le=1_000_000)
     substring_containment_micros: int = Field(ge=0, le=1_000_000)
+    boundary_omission_micros: int = Field(ge=0, le=1_000_000)
+    ordered_abbreviation_micros: int = Field(ge=0, le=1_000_000)
     score_micros: int = Field(ge=0, le=1_000_000)
 
 
@@ -292,7 +342,7 @@ class CandidateFixture(StrictModel):
 
 class DecisionExpected(StrictModel):
     status: Literal["linked", "ambiguous", "not_found"]
-    method: Literal["exact_canonical", "lexical_v1"] | None
+    method: Literal["exact_canonical", "lexical_v2"] | None
     selected_entity_key: LogicalKey | None
     candidate_entity_keys: tuple[LogicalKey, ...]
 
@@ -340,8 +390,8 @@ class CategoryPredicateCase(StrictModel):
 
 
 class ConformanceDataset(StrictModel):
-    schema_version: Literal["entity-linking-scorer-conformance-v1"]
-    algorithm_version: Literal["lexical-score-v1"]
+    schema_version: Literal["entity-linking-scorer-conformance-v2"]
+    algorithm_version: Literal["lexical-score-v2"]
     normalization_version: Literal["normalize_graph_name_v1"]
     rounding_version: Literal["integer-half-up-v1"]
     feature_cases: tuple[FeatureCase, ...]
@@ -367,6 +417,10 @@ class CountsRecord(StrictModel):
     chunks: int = Field(ge=1)
     calibration_cases: int = Field(ge=1)
     release_cases: int = Field(ge=1)
+    calibration_safety_cases: Literal[40]
+    calibration_utility_cases: Literal[40]
+    release_safety_cases: Literal[40]
+    release_utility_cases: Literal[80]
 
 
 class MinimumCountsRecord(StrictModel):
@@ -380,6 +434,12 @@ class MinimumCountsRecord(StrictModel):
     ontologies: Literal[2]
     release_category_cases: Literal[20]
     release_stratum_questions: Literal[20]
+    decoys_per_utility_case: Literal[12]
+
+
+class CohortCounts(StrictModel):
+    safety: int = Field(ge=0)
+    utility: int = Field(ge=0)
 
 
 class CategoryCounts(RootModel[dict[str, int]]):
@@ -418,6 +478,10 @@ class ControlConfig(StrictModel):
     query_rewrite_llm_enabled: Literal[False]
     embedding_model: Literal["bge-m3"]
     embedding_dimension: Literal[1024]
+    vector_search_exact: Literal[True]
+    vector_tie_completion_version: Literal[
+        "score-desc-chunk-id-asc-probe-51-102-201-tail-complete-fail-closed-v2"
+    ]
     hybrid_candidate_k: Literal[50]
     hybrid_rrf_k: Literal[60]
     hybrid_keyword_threshold_micros: Literal[300000]
@@ -452,12 +516,16 @@ class BootstrapConfig(StrictModel):
 
 
 class PerformanceFixture(StrictModel):
-    generator_version: Literal["entity-linking-performance-fixture-v1"]
+    generator_version: Literal["entity-linking-performance-fixture-v2"]
     publication_total_items: Literal[10000]
     publication_entities: Literal[6000]
     publication_relations: Literal[4000]
-    mention_count: Literal[10]
-    mention_mix: Literal["2 exact, 3 high-similarity, 3 ambiguous, 2 not-found"]
+    linker_scenario: Literal["linker-mixed-10"]
+    linker_mention_count: Literal[10]
+    linker_mention_mix: Literal["2 exact, 3 high-similarity, 3 ambiguous, 2 not-found"]
+    link_graph_scenario: Literal["link-graph-linked-10"]
+    link_graph_mention_count: Literal[10]
+    link_graph_mention_mix: Literal["2 exact, 4 boundary-omission, 4 ordered-abbreviation"]
     warmup_count: Literal[5]
     sample_count: Literal[30]
     timeout_micros: Literal[2000000]
@@ -508,8 +576,8 @@ def _validate_external_distribution_records(
 
 
 class FeasibilityManifest(StrictModel):
-    schema_version: Literal["entity-linking-feasibility-manifest-v1"]
-    dataset_id: Literal["feasibility-v1"]
+    schema_version: Literal["entity-linking-feasibility-manifest-v2"]
+    dataset_id: Literal["feasibility-v5"]
     g2_approval_commit: GitCommit
     g2_specification_tree_sha256: Sha256
     gold_ref: ArtifactRef
@@ -517,12 +585,20 @@ class FeasibilityManifest(StrictModel):
     conformance_ref: ArtifactRef
     canonicalization_version: Literal["canonical-graph-json-v1"]
     normalization_version: Literal["normalize_graph_name_v1"]
-    algorithm_version: Literal["lexical-score-v1"]
+    algorithm_version: Literal["lexical-score-v2"]
     rounding_version: Literal["integer-half-up-v1"]
-    category_predicate_version: Literal["entity-linking-category-predicates-v1"]
+    category_predicate_version: Literal["entity-linking-category-predicates-v2"]
     ordered_case_ids: tuple[LogicalKey, ...]
     ordered_calibration_case_ids: tuple[LogicalKey, ...]
     ordered_release_case_ids: tuple[LogicalKey, ...]
+    ordered_calibration_utility_case_ids: tuple[LogicalKey, ...] = Field(
+        min_length=40, max_length=40
+    )
+    ordered_release_utility_case_ids: tuple[LogicalKey, ...] = Field(
+        min_length=80, max_length=80
+    )
+    calibration_cohort_counts: CohortCounts
+    release_cohort_counts: CohortCounts
     counts: CountsRecord
     minimum_counts: MinimumCountsRecord
     release_category_counts: CategoryCounts
@@ -530,6 +606,8 @@ class FeasibilityManifest(StrictModel):
     entity_family_split_hash: Sha256
     mention_family_split_hash: Sha256
     relation_template_family_split_hash: Sha256
+    phrase_family_split_hash: Sha256
+    decoy_family_split_hash: Sha256
     logical_scope_schema_hashes: tuple[ScopeSchemaHash, ...]
     ontology_schema_set_hash: Sha256
     control_config: ControlConfig
@@ -619,8 +697,27 @@ class GridResult(StrictModel):
     exact_regression_accuracy: RateMetric
     scope_safety: RateMetric
     property_privacy: RateMetric
+    utility_question_execution_coverage: RateMetric
     non_exact_correct_auto_link_count: int = Field(ge=0)
     selection_eligible: bool
+
+    @model_validator(mode="after")
+    def validate_selection_eligibility(self) -> GridResult:
+        expected = bool(
+            self.wrong_auto_link_count == 0
+            and self.ambiguous_unlinkable_false_auto_link_count == 0
+            and self.privacy_leak_count == 0
+            and self.publication_membership_failures == 0
+            and self.auto_link_precision.value_micros == 1_000_000
+            and self.exact_regression_accuracy.value_micros == 1_000_000
+            and self.scope_safety.value_micros == 1_000_000
+            and self.property_privacy.value_micros == 1_000_000
+            and self.utility_question_execution_coverage.value_micros is not None
+            and self.utility_question_execution_coverage.value_micros >= 800_000
+        )
+        if self.selection_eligible != expected:
+            raise ValueError("grid selection eligibility invariant failed")
+        return self
 
 
 class IntrinsicMetrics(StrictModel):
@@ -696,8 +793,22 @@ class LatencySummary(StrictModel):
     p95_us: int = Field(ge=0)
     max_us: int = Field(ge=0)
 
+    @model_validator(mode="after")
+    def validate_percentiles(self) -> LatencySummary:
+        ordered = sorted(self.samples_us)
+        if (self.p50_us, self.p95_us, self.max_us) != (
+            ordered[14],
+            ordered[28],
+            ordered[-1],
+        ):
+            raise ValueError("latency percentile invariant failed")
+        return self
+
 
 class Performance(StrictModel):
+    linker_scenario: Literal["linker-mixed-10"]
+    link_graph_scenario: Literal["link-graph-linked-10"]
+    control_scenario: Literal["link-graph-linked-10"]
     linker: LatencySummary
     link_graph: LatencySummary
     dense: LatencySummary
@@ -711,6 +822,14 @@ class Performance(StrictModel):
     timeout_rollback_reused: bool
     embedding_call_count: int = Field(gt=0)
     qdrant_call_count: int = Field(gt=0)
+    linker_graph_execution_count: Literal[0]
+    link_graph_execution_count: Literal[30]
+
+    @model_validator(mode="after")
+    def validate_independent_scenarios(self) -> Performance:
+        if self.linker.samples_us == self.link_graph.samples_us:
+            raise ValueError("linker and link-graph samples must be independently measured")
+        return self
 
 
 class QdrantCollectionConfig(StrictModel):
@@ -724,6 +843,12 @@ class QdrantCollectionConfig(StrictModel):
     scalar_quantile: ReducedRational
     scalar_always_ram: Literal[True]
 
+    @model_validator(mode="after")
+    def validate_quantile(self) -> QdrantCollectionConfig:
+        if self.scalar_quantile != ReducedRational(numerator=99, denominator=100):
+            raise ValueError("qdrant scalar quantile mismatch")
+        return self
+
 
 class QdrantIdentity(StrictModel):
     identity_version: Literal["entity-linking-qdrant-identity-v1"]
@@ -733,6 +858,16 @@ class QdrantIdentity(StrictModel):
     collection_config: QdrantCollectionConfig
     collection_config_sha256: Sha256
     qdrant_fingerprint_sha256: Sha256
+
+    @model_validator(mode="after")
+    def validate_hashes(self) -> QdrantIdentity:
+        config = self.collection_config.model_dump(mode="json")
+        projection = self.model_dump(mode="json", exclude={"qdrant_fingerprint_sha256"})
+        if self.collection_config_sha256 != canonical_sha256(
+            config
+        ) or self.qdrant_fingerprint_sha256 != canonical_sha256(projection):
+            raise ValueError("qdrant identity hash mismatch")
+        return self
 
 
 class QdrantCollection(StrictModel):
@@ -750,9 +885,16 @@ class EmbeddingIdentity(StrictModel):
     model: Literal["bge-m3"]
     dimension: Literal[1024]
     probe_text_sha256: Literal["4caad60c112bd93fda55714c91aef2762a3c5c5c0df2a09dc28e6296800cc61f"]
-    vector_encoding_version: Literal["ieee754-binary64-be-v1"]
+    vector_encoding_version: Literal["ternary-deadzone-0.005-v1"]
     probe_vector_sha256: Sha256
     embedding_fingerprint_sha256: Sha256
+
+    @model_validator(mode="after")
+    def validate_fingerprint(self) -> EmbeddingIdentity:
+        projection = self.model_dump(mode="json", exclude={"embedding_fingerprint_sha256"})
+        if self.embedding_fingerprint_sha256 != canonical_sha256(projection):
+            raise ValueError("embedding identity hash mismatch")
+        return self
 
 
 class EnvironmentRecord(StrictModel):
@@ -783,6 +925,9 @@ class EnvironmentRecord(StrictModel):
         records = [record.model_dump(mode="json") for record in self.external_distribution_records]
         if canonical_sha256(records) != self.external_distribution_set_sha256:
             raise ValueError("external distribution set hash mismatch")
+        projection = self.model_dump(mode="json", exclude={"environment_fingerprint_sha256"})
+        if self.environment_fingerprint_sha256 != canonical_sha256(projection):
+            raise ValueError("environment fingerprint mismatch")
         return self
 
 
@@ -796,7 +941,7 @@ class CaseResponseHash(StrictModel):
 
 
 class CalibrationArtifact(StrictModel):
-    schema_version: Literal["entity-linking-eval-result-v1"]
+    schema_version: Literal["entity-linking-eval-result-v2"]
     phase: Literal["calibration"]
     status: Literal["passed", "no_go"]
     ordinal: None
@@ -825,7 +970,11 @@ class CalibrationArtifact(StrictModel):
     grid_results: tuple[GridResult, ...] = Field(min_length=25, max_length=25)
     candidate_thresholds: Threshold | None
     selection_reason: Literal[
-        "max-non-exact-coverage", "tie-higher-score", "tie-higher-margin", "no-valid-candidate"
+        "max-question-execution-coverage",
+        "tie-non-exact-coverage",
+        "tie-higher-score",
+        "tie-higher-margin",
+        "no-valid-candidate",
     ]
     metrics: Metrics
     category_counts: CategoryCounts
@@ -838,6 +987,351 @@ class CalibrationArtifact(StrictModel):
     qdrant_collection_created: Literal[True]
     qdrant_cleanup_succeeded: Literal[True]
     policy_ref: None
+
+    @model_validator(mode="after")
+    def validate_artifact_invariants(self) -> CalibrationArtifact:
+        selected = self.candidate_thresholds is not None
+        if selected != (self.status == "passed"):
+            raise ValueError("calibration status/threshold invariant failed")
+        if not selected and self.selection_reason != "no-valid-candidate":
+            raise ValueError("calibration no-go reason mismatch")
+        if selected and self.selection_reason == "no-valid-candidate":
+            raise ValueError("calibration selected reason mismatch")
+        if self.finished_at <= self.started_at:
+            raise ValueError("calibration timestamp order invalid")
+        if (
+            self.pg_cluster_fingerprint_sha256 != self.environment.pg_cluster_fingerprint_sha256
+            or self.qdrant_fingerprint_sha256 != self.environment.qdrant.qdrant_fingerprint_sha256
+            or self.embedding_fingerprint_sha256 != self.environment.embedding.embedding_fingerprint_sha256
+            or self.environment_fingerprint_sha256 != self.environment.environment_fingerprint_sha256
+        ):
+            raise ValueError("calibration environment identity mismatch")
+        if tuple(row.grid_index for row in self.grid_results) != tuple(range(25)):
+            raise ValueError("calibration grid order invalid")
+        threshold_pairs = tuple(
+            (row.thresholds.min_score_micros, row.thresholds.min_margin_micros) for row in self.grid_results
+        )
+        if len(set(threshold_pairs)) != 25:
+            raise ValueError("calibration grid threshold duplicate")
+        responses = [row.model_dump(mode="json") for row in self.ordered_response_hashes]
+        if self.canonical_response_set_sha256 != canonical_sha256(responses):
+            raise ValueError("calibration response set hash mismatch")
+        return self
+
+
+class PolicyApprovalPayload(StrictModel):
+    schema_version: Literal["entity-linking-policy-approval-v2"]
+    calibration_ref: ArtifactRef
+    approved_thresholds: Threshold
+    approved_by: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9 ._:/#-]{0,127}$",
+    )
+    approved_at: UtcTimestamp
+    approval_reference: str = Field(
+        min_length=1,
+        max_length=256,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9 ._:/#-]{0,255}$",
+    )
+
+
+class FrozenPolicy(StrictModel):
+    schema_version: Literal["entity-linking-policy-v2"]
+    policy_version: Literal["entity-linking-policy-v2"]
+    algorithm_version: Literal["lexical-score-v2"]
+    normalization_version: Literal["normalize_graph_name_v1"]
+    g2_approval_commit: GitCommit
+    g2_specification_tree_sha256: Sha256
+    calibration_ref: ArtifactRef
+    approved_thresholds: Threshold
+    approval_payload_sha256: Sha256
+    dataset_manifest_ref: ArtifactRef
+    dataset_content_sha256: Sha256
+    evaluation_config_sha256: Sha256
+    ontology_schema_set_hash: Sha256
+    code_commit: GitCommit
+    evaluation_tree_sha256: Sha256
+    accepted_dependency_closure_sha256: Sha256
+    reference_scorer_sha256: Sha256
+    external_distribution_set_sha256: Sha256
+    control_config_sha256: Sha256
+    environment_fingerprint_sha256: Sha256
+    pg_cluster_fingerprint_sha256: Sha256
+    qdrant_fingerprint_sha256: Sha256
+    embedding_fingerprint_sha256: Sha256
+    approved_by: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9 ._:/#-]{0,127}$",
+    )
+    approved_at: UtcTimestamp
+    approval_reference: str = Field(
+        min_length=1,
+        max_length=256,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9 ._:/#-]{0,255}$",
+    )
+
+
+class PostFreezeArtifact(StrictModel):
+    schema_version: Literal["entity-linking-eval-result-v2"]
+    phase: Literal["post_freeze_release"]
+    status: Literal["passed", "no_go"]
+    ordinal: Literal[1, 2, 3]
+    run_id: RunId
+    database_id: DatabaseId
+    started_at: UtcTimestamp
+    finished_at: UtcTimestamp
+    g2_approval_commit: GitCommit
+    g2_specification_tree_sha256: Sha256
+    code_commit: GitCommit
+    evaluation_tree_sha256: Sha256
+    accepted_dependency_closure_sha256: Sha256
+    reference_scorer_sha256: Sha256
+    external_distribution_set_sha256: Sha256
+    dataset_manifest_ref: ArtifactRef
+    dataset_content_sha256: Sha256
+    evaluation_config_sha256: Sha256
+    ontology_schema_set_hash: Sha256
+    environment_fingerprint_sha256: Sha256
+    environment: EnvironmentRecord
+    pg_cluster_fingerprint_sha256: Sha256
+    qdrant_fingerprint_sha256: Sha256
+    embedding_fingerprint_sha256: Sha256
+    qdrant_collection: QdrantCollection
+    control_config_sha256: Sha256
+    grid_results: None
+    candidate_thresholds: None
+    selection_reason: None
+    metrics: Metrics
+    category_counts: CategoryCounts
+    stratum_counts: StratumCounts
+    performance: Performance
+    ordered_response_hashes: tuple[CaseResponseHash, ...] = Field(min_length=1)
+    canonical_response_set_sha256: Sha256
+    database_created: Literal[True]
+    database_cleanup_succeeded: Literal[True]
+    qdrant_collection_created: Literal[True]
+    qdrant_cleanup_succeeded: Literal[True]
+    policy_ref: ArtifactRef
+
+    @model_validator(mode="after")
+    def validate_artifact_invariants(self) -> PostFreezeArtifact:
+        if self.finished_at <= self.started_at:
+            raise ValueError("post-freeze timestamp order invalid")
+        if (
+            self.pg_cluster_fingerprint_sha256 != self.environment.pg_cluster_fingerprint_sha256
+            or self.qdrant_fingerprint_sha256 != self.environment.qdrant.qdrant_fingerprint_sha256
+            or self.embedding_fingerprint_sha256 != self.environment.embedding.embedding_fingerprint_sha256
+            or self.environment_fingerprint_sha256 != self.environment.environment_fingerprint_sha256
+        ):
+            raise ValueError("post-freeze environment identity mismatch")
+        responses = [row.model_dump(mode="json") for row in self.ordered_response_hashes]
+        if self.canonical_response_set_sha256 != canonical_sha256(responses):
+            raise ValueError("post-freeze response set hash mismatch")
+        return self
+
+
+GateId = Literal[
+    "wrong-auto-link-count",
+    "auto-link-precision",
+    "exact-regression-accuracy",
+    "scope-safety",
+    "property-privacy",
+    "privacy-leak-count",
+    "publication-membership-failures",
+    "ambiguous-unlinkable-false-auto-links",
+    "candidate-recall-at-5",
+    "overall-link-recall",
+    "non-exact-link-recall",
+    "link-recall-gain-vs-exact",
+    "abstention-accuracy",
+    "evidence-recall-gain",
+    "complete-support-gain",
+    "evidence-precision-regression",
+    "any-gold-gain",
+    "bootstrap-ci-lower",
+    "linker-p95",
+    "link-graph-p95",
+    "link-graph-ratio",
+    "timeout-count",
+    "sql-statement-budget",
+    "per-mention-sql",
+    "projection-rows",
+    "deterministic-response-hash",
+]
+
+
+class GateDecision(StrictModel):
+    gate_id: GateId
+    value_type: Literal["integer", "rational", "boolean", "sha256"]
+    comparison: Literal["eq", "ge", "le", "gt", "all_equal"]
+    observed_integer: int | None
+    threshold_integer: int | None
+    observed_rational: ReducedRational | None
+    threshold_rational: ReducedRational | None
+    observed_boolean: bool | None
+    threshold_boolean: bool | None
+    observed_sha256: Sha256 | None
+    threshold_sha256: Sha256 | None
+    passed: bool
+
+    @model_validator(mode="after")
+    def validate_typed_pair_and_result(self) -> GateDecision:
+        pairs = {
+            "integer": (self.observed_integer, self.threshold_integer),
+            "rational": (self.observed_rational, self.threshold_rational),
+            "boolean": (self.observed_boolean, self.threshold_boolean),
+            "sha256": (self.observed_sha256, self.threshold_sha256),
+        }
+        if any(
+            (left is None) != (kind != self.value_type) or (right is None) != (kind != self.value_type)
+            for kind, (left, right) in pairs.items()
+        ):
+            raise ValueError("gate typed pair invariant failed")
+        observed, threshold = pairs[self.value_type]
+        if self.value_type == "integer":
+            if self.comparison not in {"eq", "ge", "le"}:
+                raise ValueError("integer gate comparison invalid")
+            expected = {
+                "eq": observed == threshold,
+                "ge": observed >= threshold,
+                "le": observed <= threshold,
+            }[self.comparison]
+        elif self.value_type == "rational":
+            if self.comparison not in {"eq", "ge", "le", "gt"}:
+                raise ValueError("rational gate comparison invalid")
+            assert isinstance(observed, ReducedRational)
+            assert isinstance(threshold, ReducedRational)
+            left = observed.numerator * threshold.denominator
+            right = threshold.numerator * observed.denominator
+            expected = {
+                "eq": left == right,
+                "ge": left >= right,
+                "le": left <= right,
+                "gt": left > right,
+            }[self.comparison]
+        elif self.value_type == "boolean":
+            if self.comparison != "eq":
+                raise ValueError("boolean gate comparison invalid")
+            expected = observed == threshold
+        else:
+            if self.comparison not in {"eq", "all_equal"}:
+                raise ValueError("sha256 gate comparison invalid")
+            expected = observed == threshold
+        if self.passed != expected:
+            raise ValueError("gate decision result mismatch")
+        return self
+
+
+class OrdinalArtifactRef(StrictModel):
+    ordinal: Literal[1, 2, 3]
+    run_id: RunId
+    artifact_ref: ArtifactRef
+
+
+class OrdinalResponseHash(StrictModel):
+    ordinal: Literal[1, 2, 3]
+    run_id: RunId
+    canonical_response_set_sha256: Sha256
+
+
+class RunGateDecision(StrictModel):
+    ordinal: Literal[1, 2, 3]
+    run_id: RunId
+    artifact_ref: ArtifactRef
+    gate_decisions: tuple[GateDecision, ...] = Field(min_length=26, max_length=26)
+    all_passed: bool
+
+    @model_validator(mode="after")
+    def validate_decisions(self) -> RunGateDecision:
+        if tuple(row.gate_id for row in self.gate_decisions) != GATE_ID_ORDER:
+            raise ValueError("run gate decision order invalid")
+        if self.all_passed != all(row.passed for row in self.gate_decisions):
+            raise ValueError("run all-passed invariant failed")
+        return self
+
+
+class IdentityTimeCleanupDecision(StrictModel):
+    g2_approval_commit_valid: bool
+    g2_specification_tree_match: bool
+    artifact_reference_hashes_match: bool
+    code_identities_match: bool
+    dependency_closures_match: bool
+    external_distribution_sets_match: bool
+    dataset_identities_match: bool
+    control_identities_match: bool
+    environment_fingerprints_match: bool
+    pg_cluster_fingerprints_match: bool
+    qdrant_fingerprints_match: bool
+    embedding_fingerprints_match: bool
+    run_ids_unique: bool
+    database_ids_unique: bool
+    ordinals_exact: bool
+    policy_after_calibration: bool
+    runs_after_policy: bool
+    runs_finish_after_start: bool
+    all_database_cleanup_succeeded: bool
+    all_qdrant_cleanup_succeeded: bool
+    all_databases_live_absent_same_cluster: bool
+    all_qdrant_collections_live_absent: bool
+    canonical_response_sets_equal: bool
+    privacy_scans_passed: bool
+    protected_paths_zero_drift: bool
+    openapi_has_no_v07: bool
+    alembic_head_is_0023: bool
+    mandatory_live_tests_non_skipped: bool
+
+
+class ReleaseEvidence(StrictModel):
+    schema_version: Literal["entity-linking-release-evidence-v2"]
+    status: Literal["passed", "no_go"]
+    g2_approval_commit: GitCommit
+    g2_specification_tree_sha256: Sha256
+    dataset_manifest_ref: ArtifactRef
+    dataset_content_sha256: Sha256
+    evaluation_config_sha256: Sha256
+    ontology_schema_set_hash: Sha256
+    code_commit: GitCommit
+    evaluation_tree_sha256: Sha256
+    accepted_dependency_closure_sha256: Sha256
+    reference_scorer_sha256: Sha256
+    external_distribution_set_sha256: Sha256
+    control_config_sha256: Sha256
+    environment_fingerprint_sha256: Sha256
+    pg_cluster_fingerprint_sha256: Sha256
+    qdrant_fingerprint_sha256: Sha256
+    embedding_fingerprint_sha256: Sha256
+    calibration_ref: ArtifactRef
+    policy_ref: ArtifactRef
+    post_freeze_refs: tuple[OrdinalArtifactRef, ...] = Field(min_length=3, max_length=3)
+    canonical_response_set_sha256_by_ordinal: tuple[OrdinalResponseHash, ...] = Field(
+        min_length=3, max_length=3
+    )
+    run_gate_decisions: tuple[RunGateDecision, ...] = Field(min_length=3, max_length=3)
+    identity_time_cleanup_decisions: IdentityTimeCleanupDecision
+    final_hard_and_decision: Literal["GO_ELIGIBLE", "NO_GO"]
+
+    @model_validator(mode="after")
+    def validate_release_decision(self) -> ReleaseEvidence:
+        expected_ordinals = (1, 2, 3)
+        arrays = (
+            self.post_freeze_refs,
+            self.canonical_response_set_sha256_by_ordinal,
+            self.run_gate_decisions,
+        )
+        if any(tuple(row.ordinal for row in rows) != expected_ordinals for rows in arrays):
+            raise ValueError("release ordinal order invalid")
+        expected_runs = tuple(row.run_id for row in self.post_freeze_refs)
+        if any(tuple(row.run_id for row in rows) != expected_runs for rows in arrays[1:]):
+            raise ValueError("release run reference mismatch")
+        decisions = self.identity_time_cleanup_decisions.model_dump(mode="json")
+        eligible = all(row.all_passed for row in self.run_gate_decisions) and all(decisions.values())
+        if (self.status == "passed") != eligible or (
+            self.final_hard_and_decision == "GO_ELIGIBLE"
+        ) != eligible:
+            raise ValueError("release final decision invariant failed")
+        return self
 
 
 def canonical_sha256(value: Any) -> str:

@@ -22,11 +22,13 @@ jobs:
       QDRANT_API_KEY: ""
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - name: Install (with dev + ocr extras)
-        run: pip install -e ".[dev,ocr]"
+        run: pip install -c .github/constraints-v07-release.txt -e ".[dev,ocr]"
       - name: Ruff
         run: ruff check app tests scripts
       - name: Pytest (mocked; PG integration auto-skips without DSN)
@@ -64,11 +66,13 @@ jobs:
       JWT_SECRET: ci-not-a-real-secret-rotate-before-use-0000
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - name: Install (with dev + ocr extras)
-        run: pip install -e ".[dev,ocr]"
+        run: pip install -c .github/constraints-v07-release.txt -e ".[dev,ocr]"
       # 现有 PG 测试已覆盖「空库 → Alembic upgrade 到 head」与唯一索引/outbox 结构，
       # 不重复另建迁移测试；只运行这两份集成测试文件（不跑依赖真实 Qdrant/Embedding 的 E2E 脚本）。
       - name: PG integration + Alembic migration tests
