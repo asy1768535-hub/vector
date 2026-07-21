@@ -10,7 +10,7 @@ from app.services.graph_normalization import normalize_graph_name_v1
 
 
 EntityLinkingStatus = Literal["linked", "ambiguous", "not_found"]
-EntityLinkingMethod = Literal["exact_canonical", "lexical_v1"]
+EntityLinkingMethod = Literal["exact_canonical", "lexical_v2"]
 EntityLinkingErrorCode = Literal[
     "library_not_found",
     "publication_changed",
@@ -125,7 +125,7 @@ class EntityLinkingResolveResponse(_StrictEntityLinkingModel):
         actual = (
             len(self.results),
             sum(row.method == "exact_canonical" for row in self.results),
-            sum(row.method == "lexical_v1" for row in self.results),
+            sum(row.method == "lexical_v2" for row in self.results),
             sum(row.status == "ambiguous" for row in self.results),
             sum(row.status == "not_found" for row in self.results),
             sum(len(row.candidates) for row in self.results),

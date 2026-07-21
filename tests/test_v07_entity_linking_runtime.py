@@ -33,14 +33,17 @@ from app.services import graph_retrieval
 from app.services.entity_linking_scorer import (
     EntityLinkingCandidate,
     ScoredEntityLinkingCandidate,
+    boundary_omission_micros,
     character_bigram_dice_micros,
     decide_scored_candidates,
+    ordered_abbreviation_micros,
     resolve_mention,
     score_normalized_pair,
     stable_candidate_key,
     substring_containment_micros,
     token_jaccard_micros,
 )
+from app.services.graph_normalization import normalize_graph_name_v1
 from app.services.entity_linking_observability import (
     EntityLinkingObservation,
     assert_sanitized_entity_linking_observation,
@@ -106,7 +109,7 @@ def _response() -> EntityLinkingResolveResponse:
     )
     return EntityLinkingResolveResponse(
         contract_version="v1",
-        policy_version="entity-linking-policy-v1",
+        policy_version="entity-linking-policy-v2",
         publication=EntityLinkingPublicationRead(
             id=PUBLICATION_ID,
             ontology_version_id=ONTOLOGY_ID,
@@ -270,20 +273,29 @@ def _reference_decision_identity(decision) -> tuple[object, ...]:
 
 def test_v07_production_scorer_is_bit_for_bit_conformant_with_frozen_reference():
     payload = json.loads(
-        Path("eval/entity_linking/conformance_v1.json").read_text(encoding="utf-8")
+        Path("eval/entity_linking/conformance_v2.json").read_text(encoding="utf-8")
     )
     for case in payload["feature_cases"]:
-        reference = reference_scorer.score_normalized_pair(case["left"], case["right"])
-        assert character_bigram_dice_micros(case["left"], case["right"]) == (
+        left = normalize_graph_name_v1(case["left"])
+        right = normalize_graph_name_v1(case["right"])
+        reference = reference_scorer.score_normalized_pair(left, right)
+        bigram = character_bigram_dice_micros(left, right)
+        assert bigram == (
             reference.character_bigram_dice_micros
         )
-        assert token_jaccard_micros(case["left"], case["right"]) == (
+        assert token_jaccard_micros(left, right) == (
             reference.token_jaccard_micros
         )
-        assert substring_containment_micros(case["left"], case["right"]) == (
+        assert substring_containment_micros(left, right) == (
             reference.substring_containment_micros
         )
-        assert score_normalized_pair(case["left"], case["right"]) == reference.score_micros
+        assert boundary_omission_micros(left, right) == reference.boundary_omission_micros
+        assert ordered_abbreviation_micros(
+            left,
+            right,
+            bigram_micros=bigram,
+        ) == reference.ordered_abbreviation_micros
+        assert score_normalized_pair(left, right) == reference.score_micros
 
     for case in payload["ordering_cases"]:
         reference_candidates = [_reference_candidate(row) for row in case["candidates"]]
@@ -300,7 +312,7 @@ def test_v07_production_scorer_is_bit_for_bit_conformant_with_frozen_reference()
                 ScoredEntityLinkingCandidate(
                     row,
                     score_normalized_pair(
-                        case["mention_text"],
+                        normalize_graph_name_v1(case["mention_text"]),
                         row.normalized_name,
                     ),
                 )
@@ -318,7 +330,7 @@ def test_v07_production_scorer_is_bit_for_bit_conformant_with_frozen_reference()
         reference_scored = [
             reference_scorer.ScoredCandidate(
                 candidate,
-                reference_scorer.FeatureScores(0, 0, 0, score),
+                reference_scorer.FeatureScores(0, 0, 0, 0, 0, score),
             )
             for candidate, score in zip(
                 reference_candidates,
@@ -413,16 +425,16 @@ def _policy_payload() -> dict[str, object]:
         "exact_file_sha256": sha,
     }
     return {
-        "schema_version": "entity-linking-policy-v1",
-        "policy_version": "entity-linking-policy-v1",
-        "algorithm_version": "lexical-score-v1",
+        "schema_version": "entity-linking-policy-v2",
+        "policy_version": "entity-linking-policy-v2",
+        "algorithm_version": "lexical-score-v2",
         "normalization_version": "normalize_graph_name_v1",
         "g2_approval_commit": "a" * 40,
         "g2_specification_tree_sha256": sha,
         "calibration_ref": artifact_ref,
         "approved_thresholds": {
-            "min_score_micros": 950_000,
-            "min_margin_micros": 200_000,
+            "min_score_micros": 920_000,
+            "min_margin_micros": 120_000,
             "candidate_floor_micros": 500_000,
             "max_candidates": 10,
         },
@@ -451,8 +463,8 @@ def test_v07_startup_config_is_fail_closed_and_binds_policy(tmp_path: Path):
     config = Settings(_env_file=None)
     validate_entity_linking_startup(config)
     assert config.entity_linking_enabled is False
-    assert config.entity_linking_min_score_micros == 950_000
-    assert config.entity_linking_min_margin_micros == 200_000
+    assert config.entity_linking_min_score_micros == 920_000
+    assert config.entity_linking_min_margin_micros == 120_000
 
     with pytest.raises(RuntimeError):
         validate_entity_linking_startup(
@@ -474,7 +486,7 @@ def test_v07_startup_config_is_fail_closed_and_binds_policy(tmp_path: Path):
         ).encode("utf-8")
         + b"\n"
     )
-    policy_path = tmp_path / "link_policy_v1.json"
+    policy_path = tmp_path / "link_policy_v2.json"
     policy_path.write_bytes(policy_bytes)
     enabled = Settings(
         _env_file=None,
@@ -487,6 +499,17 @@ def test_v07_startup_config_is_fail_closed_and_binds_policy(tmp_path: Path):
         validate_entity_linking_startup(
             enabled.model_copy(update={"entity_linking_policy_sha256": "0" * 64})
         )
+
+    accepted_policy_path = Path("eval/entity_linking/link_policy_v11.json")
+    accepted_policy_bytes = accepted_policy_path.read_bytes()
+    validate_entity_linking_startup(
+        Settings(
+            _env_file=None,
+            entity_linking_enabled=True,
+            entity_linking_policy_path=str(accepted_policy_path),
+            entity_linking_policy_sha256=hashlib.sha256(accepted_policy_bytes).hexdigest(),
+        )
+    )
 
 
 def test_v07_candidate_projection_is_scoped_and_excludes_private_columns():

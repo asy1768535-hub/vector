@@ -328,11 +328,11 @@ class Settings(BaseSettings):
     # ---- v0.7 Publication-scoped Entity Linking (default fail closed) ----
     entity_linking_enabled: bool = False
     entity_linking_contract_version: str = "v1"
-    entity_linking_policy_version: str = "entity-linking-policy-v1"
-    entity_linking_policy_path: str = "eval/entity_linking/link_policy_v1.json"
+    entity_linking_policy_version: str = "entity-linking-policy-v2"
+    entity_linking_policy_path: str = "eval/entity_linking/link_policy_v11.json"
     entity_linking_policy_sha256: str = ""
-    entity_linking_min_score_micros: int = 950_000
-    entity_linking_min_margin_micros: int = 200_000
+    entity_linking_min_score_micros: int = 920_000
+    entity_linking_min_margin_micros: int = 120_000
     entity_linking_candidate_floor_micros: int = 500_000
     entity_linking_max_mentions: int = 10
     entity_linking_max_candidates: int = 10
@@ -439,7 +439,7 @@ def validate_graph_retrieval_startup(config: Settings) -> None:
 def validate_entity_linking_startup(config: Settings) -> None:
     if config.entity_linking_contract_version != "v1":
         raise RuntimeError("[security] entity linking contract version must be v1")
-    if config.entity_linking_policy_version != "entity-linking-policy-v1":
+    if config.entity_linking_policy_version != "entity-linking-policy-v2":
         raise RuntimeError("[security] entity linking policy version is invalid")
     thresholds = (
         config.entity_linking_min_score_micros,
@@ -482,9 +482,9 @@ def validate_entity_linking_startup(config: Settings) -> None:
     if not isinstance(policy, dict) or set(policy) != _ENTITY_LINKING_POLICY_FIELDS:
         raise RuntimeError("[security] entity linking policy schema is invalid")
     if (
-        policy.get("schema_version") != "entity-linking-policy-v1"
+        policy.get("schema_version") != "entity-linking-policy-v2"
         or policy.get("policy_version") != config.entity_linking_policy_version
-        or policy.get("algorithm_version") != "lexical-score-v1"
+        or policy.get("algorithm_version") != "lexical-score-v2"
         or policy.get("normalization_version") != "normalize_graph_name_v1"
     ):
         raise RuntimeError("[security] entity linking policy identity is invalid")

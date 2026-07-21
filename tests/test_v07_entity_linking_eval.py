@@ -48,6 +48,7 @@ from eval.entity_linking.reference_scorer import (
 )
 from eval.entity_linking.runtime import (
     CALIBRATION_RUN_ID,
+    FINAL_RUNTIME_PROTECTED_PATHS,
     G2_APPROVAL_COMMIT,
     G2_SPECIFICATION_TREE_SHA256,
     EntityLinkingEvalError,
@@ -1075,7 +1076,7 @@ def test_invalidated_v1_calibration_is_rejected_before_policy_write():
     historical_policy_path = ROOT / "eval/entity_linking/link_policy_v1.json"
     policy_path = ROOT / "eval/entity_linking/link_policy_v11.json"
     assert historical_policy_path.is_file()
-    assert not policy_path.exists()
+    policy_bytes = policy_path.read_bytes()
     with pytest.raises(EntityLinkingEvalError, match="invalidated_calibration_artifact"):
         require_replacement_calibration_reference(
             ROOT,
@@ -1083,7 +1084,7 @@ def test_invalidated_v1_calibration_is_rejected_before_policy_write():
             expected_canonical_sha256=("96757dcd901439828b61605c473a34c2c838ed6755db6f129d030561b156894d"),
             expected_file_sha256=("c35210075e179ebce197275041e0ff69403297185ec2ebcc16a663d7611e9225"),
         )
-    assert not policy_path.exists()
+    assert policy_path.read_bytes() == policy_bytes
 
 
 def test_complete_cli_surface_is_frozen_before_replacement_calibration():
@@ -1106,13 +1107,27 @@ def test_complete_cli_surface_is_frozen_before_replacement_calibration():
     )
 
 
-def test_historical_chains_are_preserved_and_current_outputs_await_gate_b():
+def test_historical_chains_and_accepted_v12_outputs_are_preserved():
     base = ROOT / "eval/entity_linking"
     assert (base / "link_policy_v1.json").is_file()
     assert (base / "link_policy_v8.json").is_file()
     assert (base / "release_evidence_v8.json").is_file()
-    assert not (base / "link_policy_v11.json").exists()
-    assert not (base / "release_evidence_v11.json").exists()
+    accepted_policy = base / "link_policy_v11.json"
+    accepted_evidence = base / "release_evidence_v11.json"
+    assert hashlib.sha256(accepted_policy.read_bytes()).hexdigest() == (
+        "b80026b8b5e3f6d691f3bcb7481c94004a762b3b714a383c01d296970003bcec"
+    )
+    assert canonical_sha256(json.loads(accepted_policy.read_text(encoding="utf-8"))) == (
+        "01cf3495e12f8a20a163eb862e4c4c368c9a50038073eab10ea63d83d7df60c8"
+    )
+    assert hashlib.sha256(accepted_evidence.read_bytes()).hexdigest() == (
+        "adf87992e2868ed5895083703863007ebb9a642ce58dab664be4715ae2d5a624"
+    )
+    evidence_value = json.loads(accepted_evidence.read_text(encoding="utf-8"))
+    assert canonical_sha256(evidence_value) == (
+        "9e546b9dc17f4fde296c28416ad601e52c06d2f042bb1ff6fb64174902609607"
+    )
+    assert evidence_value["final_hard_and_decision"] == "GO_ELIGIBLE"
     results = base / "results"
     historical = results / "v07-el-calibration-v3-20260720-01.json"
     historical_value = json.loads(historical.read_text(encoding="utf-8"))
@@ -1205,17 +1220,51 @@ def test_historical_chains_are_preserved_and_current_outputs_await_gate_b():
     assert json.loads((base / "release_evidence_v10.json").read_text(encoding="utf-8"))[
         "final_hard_and_decision"
     ] == "NO_GO"
-    forbidden = (
-        "v07-el-post-freeze-v12-20260721-01.json",
-        "v07-el-post-freeze-v12-20260721-02.json",
-        "v07-el-post-freeze-v12-20260721-03.json",
-    )
-    assert all(not (results / name).exists() for name in forbidden)
+    accepted_post_freeze = {
+        "v07-el-post-freeze-v12-20260721-01.json": "e3a181522964ed0b5253179b2cdc4bc3b73cb5017fcf895710df0ead22b604be",
+        "v07-el-post-freeze-v12-20260721-02.json": "fc45096e920dcabba5ecb00712292cd45e0fee472807fb0e67446beb9a0bd995",
+        "v07-el-post-freeze-v12-20260721-03.json": "a36f9df4acf6ecaa58a0cf37c6c1abfbc33020e9f60b9b47540bba16d79f7af1",
+    }
+    for name, expected_sha256 in accepted_post_freeze.items():
+        assert hashlib.sha256((results / name).read_bytes()).hexdigest() == expected_sha256
 
 
-def test_no_v07_route_or_migration_and_protected_runtime_remains_unchanged():
+def test_accepted_v07_route_default_off_and_no_new_migration():
+    from app.config import Settings
     from app.main import app
 
-    assert not any("/v07/" in path for path in app.openapi()["paths"])
+    v07_paths = [path for path in app.openapi()["paths"] if "/v07/" in path]
+    assert v07_paths == ["/libraries/{slug}/v07/entity-links/resolve"]
+    config = Settings(_env_file=None)
+    assert config.entity_linking_enabled is False
+    assert config.entity_linking_policy_path == "eval/entity_linking/link_policy_v11.json"
+    assert config.entity_linking_policy_sha256 == ""
     heads = list((ROOT / "alembic/versions").glob("0024*.py"))
     assert not heads
+
+
+def test_final_runtime_tree_is_content_bound():
+    expected = {
+        ".env.example": "23b68320bf408aaec746549c30a3fc27d50a2088d265f4ac4b6e55f3d856260d",
+        "app/api/v07_entity_linking.py": "2a1e2b5a4fd4b8c5eb537216315ccf842e61b75413ee9cb9d39bf0ced7b00496",
+        "app/config.py": "48c3219216da9aaacf810878f77cda67984dd4c8b65c085894e6bc0e0fe25a48",
+        "app/main.py": "2fe2338917c88ebc0effeb364d2ef1706b51d6d9950441c4e34cb0a26f256a03",
+        "app/schemas/v07_entity_linking.py": "8d1caebbb9b6ba3668d75baf1d1e32af7d8d2f7e6752980345884d91b21e53e1",
+        "app/services/entity_linking.py": "26c5a84083199fea839faee3fec69f8402c6d1879182553b76a79778227b42ac",
+        "app/services/entity_linking_observability.py": (
+            "9c91a2ac2d658ecfc8fff123b6d4905832b1ab53e0273c859fa59b175bd6d654"
+        ),
+        "app/services/entity_linking_scorer.py": (
+            "108b17a91d2e8740cccb8e8ca8d5909427e0af9cd18ad15c60846ab9df2d5fe9"
+        ),
+    }
+    assert set(expected) == set(FINAL_RUNTIME_PROTECTED_PATHS)
+    records = []
+    for path in sorted(FINAL_RUNTIME_PROTECTED_PATHS):
+        body = (ROOT / path).read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        observed = hashlib.sha256(body).hexdigest()
+        assert observed == expected[path]
+        records.append({"repository_relative_path": path, "canonical_lf_sha256": observed})
+    assert canonical_sha256(records) == (
+        "836aacc964a3d8dd62214f54925c1f15c6b8b3c1196aaf00305207e2fccb99ba"
+    )

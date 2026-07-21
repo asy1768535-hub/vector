@@ -564,6 +564,18 @@ def canonical_graph_eval_hash(value: Any) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _artifact_sha256_variants(payload: bytes) -> frozenset[str]:
+    normalized = payload.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    return frozenset(
+        (hashlib.sha256(payload).hexdigest(), hashlib.sha256(normalized).hexdigest())
+    )
+
+
+def _normalized_artifact_sha256(payload: bytes) -> str:
+    normalized = payload.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    return hashlib.sha256(normalized).hexdigest()
+
+
 def _load_json(path: Path) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -922,8 +934,7 @@ def load_graph_eval_policy(
         calibration_bytes = calibration_path.read_bytes()
     except OSError as exc:
         raise ValueError("cannot load frozen calibration result") from exc
-    calibration_sha256 = hashlib.sha256(calibration_bytes).hexdigest()
-    if calibration_sha256 != policy.calibration_result_sha256:
+    if policy.calibration_result_sha256 not in _artifact_sha256_variants(calibration_bytes):
         raise ValueError("calibration result SHA-256 does not match Eval Policy")
 
     calibration = GraphEvalRunArtifact.model_validate_json(calibration_bytes)
@@ -944,7 +955,7 @@ def load_graph_eval_policy(
         raise ValueError("Eval Policy approval must follow calibration completion")
 
     try:
-        policy_sha256 = hashlib.sha256(resolved_policy.read_bytes()).hexdigest()
+        policy_sha256 = _normalized_artifact_sha256(resolved_policy.read_bytes())
     except OSError as exc:
         raise ValueError("cannot hash Eval Policy") from exc
     return LoadedGraphEvalPolicy(policy, calibration, policy_sha256)
@@ -975,7 +986,7 @@ def _load_evidence_reference(
         payload = path.read_bytes()
     except OSError as exc:
         raise ValueError("cannot load release evidence reference") from exc
-    if hashlib.sha256(payload).hexdigest() != reference.sha256:
+    if reference.sha256 not in _artifact_sha256_variants(payload):
         raise ValueError(f"release evidence SHA-256 mismatch: {reference.path}")
     return path, payload
 
@@ -1064,7 +1075,10 @@ def load_graph_eval_release_evidence(
         reference=evidence.policy,
     )
     policy = load_graph_eval_policy(repository_root=root, policy_path=policy_path)
-    if evidence.policy.sha256 != policy.policy_sha256:
+    if (
+        evidence.policy.sha256 not in _artifact_sha256_variants(_policy_bytes)
+        or policy.policy_sha256 not in _artifact_sha256_variants(_policy_bytes)
+    ):
         raise ValueError("release evidence policy SHA-256 is inconsistent")
 
     if evidence.calibration.path != policy.policy.calibration_result_path:
@@ -1114,7 +1128,7 @@ def load_graph_eval_release_evidence(
 
     return LoadedGraphEvalReleaseEvidence(
         evidence=evidence,
-        evidence_sha256=hashlib.sha256(evidence_bytes).hexdigest(),
+        evidence_sha256=_normalized_artifact_sha256(evidence_bytes),
         policy=policy,
         calibration=calibration,
         post_freeze_runs=(

@@ -289,7 +289,7 @@ async def _run_acceptance(monkeypatch) -> None:
             ]
             assert [row.method for row in response.results] == [
                 "exact_canonical",
-                "lexical_v1",
+                "lexical_v2",
                 None,
                 None,
             ]

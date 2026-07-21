@@ -302,7 +302,7 @@ def _counts(results: Sequence[EntityLinkingResult]) -> EntityLinkingCounts:
     return EntityLinkingCounts(
         mentions=len(results),
         linked_exact=sum(row.method == "exact_canonical" for row in results),
-        linked_lexical=sum(row.method == "lexical_v1" for row in results),
+        linked_lexical=sum(row.method == "lexical_v2" for row in results),
         ambiguous=sum(row.status == "ambiguous" for row in results),
         not_found=sum(row.status == "not_found" for row in results),
         candidates=sum(len(row.candidates) for row in results),

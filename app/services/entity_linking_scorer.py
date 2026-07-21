@@ -33,7 +33,7 @@ class ScoredEntityLinkingCandidate:
 @dataclass(frozen=True, slots=True)
 class EntityLinkingDecision:
     status: Literal["linked", "ambiguous", "not_found"]
-    method: Literal["exact_canonical", "lexical_v1"] | None
+    method: Literal["exact_canonical", "lexical_v2"] | None
     selected: ScoredEntityLinkingCandidate | None
     candidates: tuple[ScoredEntityLinkingCandidate, ...]
 
@@ -73,13 +73,70 @@ def substring_containment_micros(left: str, right: str) -> int:
     return 0
 
 
+def _scale_support_micros(support_micros: int) -> int:
+    if not 0 <= support_micros <= MICROS:
+        raise ValueError("support_micros out of range")
+    return 850_000 + (2 * 150_000 * support_micros + MICROS) // (2 * MICROS)
+
+
+def _is_strict_subsequence(left: str, right: str) -> bool:
+    if not left or not right:
+        return False
+    position = 0
+    for value in right:
+        if value == left[position]:
+            position += 1
+            if position == len(left):
+                return True
+    return False
+
+
+def boundary_omission_micros(left: str, right: str) -> int:
+    if len(left) < 2 or len(left) >= len(right):
+        return 0
+    if not (right.startswith(left) or right.endswith(left)):
+        return 0
+    return _scale_support_micros(ratio_micros(len(left), len(right)))
+
+
+def ordered_abbreviation_micros(
+    left: str,
+    right: str,
+    *,
+    bigram_micros: int,
+) -> int:
+    compact_left = "".join(left.split())
+    compact_right = "".join(right.split())
+    right_tokens = right.split()
+    initialism = bool(
+        len(right_tokens) >= 2
+        and compact_left == "".join(token[0] for token in right_tokens)
+    )
+    subsequence = bool(
+        2 <= len(compact_left) < len(compact_right)
+        and _is_strict_subsequence(compact_left, compact_right)
+        and compact_left not in compact_right
+        and 4 * len(compact_left) <= 3 * len(compact_right)
+    )
+    if not (initialism or subsequence):
+        return 0
+    support = max(
+        bigram_micros,
+        ratio_micros(len(compact_left), len(compact_right)),
+    )
+    return _scale_support_micros(support)
+
+
 def score_normalized_pair(left: str, right: str) -> int:
     if not left or not right:
         raise ValueError("normalized scorer inputs must be non-empty")
+    bigram = character_bigram_dice_micros(left, right)
     return max(
-        character_bigram_dice_micros(left, right),
+        bigram,
         token_jaccard_micros(left, right),
         substring_containment_micros(left, right),
+        boundary_omission_micros(left, right),
+        ordered_abbreviation_micros(left, right, bigram_micros=bigram),
     )
 
 
@@ -182,4 +239,4 @@ def decide_scored_candidates(
     second_score = presented[1].score_micros if len(presented) > 1 else 0
     if top_score < min_score_micros or top_score - second_score < min_margin_micros:
         return EntityLinkingDecision("ambiguous", None, None, presented)
-    return EntityLinkingDecision("linked", "lexical_v1", presented[0], ())
+    return EntityLinkingDecision("linked", "lexical_v2", presented[0], ())

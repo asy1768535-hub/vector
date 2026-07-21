@@ -128,6 +128,8 @@ from eval.entity_linking.reference_scorer import (
 
 G2_APPROVAL_COMMIT = "57eef637e5fd5d0ccc42404d4440420b5fe95c93"
 G2_SPECIFICATION_TREE_SHA256 = "5d86fedfb53f7afc0f781e190d25319f9ad945d4ba55aa6f63af5d5fa3372f1f"
+FROZEN_EVALUATOR_COMMIT = "8bc7dcf1b358b1e735114ebd43b1e213e0ac487f"
+FROZEN_EVALUATION_TREE_SHA256 = "d617fb9fe963843df3789f5b41639dd76b34eaba427b8bb71a266f47701f719c"
 G1_COMMIT = "f40c5c84c3248639aa6603d43b6b306ad76d66fd"
 AUDIT_PRESERVATION_COMMIT = "155ef946c48272518c996458bc206039b6676c18"
 INVALIDATED_G2_APPROVAL_COMMIT = "75bf4141be743c1164bfa9841d0737509d7575fe"
@@ -215,6 +217,19 @@ PROTECTED_PATHS = (
     "alembic",
     "eval/graph_retrieval",
     "scripts/graph_retrieval_eval.py",
+)
+FINAL_RUNTIME_PROTECTED_PATHS = (
+    ".env.example",
+    "app/api/v07_entity_linking.py",
+    "app/config.py",
+    "app/main.py",
+    "app/schemas/v07_entity_linking.py",
+    "app/services/entity_linking.py",
+    "app/services/entity_linking_observability.py",
+    "app/services/entity_linking_scorer.py",
+)
+HISTORICAL_ACCEPTANCE_PROTECTED_PATHS = (
+    "app/services/graph_extraction_eval.py",
 )
 EXCLUDED_USER_PATHS = (
     "admin-ui/login_redesign.test.mjs",
@@ -368,6 +383,45 @@ def _audit_field(document: str, name: str) -> str:
     return match.group(1).strip()
 
 
+@lru_cache(maxsize=4)
+def _tree_sha256_at_commit(root: Path, commit: str, paths: tuple[str, ...]) -> str:
+    records = []
+    for path in sorted(paths):
+        oid = _git(root, "rev-parse", f"{commit}:{path}")
+        body = subprocess.check_output(("git", "cat-file", "blob", oid), cwd=root)
+        records.append(
+            {
+                "repository_relative_path": path,
+                "exact_file_sha256": hashlib.sha256(body).hexdigest(),
+            }
+        )
+    return canonical_sha256(records)
+
+
+@lru_cache(maxsize=256)
+def _blob_hashes_at_commit(root: Path, commit: str, path: str) -> tuple[str, str]:
+    oid = _git(root, "rev-parse", f"{commit}:{path}")
+    body = subprocess.check_output(("git", "cat-file", "blob", oid), cwd=root)
+    checkout_body = body.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+    return hashlib.sha256(body).hexdigest(), hashlib.sha256(checkout_body).hexdigest()
+
+
+def _verify_frozen_dependency_records(
+    root: Path,
+    commit: str,
+    records: Sequence[dict[str, str]],
+) -> None:
+    for record in records:
+        path = record["repository_relative_path"]
+        expected = record["exact_file_sha256"]
+        if path in FINAL_RUNTIME_PROTECTED_PATHS:
+            observed = _blob_hashes_at_commit(root, commit, path)
+        else:
+            observed = (hashlib.sha256((root / path).read_bytes()).hexdigest(),)
+        if expected not in observed:
+            raise EntityLinkingEvalError("dependency_closure_unresolved")
+
+
 def verify_g2_approval(root: Path) -> dict[str, str]:
     head = _git(root, "rev-parse", "HEAD")
     if not re.fullmatch(r"[0-9a-f]{40}", head):
@@ -375,6 +429,13 @@ def verify_g2_approval(root: Path) -> dict[str, str]:
     _require_ancestor(root, AUDIT_PRESERVATION_COMMIT, G2_APPROVAL_COMMIT)
     _require_ancestor(root, G1_COMMIT, G2_APPROVAL_COMMIT)
     _require_ancestor(root, G2_APPROVAL_COMMIT, head)
+    _require_ancestor(root, G2_APPROVAL_COMMIT, FROZEN_EVALUATOR_COMMIT)
+    _require_ancestor(root, FROZEN_EVALUATOR_COMMIT, head)
+    if (
+        _tree_sha256_at_commit(root, FROZEN_EVALUATOR_COMMIT, G3_IMPLEMENTATION_PATHS)
+        != FROZEN_EVALUATION_TREE_SHA256
+    ):
+        raise EntityLinkingEvalError("implementation_tree_drift")
 
     preservation_paths = set(
         _git(
@@ -479,7 +540,12 @@ def verify_g2_approval(root: Path) -> dict[str, str]:
     protected = set(
         _git(root, "diff", "--name-only", G2_APPROVAL_COMMIT, "--", *PROTECTED_PATHS).splitlines()
     )
-    if protected - {"app/services/qdrant.py"}:
+    allowed_protected = {
+        "app/services/qdrant.py",
+        *FINAL_RUNTIME_PROTECTED_PATHS,
+        *HISTORICAL_ACCEPTANCE_PROTECTED_PATHS,
+    }
+    if protected - allowed_protected:
         raise EntityLinkingEvalError("scope_drift_detected")
     return {"g2_approval_commit": G2_APPROVAL_COMMIT, "g2_specification_tree_sha256": specification_hash}
 
@@ -2470,10 +2536,11 @@ def load_dataset(root: Path) -> LoadedDataset:
         "performance_fixture": manifest.performance_fixture.model_dump(mode="json"),
         "threshold_grid": manifest.threshold_grid.model_dump(mode="json"),
     }
-    closure = build_dependency_closure(root)
+    closure = tuple(
+        row.model_dump(mode="json") for row in manifest.accepted_dependency_closure_records
+    )
+    _verify_frozen_dependency_records(root, FROZEN_EVALUATOR_COMMIT, closure)
     distributions = discover_external_distribution_records(root)
-    if tuple(row.model_dump(mode="json") for row in manifest.accepted_dependency_closure_records) != closure:
-        raise EntityLinkingEvalError("dependency_closure_unresolved")
     if manifest.accepted_dependency_closure_sha256 != canonical_sha256(closure):
         raise EntityLinkingEvalError("dependency_closure_unresolved")
     if tuple(row.model_dump(mode="json") for row in manifest.external_distribution_records) != distributions:
