@@ -47,11 +47,11 @@ COOKIE_SECURE=false              # 上 HTTPS 时改 true
 # 在 PG 上建独立库
 createdb -h 10.0.10.114 -p 5434 -U postgres vector_kb
 
-# 应用初始 migration（创建 8 业务表 + casbin_rule）
+# 应用全部 migration（建表 + #6/#7 的 revision / rebuild_operations / qdrant_cleanup_outbox）
 alembic upgrade head
 ```
 
-成功标志：`alembic upgrade head` 退出码 0，无报错。
+成功标志：`alembic upgrade head` 退出码 0，无报错；当前 head 为 **0015**（含 0013 常用问题、0014 聊天历史、0015 轻量 Hybrid 关键词索引；旧 0012 hybrid 已回退，由 0015 幂等收编）。
 
 ## 4. 创建首位超管
 
@@ -63,12 +63,17 @@ python scripts/bootstrap_admin.py --email admin@example.com --password CHANGE_ME
 
 ## 5. 启动服务
 
+需要三个进程（#6/#7 后新增 cleanup worker）：
+
 ```bash
 # 终端 A：API（host/port 读 .env 的 API_HOST / API_PORT）
 python -m app.main
 
-# 终端 B：Worker（长跑）
+# 终端 B：Embedding Worker（长跑）
 python -m app.workers.embedder --watch
+
+# 终端 C：Cleanup Worker（长跑）——消费 Qdrant 删除/重建清理 outbox
+python -m app.workers.cleanup --watch
 ```
 
 > 如果要临时覆盖端口（不改 `.env`）：

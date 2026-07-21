@@ -1,0 +1,13 @@
+# Exact external distribution identity frozen by v0.7 release evidence.
+alembic==1.18.4
+asyncpg==0.31.0
+fastapi-users-db-sqlalchemy==7.0.0
+httpx==0.28.1
+psycopg2-binary==2.9.12
+pydantic==2.13.4
+pydantic-settings==2.14.1
+pytest==9.1.0
+pytest-asyncio==1.4.0
+python-dotenv==1.2.2
+ruff==0.15.17
+sqlalchemy==2.0.51

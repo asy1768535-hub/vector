@@ -3,10 +3,24 @@ __pycache__/
 *$py.class
 *.egg-info/
 .venv/
+.run_logs/
 venv/
+
+# PDF OCR 真实测试样本（含客户业务文书）——不入库
+/samples/
+# OCR 验收报告含真实客户名称/证件号/金额——仅本地留档，未脱敏前不入库
+/docs/testing/
+# 本机 OCR 验收脚本（建库/生命周期）——仅本机用，不入库
+/scripts/create_pdf_ocr_test_lib.py
+/scripts/ocr_lifecycle.py
 /.env
 /.env.local
+.env.bak*
+*.bak
 .pytest_cache/
+.pytest-tmp/
+.tmp/
+pytest_tmp*/
 .ruff_cache/
 .mypy_cache/
 .idea/
@@ -16,3 +30,35 @@ node_modules/
 admin-ui/dist/
 admin-ui/.vite/
 cpwsImportData/
+storage/document_files/
+
+# 备份产物（PG dump / Qdrant 快照等）——绝不入库（见 docs/27）
+/backups/
+*.dump
+*.backup
+*.snapshot
+
+# Claude Code 本机配置（每台机器自有，不入库）
+.claude/settings.local.json
+
+# Claude Code / 工具生成的本地 brainstorm、preview 状态（含本机绝对路径）
+.superpowers/
+.worktrees/
+.tmp_zip_compare/
+
+# 评测集：真实数据(含项目/人员等)不入库；仓库只保留通用示例与说明。
+# 真实评测集放仓库外(如桌面)，或放回 eval/ 也会被忽略；用 --dataset 指定路径。
+/eval/dataset*.jsonl
+!/eval/dataset.example.jsonl
+/eval/report*.md
+
+# 本机工具与含业务数据/绕权限的开发脚本——不入库
+# （.gitignore 不支持行尾注释，patterns 必须独占一行）
+# /tools/cloudflared.exe 等本机二进制
+/tools/
+# scripts/ask.py：检索手测，绕权限校验、直打正文，仅本地开发用
+/scripts/ask.py
+# scripts/build_eval_test_one.py：内嵌业务评测题与文档片段
+/scripts/build_eval_test_one.py
+# scripts/build_bge_compare.py：bge/云对比的一次性本地工具
+/scripts/build_bge_compare.py

@@ -17,7 +17,6 @@ from typing import Optional
 import bcrypt
 from fastapi_users.authentication.strategy import Strategy
 from fastapi_users.exceptions import InvalidPasswordException
-from fastapi_users_db_sqlalchemy import SQLAlchemyUserDatabase
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 

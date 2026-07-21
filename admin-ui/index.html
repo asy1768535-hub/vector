@@ -4,18 +4,15 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>向量知识库 · 管理后台</title>
-    <link rel="stylesheet" href="https://unpkg.com/element-plus@2.7.6/dist/index.css" />
-    <link rel="stylesheet" href="https://unpkg.com/element-plus@2.7.6/theme-chalk/dark/css-vars.css" />
+    <link rel="stylesheet" href="./vendor/element-plus.index.css" />
     <link rel="stylesheet" href="./style.css" />
-    <!-- Iconify 网页组件：<iconify-icon icon="mdi:xxx"> 任意图标，零构建 -->
-    <script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
     <script type="importmap">
     {
       "imports": {
-        "vue": "https://unpkg.com/vue@3.4.27/dist/vue.esm-browser.prod.js",
-        "vue-router": "https://unpkg.com/vue-router@4.5.1/dist/vue-router.esm-browser.prod.js",
-        "element-plus": "https://unpkg.com/element-plus@2.7.6/dist/index.full.min.mjs",
-        "element-plus/locale/zh-cn": "https://unpkg.com/element-plus@2.7.6/dist/locale/zh-cn.mjs"
+        "vue": "./vendor/vue.esm-browser.prod.js",
+        "vue-router": "./vendor/vue-router.esm-browser.prod.js",
+        "element-plus": "./vendor/element-plus.full.min.mjs",
+        "element-plus/locale/zh-cn": "./vendor/element-plus-locale-zh-cn.mjs"
       }
     }
     </script>
@@ -68,6 +65,8 @@
                               (reason.stack || reason.message || String(e.reason));
         });
     </script>
+    <!-- 开发预览：取消下一行注释以启用无后端 mock 登录 -->
+    <!-- <script>window.__DEV_PREVIEW__ = true;</script> -->
     <script type="module" src="./src/app.js"></script>
 </body>
 </html>

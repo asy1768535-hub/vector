@@ -4,6 +4,8 @@
 
 API 进程 + Worker 进程都无状态，可水平扩展；状态全在 PostgreSQL + Qdrant + bge-m3 三个外部服务里。
 
+> **部署方式**：本项目目前**不提供官方 Dockerfile**，推荐用 **Python 虚拟环境（`.venv`）+ systemd** 托管（见下「进程托管」）。如需容器化，可自行基于该 venv 流程编写 Dockerfile，但非内部试运行的必需项。
+
 ## 生产前必改清单
 
 | 项 | 检查 |
@@ -60,11 +62,31 @@ RestartSec=10
 WantedBy=multi-user.target
 ```
 
-启用：
+`/etc/systemd/system/vector-kb-cleanup.service`（#7：Qdrant 清理 outbox 消费）：
+
+```ini
+[Unit]
+Description=Vector KB Cleanup Worker
+After=network.target
+
+[Service]
+User=vkb
+WorkingDirectory=/opt/vector-kb
+EnvironmentFile=/opt/vector-kb/.env
+ExecStart=/opt/vector-kb/.venv/bin/python -m app.workers.cleanup --watch
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+启用（生产需 **三类进程**：API + embedding worker + cleanup worker）：
 
 ```bash
 systemctl enable --now vector-kb-api
 systemctl enable --now vector-kb-worker@1 vector-kb-worker@2 vector-kb-worker@3
+systemctl enable --now vector-kb-cleanup
 ```
 
 ### Docker（可选）
@@ -116,10 +138,13 @@ HTTPS 终止后把 `COOKIE_SECURE=true` 即可。
 # 创建
 createdb -h <host> -U postgres vector_kb
 
-# 应用 schema
+# 应用 schema（当前 head 为 0015）
 DB_HOST=<host> DB_USER=postgres DB_PASSWORD=… DB_NAME=vector_kb \
   alembic upgrade head
 ```
+
+> 升级到 v0.1.4：`alembic upgrade head`（含 0009 revision/rebuild_operations、0010 qdrant_cleanup_outbox、0011 service_heartbeats、0013 library_faq_questions、0014 chat_history、0015 hybrid_retrieval；旧 0012 hybrid 已回退，由 0015 幂等收编残留列）。
+> 注意：0009 的活动唯一索引创建前，若库内已有违反唯一性的历史活动行需先清理（见 docs/20 §11.1）。
 
 建议 PG 配置：
 
@@ -141,15 +166,24 @@ DB_HOST=<host> DB_USER=postgres DB_PASSWORD=… DB_NAME=vector_kb \
 
 ## 备份 & 恢复
 
+> **完整手册见 [docs/27 · 备份恢复与部署演练](27-backup-restore-runbook.md)**，含：PG 备份/恢复、
+> Qdrant snapshot、`.env` 安全保存、「Qdrant 丢失走 rebuild」「PostgreSQL 丢失不可恢复项」、
+> 以及**恢复后验收 checklist**（三类进程 + `/health` + 运行状态页 + 临时文档生命周期冒烟）。
+>
+> 脚本模板：`scripts/backup_pg.ps1`、`scripts/restore_pg.ps1`、`scripts/backup_qdrant.md`
+> （参数走环境变量/命令行，不含真实密钥/路径）。
+
+快速参考（下面是 Linux 风格命令；**Windows 部署请优先用 `scripts/backup_pg.ps1` / `scripts/restore_pg.ps1`**）：
+
 ```bash
-# 备份 PG
+# 备份 PG（custom 格式）
 pg_dump -h <host> -U postgres -F c -f vector_kb_$(date +%F).dump vector_kb
 
 # 恢复
-pg_restore -h <host> -U postgres -d vector_kb -c vector_kb_2026-05-19.dump
+pg_restore -h <host> -U postgres -d vector_kb -c vector_kb_<date>.dump
 ```
 
-Qdrant：用 Qdrant 自带 `snapshots` API。每个 collection 单独。
+Qdrant：用 Qdrant 自带 `snapshots` API，每个 collection 单独；或干脆不备份，靠 `rebuild` 从 PG 重算（见 docs/27 §七）。
 
 ## 多副本注意
 

@@ -2,39 +2,61 @@
 
 ## 概述
 
-零构建 Vue 3 SPA。所有依赖（Vue、Vue Router、Element Plus）从 CDN 加载，`<script type="importmap">` + ES Module。无需 npm / node / vite / webpack。
+零构建 Vue 3 SPA。运行时依赖（Vue、Vue Router、Element Plus、marked、DOMPurify）本地化为 `admin-ui/vendor/` 目录，`<script type="importmap">` + ES Module；业务图标由 `src/icons.js` 注册为本地 `<local-icon>` 自定义元素。无需 npm / node / vite / webpack，页面运行时零公网 CDN 请求。
 
 入口：`http://<host>:8100/console/`（根 `/` 自动 302 到这里）
+
+FastAPI 默认挂载 `admin-ui/`。`frontend/` 是未完成的 Soybean Admin 迁移/备用工程，不会因为存在 `frontend/dist` 自动接管 `/console`；如确需使用其他构建产物，必须显式设置 `CONSOLE_UI_DIR=frontend/dist`。
 
 ## 技术栈
 
 | 库 | 来源 |
 |---|---|
-| Vue 3.4 | `https://unpkg.com/vue@3.4.27/dist/vue.esm-browser.prod.js` |
-| Vue Router 4 | `https://unpkg.com/vue-router@4.3.2/dist/vue-router.esm-browser.js` |
-| Element Plus 2.7 | `https://unpkg.com/element-plus@2.7.6/dist/index.full.min.mjs` |
-| 中文语言包 | `https://unpkg.com/element-plus@2.7.6/dist/locale/zh-cn.mjs` |
+| Vue 3.4 | `admin-ui/vendor/vue.esm-browser.prod.js` |
+| Vue Router 4 | `admin-ui/vendor/vue-router.esm-browser.prod.js` |
+| Element Plus 2.7 | `admin-ui/vendor/element-plus.full.min.mjs` |
+| 中文语言包 | `admin-ui/vendor/element-plus-locale-zh-cn.mjs` |
+| 本地图标 | `admin-ui/src/icons.js` + `<local-icon>` |
+| marked (Markdown) | `admin-ui/vendor/marked.esm.js` |
+| DOMPurify (XSS净化) | `admin-ui/vendor/dompurify.es.mjs` |
 
 ## 文件树
 
 ```
 admin-ui/
-├── index.html                # bootstrap + import map
-├── style.css                 # 全局样式 (登录页、侧栏、卡片样式)
+├── index.html                # bootstrap + import map（本地 vendor）
+├── style.css                 # 全局样式（含 Chat Markdown / 光标动画）
+├── vendor/                   # 第三方依赖本地化（零 CDN）
+│   ├── vue.esm-browser.prod.js
+│   ├── vue-router.esm-browser.prod.js
+│   ├── element-plus.full.min.mjs
+│   ├── element-plus-locale-zh-cn.mjs
+│   ├── element-plus.index.css
+│   ├── marked.esm.js
+│   └── dompurify.es.mjs
 └── src/
-    ├── api.js                # fetch 包装 + 401 拦截
+    ├── api.js                # fetch 包装 + 401 拦截 + 统一错误处理
+    ├── api_errors.js         # 纯函数：humanizeApiError / humanizeFetchError
     ├── store.js              # reactive 全局状态（user / permissions）
+    ├── common_ui.js          # 基础分页/普通时间格式化
+    ├── menu_access.js        # 菜单/路由权限纯逻辑
+    ├── icons.js              # 本地 SVG 图标注册 <local-icon>
     ├── app.js                # Vue / Router / Element Plus 装配
     └── views/
         ├── Login.js
         ├── Layout.js         # 侧边栏 + 顶栏 + 动态菜单
         ├── Dashboard.js
-        ├── Users.js
+        ├── Users.js          # 用户管理（创建时可同时授权知识库）
         ├── Libraries.js
         ├── Permissions.js    # 矩阵：选用户 → 勾选 → diff 保存
         ├── Documents.js
+        ├── Search.js
+        ├── Chat.js           # 智能问答（Markdown + 流式 + 引用来源）
+        ├── ChatLogs.js
+        ├── Import.js         # 文件导入（含上传错误中文化）
         ├── ApiKeys.js
         ├── Jobs.js
+        ├── RuntimeStatus.js
         └── Audit.js
 ```
 
@@ -43,19 +65,27 @@ admin-ui/
 | Path（hash） | 组件 | 角色 |
 |---|---|---|
 | `#/login` | Login | 公开 |
-| `#/dashboard` | Dashboard | 任意登录用户 |
-| `#/documents` | Documents | 普通 + 超管 |
-| `#/api-keys` | ApiKeys | 普通 + 超管 |
+| `#/chat` | Chat | 有任一库 `read` 权限 / superuser |
+| `#/documents` | Documents | 有任一库 `read` 权限 / superuser |
+| `#/search` | Search | 有任一库 `read` 权限 / superuser |
+| `#/import` | Import | 有任一库 `insert` 权限 / superuser |
+| `#/api-keys` | ApiKeys | 已登录用户 |
+| `#/dashboard` | Dashboard | superuser |
 | `#/users` | Users | superuser |
 | `#/libraries` | Libraries | superuser |
 | `#/permissions` | Permissions | superuser |
 | `#/jobs` | Jobs | superuser |
+| `#/operations` | RuntimeStatus | superuser |
 | `#/audit` | Audit | superuser |
+| `#/chat-logs` | ChatLogs | superuser |
 
 `app.js` 里 `router.beforeEach` 守卫：
-1. 未登录 → 跳 `/login`
-2. 已登录访问 `/login` → 跳 `/dashboard`
-3. 非超管访问 `meta.admin` 路由 → 跳 `/dashboard`
+1. 未登录 → 跳 `/login?redirect=<原路径>`
+2. 已登录访问 `/login` → 跳 `defaultRoute(user, permissions)`
+3. 非超管访问 `meta.admin` 路由 → 中文提示并跳 `defaultRoute(user, permissions)`
+4. 普通用户访问缺少 `meta.perm` 权限的页面 → 中文提示并跳 `defaultRoute(user, permissions)`
+
+默认落点：superuser 到 `/dashboard`；有 `read` 权限优先到 `/chat`；只有 `insert` 权限到 `/import`；无库权限到 `/api-keys`。
 
 ## 状态管理
 
@@ -69,24 +99,36 @@ export const store = reactive({
 });
 
 export async function refreshAuth() {
-    store.user = await api.me();         // GET /users/me
-    store.permissions = await api.myPermissions(); // GET /me/permissions
+    // 直接 fetch，避免初次启动 401 触发全局 onUnauthorized 跳路由
+    const resp = await fetch('/users/me', { credentials: 'include' });
+    if (resp.ok) {
+        store.user = await resp.json();
+        const pResp = await fetch('/me/permissions', { credentials: 'include' });
+        store.permissions = pResp.ok ? await pResp.json() : [];
+    } else {
+        store.user = null;
+        store.permissions = [];
+    }
+    store.ready = true;
 }
 ```
 
-登录后调一次 `refreshAuth()`，组件用 `store.user` 渲染。
+路由守卫首次进入时调用 `refreshAuth()`；登录成功后也会刷新身份信息，再按 redirect 或默认落点跳转。
 
 ## 动态菜单
 
-`Layout.js` 根据 `store.user.is_superuser` 决定显示哪些 menu-item：
+`Layout.js` 根据 `menuAccess(store.user, store.permissions)` 和 `store.user.is_superuser` 决定显示哪些 menu-item：
 
 ```html
-<el-menu-item index="/dashboard">概览</el-menu-item>
-<el-menu-item index="/documents">文档</el-menu-item>
+<el-menu-item v-if="access.chat" index="/chat">智能问答</el-menu-item>
+<el-menu-item v-if="access.documents" index="/documents">文档</el-menu-item>
+<el-menu-item v-if="access.search" index="/search">数据检索</el-menu-item>
+<el-menu-item v-if="access.import" index="/import">导入数据</el-menu-item>
 <el-menu-item index="/api-keys">我的 API Key</el-menu-item>
 
 <template v-if="isSuper">
     <el-menu-item-group title="管理员">
+        <el-menu-item index="/dashboard">概览</el-menu-item>
         <el-menu-item index="/users">用户管理</el-menu-item>
         <el-menu-item index="/libraries">库管理</el-menu-item>
         ...
@@ -123,7 +165,7 @@ cookie 过期后，下次 fetch 401 → 自动跳登录 → 登录后跳回原�
 
 - form 字段：`email` + `password`
 - 调 `POST /auth/jwt/login`（注意：**form-urlencoded** 不是 JSON，body=`username=email&password=xxx`）
-- 成功后 `refreshAuth()` → 跳 `redirect` 或 `/dashboard`
+- 成功后 `refreshAuth()` → 跳 `redirect` 或 `defaultRoute(user, permissions)`
 
 ### Dashboard
 
@@ -174,6 +216,14 @@ cookie 过期后，下次 fetch 401 → 自动跳登录 → 登录后跳回原�
 - 过滤：status（pending / processing / done / failed）
 - 重试按钮：失败 / 卡死的 job
 
+### RuntimeStatus（运行状态，docs/26 / 批次 C2）
+
+- 数据源：`GET /admin/operations/status`（`api.operationsStatus()`），默认 30 秒自动刷新，也可手动刷新；无 WebSocket
+- **服务状态表**：API / Embedding Worker / Cleanup Worker 三类恒定一行，标签 在线(success) / 降级(warning) / 离线(danger)；列「在线实例数」、最后心跳精确时间、主机、PID
+- **Embedding 任务 / Cleanup Outbox** 两张统计卡（含死信 = failed）
+- **重建**卡：进行中 operation 进度条 `done/expected (pct%)` + 失败库数
+- 与 `/health`（此刻能否连通）互补：此页看「某进程是否在线 + 上次心跳」
+
 ### Audit
 
 - 表格：审计日志
@@ -199,11 +249,12 @@ cookie 过期后，下次 fetch 401 → 自动跳登录 → 登录后跳回原�
 
 ## 想换成全功能模板？
 
-把 `admin-ui/` 替换成 vue-vben-admin / Ant Design Pro 等编译后的 `dist/` 即可。
+当前 `/console` 默认固定挂载 `admin-ui/`。如要替换成 vue-vben-admin / Ant Design Pro / Soybean Admin 等编译后的 `dist/`，先确认功能完整覆盖当前页面，再设置 `CONSOLE_UI_DIR=<dist 相对路径>`，例如 `CONSOLE_UI_DIR=frontend/dist`。
 
 约束：
 - 必须能用 cookie + JSON REST 直接调本服务，不要再加 token / state
 - 路由根用 hash 或 history mode（用 history 的话 FastAPI 要加 fallback 到 `index.html`）
 - 调用 `/auth/jwt/login` 注意是 form-urlencoded，不是 JSON
+- 必须覆盖当前 `admin-ui` 的智能问答、问答日志、运行状态等页面，避免功能回退
 
 API 契约稳定（除新增字段外不会破坏），换前端只是 UI 工作。

@@ -26,7 +26,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from app.auth.user_manager import UserManager, get_user_db  # noqa: E402
+from app.auth.user_manager import UserManager  # noqa: E402
 from app.db import async_session_factory  # noqa: E402
 from app.schemas.users import UserCreate  # noqa: E402
 

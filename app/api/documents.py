@@ -2,15 +2,20 @@
 from __future__ import annotations
 
 import csv
+import hashlib
+import re
 import io
 import json
 import logging
 import uuid
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status, File, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Query, Response, status, File, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.backend import current_active_user
@@ -18,22 +23,408 @@ from app.db import get_db
 from app.deps import require_lib
 from app.models.chunk import Chunk
 from app.models.document import Document
+from app.models.document_file import DocumentFile
+from app.models.document_source import DocumentSource
 from app.models.embedding_job import EmbeddingJob
 from app.models.library import Library
 from app.models.user import User
+from app.schemas.admin import EmbeddingJobRead
 from app.schemas.documents import (
+    DocumentFullSourceResponse,
     DocumentIngestRequest,
     DocumentIngestResponse,
     DocumentRead,
+    DocumentSourceLocationResponse,
+    ImportFileResponse,
     LibraryStats,
     QueryRequest,
     QueryResultItem,
     QueryResponse,
 )
-from app.services import embedding, ingest as ingest_service, qdrant, source_enrichment
+from app.config import settings
+from app.services import embedding, ingest as ingest_service, source_enrichment
+from app.services import cleanup as cleanup_service
+from app.services.metadata_guard import MetadataValidationError
+from app.services import rerank as rerank_svc
+from app.services import retrieval as retrieval_svc
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/libraries/{slug}", tags=["documents"])
+SOURCE_CONTEXT_CHARS = 3000
+
+# #13：导入文件后缀白名单（小写）。不在表内 → 415。
+_SUPPORTED_IMPORT_SUFFIXES = {
+    ".json", ".csv", ".pdf", ".docx", ".xlsx", ".txt", ".md", ".markdown",
+}
+
+_UPLOAD_READ_CHUNK = 1024 * 1024  # 1MiB 分块
+
+
+async def _read_capped(file: UploadFile, limit: int) -> bytes:
+    """#12：分块读取上传文件，累计字节一旦超过 limit 立即中止并 413。
+
+    不先把整文件读进内存——峰值内存被限制在 ~limit（最多 limit + 一个分块），
+    避免超大文件（含恶意构造）在 `await file.read()` 那一刻打爆内存。
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        part = await file.read(_UPLOAD_READ_CHUNK)
+        if not part:
+            break
+        total += len(part)
+        if total > limit:
+            raise HTTPException(
+                status.HTTP_413_CONTENT_TOO_LARGE,
+                f"文件过大（已超过上限 {limit} 字节）",
+            )
+        chunks.append(part)
+    return b"".join(chunks)
+
+
+
+
+def _document_files_root() -> Path:
+    root = Path(settings.document_files_dir)
+    if not root.is_absolute():
+        root = Path(__file__).resolve().parents[2] / root
+    return root
+
+
+def _safe_suffix(filename: str) -> str:
+    suffix = Path(filename).suffix.lower()
+    if suffix and re.fullmatch(r"\.[a-z0-9][a-z0-9._-]{0,15}", suffix):
+        return suffix
+    return ""
+
+
+def _document_file_path(library_id: uuid.UUID, document_id: uuid.UUID, revision: int, digest: str, filename: str) -> Path:
+    return _document_files_root() / str(library_id) / str(document_id) / str(revision) / f"{digest}{_safe_suffix(filename)}"
+
+
+async def _upsert_document_file(
+    db: AsyncSession,
+    *,
+    lib: Library,
+    document_id: uuid.UUID,
+    revision: int,
+    filename: str,
+    content_type: str | None,
+    content: bytes,
+) -> None:
+    digest = hashlib.sha256(content).hexdigest()
+    path = _document_file_path(lib.id, document_id, revision, digest, filename)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+    rel_path = str(path.relative_to(_document_files_root()))
+    values = {
+        "revision": revision,
+        "file_name": filename,
+        "content_type": content_type,
+        "storage_path": rel_path,
+        "size_bytes": len(content),
+        "sha256": digest,
+    }
+    existing = await db.get(DocumentFile, document_id)
+    if existing is None:
+        db.add(DocumentFile(document_id=document_id, **values))
+    else:
+        for key, value in values.items():
+            setattr(existing, key, value)
+
+
+async def _store_original_file_for_result(
+    db: AsyncSession,
+    *,
+    lib: Library,
+    result: dict,
+    filename: str,
+    content_type: str | None,
+    content: bytes,
+) -> None:
+    document_id = uuid.UUID(str(result["document_id"]))
+    try:
+        revision = int(result.get("_revision") or 1)
+    except (TypeError, ValueError):
+        revision = 1
+    await _upsert_document_file(
+        db,
+        lib=lib,
+        document_id=document_id,
+        revision=revision,
+        filename=filename,
+        content_type=content_type,
+        content=content,
+    )
+
+
+async def _lock_writable(db: AsyncSession, lib: Library) -> Library:
+    """写前置（#6 §6/§7.1）：库 FOR KEY SHARE 锁（与 Worker 并发、与 rebuild 互斥）+ 状态校验。
+
+    external 库 → 409（本系统不可写）；rebuilding/failed → 503（+Retry-After）。
+    持锁直到本事务 commit，保证 rebuild 的 FOR UPDATE 会等待在途写、写也看不到半途重建。
+    """
+    # 取 FOR KEY SHARE 锁（与 rebuild 的 FOR UPDATE 互斥，持锁至本事务 commit）。
+    # **必须读锁定后的新鲜行**：等 rebuild 释放后，新鲜行的 index_state 才反映最新状态；
+    # 不能用 require_lib 注入前加载的旧 lib（否则等到 rebuild 后仍按旧 ready 放行）。
+    locked = (await db.execute(
+        select(Library).where(Library.id == lib.id).with_for_update(read=True, key_share=True)
+    )).scalars().first()
+    if locked is None:   # 锁定时行已不存在（理论上软删保留行，此为防御）→ 404，不回退旧对象
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "library not found")
+    if locked.lifecycle_mode == "external":
+        raise HTTPException(status.HTTP_409_CONFLICT, "external 库由外部系统管理，本系统禁止写入")
+    if locked.index_state != "ready":
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "library index rebuilding",
+            headers={"Retry-After": "5"},
+        )
+    return locked
+
+
+def _uuid_or_none(value) -> uuid.UUID | None:
+    if isinstance(value, uuid.UUID):
+        return value
+    if isinstance(value, str):
+        try:
+            return uuid.UUID(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _str_or_none(value) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _ingest_response(doc: Document, job: EmbeddingJob | None, chunk_count: int) -> DocumentIngestResponse:
+    revision_id = (
+        _uuid_or_none(getattr(job, "document_revision_id", None))
+        if job is not None
+        else _uuid_or_none(getattr(doc, "latest_revision_id", None))
+    )
+    job_status = _str_or_none(getattr(job, "status", None)) if job is not None else None
+    revision_status = job_status if revision_id is not None else None
+    return DocumentIngestResponse(
+        document_id=doc.id,
+        status=doc.status,
+        document_status=doc.status,
+        revision_status=revision_status,
+        job_status=job_status,
+        document_revision_id=revision_id,
+        chunk_count=chunk_count,
+        job_id=job.id if job is not None else None,
+    )
+
+
+def _set_write_status(response: Response, *, changed: bool) -> None:
+    if not getattr(settings, "enable_evidence_write_path", False):
+        return
+    response.status_code = status.HTTP_202_ACCEPTED if changed else status.HTTP_200_OK
+
+
+async def _apply_reingest(
+    db: AsyncSession, lib: Library, doc: Document, body: "DocumentIngestRequest", *, force: bool = False
+):
+    """更新已存在文档：重切 + 开新代际（current_revision+=1 + supersede 旧 job）。
+
+    force=True（显式 PUT）总是重做；force=False（external_id upsert）内容没变则 no-op。
+    返回 (job, chunk_count)。#6 决策 1：**不再同步删 Qdrant 旧 points**——靠检索按 revision
+    过滤即不可见，物理清理走批次 B 的 cleanup outbox。
+    """
+    job, chunk_count, changed = await ingest_service.reingest_document(
+        db=db, library=lib, document=doc,
+        new_text=body.text, title=body.title, metadata=body.metadata, splitter=body.splitter,
+        force=force,
+    )
+    await db.commit()
+    return job, chunk_count, changed
+
+
+async def _upsert_document_source(db, document_id, revision: int, source: dict | None) -> None:
+    if not source:
+        return
+    existing = await db.get(DocumentSource, document_id)
+    values = {
+        "revision": revision,
+        "file_name": source.get("file_name"),
+        "file_type": source.get("file_type"),
+        "normalized_text": source["normalized_text"],
+    }
+    if existing is None:
+        db.add(DocumentSource(document_id=document_id, **values))
+    else:
+        for key, value in values.items():
+            setattr(existing, key, value)
+
+
+def _legacy_source_response(
+    doc: Document, chunk: Chunk, file_type: str | None = None
+) -> DocumentSourceLocationResponse:
+    return DocumentSourceLocationResponse(
+        document_title=doc.title,
+        file_type=file_type,
+        chunk_id=str(chunk.id),
+        chunk_seq=chunk.seq,
+        legacy=True,
+        fallback_chunk=chunk.text,
+    )
+
+
+def _bounded_source_window(text: str, start: int, end: int) -> tuple[str, int, int]:
+    span = max(0, end - start)
+    remaining = max(0, SOURCE_CONTEXT_CHARS - span)
+    before = remaining // 2
+    after = remaining - before
+    window_start = max(0, start - before)
+    window_end = min(len(text), end + after)
+    return text[window_start:window_end], window_start, window_end
+
+
+def _valid_source_ranges(raw_ranges, normalized_text: str) -> list[dict] | None:
+    if raw_ranges is None:
+        return None
+    if not isinstance(raw_ranges, list) or not raw_ranges:
+        return []
+    out: list[dict] = []
+    for item in raw_ranges:
+        if not isinstance(item, dict):
+            return []
+        try:
+            start = int(item["start"])
+            end = int(item["end"])
+        except (KeyError, TypeError, ValueError):
+            return []
+        stored_hash = item.get("hash")
+        if start < 0 or end < start or end > len(normalized_text):
+            return []
+        if not isinstance(stored_hash, str) or not re.fullmatch(r"[0-9a-f]{16}", stored_hash):
+            return []
+        actual_hash = hashlib.sha256(normalized_text[start:end].encode("utf-8")).hexdigest()[:16]
+        if stored_hash != actual_hash:
+            return []
+        out.append({"start": start, "end": end, "hash": stored_hash})
+    return out
+
+
+def _source_data(text: str, filename: str, suffix: str) -> dict:
+    return {"normalized_text": text, "file_name": filename, "file_type": suffix or None}
+
+
+def _structured_chunks(text: str, splitter: str, lib: Library, base_location: dict | None = None) -> list[dict]:
+    from app.services.splitter import split_structured_text
+
+    return split_structured_text(
+        text,
+        chunk_size=lib.chunk_size,
+        chunk_overlap=lib.chunk_overlap,
+        splitter=splitter,
+        base_location=base_location,
+    )
+
+
+def _structured_doc_data(text: str, filename: str, suffix: str, splitter: str, lib: Library) -> dict:
+    return {
+        "text": text,
+        "title": filename,
+        "external_id": None,
+        "metadata": None,
+        "splitter": splitter,
+        "chunks": _structured_chunks(text, splitter, lib),
+        "source": _source_data(text, filename, suffix),
+    }
+
+
+async def _ingest_or_upsert(db: AsyncSession, lib: Library, user: User, doc_data: dict) -> dict:
+    """单条文档摄入：有 external_id 且库内已存在同键未删文档 → reingest 覆盖更新；否则新建。
+
+    返回 import 结果 dict（document_id/title/chunk_count/status/job_id/external_id）。
+    #6 决策 1：upsert 命中改内容时**不再**同步删 Qdrant 旧 points——靠 revision 过滤即不可见，
+    物理清理走批次 B outbox。
+    """
+    ext = doc_data.get("external_id")
+    if ext:
+        # external_id 非唯一索引，历史可能重复 → 取最新一条（FOR UPDATE：_new_generation 前提）
+        existing = (await db.execute(
+            select(Document).where(
+                Document.library_id == lib.id,
+                Document.external_id == ext,
+                Document.deleted_at.is_(None),
+            ).order_by(Document.created_at.desc()).limit(1).with_for_update()
+        )).scalars().first()
+        if existing is not None:
+            job, chunk_count, changed = await ingest_service.reingest_document(
+                db=db, library=lib, document=existing,
+                new_text=doc_data["text"], title=doc_data["title"],
+                metadata=doc_data["metadata"], splitter=doc_data["splitter"],
+                force=False, chunks=doc_data.get("chunks"),
+            )
+            if changed:
+                await _upsert_document_source(db, existing.id, existing.current_revision, doc_data.get("source"))
+            return {
+                "document_id": str(existing.id), "title": doc_data["title"],
+                "chunk_count": chunk_count, "status": existing.status,
+                "job_id": str(job.id) if job is not None else None, "external_id": ext,
+                "operation": "updated" if changed else "unchanged",
+                "_revision": existing.current_revision,
+            }
+
+    doc, job, chunk_count, was_existing = await ingest_service.ingest_text(
+        db=db, library=lib, text=doc_data["text"], title=doc_data["title"],
+        external_id=ext, metadata=doc_data["metadata"], splitter=doc_data["splitter"],
+        created_by=user.id, chunks=doc_data.get("chunks"),
+    )
+    if not was_existing:
+        await _upsert_document_source(db, doc.id, doc.current_revision, doc_data.get("source"))
+    # 去重命中（was_existing）：回显数据库里真实保留的旧文件名/external_id，
+    # 而非本次上传的文件名——否则前端会显示一个其实没入库的名字。
+    return {
+        "document_id": str(doc.id),
+        "title": doc.title if was_existing else doc_data["title"],
+        "chunk_count": chunk_count, "status": doc.status,
+        "job_id": str(job.id) if job is not None else None,
+        "external_id": doc.external_id if was_existing else ext,
+        "operation": "unchanged" if was_existing else "created",
+        "_revision": doc.current_revision,
+    }
+
+
+async def _replace_document(db: AsyncSession, lib: Library, target_id: uuid.UUID, doc_data: dict) -> dict:
+    """按 document ID 替换已有文档（不依赖 external_id）：复用 reingest/revision 流程（force=True）。
+
+    校验目标属于本库且未删（否则 404）；保留 document_id 与 external_id，标题更新为新文件名。
+    force=True → 必然 current_revision+1、supersede 旧 job、旧向量按 revision 立即不可见、入 cleanup outbox。
+    """
+    target = (await db.execute(
+        select(Document).where(Document.id == target_id).with_for_update()
+    )).scalars().first()
+    if target is None or target.library_id != lib.id or target.deleted_at is not None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "document not found")
+    # 文件上传不带 metadata（doc_data["metadata"]=None）时保留目标原 metadata，
+    # 避免替换正文却清空作者/分类/过滤字段；文件显式带 metadata（如 json）才覆盖。
+    new_meta = doc_data.get("metadata")
+    meta = new_meta if new_meta is not None else target.doc_metadata
+    try:
+        job, chunk_count, _changed = await ingest_service.reingest_document(
+            db=db, library=lib, document=target,
+            new_text=doc_data["text"], title=doc_data["title"],
+            metadata=meta, splitter=doc_data["splitter"],
+            force=True, chunks=doc_data.get("chunks"),
+        )
+        await _upsert_document_source(db, target.id, target.current_revision, doc_data.get("source"))
+    except IntegrityError as exc:
+        # 无 external_id 文档受 (library_id, content_hash) 活动行唯一约束保护：
+        # 替换成与同库另一篇文档完全相同的内容会撞约束 → 回滚并转 409（而非 500）。
+        await db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "相同内容已存在") from exc
+    return {
+        "document_id": str(target.id), "title": doc_data["title"],
+        "chunk_count": chunk_count, "status": target.status,
+        "job_id": str(job.id) if job is not None else None,
+        "external_id": target.external_id,   # 保留目标原 external_id（替换不改身份）
+        "operation": "updated",              # force=True 必然走新代际
+        "_revision": target.current_revision,
+    }
 
 
 @router.post(
@@ -43,10 +434,32 @@ router = APIRouter(prefix="/libraries/{slug}", tags=["documents"])
 )
 async def ingest(
     body: DocumentIngestRequest,
+    response: Response,
     lib: Library = Depends(require_lib("insert")),
     user: User = Depends(current_active_user),
     db: AsyncSession = Depends(get_db),
 ) -> DocumentIngestResponse:
+    await _lock_writable(db, lib)
+    # external_id 自动 upsert：库内已有同 external_id 的未删文档 → 更新它（重 embed），而非新建
+    if body.external_id:
+        # external_id 普通索引，历史可能重复 → 取最新一条（FOR UPDATE：_new_generation 前提）
+        existing = (await db.execute(
+            select(Document).where(
+                Document.library_id == lib.id,
+                Document.external_id == body.external_id,
+                Document.deleted_at.is_(None),
+            ).order_by(Document.created_at.desc()).limit(1).with_for_update()
+        )).scalars().first()
+        if existing is not None:
+            try:
+                job, chunk_count, changed = await _apply_reingest(db, lib, existing, body)
+            except MetadataValidationError as exc:
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+            _set_write_status(response, changed=changed)
+            return _ingest_response(existing, job, chunk_count)
+
     try:
         doc, job, chunk_count, _existing = await ingest_service.ingest_text(
             db=db,
@@ -58,15 +471,40 @@ async def ingest(
             splitter=body.splitter,
             created_by=user.id,
         )
+    except MetadataValidationError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     await db.commit()
-    return DocumentIngestResponse(
-        document_id=doc.id,
-        status=doc.status,
-        chunk_count=chunk_count,
-        job_id=job.id if job is not None else uuid.uuid4(),  # 兜底，理论 ingest 必返 job
-    )
+    _set_write_status(response, changed=not _existing)
+    return _ingest_response(doc, job, chunk_count)
+
+
+@router.put("/documents/{document_id}", response_model=DocumentIngestResponse)
+async def update_document(
+    document_id: uuid.UUID,
+    body: DocumentIngestRequest,
+    response: Response,
+    lib: Library = Depends(require_lib("insert")),
+    user: User = Depends(current_active_user),
+    db: AsyncSession = Depends(get_db),
+) -> DocumentIngestResponse:
+    """更新文档正文/标题/metadata → 删旧向量 + 重新切分入队，worker 重 embed。"""
+    await _lock_writable(db, lib)
+    # 锁序 library→document：_new_generation 前提要求 document FOR UPDATE
+    doc = (await db.execute(
+        select(Document).where(Document.id == document_id).with_for_update()
+    )).scalars().first()
+    if doc is None or doc.library_id != lib.id or doc.deleted_at is not None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "document not found")
+    try:
+        job, chunk_count, changed = await _apply_reingest(db, lib, doc, body, force=True)
+    except MetadataValidationError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    _set_write_status(response, changed=changed)
+    return _ingest_response(doc, job, chunk_count)
 
 
 @router.get("/documents", response_model=list[DocumentRead])
@@ -94,6 +532,133 @@ async def list_documents(
     return list(rows.scalars().all())
 
 
+@router.get("/documents/{document_id}/source", response_model=DocumentSourceLocationResponse)
+async def get_document_source(
+    document_id: uuid.UUID,
+    chunk_id: uuid.UUID = Query(...),
+    lib: Library = Depends(require_lib("read")),
+    db: AsyncSession = Depends(get_db),
+) -> DocumentSourceLocationResponse:
+    doc = await db.get(Document, document_id)
+    if doc is None or doc.library_id != lib.id or doc.deleted_at is not None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "document not found")
+
+    chunk = await db.get(Chunk, chunk_id)
+    if chunk is None or chunk.document_id != doc.id or chunk.library_id != lib.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "chunk not found")
+
+    source = await db.get(DocumentSource, document_id)
+    if source is None:
+        return _legacy_source_response(doc, chunk)
+
+    metadata = chunk.chunk_metadata or {}
+    try:
+        source_start = int(metadata["source_start"])
+        source_end = int(metadata["source_end"])
+        source_revision = int(metadata["source_revision"])
+    except (KeyError, TypeError, ValueError):
+        return _legacy_source_response(doc, chunk, source.file_type)
+
+    location = metadata.get("location")
+    if not isinstance(location, dict):
+        return _legacy_source_response(doc, chunk, source.file_type)
+    if source_revision != source.revision or source.revision != doc.current_revision:
+        return _legacy_source_response(doc, chunk, source.file_type)
+    if source_start < 0 or source_end < source_start or source_end > len(source.normalized_text):
+        return _legacy_source_response(doc, chunk, source.file_type)
+    validated_ranges = _valid_source_ranges(metadata.get("source_ranges"), source.normalized_text)
+    if validated_ranges == []:
+        return _legacy_source_response(doc, chunk, source.file_type)
+    if validated_ranges is None:
+        # 校验原文 span 完整性（span hash + revision，不再强求 == chunk.text，
+        # 因为表格 chunk.text 可能含检索用的重复表头/前缀）。
+        stored_hash = metadata.get("source_span_hash")
+        if not isinstance(stored_hash, str) or not re.fullmatch(r"[0-9a-f]{16}", stored_hash):
+            return _legacy_source_response(doc, chunk, source.file_type)
+        actual_hash = hashlib.sha256(
+            source.normalized_text[source_start:source_end].encode("utf-8")
+        ).hexdigest()[:16]
+        if stored_hash != actual_hash:
+            return _legacy_source_response(doc, chunk, source.file_type)
+        validated_ranges = [{"start": source_start, "end": source_end, "hash": stored_hash}]
+
+    text_window, window_start, window_end = _bounded_source_window(
+        source.normalized_text, source_start, source_end
+    )
+    return DocumentSourceLocationResponse(
+        document_title=doc.title or source.file_name,
+        file_type=source.file_type,
+        text_window=text_window,
+        window_start=window_start,
+        window_end=window_end,
+        source_start=source_start,
+        source_end=source_end,
+        source_ranges=validated_ranges,
+        location=location,
+        chunk_id=str(chunk.id),
+        chunk_seq=chunk.seq,
+        legacy=False,
+        fallback_chunk=chunk.text,
+    )
+
+
+@router.get("/documents/{document_id}/source/full", response_model=DocumentFullSourceResponse)
+async def get_document_full_source(
+    document_id: uuid.UUID,
+    lib: Library = Depends(require_lib("read")),
+    db: AsyncSession = Depends(get_db),
+) -> DocumentFullSourceResponse:
+    doc = await db.get(Document, document_id)
+    if doc is None or doc.library_id != lib.id or doc.deleted_at is not None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "document not found")
+
+    source = await db.get(DocumentSource, document_id)
+    if source is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "该文档需重新导入后才能阅读原文")
+
+    text = source.normalized_text or ""
+    return DocumentFullSourceResponse(
+        document_id=doc.id,
+        document_title=doc.title or source.file_name,
+        file_name=source.file_name,
+        file_type=source.file_type,
+        revision=source.revision,
+        normalized_text=text,
+        text_length=len(text),
+        created_at=source.created_at,
+        updated_at=source.updated_at,
+    )
+
+
+@router.get("/documents/{document_id}/file")
+async def download_document_file(
+    document_id: uuid.UUID,
+    lib: Library = Depends(require_lib("read")),
+    db: AsyncSession = Depends(get_db),
+):
+    doc = await db.get(Document, document_id)
+    if doc is None or doc.library_id != lib.id or doc.deleted_at is not None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "document not found")
+
+    row = await db.get(DocumentFile, document_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "该文档缺少原始文件，请重新导入")
+    root = _document_files_root().resolve()
+    raw_path = Path(row.storage_path)
+    path = raw_path.resolve() if raw_path.is_absolute() else (root / raw_path).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "该文档缺少原始文件，请重新导入")
+    if not path.is_file():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "该文档缺少原始文件，请重新导入")
+    return FileResponse(
+        path,
+        media_type=row.content_type or "application/octet-stream",
+        filename=row.file_name,
+    )
+
+
 @router.get("/documents/{document_id}", response_model=DocumentRead)
 async def get_document(
     document_id: uuid.UUID,
@@ -113,26 +678,28 @@ async def delete_document(
     lib: Library = Depends(require_lib("delete")),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    doc = await db.get(Document, document_id)
+    locked = await _lock_writable(db, lib)
+    doc = (await db.execute(
+        select(Document).where(Document.id == document_id).with_for_update()
+    )).scalars().first()
     if doc is None or doc.library_id != lib.id or doc.deleted_at is not None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "document not found")
+    # #7：单事务 tombstone + supersede 在途 job + 入 cleanup outbox（移除不可靠的 BackgroundTask）。
+    # 提交后检索立即不可见（按 deleted_at 过滤）；Qdrant 物理清理由 Cleanup Worker 幂等执行。
     now = datetime.now(timezone.utc)
     await db.execute(
         update(Document).where(Document.id == doc.id).values(
             deleted_at=now, status="deleted", updated_at=now
         )
     )
+    await db.execute(
+        update(EmbeddingJob).where(
+            EmbeddingJob.document_id == doc.id,
+            EmbeddingJob.status.in_(("pending", "processing")),
+        ).values(status="superseded", finished_at=now)
+    )
+    await cleanup_service.enqueue_delete_document(db, locked, doc.id)
     await db.commit()
-    collection = lib.qdrant_collection
-    doc_id_str = str(doc.id)
-
-    async def _purge():
-        try:
-            await qdrant.delete_points_by_document_id(collection, doc_id_str)
-        except Exception:  # noqa: BLE001
-            log.exception("delete_points failed: collection=%s doc=%s", collection, doc_id_str)
-
-    background.add_task(_purge)
     return None
 
 
@@ -162,8 +729,41 @@ async def library_stats(
         chunk_count=int(chunk_count),
         pending_jobs=counts.get("pending", 0),
         processing_jobs=counts.get("processing", 0),
+        done_jobs=counts.get("done", 0),
         failed_jobs=counts.get("failed", 0),
+        total_jobs=sum(counts.values()),
     )
+
+
+@router.get("/jobs/{job_id}", response_model=EmbeddingJobRead)
+async def get_job(
+    job_id: uuid.UUID,
+    lib: Library = Depends(require_lib("read")),
+    db: AsyncSession = Depends(get_db),
+) -> EmbeddingJob:
+    """查单条摄入任务状态（库级隔离）。外部系统可用上传返回的 job_id 轮询。"""
+    job = await db.get(EmbeddingJob, job_id)
+    if job is None or job.library_id != lib.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "job not found")
+    return job
+
+
+@router.get("/documents/{document_id}/jobs", response_model=list[EmbeddingJobRead])
+async def list_document_jobs(
+    document_id: uuid.UUID,
+    lib: Library = Depends(require_lib("read")),
+    db: AsyncSession = Depends(get_db),
+) -> list[EmbeddingJob]:
+    """列出某文档的全部摄入任务（最新在前），看重嵌入历史/失败原因。"""
+    doc = await db.get(Document, document_id)
+    if doc is None or doc.library_id != lib.id or doc.deleted_at is not None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "document not found")
+    rows = await db.execute(
+        select(EmbeddingJob)
+        .where(EmbeddingJob.document_id == document_id, EmbeddingJob.library_id == lib.id)
+        .order_by(EmbeddingJob.created_at.desc())
+    )
+    return list(rows.scalars().all())
 
 
 @router.post("/query", response_model=QueryResponse)
@@ -172,6 +772,9 @@ async def query_library(
     lib: Library = Depends(require_lib("read")),
     db: AsyncSession = Depends(get_db),
 ) -> QueryResponse:
+    # 重建中/失败的库不返回半成品（#6 §9）
+    if lib.index_state in ("rebuilding", "failed"):
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "library index rebuilding")
     try:
         vector = await embedding.embed_one(
             body.query, model=lib.embedding_model, base_url=lib.embedding_base_url
@@ -180,13 +783,20 @@ async def query_library(
         log.exception("Embedding query failed: %s", str(exc))
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "embedding service failed")
 
+    # rerank 生效：库级覆盖优先，否则全局，且配好了 reranker 地址
+    eff_rerank = (
+        (lib.rerank_enabled if lib.rerank_enabled is not None else settings.rerank_enabled)
+        and rerank_svc.is_configured()
+    )
+    recall_limit = max(settings.rerank_candidate_k, body.limit) if eff_rerank else body.limit
+
     try:
-        raw = await qdrant.search(
-            collection=lib.qdrant_collection,
-            vector=vector,
-            limit=body.limit,
-            with_payload=True,
+        # 有界 overfetch + 可见性过滤（managed 回查 PG 丢弃陈旧/越库/已删；external 跳过）
+        raw = await retrieval_svc._recall_visible(
+            db, lib, lib.qdrant_collection, vector, needed=recall_limit,
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         log.exception("Qdrant search failed: %s", str(exc))
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "vector search failed")
@@ -203,17 +813,35 @@ async def query_library(
 
     internal_keys = {"text", "title", "library_id", "document_id", "chunk_id", "seq"}
     extra_columns = enr.parsed["extra_columns"] if enr.enabled else []
+
+    contents = [
+        (enr.texts[i] if enr.texts[i] is not None else (payloads[i].get("text") or ""))
+        for i in range(len(raw))
+    ]
+    # 重排：召回候选按 query 重排取前 limit；失败/未启用回退向量序（不阻断）
+    order, rerank_scores = await rerank_svc.rank_candidates(
+        body.query, contents, top_k=body.limit, enabled=bool(eff_rerank), log_label="query"
+    )
+
     results = []
-    for item, payload, enriched, src_row in zip(raw, payloads, enr.texts, enr.rows):
+    for i in order:
+        item, payload, enriched, src_row = raw[i], payloads[i], enr.texts[i], enr.rows[i]
         text = enriched if enriched is not None else (payload.get("text") or "")
         metadata = {k: v for k, v in payload.items() if k not in internal_keys}
         # 并入源库 extra_columns
         if src_row:
             for col in extra_columns:
                 metadata.setdefault(col, src_row.get(col))
+        # 双分数留痕便于排查质量：vector_score 恒有；rerank_score 仅重排命中时有
+        vector_score = float(item.get("score") or 0.0)
+        rr_score = rerank_scores.get(i)
+        metadata["vector_score"] = vector_score
+        if rr_score is not None:
+            metadata["rerank_score"] = rr_score
+        sim = rr_score if rr_score is not None else vector_score
         results.append(QueryResultItem(
             text=text or "",
-            similarity=float(item.get("score") or 0.0),
+            similarity=sim,
             document_id=str(payload.get("document_id") or ""),
             chunk_id=str(payload.get("chunk_id") or ""),
             title=payload.get("title"),
@@ -222,19 +850,32 @@ async def query_library(
     return QueryResponse(results=results)
 
 
-@router.post("/import-file", status_code=status.HTTP_201_CREATED)
+@router.post("/import-file", response_model=ImportFileResponse, status_code=status.HTTP_201_CREATED)
 async def import_file(
     file: UploadFile = File(...),
+    external_id: Optional[str] = Form(default=None),
+    replace_document_id: Optional[uuid.UUID] = Form(default=None),
     lib: Library = Depends(require_lib("insert")),
     user: User = Depends(current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
+    await _lock_writable(db, lib)
     filename = file.filename or "imported_file"
-    content = await file.read()
+    # #13：后缀大小写不敏感 + 白名单。未知格式直接 415，不再「当纯文本」误吞二进制。
+    lower_name = filename.lower()
+    suffix = "." + lower_name.rsplit(".", 1)[1] if "." in lower_name else ""
+    if suffix not in _SUPPORTED_IMPORT_SUFFIXES:
+        raise HTTPException(
+            status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            f"不支持的文件类型 '{suffix or filename}'；支持：{', '.join(sorted(_SUPPORTED_IMPORT_SUFFIXES))}",
+        )
+
+    # #12：分块读取并在累计超限时立即 413（不先整文件入内存）。
+    content = await _read_capped(file, settings.max_import_file_bytes)
 
     documents_to_ingest = []
 
-    if filename.endswith(".json"):
+    if suffix == ".json":
         try:
             data = json.loads(content.decode("utf-8"))
             if isinstance(data, list):
@@ -247,7 +888,9 @@ async def import_file(
                         "title": item.get("title") or filename,
                         "external_id": item.get("external_id"),
                         "metadata": item.get("metadata"),
-                        "splitter": item.get("splitter", "text")
+                        "splitter": item.get("splitter", "text"),
+                        "chunks": _structured_chunks(text, item.get("splitter", "text"), lib),
+                        "source": _source_data(text, filename, suffix),
                     })
             elif isinstance(data, dict):
                 text = data.get("text")
@@ -257,12 +900,14 @@ async def import_file(
                         "title": data.get("title") or filename,
                         "external_id": data.get("external_id"),
                         "metadata": data.get("metadata"),
-                        "splitter": data.get("splitter", "text")
+                        "splitter": data.get("splitter", "text"),
+                        "chunks": _structured_chunks(text, data.get("splitter", "text"), lib),
+                        "source": _source_data(text, filename, suffix),
                     })
         except Exception as e:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid JSON format: {str(e)}")
 
-    elif filename.endswith(".csv"):
+    elif suffix == ".csv":
         try:
             text_stream = io.StringIO(content.decode("utf-8"))
             reader = csv.DictReader(text_stream)
@@ -290,52 +935,194 @@ async def import_file(
                     "title": title,
                     "external_id": ext_id,
                     "metadata": None,
-                    "splitter": "text"
+                    "splitter": "text",
+                    "chunks": _structured_chunks(text, "text", lib, {"type": "csv_row", "row": reader.line_num}),
+                    "source": _source_data(text, filename, suffix),
                 })
         except Exception as e:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid CSV format: {str(e)}")
 
+    elif suffix == ".pdf":
+        # PDF：文字层优先；图片/扫描页在库级 ocr_enabled 开启时逐页渲染 + OCR（见 docs/23）。
+        # 文字版行为不变；OCR 默认关，关闭时纯扫描件给出"去开启 OCR"的明确 400。
+        from app.services import ocr as ocr_svc
+        from app.services import pdf_extract
+
+        eff_ocr = lib.ocr_enabled if lib.ocr_enabled is not None else settings.ocr_enabled
+        ocr_cb = ocr_svc.ocr_image if (eff_ocr and ocr_svc.is_available()) else None
+        try:
+            source = pdf_extract.build_pdf_source(
+                content,
+                chunk_size=lib.chunk_size,
+                chunk_overlap=lib.chunk_overlap,
+                ocr_enabled=bool(eff_ocr),
+                ocr=ocr_cb,
+                min_text_chars=settings.pdf_ocr_min_text_chars,
+                render_dpi=settings.pdf_ocr_render_dpi,
+                max_ocr_pages=settings.pdf_ocr_max_pages,
+            )
+        except pdf_extract.PdfExtractError as exc:
+            # 含 PdfOcrUnavailableError（需 OCR 但依赖缺）——消息已是用户可读的提示
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+        documents_to_ingest.append({
+            "text": source["normalized_text"],
+            "title": filename,
+            "external_id": None,
+            "metadata": None,
+            "splitter": "text",
+            "chunks": source["chunks"],
+            "source": _source_data(source["normalized_text"], filename, suffix),
+        })
+
+    elif suffix == ".docx":
+        # Word 文档：抽段落 + 表格（表格内容也入库）；库开了 OCR 则连内嵌图片一起识别。
+        # 切块方式按库级 docx_table_aware 开关（null 继承全局 settings.docx_table_aware）：
+        #   关（默认）：扁平正文切分——散文为主的库实测更优、成本低；
+        #   开：表格感知切块（每表单独成块带表头/章节上下文）——表格召回更稳但 chunk 数/成本上升。
+        try:
+            from app.services.docx_extract import extract_docx_segments, extract_docx_text
+            from app.services import ocr as ocr_svc
+
+            eff_ocr = lib.ocr_enabled if lib.ocr_enabled is not None else settings.ocr_enabled
+            ocr_cb = ocr_svc.ocr_image if (eff_ocr and ocr_svc.is_available()) else None
+            eff_table_aware = (
+                lib.docx_table_aware if lib.docx_table_aware is not None else settings.docx_table_aware
+            )
+
+            if eff_table_aware:
+                segs = extract_docx_segments(content, ocr=ocr_cb)
+                from app.services.splitter import build_structured_source_from_segments
+
+                source = build_structured_source_from_segments(
+                    segs, chunk_size=lib.chunk_size, chunk_overlap=lib.chunk_overlap
+                )
+                text = source["normalized_text"]
+                if not text.strip():
+                    raise HTTPException(status.HTTP_400_BAD_REQUEST, "DOCX 无可提取的文本")
+                documents_to_ingest.append({
+                    "text": text, "title": filename, "external_id": None,
+                    "metadata": None, "splitter": "docx", "chunks": source["chunks"],
+                    "source": _source_data(source["normalized_text"], filename, suffix),
+                })
+            else:
+                text = extract_docx_text(content, ocr=ocr_cb)
+                if not text.strip():
+                    raise HTTPException(status.HTTP_400_BAD_REQUEST, "DOCX 无可提取的文本")
+                documents_to_ingest.append(_structured_doc_data(text, filename, suffix, "text", lib))
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid DOCX format: {str(e)}")
+
+    elif suffix == ".xlsx":
+        # 电子表格：每个工作表按表格感知切分入库
+        try:
+            from app.services.xlsx_extract import extract_xlsx_segments
+            from app.services.splitter import build_structured_source_from_segments
+
+            segs = extract_xlsx_segments(content)
+            source = build_structured_source_from_segments(
+                segs, chunk_size=lib.chunk_size, chunk_overlap=lib.chunk_overlap
+            )
+            text = source["normalized_text"]
+            chunks = source["chunks"]
+            if not chunks:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "表格无可提取内容")
+            documents_to_ingest.append({
+                "text": text, "title": filename, "external_id": None,
+                "metadata": None, "splitter": "docx", "chunks": chunks,
+                "source": _source_data(source["normalized_text"], filename, suffix),
+            })
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid spreadsheet: {str(e)}")
+
     else:
-        # Treat as plain text
+        # 纯文本类（.txt/.md/.markdown）——已被白名单限定，不会再误吞未知二进制
         try:
             text = content.decode("utf-8")
             if not text.strip():
                 raise HTTPException(status.HTTP_400_BAD_REQUEST, "File is empty")
-            documents_to_ingest.append({
-                "text": text,
-                "title": filename,
-                "external_id": None,
-                "metadata": None,
-                "splitter": "text"
-            })
+            documents_to_ingest.append(_structured_doc_data(text, filename, suffix, "text", lib))
         except Exception as e:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid text encoding: {str(e)}")
 
     if not documents_to_ingest:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "No valid content found to ingest")
 
-    ingested = []
-    for doc_data in documents_to_ingest:
-        try:
-            doc, job, chunk_count, _existing = await ingest_service.ingest_text(
-                db=db,
-                library=lib,
-                text=doc_data["text"],
-                title=doc_data["title"],
-                external_id=doc_data["external_id"],
-                metadata=doc_data["metadata"],
-                splitter=doc_data["splitter"],
-                created_by=user.id,
+    # 替换模式（新增/替换上传）：按 document ID 覆盖目标文档，不依赖 external_id。
+    # 仅允许解析为单篇文档的文件；多篇（json 数组 / csv 多行）明确拒绝，避免一对多歧义。
+    if replace_document_id is not None:
+        if len(documents_to_ingest) != 1:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "替换只支持解析为单篇文档的文件；JSON 数组 / CSV 多行会产生多篇文档，不能用于替换",
             )
-            ingested.append({
-                "document_id": str(doc.id),
-                "title": doc_data["title"],
-                "chunk_count": chunk_count,
-                "status": doc.status
-            })
+        doc_data = documents_to_ingest[0]
+        doc_data["title"] = filename  # 标题更新为新文件名
+        try:
+            result = await _replace_document(db, lib, replace_document_id, doc_data)
+            await _store_original_file_for_result(
+                db,
+                lib=lib,
+                result=result,
+                filename=filename,
+                content_type=file.content_type,
+                content=content,
+            )
+            result.pop("_revision", None)
         except ValueError as exc:
-            log.warning("Import doc failed: %s", str(exc))
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+        await db.commit()
+        return {
+            "status": "success", "imported_count": 1, "failed_count": 0,
+            "documents": [result], "errors": [],
+        }
+
+    # 表单 external_id 只作用于"单文档"上传（txt/md/pdf/docx/xlsx 或单对象 json）；
+    # 多文档（json 数组 / csv 多行）保留每条自带的 external_id，避免互相 upsert 覆盖。
+    if external_id and len(documents_to_ingest) == 1 and not documents_to_ingest[0].get("external_id"):
+        documents_to_ingest[0]["external_id"] = external_id
+
+    ingested = []
+    errors = []
+    for idx, doc_data in enumerate(documents_to_ingest):
+        try:
+            result = await _ingest_or_upsert(db, lib, user, doc_data)
+            await _store_original_file_for_result(
+                db,
+                lib=lib,
+                result=result,
+                filename=filename,
+                content_type=file.content_type,
+                content=content,
+            )
+            result.pop("_revision", None)
+            ingested.append(result)
+        except ValueError as exc:
+            log.warning("Import doc[%s] failed: %s", idx, str(exc))
+            errors.append({
+                "index": idx,
+                "title": doc_data.get("title"),
+                "external_id": doc_data.get("external_id"),
+                "error": str(exc),
+            })
+
+    # #10：全失败不再谎报 success。全失败 → 400（含明细）；部分失败 → 200 partial。
+    if not ingested:
+        await db.rollback()
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            {"message": "所有文档摄入均失败", "errors": errors},
+        )
 
     await db.commit()
-    return {"status": "success", "imported_count": len(ingested), "documents": ingested}
+    return {
+        "status": "partial" if errors else "success",
+        "imported_count": len(ingested),
+        "failed_count": len(errors),
+        "documents": ingested,
+        "errors": errors,
+    }
 

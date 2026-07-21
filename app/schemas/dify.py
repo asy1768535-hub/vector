@@ -24,7 +24,8 @@ class RetrievalSetting(BaseModel):
 class MetadataConditionItem(BaseModel):
     name: list[str] = Field(..., min_length=1, description="Metadata field names (any-of).")
     comparison_operator: str = Field(..., min_length=1)
-    value: str | int | float | bool | None = None
+    # list 用于 in / not in（多值）；其余算子用标量。原先缺 list → in/not in 在 schema 层即被拒。
+    value: str | int | float | bool | list | None = None
 
     model_config = {"extra": "ignore"}
 

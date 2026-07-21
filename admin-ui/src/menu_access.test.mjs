@@ -1,0 +1,71 @@
+// 聚焦单测：menuAccess / canAccessRoute 的权限组合逻辑（Node 内置 assert）。
+// 运行：node admin-ui/src/menu_access.test.mjs
+import assert from 'node:assert/strict';
+import { menuAccess, canAccessRoute, readableLibraries, resolveSelectedSlug } from './menu_access.js';
+
+const READER = [{ library_slug: 'a', actions: ['read'] }];
+const INSERTER = [{ library_slug: 'a', actions: ['read', 'insert'] }];
+const INSERT_ONLY = [{ library_slug: 'a', actions: ['insert'] }];
+const NONE = [];
+const SUPER = { is_superuser: true };
+const USER = { is_superuser: false };
+
+const cases = [
+    // [name, user, perms, expected menuAccess]
+    ['superuser 全可见', SUPER, NONE,
+        { documents: true, search: true, chat: true, import: true, apiKeys: true }],
+    ['只有 read：文档/检索/问答可见，导入隐藏', USER, READER,
+        { documents: true, search: true, chat: true, import: false, apiKeys: true }],
+    ['read+insert：全部业务菜单可见', USER, INSERTER,
+        { documents: true, search: true, chat: true, import: true, apiKeys: true }],
+    ['只有 insert：导入可见，读类隐藏', USER, INSERT_ONLY,
+        { documents: false, search: false, chat: false, import: true, apiKeys: true }],
+    ['无任何权限：仅 API Key 可见', USER, NONE,
+        { documents: false, search: false, chat: false, import: false, apiKeys: true }],
+];
+
+let passed = 0;
+for (const [name, user, perms, expected] of cases) {
+    assert.deepEqual(menuAccess(user, perms), expected, `[FAIL menuAccess] ${name}`);
+    console.log(`  ok  ${name}`);
+    passed++;
+}
+
+// canAccessRoute：路由级
+const routeCases = [
+    ['superuser 任何 perm 放行', SUPER, NONE, 'insert', true],
+    ['普通用户 read 路由：有 read 放行', USER, READER, 'read', true],
+    ['普通用户 insert 路由：无 insert 拒绝', USER, READER, 'insert', false],
+    ['普通用户 insert 路由：有 insert 放行', USER, INSERT_ONLY, 'insert', true],
+    ['无 perm 要求：始终放行', USER, NONE, undefined, true],
+    ['普通用户无权限：拒绝', USER, NONE, 'read', false],
+];
+for (const [name, user, perms, perm, expected] of routeCases) {
+    assert.equal(canAccessRoute(user, perms, perm), expected, `[FAIL canAccessRoute] ${name}`);
+    console.log(`  ok  ${name}`);
+    passed++;
+}
+
+// readableLibraries / resolveSelectedSlug：Documents 默认库（P1-2）
+let extra = 0;
+function ok(name, cond) { assert.ok(cond, `[FAIL] ${name}`); console.log(`  ok  ${name}`); extra++; }
+
+// 第一个 insert-only、第二个 read → 只能选第二个
+const mixed = [
+    { library_slug: 'a', actions: ['insert'], library_name: 'A库' },
+    { library_slug: 'b', actions: ['read'], library_name: 'B库' },
+];
+const readable = readableLibraries(mixed);
+ok('insert-only 被过滤，仅保留 read 库', readable.length === 1 && readable[0].slug === 'b');
+ok('可读库带 library_name', readable[0].name === 'B库');
+ok('默认 slug 从可读库选第一个', resolveSelectedSlug(null, readable) === 'b');
+ok('当前 slug 不在可读库 → 切到第一个可读', resolveSelectedSlug('a', readable) === 'b');
+ok('当前 slug 仍可读 → 保留', resolveSelectedSlug('b', readable) === 'b');
+
+// 无 read 权限 → 空列表 + slug 置 null（上层据此不发请求）
+const noRead = readableLibraries([{ library_slug: 'a', actions: ['insert'] }]);
+ok('无 read 权限 → 可读库为空', noRead.length === 0);
+ok('无可读库 → slug 为 null', resolveSelectedSlug('a', noRead) === null);
+ok('library_name 缺失 → 回退 slug', readableLibraries([{ library_slug: 'x', actions: ['read'] }])[0].name === 'x');
+
+console.log(`\n${passed + extra}/${cases.length + routeCases.length + extra} passed`);

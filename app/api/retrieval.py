@@ -16,7 +16,7 @@ from app.db import get_db
 from app.deps import load_active_library
 from app.models.user import User
 from app.schemas.dify import DifyRetrievalRequest, DifyRetrievalResponse
-from app.services.retrieval import run_retrieval
+from app.services.retrieval import FilterError, run_retrieval
 
 log = logging.getLogger(__name__)
 router = APIRouter(tags=["retrieval"])
@@ -33,6 +33,9 @@ async def retrieval(
         raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden")
     if not user.is_superuser and not has_permission(str(user.id), lib.slug, "read"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden")
+    # 重建中/失败的库不返回半成品（#6 §9）
+    if lib.index_state in ("rebuilding", "failed"):
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "library index rebuilding")
     try:
         return await run_retrieval(
             collection=lib.qdrant_collection,
@@ -40,7 +43,14 @@ async def retrieval(
             embedding_base_url=lib.embedding_base_url,
             request=request,
             source_config=lib.source_config,
+            rerank_enabled=lib.rerank_enabled,
+            retrieval_mode=lib.retrieval_mode,
+            db=db,
+            library=lib,
         )
+    except FilterError as exc:
+        # #8：metadata_condition 含不支持的运算符/取值 → 422，绝不静默放行
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         log.exception("retrieval failed: knowledge_id=%s", request.knowledge_id)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "retrieval failed") from exc

@@ -5,10 +5,14 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
-class ApiKeyCreateRequest(BaseModel):
+class StrictBaseModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class ApiKeyCreateRequest(StrictBaseModel):
     name: str = Field(..., min_length=1, max_length=128, description="Human-readable label.")
     expires_at: Optional[datetime] = None
 

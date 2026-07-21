@@ -32,6 +32,20 @@ export async function refreshAuth() {
     }
 }
 
+// 开发模式：后端不可用时模拟超管身份，方便本地查看前端
+export function setMockUser() {
+    store.user = {
+        id: 'dev-mock-001',
+        email: 'dev@localhost',
+        username: 'dev',
+        display_name: '开发预览',
+        is_superuser: true,
+        is_active: true,
+    };
+    store.permissions = [];
+    store.ready = true;
+}
+
 export function hasPermission(slug, action) {
     if (!store.user) return false;
     if (store.user.is_superuser) return true;

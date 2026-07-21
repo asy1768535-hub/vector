@@ -1,0 +1,138 @@
+{
+  "alembic_head": "0022",
+  "attempt_status_counts": {
+    "succeeded": 120
+  },
+  "code_commit": "ed69d15b81e52a2e11c15ead25289dc20e93a81f",
+  "component_versions": {
+    "chunking_strategy_version": "m6-unit-v1",
+    "confidence_policy_version": "v1",
+    "context_policy_version": "v1",
+    "document_parser_version": "m6-synthetic-v1",
+    "extraction_policy_version": "v1",
+    "extractor_version": "v1",
+    "normalization_rule_version": "normalization_v1",
+    "output_parser_version": "v1",
+    "prompt_version": "v1"
+  },
+  "database_name": "vkt_m6_eval_calibration_20260715_01",
+  "dataset_content_sha256": "6b316cbbcfc7357cb27bb0b8500e8c49ec041ce2d85c52715aba7108c3d6e96b",
+  "dataset_counts": {
+    "documents": 30,
+    "entities": 150,
+    "relations": 120,
+    "units": 120
+  },
+  "dataset_id": "release-v1",
+  "dataset_manifest_sha256": "8cb812a33dac20745b78cca342a27e065684032a25e7adc020cc3d0ad19b5d22",
+  "evaluation_config_hash": "abac93e3e86a5d198708410e6c6046f14a14d0e150970940983eea1b73f2d54a",
+  "finished_at": "2026-07-15T02:23:07.822620Z",
+  "job_ids": [
+    "06ef6702-2d09-4ec3-a034-aa9a6255d8c2",
+    "0adfe372-4d31-4814-bcb4-c85e9fbc8e19",
+    "1d6edda6-7eb9-4e6e-a611-f3067258b2c7",
+    "3357eeff-f162-4ee1-84fb-4864736c12fc",
+    "33fc9d1e-9a0d-469d-8cc7-046de11c699d",
+    "379bb06a-a34f-402d-b1f6-38bc862ac1bf",
+    "39f66899-41f9-4efc-aa83-ddfcb159eb09",
+    "3c1df5cd-7e8e-48c7-93d3-086ff95dba29",
+    "3e6fb9e5-bc7d-489a-8c1f-cb666f3fa293",
+    "4d32c697-1109-47d6-bb6e-d07ea59ac534",
+    "4f5e7a1c-6152-4997-9d01-6c40af9b2d3e",
+    "53c32a90-f8b6-4646-9b26-e7e63d69f91f",
+    "54efe21d-5567-4896-a64d-bcb9269dbc81",
+    "76e57cb4-d85a-4626-9ca0-b3ee3a5a5bf6",
+    "7c23e772-184f-43b3-ba5c-f1814658eb8e",
+    "815f0ff5-927e-451d-9e9c-76ee18aa6e07",
+    "948db155-2010-4d71-8067-bf4af25946d6",
+    "9f2e37bf-b45d-4c56-be6e-3f7a59b67aec",
+    "a5774958-846a-4399-b5f6-520d2d958e65",
+    "a7fc6222-e330-4f60-93e5-da28859d24be",
+    "bcc7a5d9-3b53-4896-b30b-11e05aea5f14",
+    "bec08b1b-597b-4309-a656-d7db530aabd8",
+    "bed381f9-4808-4675-8863-d55c333abbb3",
+    "dafb3fa0-0d32-461e-88f9-cd2248dc43fd",
+    "dd0dc038-9f25-43e2-8e51-77acddebcb05",
+    "dd2a4ea9-bee9-4334-a10b-5aa14b09c63e",
+    "e3173c6a-e0e0-4fd1-a27a-2d879936ac24",
+    "f0203ce5-9a32-47ab-9dbc-17e883b83d77",
+    "f9c1e9e0-bc49-4061-bf3e-793384285542",
+    "fda24216-48fd-49cd-b4d1-8c4ea01c7f4e"
+  ],
+  "job_status_counts": {
+    "succeeded": 30
+  },
+  "metrics": {
+    "ambiguous_evidence_count": 0,
+    "candidate_duplicate_rate": {
+      "denominator": 270,
+      "numerator": 0,
+      "value": 0.0
+    },
+    "cross_revision_evidence_count": 0,
+    "entity": {
+      "false_negative": 0,
+      "false_positive": 0,
+      "precision": {
+        "denominator": 150,
+        "numerator": 150,
+        "value": 1.0
+      },
+      "recall": {
+        "denominator": 150,
+        "numerator": 150,
+        "value": 1.0
+      },
+      "true_positive": 150
+    },
+    "eval_formal_write_count": 0,
+    "invalid_evidence_rate": {
+      "denominator": 851,
+      "numerator": 0,
+      "value": 0.0
+    },
+    "json_parse_rate": {
+      "denominator": 120,
+      "numerator": 120,
+      "value": 1.0
+    },
+    "relation": {
+      "false_negative": 0,
+      "false_positive": 0,
+      "precision": {
+        "denominator": 120,
+        "numerator": 120,
+        "value": 1.0
+      },
+      "recall": {
+        "denominator": 120,
+        "numerator": 120,
+        "value": 1.0
+      },
+      "true_positive": 120
+    },
+    "schema_valid_rate": {
+      "denominator": 120,
+      "numerator": 120,
+      "value": 1.0
+    }
+  },
+  "model_attempt_count": 120,
+  "model_name": "deepseek-v4-pro",
+  "model_provider": "deepseek",
+  "phase": "calibration",
+  "policy_id": null,
+  "policy_sha256": null,
+  "provider_request_id_count": 120,
+  "provider_request_id_sha256": "93cee649c053b7578879bf5b33083cb7b6fd9b11e0861d926b0dad99d06f8933",
+  "real_model_call_count": 120,
+  "real_provider": true,
+  "run_id": "release-calibration-v1-20260715-01",
+  "schema_version": "graph-extraction-eval-result-v1",
+  "stable_error_code_counts": {},
+  "started_at": "2026-07-15T02:07:18.546929Z",
+  "status": "passed",
+  "unit_status_counts": {
+    "succeeded": 120
+  }
+}

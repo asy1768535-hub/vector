@@ -13,7 +13,7 @@ from app.auth.backend import current_superuser
 from app.auth.user_manager import UserManager, get_user_manager
 from app.db import get_db
 from app.models.user import User
-from app.schemas.admin import AdminUserCreate, AdminUserRead, AdminUserUpdate
+from app.schemas.admin import AdminResetPassword, AdminUserCreate, AdminUserRead, AdminUserUpdate
 from app.schemas.users import UserCreate
 from app.services import audit_log
 
@@ -86,6 +86,13 @@ async def update_user(
     user = await db.get(User, user_id)
     if user is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "user not found")
+    # 防自锁：当前超管不能通过 PATCH 取消自己的超管权限或停用自己，
+    # 否则可能把系统锁死（无人能再管理）。降权/停用他人不受限。
+    if user_id == actor.id:
+        if body.is_superuser is False:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "不能取消自己的超级管理员权限")
+        if body.is_active is False:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "不能停用自己的账号")
     changes: dict[str, object] = {}
     for field in ("username", "display_name", "is_active", "is_superuser"):
         value = getattr(body, field)
@@ -97,6 +104,27 @@ async def update_user(
     await db.commit()
     await db.refresh(user)
     return user
+
+
+@router.post("/{user_id}/reset-password", status_code=status.HTTP_204_NO_CONTENT)
+async def reset_user_password(
+    user_id: uuid.UUID,
+    body: AdminResetPassword,
+    actor: User = Depends(current_superuser),
+    user_manager: UserManager = Depends(get_user_manager),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """超管重置某用户密码。专用端点（与普通 PATCH 分离，password 不混入 AdminUserUpdate）。"""
+    user = await db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "user not found")
+    # 用 fastapi-users 的 password_helper（argon2）生成哈希，不手写算法；直接设到已由
+    # db.get() 加载/锁定的 user 上，与审计同一事务一次提交（原子：审计失败则密码改动一并回滚）。
+    user.hashed_password = user_manager.password_helper.hash(body.password)
+    # 审计只记 user_id + 动作，绝不记录明文密码或哈希。
+    await audit_log.record(db, actor.id, "user.password_reset", {"user_id": str(user.id)})
+    await db.commit()
+    return None
 
 
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)

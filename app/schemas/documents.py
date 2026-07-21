@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 
 class DocumentIngestRequest(BaseModel):
@@ -20,7 +20,11 @@ class DocumentIngestResponse(BaseModel):
     document_id: uuid.UUID
     status: str
     chunk_count: int
-    job_id: uuid.UUID
+    document_status: Optional[str] = None
+    revision_status: Optional[str] = None
+    job_status: Optional[str] = None
+    document_revision_id: Optional[uuid.UUID] = None
+    job_id: Optional[uuid.UUID] = None   # 无新任务（如 no-op upsert / 去重命中）时为 null
 
 
 class DocumentRead(BaseModel):
@@ -28,8 +32,12 @@ class DocumentRead(BaseModel):
     library_id: uuid.UUID
     external_id: Optional[str] = None
     title: Optional[str] = None
-    metadata: Optional[dict[str, Any]] = None
+    metadata: Optional[dict[str, Any]] = Field(
+        default=None,
+        validation_alias=AliasChoices("doc_metadata", "metadata"),
+    )
     content_hash: str
+    current_revision: int = 1            # #6 索引版本
     status: str
     last_error: Optional[str] = None
     created_at: datetime
@@ -44,7 +52,9 @@ class LibraryStats(BaseModel):
     chunk_count: int
     pending_jobs: int
     processing_jobs: int
+    done_jobs: int
     failed_jobs: int
+    total_jobs: int
 
 
 class QueryRequest(BaseModel):
@@ -65,6 +75,34 @@ class QueryResponse(BaseModel):
     results: list[QueryResultItem]
 
 
+class DocumentSourceLocationResponse(BaseModel):
+    document_title: Optional[str] = None
+    file_type: Optional[str] = None
+    text_window: str = ""
+    window_start: Optional[int] = None
+    window_end: Optional[int] = None
+    source_start: Optional[int] = None
+    source_end: Optional[int] = None
+    source_ranges: list[dict[str, Any]] = Field(default_factory=list)
+    location: Optional[dict[str, Any]] = None
+    chunk_id: str
+    chunk_seq: int
+    legacy: bool
+    fallback_chunk: str = ""
+
+
+class DocumentFullSourceResponse(BaseModel):
+    document_id: uuid.UUID
+    document_title: Optional[str] = None
+    file_name: Optional[str] = None
+    file_type: Optional[str] = None
+    revision: int
+    normalized_text: str
+    text_length: int
+    created_at: datetime
+    updated_at: datetime
+
+
 # ── 文件导入 ──────────────────────────────────────────────────────────
 
 class ImportFileDocResult(BaseModel):
@@ -72,10 +110,22 @@ class ImportFileDocResult(BaseModel):
     title: str
     chunk_count: int
     status: str
+    job_id: Optional[str] = None          # 摄入任务 ID，供上传后查任务状态
+    external_id: Optional[str] = None     # 调用方去重键（命中 upsert 时回显）
+    operation: Optional[str] = None       # created | updated | unchanged（向后兼容，旧客户端可忽略）
+
+
+class ImportFileDocError(BaseModel):
+    index: int                # 在本次解析出的文档列表中的序号（0-based）
+    title: Optional[str] = None
+    external_id: Optional[str] = None
+    error: str                # 失败原因
 
 
 class ImportFileResponse(BaseModel):
-    status: str               # "success"
+    status: str               # "success" | "partial"（全失败直接返回 400，不会是本响应）
     imported_count: int
+    failed_count: int = 0
     documents: list[ImportFileDocResult]
+    errors: list[ImportFileDocError] = []
 
