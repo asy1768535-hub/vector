@@ -23,6 +23,12 @@ class Library(Base):
             "jsonb_typeof(knowledge_artifact_allowed_security_levels) = 'array'",
             name="ck_lib_knowledge_artifact_security_levels_array",
         ),
+        CheckConstraint(
+            "revision_retention_days BETWEEN 30 AND 60 AND "
+            "revision_retention_notice_days BETWEEN 1 AND 14 AND "
+            "revision_retention_notice_days < revision_retention_days",
+            name="ck_lib_revision_retention_policy",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -78,6 +84,15 @@ class Library(Base):
     )
     knowledge_artifact_allowed_security_levels: Mapped[list[str]] = mapped_column(
         JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    revision_retention_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    revision_retention_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=60, server_default="60"
+    )
+    revision_retention_notice_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=7, server_default="7"
     )
 
     # 生命周期归属（#6/#7 设计 §4.5）：managed=本系统管理(参与 revision/tombstone 过滤)；

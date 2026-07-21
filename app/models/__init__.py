@@ -40,6 +40,7 @@ from app.models.library_faq import LibraryFAQQuestion
 from app.models.migration_backfill_state import MigrationBackfillState
 from app.models.ontology_version import OntologyVersion
 from app.models.rebuild_operation import RebuildOperation
+from app.models.revision_retention import RevisionRetentionRecord
 from app.models.relation_evidence import RelationEvidence
 from app.models.relation_type import RelationType
 from app.models.relation_type_constraint import RelationTypeConstraint
@@ -93,6 +94,7 @@ __all__ = [
     "MigrationBackfillState",
     "OntologyVersion",
     "RebuildOperation",
+    "RevisionRetentionRecord",
     "RelationEvidence",
     "RelationType",
     "RelationTypeConstraint",

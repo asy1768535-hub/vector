@@ -43,6 +43,7 @@ from app.casbin.enforcer import get_enforcer
 from app.config import (
     settings,
     validate_revision_file_storage_startup,
+    validate_revision_retention_startup,
     validate_entity_linking_startup,
     validate_graph_extraction_startup,
     validate_knowledge_artifact_startup,
@@ -116,6 +117,10 @@ def assert_revision_file_storage_startup_security() -> None:
             ) from None
 
 
+def assert_revision_retention_startup_security() -> None:
+    validate_revision_retention_startup(settings)
+
+
 def assert_graph_publication_startup_security() -> None:
     validate_graph_publication_startup(settings)
 
@@ -144,6 +149,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     assert_graph_extraction_startup_security()
     assert_knowledge_artifact_startup_security()
     assert_revision_file_storage_startup_security()
+    assert_revision_retention_startup_security()
     assert_graph_publication_startup_security()
     assert_graph_retrieval_startup_security()
     assert_entity_linking_startup_security()

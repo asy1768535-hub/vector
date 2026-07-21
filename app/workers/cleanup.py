@@ -160,6 +160,31 @@ async def run(watch: bool) -> None:
             purge_expired_graph_extraction_payloads,
         )
 
+        if settings.revision_retention_enabled:
+            from app.services.revision_retention import (
+                run_revision_retention_maintenance,
+            )
+
+            try:
+                async with async_session_factory() as retention_session:
+                    async with retention_session.begin():
+                        retention = await run_revision_retention_maintenance(
+                            retention_session
+                        )
+                if (
+                    retention.created_record_ids
+                    or retention.notice_record_ids
+                    or retention.refreshed_record_ids
+                ):
+                    log.info(
+                        "revision retention maintenance: created=%s notices=%s "
+                        "refreshed=%s",
+                        len(retention.created_record_ids),
+                        len(retention.notice_record_ids),
+                        len(retention.refreshed_record_ids),
+                    )
+            except Exception:  # noqa: BLE001
+                log.exception("revision retention maintenance failed")
         try:
             async with async_session_factory() as purge_session:
                 async with purge_session.begin():

@@ -185,6 +185,9 @@ class Settings(BaseSettings):
     document_storage_region: str = ""
     document_storage_max_read_bytes: int = 50 * 1024 * 1024
     document_storage_signed_url_seconds: int = 300
+    revision_retention_enabled: bool = False
+    revision_retention_batch_size: int = 50
+    revision_retention_impact_evidence_sample: int = 20
 
     # ---- 检索可见性过滤（#6 批次 A，revision 维度）----
     retrieval_consistency_filter: bool = True   # 总开关；关掉则不回查 PG（灰度/回滚用）
@@ -532,6 +535,19 @@ def validate_revision_file_storage_startup(config: Settings) -> None:
     if importlib.util.find_spec(dependency) is None:
         raise RuntimeError(
             f"[security] document storage optional dependency '{dependency}' is required"
+        )
+
+
+def validate_revision_retention_startup(config: Settings) -> None:
+    if not config.revision_retention_enabled:
+        return
+    if not 1 <= config.revision_retention_batch_size <= 500:
+        raise RuntimeError(
+            "[security] revision retention batch size must be within 1..500"
+        )
+    if not 1 <= config.revision_retention_impact_evidence_sample <= 100:
+        raise RuntimeError(
+            "[security] revision retention Evidence sample must be within 1..100"
         )
 
 

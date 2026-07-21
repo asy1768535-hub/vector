@@ -99,6 +99,9 @@ class LibraryCreate(BaseModel):
         default=None,
         description="高级用法：完整跨库补全配置；不传则按 source_enrichment_enabled 决定是否按约定自动生成。结构见 source_enrichment.parse_source_config。",
     )
+    revision_retention_enabled: bool = False
+    revision_retention_days: int = Field(default=60, ge=30, le=60)
+    revision_retention_notice_days: int = Field(default=7, ge=1, le=14)
 
     @field_validator("slug")
     @classmethod
@@ -109,7 +112,8 @@ class LibraryCreate(BaseModel):
 
     @model_validator(mode="after")
     def _check_chunk_params(self):
-        return _validate_chunk_overlap(self)
+        _validate_chunk_overlap(self)
+        return _validate_revision_retention_policy(self)
 
 
 def _validate_chunk_overlap(model):
@@ -121,6 +125,18 @@ def _validate_chunk_overlap(model):
     size, overlap = model.chunk_size, model.chunk_overlap
     if size is not None and overlap is not None and overlap >= size:
         raise ValueError(f"chunk_overlap（{overlap}）必须小于 chunk_size（{size}）")
+    return model
+
+
+def _validate_revision_retention_policy(model):
+    retention_days = model.revision_retention_days
+    notice_days = model.revision_retention_notice_days
+    if (
+        retention_days is not None
+        and notice_days is not None
+        and notice_days >= retention_days
+    ):
+        raise ValueError("revision_retention_notice_days must be less than retention days")
     return model
 
 
@@ -151,6 +167,9 @@ class LibraryUpdate(BaseModel):
     outline_artifact_enabled: Optional[bool] = None
     knowledge_artifact_external_model_enabled: Optional[bool] = None
     knowledge_artifact_allowed_security_levels: Optional[list[str]] = None
+    revision_retention_enabled: Optional[bool] = None
+    revision_retention_days: Optional[int] = Field(default=None, ge=30, le=60)
+    revision_retention_notice_days: Optional[int] = Field(default=None, ge=1, le=14)
 
     @field_validator("graph_extraction_enabled", "external_llm_enabled", mode="before")
     @classmethod
@@ -179,6 +198,13 @@ class LibraryUpdate(BaseModel):
             raise ValueError("knowledge artifact switch cannot be null")
         return value
 
+    @field_validator("revision_retention_enabled", mode="before")
+    @classmethod
+    def _reject_null_retention_switch(cls, value):
+        if value is None:
+            raise ValueError("revision retention switch cannot be null")
+        return value
+
     @field_validator("knowledge_artifact_allowed_security_levels", mode="before")
     @classmethod
     def _validate_artifact_security_levels(cls, value):
@@ -188,7 +214,8 @@ class LibraryUpdate(BaseModel):
 
     @model_validator(mode="after")
     def _check_chunk_params(self):
-        return _validate_chunk_overlap(self)
+        _validate_chunk_overlap(self)
+        return _validate_revision_retention_policy(self)
 
 
 class LibraryRead(BaseModel):
@@ -217,11 +244,29 @@ class LibraryRead(BaseModel):
     outline_artifact_enabled: bool = False
     knowledge_artifact_external_model_enabled: bool = False
     knowledge_artifact_allowed_security_levels: list[str] = Field(default_factory=list)
+    revision_retention_enabled: bool = False
+    revision_retention_days: int = 60
+    revision_retention_notice_days: int = 7
     lifecycle_mode: str = "managed"                 # #6 managed | external
     index_state: str = "ready"                      # #6 ready | rebuilding | failed
     active_rebuild_operation_id: Optional[uuid.UUID] = None
     created_at: datetime
     deleted_at: Optional[datetime] = None
+
+    @field_validator("revision_retention_enabled", mode="before")
+    @classmethod
+    def _default_retention_enabled(cls, value):
+        return False if value is None else value
+
+    @field_validator("revision_retention_days", mode="before")
+    @classmethod
+    def _default_retention_days(cls, value):
+        return 60 if value is None else value
+
+    @field_validator("revision_retention_notice_days", mode="before")
+    @classmethod
+    def _default_retention_notice_days(cls, value):
+        return 7 if value is None else value
 
     model_config = {"from_attributes": True}
 

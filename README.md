@@ -147,6 +147,11 @@ MinIO or Alibaba OSS deployments install their lazy SDK adapters with:
 pip install -e ".[object-storage]"
 ```
 
+Revision-file retention governance is also default-off. Set
+`REVISION_RETENTION_ENABLED=true` and enable the Library policy to record replacement-ready
+deadlines, bounded graph impact, and pre-expiry notices. Migration `0027` does not delete
+objects or rows; physical cleanup remains a separately gated executor.
+
 详见 [docs/04 快速开始](./docs/04-quickstart.md)。
 
 ## 10. 数据库迁移与首次管理员

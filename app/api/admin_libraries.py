@@ -102,6 +102,9 @@ async def create_library(
         chunk_overlap=chunk_overlap,
         qdrant_collection="",  # 写完 ID 后再 set
         source_config=source_config,
+        revision_retention_enabled=body.revision_retention_enabled,
+        revision_retention_days=body.revision_retention_days,
+        revision_retention_notice_days=body.revision_retention_notice_days,
         created_by=actor.id,
     )
     lib.qdrant_collection = _collection_name(body.slug)
@@ -309,6 +312,32 @@ async def update_library(
         changes["knowledge_artifact_allowed_security_levels"] = levels
         artifact_policy_changed = levels != old_levels
         cancel_model_artifact_jobs = cancel_model_artifact_jobs or artifact_policy_changed
+
+    retention_fields = {
+        "revision_retention_enabled",
+        "revision_retention_days",
+        "revision_retention_notice_days",
+    }
+    if retention_fields & body.model_fields_set:
+        retention_days = (
+            body.revision_retention_days
+            if "revision_retention_days" in body.model_fields_set
+            else lib.revision_retention_days
+        )
+        notice_days = (
+            body.revision_retention_notice_days
+            if "revision_retention_notice_days" in body.model_fields_set
+            else lib.revision_retention_notice_days
+        )
+        if notice_days >= retention_days:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "revision retention notice days must be less than retention days",
+            )
+        for field in sorted(retention_fields & body.model_fields_set):
+            value = getattr(body, field)
+            setattr(lib, field, value)
+            changes[field] = value
 
     if cancelled_artifact_types or cancel_model_artifact_jobs:
         error_code = (
