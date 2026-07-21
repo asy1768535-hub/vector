@@ -1,5 +1,14 @@
 # 文档索引
 
+> **v0.7 corrective G2.8 (2026-07-21):** The user restarted bge-m3 as a
+> deterministic single instance. The pre-registered eight public probes each produced
+> one identical full-float32 hash across eight repetitions (`64/64`), with probe-set SHA
+> `21c8f3f0749e0ffa4b6080c27045d8707f70eafc5293e86602f1bddd271a01f8`.
+> G2.8 adds that exact pre-resource fail-closed gate, preserves all v4/v11/v10 NO-GO
+> evidence, and authorizes fresh family-disjoint v5 data with v12 output identities.
+> Scorer, thresholds, retrieval bounds, product gates, privacy, and default-off rollout
+> remain unchanged.
+>
 > **v0.7 release-evidence v10 (2026-07-21):** All three post-freeze v11 runs
 > passed 26/26 gates, but release evidence v10 is immutable `NO_GO` because dense
 > and hybrid logical response hashes changed across runs. Candidate and exact-only
