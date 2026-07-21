@@ -1,5 +1,13 @@
 # 文档索引
 
+> **v0.7 corrective G2.7.1 (2026-07-21):** The first v10 calibration attempt
+> passed live dependency preflight and the non-skipped integration test, then failed
+> closed before artifact creation when hybrid exact retrieval could not recognize that
+> a cutoff tie cohort had completed inside an expanded probe. No holdout was opened and
+> all resources were removed. G2.7.1 corrects that bounded completion test without
+> changing Top 50, the 201 hard bound, scorer, thresholds, dataset, or gates, and reserves
+> fresh v11 run/database/policy identities.
+>
 > **v0.7 corrective G2.7 (2026-07-21):** Calibration v9, policy v8, and all
 > three post-freeze v9 runs are immutable individually passing evidence, while
 > release-evidence v8 remains `NO_GO` because dense/hybrid response sets changed
