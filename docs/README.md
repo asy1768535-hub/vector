@@ -1,5 +1,14 @@
 # 文档索引
 
+> **v0.7 corrective G2.7 (2026-07-21):** Calibration v9, policy v8, and all
+> three post-freeze v9 runs are immutable individually passing evidence, while
+> release-evidence v8 remains `NO_GO` because dense/hybrid response sets changed
+> across rebuilt Qdrant collections. G2.7 authorizes deterministic exact control
+> retrieval with a normal candidate pool of 50, bounded tie completion and stable
+> ordering, plus a fresh family-disjoint v4 benchmark and v10 workflow identities.
+> Scorer, thresholds, utility/safety/performance gates, privacy, and default-off
+> rollout remain unchanged.
+>
 > **v0.7 corrective G2.6.1 (2026-07-20):** The first v8 calibration attempt
 > failed closed before artifact creation because the fixed linked performance fixture
 > classified mentions by feature but did not verify the selected score/margin. G2.6.1
