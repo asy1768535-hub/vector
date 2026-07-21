@@ -8,7 +8,7 @@ from app.api.admin_operations import _SERVICE_TYPES
 
 
 def test_operations_status_declares_graph_extractor():
-    assert _SERVICE_TYPES == (
+    assert _SERVICE_TYPES[:4] == (
         "api",
         "embedding_worker",
         "cleanup_worker",

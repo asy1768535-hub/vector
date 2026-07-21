@@ -135,6 +135,7 @@ python scripts/bootstrap_admin.py --email admin@example.com --password CHANGE_ME
 python -m app.main                       # API（端口读 .env，默认 8100）
 python -m app.workers.embedder --watch   # Embedding Worker
 python -m app.workers.cleanup  --watch   # Cleanup Worker
+python -m app.workers.knowledge_artifacts --watch  # v0.8 Summary/Outline Worker
 
 # 6. 后台：浏览器开 http://<host>:8100/console/
 ```

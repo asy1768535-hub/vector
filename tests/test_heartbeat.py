@@ -125,6 +125,7 @@ def test_service_heartbeat_model_allows_graph_extractor():
         and constraint.name == "ck_heartbeat_service_type"
     )
     assert "graph_extractor" in str(check.sqltext)
+    assert "knowledge_artifact_worker" in str(check.sqltext)
 
 
 # ── §8.4 心跳写失败不向上抛、不终止调用方 ──────────────────────────────────

@@ -9,6 +9,9 @@ from typing import Any, Optional
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from app.services.graph_extraction_safety import normalize_allowed_security_levels
+from app.services.knowledge_artifact_policy import (
+    normalize_knowledge_artifact_security_levels,
+)
 
 # 库唯一ID：只允许大小写英文字母和下划线（其它一律不允许）。
 # 同时它也是 Dify knowledge_id、URL 路径段、Qdrant collection 名、约定全文源表名，
@@ -143,6 +146,11 @@ class LibraryUpdate(BaseModel):
     graph_extraction_enabled: Optional[bool] = None
     external_llm_enabled: Optional[bool] = None
     graph_extraction_allowed_security_levels: Optional[list[str]] = None
+    knowledge_artifact_auto_enabled: Optional[bool] = None
+    summary_artifact_enabled: Optional[bool] = None
+    outline_artifact_enabled: Optional[bool] = None
+    knowledge_artifact_external_model_enabled: Optional[bool] = None
+    knowledge_artifact_allowed_security_levels: Optional[list[str]] = None
 
     @field_validator("graph_extraction_enabled", "external_llm_enabled", mode="before")
     @classmethod
@@ -157,6 +165,26 @@ class LibraryUpdate(BaseModel):
         if value is None:
             raise ValueError("graph extraction security levels cannot be null")
         return normalize_allowed_security_levels(value)
+
+    @field_validator(
+        "knowledge_artifact_auto_enabled",
+        "summary_artifact_enabled",
+        "outline_artifact_enabled",
+        "knowledge_artifact_external_model_enabled",
+        mode="before",
+    )
+    @classmethod
+    def _reject_null_artifact_switch(cls, value):
+        if value is None:
+            raise ValueError("knowledge artifact switch cannot be null")
+        return value
+
+    @field_validator("knowledge_artifact_allowed_security_levels", mode="before")
+    @classmethod
+    def _validate_artifact_security_levels(cls, value):
+        if value is None:
+            raise ValueError("knowledge artifact security levels cannot be null")
+        return normalize_knowledge_artifact_security_levels(value)
 
     @model_validator(mode="after")
     def _check_chunk_params(self):
@@ -184,6 +212,11 @@ class LibraryRead(BaseModel):
     graph_extraction_enabled: bool = False
     external_llm_enabled: bool = False
     graph_extraction_allowed_security_levels: list[str] = Field(default_factory=list)
+    knowledge_artifact_auto_enabled: bool = False
+    summary_artifact_enabled: bool = False
+    outline_artifact_enabled: bool = False
+    knowledge_artifact_external_model_enabled: bool = False
+    knowledge_artifact_allowed_security_levels: list[str] = Field(default_factory=list)
     lifecycle_mode: str = "managed"                 # #6 managed | external
     index_state: str = "ready"                      # #6 ready | rebuilding | failed
     active_rebuild_operation_id: Optional[uuid.UUID] = None

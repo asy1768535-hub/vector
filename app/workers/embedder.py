@@ -325,6 +325,17 @@ async def _publish_revision_after_qdrant(
         )
     )
     if old_current_revision_id is not None and old_current_revision_id != job.document_revision_id:
+        from app.services.knowledge_artifact_publication import (
+            supersede_revision_artifacts,
+        )
+
+        await supersede_revision_artifacts(
+            db,
+            library_id=library.id,
+            document_id=job.document_id,
+            document_revision_id=old_current_revision_id,
+            now=now,
+        )
         await db.execute(
             update(DocumentRevision)
             .where(DocumentRevision.id == old_current_revision_id)
@@ -347,6 +358,23 @@ async def _publish_revision_after_qdrant(
     except Exception:  # noqa: BLE001
         log.exception(
             "graph extraction auto trigger failed after publication: doc=%s revision=%s",
+            job.document_id,
+            job.document_revision_id,
+        )
+    try:
+        from app.services.knowledge_artifact_jobs import (
+            enqueue_ready_revision_artifacts,
+        )
+
+        await enqueue_ready_revision_artifacts(
+            library_id=library.id,
+            document_id=job.document_id,
+            revision_id=job.document_revision_id,
+        )
+    except Exception:  # noqa: BLE001
+        log.exception(
+            "knowledge artifact auto trigger failed after publication: "
+            "doc=%s revision=%s",
             job.document_id,
             job.document_revision_id,
         )

@@ -55,6 +55,19 @@ class KnowledgeArtifactJob(Base):
             "retry_generation >= 0",
             name="ck_knowledge_artifact_jobs_retry_generation",
         ),
+        CheckConstraint(
+            "attempt_count >= 0",
+            name="ck_knowledge_artifact_jobs_attempt_count",
+        ),
+        CheckConstraint(
+            "((status = 'processing' AND claim_token IS NOT NULL "
+            "AND claimed_by IS NOT NULL AND lease_expires_at IS NOT NULL "
+            "AND last_heartbeat_at IS NOT NULL) OR "
+            "(status <> 'processing' AND claim_token IS NULL "
+            "AND claimed_by IS NULL AND lease_expires_at IS NULL "
+            "AND last_heartbeat_at IS NULL))",
+            name="ck_knowledge_artifact_jobs_claim_state",
+        ),
         UniqueConstraint(
             "idempotency_key",
             name="uq_knowledge_artifact_jobs_idempotency_key",
@@ -77,6 +90,12 @@ class KnowledgeArtifactJob(Base):
             "created_at",
         ),
         Index("ix_knowledge_artifact_jobs_rerun", "rerun_of_job_id"),
+        Index(
+            "ix_knowledge_artifact_jobs_claimable",
+            "status",
+            "lease_expires_at",
+            "created_at",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -121,9 +140,22 @@ class KnowledgeArtifactJob(Base):
     retry_generation: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
+    attempt_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     trigger_type: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, default="queued", server_default="queued"
+    )
+    claim_token: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PgUUID(as_uuid=True), nullable=True
+    )
+    claimed_by: Mapped[Optional[str]] = mapped_column(String(160), nullable=True)
+    lease_expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_heartbeat_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
     rerun_of_job_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         PgUUID(as_uuid=True),

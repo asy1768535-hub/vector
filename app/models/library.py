@@ -19,6 +19,10 @@ class Library(Base):
         CheckConstraint("lifecycle_mode IN ('managed','external')", name="ck_lib_lifecycle_mode"),
         CheckConstraint("index_state IN ('ready','rebuilding','failed')", name="ck_lib_index_state"),
         CheckConstraint("retrieval_mode IN ('dense','hybrid')", name="ck_lib_retrieval_mode"),
+        CheckConstraint(
+            "jsonb_typeof(knowledge_artifact_allowed_security_levels) = 'array'",
+            name="ck_lib_knowledge_artifact_security_levels_array",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -58,6 +62,21 @@ class Library(Base):
         Boolean, nullable=False, default=False, server_default="false"
     )
     graph_extraction_allowed_security_levels: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    knowledge_artifact_auto_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    summary_artifact_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    outline_artifact_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    knowledge_artifact_external_model_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    knowledge_artifact_allowed_security_levels: Mapped[list[str]] = mapped_column(
         JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
     )
 

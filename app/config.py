@@ -306,6 +306,24 @@ class Settings(BaseSettings):
     graph_extraction_raw_output_retention_days: int = 30
     graph_extraction_candidate_retention_days: int = 180
 
+    # ---- v0.8 Knowledge Artifact Runtime (default fail closed) ----
+    knowledge_artifact_runtime_enabled: bool = False
+    knowledge_artifact_auto_trigger_enabled: bool = False
+    knowledge_artifact_external_model_enabled: bool = False
+    knowledge_artifact_base_url: str = "https://api.deepseek.com/v1"
+    knowledge_artifact_model: str = "deepseek-v4-pro"
+    knowledge_artifact_api_key: SecretStr = SecretStr("")
+    knowledge_artifact_provider_timeout_seconds: float = 120.0
+    knowledge_artifact_short_summary_max_chars: int = 4_000
+    knowledge_artifact_model_max_source_chars: int = 24_000
+    knowledge_artifact_summary_extractor_version: str = "summary-extractor-v1"
+    knowledge_artifact_outline_extractor_version: str = "outline-extractor-v1"
+    knowledge_artifact_prompt_version: str = "summary-prompt-v1"
+    knowledge_artifact_worker_poll_seconds: float = 3.0
+    knowledge_artifact_worker_lease_seconds: int = 180
+    knowledge_artifact_worker_renew_seconds: int = 30
+    knowledge_artifact_worker_max_attempts: int = 3
+
     # ---- v0.5 Active Graph Publication (M1 defaults; fail closed) ----
     graph_publication_enabled: bool = False
     graph_publication_require_entity_evidence: bool = True
@@ -391,6 +409,65 @@ def validate_graph_extraction_startup(config: Settings) -> None:
     ):
         raise RuntimeError(
             "[security] GRAPH_EXTRACTION_API_KEY is required when auto trigger is enabled"
+        )
+
+
+def validate_knowledge_artifact_startup(config: Settings) -> None:
+    if config.knowledge_artifact_auto_trigger_enabled and not (
+        config.knowledge_artifact_runtime_enabled
+    ):
+        raise RuntimeError(
+            "[security] knowledge artifact auto trigger requires the runtime"
+        )
+
+    positive_values = (
+        config.knowledge_artifact_provider_timeout_seconds,
+        config.knowledge_artifact_short_summary_max_chars,
+        config.knowledge_artifact_model_max_source_chars,
+        config.knowledge_artifact_worker_poll_seconds,
+        config.knowledge_artifact_worker_lease_seconds,
+        config.knowledge_artifact_worker_renew_seconds,
+        config.knowledge_artifact_worker_max_attempts,
+    )
+    if any(not math.isfinite(value) or value <= 0 for value in positive_values):
+        raise RuntimeError("[security] knowledge artifact runtime limits must be positive")
+    if (
+        config.knowledge_artifact_short_summary_max_chars
+        > config.knowledge_artifact_model_max_source_chars
+    ):
+        raise RuntimeError(
+            "[security] short Summary limit must not exceed model source limit"
+        )
+    lease = config.knowledge_artifact_worker_lease_seconds
+    if config.knowledge_artifact_worker_renew_seconds >= lease / 2:
+        raise RuntimeError(
+            "[security] knowledge artifact lease renew must be less than half the lease"
+        )
+    if config.knowledge_artifact_provider_timeout_seconds >= lease:
+        raise RuntimeError(
+            "[security] knowledge artifact provider timeout must be below the lease"
+        )
+    version_values = (
+        config.knowledge_artifact_summary_extractor_version,
+        config.knowledge_artifact_outline_extractor_version,
+        config.knowledge_artifact_prompt_version,
+    )
+    if any(not value.strip() or len(value) > 64 for value in version_values):
+        raise RuntimeError(
+            "[security] knowledge artifact versions must be nonblank and bounded"
+        )
+    if not config.knowledge_artifact_external_model_enabled:
+        return
+    if (
+        config.knowledge_artifact_base_url != "https://api.deepseek.com/v1"
+        or config.knowledge_artifact_model != "deepseek-v4-pro"
+    ):
+        raise RuntimeError(
+            "[security] knowledge artifact model requires the approved DeepSeek identity"
+        )
+    if not config.knowledge_artifact_api_key.get_secret_value().strip():
+        raise RuntimeError(
+            "[security] KNOWLEDGE_ARTIFACT_API_KEY is required for model generation"
         )
 
 

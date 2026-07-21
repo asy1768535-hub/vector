@@ -44,6 +44,7 @@ from app.config import (
     settings,
     validate_entity_linking_startup,
     validate_graph_extraction_startup,
+    validate_knowledge_artifact_startup,
     validate_graph_publication_startup,
     validate_graph_retrieval_startup,
 )
@@ -93,6 +94,10 @@ def assert_graph_extraction_startup_security() -> None:
     validate_graph_extraction_startup(settings)
 
 
+def assert_knowledge_artifact_startup_security() -> None:
+    validate_knowledge_artifact_startup(settings)
+
+
 def assert_graph_publication_startup_security() -> None:
     validate_graph_publication_startup(settings)
 
@@ -119,6 +124,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     # 安全前置校验：默认密钥等危险配置在启动时就拦下
     assert_startup_security()
     assert_graph_extraction_startup_security()
+    assert_knowledge_artifact_startup_security()
     assert_graph_publication_startup_security()
     assert_graph_retrieval_startup_security()
     assert_entity_linking_startup_security()

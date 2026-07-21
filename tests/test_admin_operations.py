@@ -72,6 +72,7 @@ def test_status_empty_db_shape():
             "embedding_worker",
             "cleanup_worker",
             "graph_extractor",
+            "knowledge_artifact_worker",
         }
         for s in body["services"]:
             assert s["status"] == "offline"
@@ -109,6 +110,7 @@ def test_status_aggregates_counts_and_progress():
         _hb("embedding_worker", "h-2-b"),
         _hb("cleanup_worker", "h-3-c"),
         _hb("graph_extractor", "h-4-d"),
+        _hb("knowledge_artifact_worker", "h-5-e"),
     ]
 
     db = AsyncMock()

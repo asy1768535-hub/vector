@@ -29,6 +29,8 @@ from app.schemas.admin import (
 from app.services import (
     audit_log,
     graph_extraction_safety,
+    knowledge_artifact_jobs,
+    knowledge_artifact_policy,
     library_faq,
     qdrant,
     source_enrichment,
@@ -270,6 +272,57 @@ async def update_library(
                 db,
                 library_id=lib.id,
                 job_error_code=safety_change_error,
+            )
+        )
+
+    cancelled_artifact_types: set[str] = set()
+    cancel_model_artifact_jobs = (
+        "external_llm_enabled" in body.model_fields_set
+        and body.external_llm_enabled is False
+        and bool(lib.knowledge_artifact_external_model_enabled)
+    )
+    for field in (
+        "knowledge_artifact_auto_enabled",
+        "summary_artifact_enabled",
+        "outline_artifact_enabled",
+        "knowledge_artifact_external_model_enabled",
+    ):
+        if field not in body.model_fields_set:
+            continue
+        value = getattr(body, field)
+        setattr(lib, field, value)
+        changes[field] = value
+        if value is False and field == "summary_artifact_enabled":
+            cancelled_artifact_types.add("summary")
+        elif value is False and field == "outline_artifact_enabled":
+            cancelled_artifact_types.add("outline")
+        elif value is False and field == "knowledge_artifact_external_model_enabled":
+            cancel_model_artifact_jobs = True
+
+    artifact_policy_changed = False
+    if "knowledge_artifact_allowed_security_levels" in body.model_fields_set:
+        old_levels = list(lib.knowledge_artifact_allowed_security_levels or [])
+        levels = knowledge_artifact_policy.normalize_knowledge_artifact_security_levels(
+            body.knowledge_artifact_allowed_security_levels
+        )
+        lib.knowledge_artifact_allowed_security_levels = levels
+        changes["knowledge_artifact_allowed_security_levels"] = levels
+        artifact_policy_changed = levels != old_levels
+        cancel_model_artifact_jobs = cancel_model_artifact_jobs or artifact_policy_changed
+
+    if cancelled_artifact_types or cancel_model_artifact_jobs:
+        error_code = (
+            "library_artifact_policy_changed"
+            if artifact_policy_changed or cancel_model_artifact_jobs
+            else "library_artifact_type_disabled"
+        )
+        changes["cancelled_knowledge_artifact_jobs"] = (
+            await knowledge_artifact_jobs.cancel_library_artifact_jobs_for_policy_change(
+                db,
+                library_id=lib.id,
+                error_code=error_code,
+                artifact_types=tuple(sorted(cancelled_artifact_types)),
+                include_model_jobs=cancel_model_artifact_jobs,
             )
         )
 
