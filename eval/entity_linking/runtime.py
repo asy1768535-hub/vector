@@ -125,8 +125,8 @@ from eval.entity_linking.reference_scorer import (
 )
 
 
-G2_APPROVAL_COMMIT = "1d67635735b0aa553399168eb3c923500ee41b2b"
-G2_SPECIFICATION_TREE_SHA256 = "af4ca0f30369694722504e34ecfd3667875b1f93dc462c8751497f59697991e0"
+G2_APPROVAL_COMMIT = "9e2743c44785faf3d3aa10493305e66ef8862354"
+G2_SPECIFICATION_TREE_SHA256 = "ca2aa20067a021e10709a5488fd976f3d8c7bf8d4eab7766044eeceb05f89f17"
 G1_COMMIT = "f40c5c84c3248639aa6603d43b6b306ad76d66fd"
 AUDIT_PRESERVATION_COMMIT = "155ef946c48272518c996458bc206039b6676c18"
 INVALIDATED_G2_APPROVAL_COMMIT = "75bf4141be743c1164bfa9841d0737509d7575fe"
@@ -139,15 +139,15 @@ INVALIDATED_CALIBRATION_BLOB_OID = "4c1dc04cca1ddd874fa309ad0314ad24dfc0ea68"
 PRESERVED_GITATTRIBUTES_BLOB_OID = "3f5e0ee58b5d94db6fd2ed25511a9957130885f6"
 UUID_NAMESPACE = uuid.UUID("47eb7b81-7cac-42be-976d-92d8a009a325")
 SCORER_CONFORMANCE_UUID_NAMESPACE = uuid.UUID("1bcb8d89-4423-563a-962d-670c026f6dc8")
-CALIBRATION_RUN_ID = "v07-el-calibration-v9-20260720-01"
-CALIBRATION_DATABASE_ID = "vkt_v07_el_eval_calibration_v9_20260720_01"
+CALIBRATION_RUN_ID = "v07-el-calibration-v10-20260721-01"
+CALIBRATION_DATABASE_ID = "vkt_v07_el_eval_calibration_v10_20260721_01"
 POST_FREEZE_IDENTITIES = (
-    (1, "v07-el-post-freeze-v9-20260720-01", "vkt_v07_el_eval_post_freeze_v9_20260720_01"),
-    (2, "v07-el-post-freeze-v9-20260720-02", "vkt_v07_el_eval_post_freeze_v9_20260720_02"),
-    (3, "v07-el-post-freeze-v9-20260720-03", "vkt_v07_el_eval_post_freeze_v9_20260720_03"),
+    (1, "v07-el-post-freeze-v10-20260721-01", "vkt_v07_el_eval_post_freeze_v10_20260721_01"),
+    (2, "v07-el-post-freeze-v10-20260721-02", "vkt_v07_el_eval_post_freeze_v10_20260721_02"),
+    (3, "v07-el-post-freeze-v10-20260721-03", "vkt_v07_el_eval_post_freeze_v10_20260721_03"),
 )
-POLICY_PATH = "eval/entity_linking/link_policy_v8.json"
-RELEASE_EVIDENCE_PATH = "eval/entity_linking/release_evidence_v8.json"
+POLICY_PATH = "eval/entity_linking/link_policy_v9.json"
+RELEASE_EVIDENCE_PATH = "eval/entity_linking/release_evidence_v9.json"
 EMBEDDING_PROBE_TEXT = "vkt-v07-entity-linking-identity-probe"
 EMBEDDING_PROBE_SHA256 = "4caad60c112bd93fda55714c91aef2762a3c5c5c0df2a09dc28e6296800cc61f"
 CONTROL_RETRIEVAL_CANDIDATE_K = 50
@@ -175,10 +175,10 @@ G3_IMPLEMENTATION_PATHS = (
     "eval/entity_linking/reference_scorer.py",
     "eval/entity_linking/runtime.py",
     "eval/entity_linking/README.md",
-    "eval/entity_linking/gold_v3.json",
-    "eval/entity_linking/cases_v3.jsonl",
+    "eval/entity_linking/gold_v4.json",
+    "eval/entity_linking/cases_v4.jsonl",
     "eval/entity_linking/conformance_v2.json",
-    "eval/entity_linking/manifests/feasibility_v3.json",
+    "eval/entity_linking/manifests/feasibility_v4.json",
     "scripts/entity_linking_feasibility.py",
     "tests/test_v07_entity_linking_eval.py",
     "tests/test_v07_entity_linking_eval_pg.py",
@@ -236,6 +236,9 @@ LF_CONTRACT_PATHS = (
     "eval/entity_linking/gold_v3.json",
     "eval/entity_linking/cases_v3.jsonl",
     "eval/entity_linking/manifests/feasibility_v3.json",
+    "eval/entity_linking/gold_v4.json",
+    "eval/entity_linking/cases_v4.jsonl",
+    "eval/entity_linking/manifests/feasibility_v4.json",
     "eval/entity_linking/results/v07-el-calibration-v1-20260717-01.json",
     "scripts/entity_linking_feasibility.py",
     "tests/test_v07_entity_linking_eval.py",
@@ -266,6 +269,15 @@ HISTORICAL_ENTITY_LINKING_PATHS = (
     "eval/entity_linking/results/v07-el-calibration-v7-20260720-01.json",
     "eval/entity_linking/link_policy_v6.json",
     "eval/entity_linking/results/v07-el-post-freeze-v7-20260720-01.json",
+    "eval/entity_linking/gold_v3.json",
+    "eval/entity_linking/cases_v3.jsonl",
+    "eval/entity_linking/manifests/feasibility_v3.json",
+    "eval/entity_linking/results/v07-el-calibration-v9-20260720-01.json",
+    "eval/entity_linking/link_policy_v8.json",
+    "eval/entity_linking/results/v07-el-post-freeze-v9-20260720-01.json",
+    "eval/entity_linking/results/v07-el-post-freeze-v9-20260720-02.json",
+    "eval/entity_linking/results/v07-el-post-freeze-v9-20260720-03.json",
+    "eval/entity_linking/release_evidence_v8.json",
 )
 
 
@@ -624,26 +636,31 @@ def _entity(
 
 
 def _case_prefix(index: int) -> str:
-    return f"v3-{index:03d}"
+    return f"v4-{index:03d}"
 
 
 _CALIBRATION_ROOTS = (
-    "Ardent", "Beacon", "Cobalt", "Drift", "Echo", "Fable", "Harbor", "Ion", "Kestrel", "Meridian"
+    "Axiom", "Brumal", "Cypher", "Dorsal", "Eolian",
+    "Fractal", "Gimbal", "Halcyon", "Isobar", "Jovian",
 )
 _RELEASE_ROOTS = (
-    "Nimbus", "Orbit", "Prism", "Quill", "Radiant", "Summit", "Tundra", "Umber", "Vector", "Zenith"
+    "Krypton", "Liminal", "Monadic", "Nacre", "Orphic",
+    "Penumbral", "Quasar", "Radian", "Sidereal", "Tesseral",
 )
 _FAMILY_MODIFIERS = (
-    "Bronze", "Cinder", "Falcon", "Glacier", "Helix", "Indigo",
-    "Kernel", "Matrix", "Onyx", "Pulsar", "Saffron", "Vertex",
+    "Umbral", "Verdant", "Warden", "Xenial", "Yarrow", "Zephyr",
+    "Aureate", "Beryl", "Cerulean", "Diurnal", "Equinox", "Fulcrum",
 )
 _CALIBRATION_CJK_ROOTS = (
-    "苍穹", "碧海", "翠岭", "岚谷", "朝霞", "柏涛", "澄湖", "涌泉", "劲风", "星湾",
+    "青岬", "玄浦", "赤峰", "白泽", "金泉", "玉溪", "松原", "竹岭", "桂湾", "兰洲",
 )
 _RELEASE_CJK_ROOTS = (
-    "云际", "沧岳", "梅影", "东辰", "霞光", "杉涛", "映湖", "河谷", "西风", "霜原",
+    "银沙", "丹岳", "桐川", "荷港", "石林", "雪谷", "月潭", "日泉", "风台", "雨城",
 )
-_CJK_MODIFIERS = ("智联", "勘研", "构造", "算据", "联创", "新域", "云服", "数科", "策划", "营运", "平台", "验证")
+_CJK_MODIFIERS = (
+    "研策", "智造", "数联", "云算", "新创", "协同",
+    "拓维", "经纬", "融汇", "启明", "远航", "卓越",
+)
 
 
 def _family_words(index: int, split: str) -> tuple[str, str, str]:
@@ -766,7 +783,7 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
                 document_key=document_key,
                 library_key="library-primary",
                 title=f"{family_label} published relation record",
-                external_id=f"synthetic-v3-{index:03d}",
+                external_id=f"synthetic-v4-{index:03d}",
                 status="ready",
             )
         )
@@ -780,8 +797,8 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
             )
         )
         text = (
-            f"{family_label} Anchor is formally related to {family_label} Archive "
-            "under the active synthetic publication."
+            f"{family_label} Anchor and {family_label} Archive are bound by a verified "
+            "relation in the active publication record."
         )
         chunks.append(
             ChunkRecord(
@@ -962,7 +979,7 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
             )
         elif group == 3:
             outside_key = f"entity-{suffix}-outside"
-            outside_name = f"externalcodev3{index:03d}"
+            outside_name = f"externalcodev4{index:03d}"
             entities[outside_key] = _entity(
                 outside_key,
                 outside_name,
@@ -1042,7 +1059,7 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
         decoy_chunk_keys: tuple[str, ...] = ()
         if cohort == "utility":
             surface = " / ".join(" ".join(mention.text.split()) for mention in mentions)
-            question = f"Retrieve the signed publication evidence dossier for {surface}."
+            question = f"Locate the verified publication record binding {surface}."
             decoy_keys: list[str] = []
             decoy_chunks: list[str] = []
             for decoy_index in range(12):
@@ -1053,29 +1070,29 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
                 decoy_keys.append(f"decoy-family-{suffix}-{marker:02d}")
                 decoy_chunks.append(decoy_chunk_key)
                 if decoy_index < 4:
-                    decoy_title = f"{question} Contradictory surface record {marker}"
+                    decoy_title = f"{question} Negated registry note {marker}"
                     decoy_text = (
-                        f"{question} {surface}. This ordinary record states that no active "
-                        "published relation connects the named entities."
+                        f"{question} {surface}. This registry note explicitly says the named "
+                        "records are not bound by an active published relation."
                     )
                 elif decoy_index < 8:
-                    decoy_title = f"{question} Competing relation record {marker}"
+                    decoy_title = f"{question} Alternate binding note {marker}"
                     decoy_text = (
-                        f"{question} {surface}. This ordinary record assigns the requested relation "
-                        "to an unrelated archive instead of the named target."
+                        f"{question} {surface}. This registry note binds an unrelated synthetic "
+                        "source rather than the named target."
                     )
                 else:
-                    decoy_title = f"{question} Incomplete provenance record {marker}"
+                    decoy_title = f"{question} Partial catalogue note {marker}"
                     decoy_text = (
-                        f"{question} {surface}. This ordinary record lists the names but omits "
-                        "the requested relation and its supporting evidence."
+                        f"{question} {surface}. This catalogue note lists one named record but "
+                        "contains no verified relation or supporting evidence."
                     )
                 documents.append(
                     DocumentRecord(
                         document_key=decoy_document_key,
                         library_key="library-primary",
                         title=decoy_title,
-                        external_id=f"synthetic-v3-decoy-{index:03d}-{marker:02d}",
+                        external_id=f"synthetic-v4-decoy-{index:03d}-{marker:02d}",
                         status="ready",
                     )
                 )
@@ -1195,24 +1212,24 @@ def build_static_gold_and_cases() -> tuple[GoldDataset, tuple[EvaluationCase, ..
             canary_key="canary-credential",
             key_marker="synthetic-credential-shaped-key",
             value_marker="synthetic-credential-shaped-value",
-            target_rows=("entity-v3-000-seed",),
+            target_rows=("entity-v4-000-seed",),
         ),
         PrivacyCanaryRecord(
             canary_key="canary-properties",
             key_marker="synthetic-private-properties-key",
             value_marker="synthetic-private-properties-value",
-            target_rows=("entity-v3-000-seed",),
+            target_rows=("entity-v4-000-seed",),
         ),
         PrivacyCanaryRecord(
             canary_key="canary-source",
             key_marker="synthetic-source-like-key",
             value_marker="synthetic-source-like-value",
-            target_rows=("relation-v3-000-a",),
+            target_rows=("relation-v4-000-a",),
         ),
     )
     gold = GoldDataset(
         schema_version="entity-linking-gold-v2",
-        dataset_id="feasibility-v3",
+        dataset_id="feasibility-v4",
         uuid_namespace=str(UUID_NAMESPACE),
         libraries=libraries,
         ontologies=ontologies,
@@ -1791,6 +1808,10 @@ def _fixed_controls() -> tuple[
             query_rewrite_llm_enabled=False,
             embedding_model="bge-m3",
             embedding_dimension=1024,
+            vector_search_exact=True,
+            vector_tie_completion_version=(
+                "score-desc-chunk-id-asc-probe-51-102-201-fail-closed-v1"
+            ),
             hybrid_candidate_k=CONTROL_RETRIEVAL_CANDIDATE_K,
             hybrid_rrf_k=60,
             hybrid_keyword_threshold_micros=300000,
@@ -1844,10 +1865,10 @@ def write_static_dataset(root: Path) -> FeasibilityManifest:
     gold, cases = build_static_gold_and_cases()
     conformance = build_conformance_dataset()
     base = root / "eval/entity_linking"
-    gold_path = base / "gold_v3.json"
-    cases_path = base / "cases_v3.jsonl"
+    gold_path = base / "gold_v4.json"
+    cases_path = base / "cases_v4.jsonl"
     conformance_path = base / "conformance_v2.json"
-    manifest_path = base / "manifests/feasibility_v3.json"
+    manifest_path = base / "manifests/feasibility_v4.json"
     _write_json(gold_path, gold.model_dump(mode="json"))
     _write_jsonl(cases_path, [case.model_dump(mode="json") for case in cases])
     _write_json(conformance_path, conformance.model_dump(mode="json"))
@@ -1875,7 +1896,7 @@ def write_static_dataset(root: Path) -> FeasibilityManifest:
     control, metric, grid, bootstrap, performance = _fixed_controls()
     manifest = FeasibilityManifest(
         schema_version="entity-linking-feasibility-manifest-v2",
-        dataset_id="feasibility-v3",
+        dataset_id="feasibility-v4",
         g2_approval_commit=G2_APPROVAL_COMMIT,
         g2_specification_tree_sha256=G2_SPECIFICATION_TREE_SHA256,
         gold_ref=gold_ref,
@@ -2135,9 +2156,9 @@ def _validate_references(gold: GoldDataset, cases: Sequence[EvaluationCase]) -> 
             if any(case.question in chunk.text for chunk in gold_chunks):
                 raise ValueError(f"gold Chunk copies retrieval query: {case.case_id}")
             expected_markers = (
-                *("Contradictory surface record",) * 4,
-                *("Competing relation record",) * 4,
-                *("Incomplete provenance record",) * 4,
+                *("Negated registry note",) * 4,
+                *("Alternate binding note",) * 4,
+                *("Partial catalogue note",) * 4,
             )
             for chunk_key, marker in zip(case.decoy_chunk_keys, expected_markers, strict=True):
                 chunk = chunks[chunk_key]
@@ -2286,7 +2307,7 @@ def _validate_historical_family_disjoint(
     ):
         current_values = values_for(current_cases, field)
         historical_values = values_for(historical_cases, field)
-        if current_values & historical_values or any("v3" not in value for value in current_values):
+        if current_values & historical_values or any("v4" not in value for value in current_values):
             raise EntityLinkingEvalError("family_split_overlap")
 
 
@@ -2294,10 +2315,10 @@ def _validate_historical_family_disjoint(
 def load_dataset(root: Path) -> LoadedDataset:
     verify_g2_approval(root)
     base = root / "eval/entity_linking"
-    gold_path = base / "gold_v3.json"
-    cases_path = base / "cases_v3.jsonl"
+    gold_path = base / "gold_v4.json"
+    cases_path = base / "cases_v4.jsonl"
     conformance_path = base / "conformance_v2.json"
-    manifest_path = base / "manifests/feasibility_v3.json"
+    manifest_path = base / "manifests/feasibility_v4.json"
     gold = load_canonical_json(root, gold_path, GoldDataset)
     cases = load_canonical_jsonl(root, cases_path, EvaluationCase)
     conformance = load_canonical_json(root, conformance_path, ConformanceDataset)
@@ -2317,7 +2338,8 @@ def load_dataset(root: Path) -> LoadedDataset:
     _validate_families(typed_cases)
     historical_cases = tuple(
         case
-        for case in load_canonical_jsonl(root, base / "cases_v2.jsonl", EvaluationCase)
+        for path in (base / "cases_v2.jsonl", base / "cases_v3.jsonl")
+        for case in load_canonical_jsonl(root, path, EvaluationCase)
         if isinstance(case, EvaluationCase)
     )
     _validate_historical_family_disjoint(typed_cases, historical_cases)
@@ -2400,7 +2422,7 @@ def load_dataset(root: Path) -> LoadedDataset:
             "cases_schema_version": "entity-linking-case-v2",
             "conformance_content_sha256": manifest.conformance_ref.canonical_sha256,
             "conformance_schema_version": conformance.schema_version,
-            "dataset_id": "feasibility-v3",
+            "dataset_id": "feasibility-v4",
             "gold_content_sha256": manifest.gold_ref.canonical_sha256,
             "gold_schema_version": gold.schema_version,
         }

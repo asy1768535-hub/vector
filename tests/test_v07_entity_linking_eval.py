@@ -137,7 +137,7 @@ def _v2_calibration_value() -> dict[str, object]:
     value.update(
         schema_version="entity-linking-eval-result-v2",
         run_id=CALIBRATION_RUN_ID,
-        database_id="vkt_v07_el_eval_calibration_v9_20260720_01",
+        database_id="vkt_v07_el_eval_calibration_v10_20260721_01",
         g2_approval_commit=G2_APPROVAL_COMMIT,
         g2_specification_tree_sha256=G2_SPECIFICATION_TREE_SHA256,
         selection_reason="tie-higher-score",
@@ -189,9 +189,9 @@ def _release_value() -> dict[str, object]:
     refs = [
         {
             "ordinal": ordinal,
-            "run_id": f"v07-el-post-freeze-v9-20260720-0{ordinal}",
+            "run_id": f"v07-el-post-freeze-v10-20260721-0{ordinal}",
             "artifact_ref": _artifact_ref_value(
-                f"eval/entity_linking/results/v07-el-post-freeze-v9-20260720-0{ordinal}.json"
+                f"eval/entity_linking/results/v07-el-post-freeze-v10-20260721-0{ordinal}.json"
             ),
         }
         for ordinal in (1, 2, 3)
@@ -210,7 +210,7 @@ def _release_value() -> dict[str, object]:
         "status": "passed",
         "g2_approval_commit": COMMIT,
         "g2_specification_tree_sha256": SHA,
-        "dataset_manifest_ref": _artifact_ref_value("eval/entity_linking/manifests/feasibility_v3.json"),
+        "dataset_manifest_ref": _artifact_ref_value("eval/entity_linking/manifests/feasibility_v4.json"),
         "dataset_content_sha256": SHA,
         "evaluation_config_sha256": SHA,
         "ontology_schema_set_hash": SHA,
@@ -225,9 +225,9 @@ def _release_value() -> dict[str, object]:
         "qdrant_fingerprint_sha256": SHA,
         "embedding_fingerprint_sha256": SHA,
         "calibration_ref": _artifact_ref_value(
-            "eval/entity_linking/results/v07-el-calibration-v9-20260720-01.json"
+            "eval/entity_linking/results/v07-el-calibration-v10-20260721-01.json"
         ),
-        "policy_ref": _artifact_ref_value("eval/entity_linking/link_policy_v8.json"),
+        "policy_ref": _artifact_ref_value("eval/entity_linking/link_policy_v9.json"),
         "post_freeze_refs": refs,
         "canonical_response_set_sha256_by_ordinal": [
             {
@@ -253,11 +253,16 @@ def test_g2_approval_identity_specification_tree_and_ancestry_are_frozen():
 
 def test_fixed_dataset_is_canonical_complete_and_family_disjoint():
     dataset = load_dataset(ROOT)
-    assert dataset.gold.dataset_id == "feasibility-v3"
-    assert dataset.manifest.dataset_id == "feasibility-v3"
-    assert dataset.manifest_path == ROOT / "eval/entity_linking/manifests/feasibility_v3.json"
+    assert dataset.gold.dataset_id == "feasibility-v4"
+    assert dataset.manifest.dataset_id == "feasibility-v4"
+    assert dataset.manifest_path == ROOT / "eval/entity_linking/manifests/feasibility_v4.json"
     assert dataset.manifest.g2_approval_commit == G2_APPROVAL_COMMIT
     assert dataset.manifest.accepted_dependency_closure_path_count == 63
+    assert dataset.manifest.control_config.hybrid_candidate_k == 50
+    assert dataset.manifest.control_config.vector_search_exact is True
+    assert dataset.manifest.control_config.vector_tie_completion_version == (
+        "score-desc-chunk-id-asc-probe-51-102-201-fail-closed-v1"
+    )
     assert dataset.manifest.counts.questions == 200
     assert dataset.manifest.counts.calibration_cases == 80
     assert dataset.manifest.counts.release_cases == 120
@@ -269,7 +274,7 @@ def test_fixed_dataset_is_canonical_complete_and_family_disjoint():
         len(case.decoy_chunk_keys) == (12 if case.cohort == "utility" else 0)
         for case in dataset.cases
     )
-    assert all(case.case_id.startswith("case-v3-") for case in dataset.cases)
+    assert all(case.case_id.startswith("case-v4-") for case in dataset.cases)
     assert all(
         all(mention.is_exact_control for mention in case.mentions)
         for case in dataset.cases
@@ -308,7 +313,7 @@ def test_calibration_dataset_load_does_not_score_release_holdout(monkeypatch):
     assert observed_splits == ["calibration"] * 80
 
 
-def test_v3_decoy_and_historical_family_mutations_are_rejected():
+def test_v4_decoy_and_historical_family_mutations_are_rejected():
     dataset = load_dataset(ROOT)
     utility_case = next(case for case in dataset.cases if case.cohort == "utility")
     decoy_chunk = next(
@@ -396,7 +401,7 @@ def test_linked_performance_fixture_resolves_full_frozen_mix():
 
 
 def test_canonical_loader_rejects_pretty_json_duplicate_keys_crlf_and_extra(tmp_path):
-    source = ROOT / "eval/entity_linking/gold_v3.json"
+    source = ROOT / "eval/entity_linking/gold_v4.json"
     value = json.loads(source.read_text(encoding="utf-8"))
     pretty = tmp_path / "pretty.json"
     pretty.write_bytes((json.dumps(value, indent=2) + "\n").encode("utf-8"))
@@ -609,9 +614,9 @@ def test_paired_bootstrap_is_exact_rational_and_reproducible():
 
 def test_qdrant_collection_and_service_origin_conformance_vectors():
     collection = qdrant_collection_identity(CALIBRATION_RUN_ID, "cal")
-    assert collection.collection_name == "vkt_v07_el_cal_580490804153"
+    assert collection.collection_name == "vkt_v07_el_cal_dbba268fac7f"
     assert collection.collection_name_sha256 == (
-        "eef371ed9043b8792ad2854862ddf591d2729a8d1bc3a6833486a5dc875ff485"
+        "c4f60f83c1521d869ff68888cd88540d12e5d66d1fe1bd08dc2d3b35d1a7d974"
     )
     assert normalize_service_origin("HTTP://Example.COM", qdrant=True) == "http://example.com:80"
     assert (
@@ -807,7 +812,7 @@ def test_privacy_scanner_rejects_dataset_values_canaries_and_private_fields():
 
 def test_policy_approval_and_frozen_policy_contracts_are_strict():
     calibration_ref = _artifact_ref_value(
-        "eval/entity_linking/results/v07-el-calibration-v9-20260720-01.json"
+        "eval/entity_linking/results/v07-el-calibration-v10-20260721-01.json"
     )
     thresholds = {
         "min_score_micros": 850000,
@@ -835,7 +840,7 @@ def test_policy_approval_and_frozen_policy_contracts_are_strict():
         "calibration_ref": calibration_ref,
         "approved_thresholds": thresholds,
         "approval_payload_sha256": canonical_sha256(approval),
-        "dataset_manifest_ref": _artifact_ref_value("eval/entity_linking/manifests/feasibility_v3.json"),
+        "dataset_manifest_ref": _artifact_ref_value("eval/entity_linking/manifests/feasibility_v4.json"),
         "dataset_content_sha256": SHA,
         "evaluation_config_sha256": SHA,
         "ontology_schema_set_hash": SHA,
@@ -881,9 +886,9 @@ def test_gate_decisions_reject_wrong_typed_pairs_order_and_derived_values():
 
     run_value = {
         "ordinal": 1,
-        "run_id": "v07-el-post-freeze-v9-20260720-01",
+        "run_id": "v07-el-post-freeze-v10-20260721-01",
         "artifact_ref": _artifact_ref_value(
-            "eval/entity_linking/results/v07-el-post-freeze-v9-20260720-01.json"
+            "eval/entity_linking/results/v07-el-post-freeze-v10-20260721-01.json"
         ),
         "gate_decisions": _passing_gate_values(),
         "all_passed": True,
@@ -909,13 +914,13 @@ def test_post_freeze_contract_requires_ordinal_policy_and_null_calibration_field
     value.update(
         phase="post_freeze_release",
         ordinal=1,
-        run_id="v07-el-post-freeze-v9-20260720-01",
-        database_id="vkt_v07_el_eval_post_freeze_v9_20260720_01",
+        run_id="v07-el-post-freeze-v10-20260721-01",
+        database_id="vkt_v07_el_eval_post_freeze_v10_20260721_01",
         grid_results=None,
         candidate_thresholds=None,
         selection_reason=None,
-        policy_ref=_artifact_ref_value("eval/entity_linking/link_policy_v8.json"),
-        qdrant_collection=qdrant_collection_identity("v07-el-post-freeze-v9-20260720-01", "pf1").model_dump(
+        policy_ref=_artifact_ref_value("eval/entity_linking/link_policy_v9.json"),
+        qdrant_collection=qdrant_collection_identity("v07-el-post-freeze-v10-20260721-01", "pf1").model_dump(
             mode="json"
         ),
     )
@@ -955,7 +960,7 @@ def test_release_evidence_rejects_reordered_refs_false_identity_and_extra_fields
 
 def test_invalidated_v1_calibration_is_rejected_before_policy_write():
     historical_policy_path = ROOT / "eval/entity_linking/link_policy_v1.json"
-    policy_path = ROOT / "eval/entity_linking/link_policy_v8.json"
+    policy_path = ROOT / "eval/entity_linking/link_policy_v9.json"
     assert historical_policy_path.is_file()
     assert not policy_path.exists()
     with pytest.raises(EntityLinkingEvalError, match="invalidated_calibration_artifact"):
@@ -991,8 +996,10 @@ def test_complete_cli_surface_is_frozen_before_replacement_calibration():
 def test_historical_chains_are_preserved_and_current_outputs_await_gate_b():
     base = ROOT / "eval/entity_linking"
     assert (base / "link_policy_v1.json").is_file()
-    assert not (base / "link_policy_v8.json").exists()
-    assert not (base / "release_evidence_v8.json").exists()
+    assert (base / "link_policy_v8.json").is_file()
+    assert (base / "release_evidence_v8.json").is_file()
+    assert not (base / "link_policy_v9.json").exists()
+    assert not (base / "release_evidence_v9.json").exists()
     results = base / "results"
     historical = results / "v07-el-calibration-v3-20260720-01.json"
     historical_value = json.loads(historical.read_text(encoding="utf-8"))
@@ -1052,9 +1059,9 @@ def test_historical_chains_are_preserved_and_current_outputs_await_gate_b():
         "0f0becf67805b23f38728bda642ce7dbb3fb552c33ffa742f51ec9a695aa3d25"
     )
     forbidden = (
-        "v07-el-post-freeze-v9-20260720-01.json",
-        "v07-el-post-freeze-v9-20260720-02.json",
-        "v07-el-post-freeze-v9-20260720-03.json",
+        "v07-el-post-freeze-v10-20260721-01.json",
+        "v07-el-post-freeze-v10-20260721-02.json",
+        "v07-el-post-freeze-v10-20260721-03.json",
     )
     assert all(not (results / name).exists() for name in forbidden)
 

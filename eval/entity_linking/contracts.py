@@ -233,7 +233,7 @@ class PrivacyCanaryRecord(StrictModel):
 
 class GoldDataset(StrictModel):
     schema_version: Literal["entity-linking-gold-v2"]
-    dataset_id: Literal["feasibility-v3"]
+    dataset_id: Literal["feasibility-v4"]
     uuid_namespace: str
     libraries: tuple[LibraryRecord, ...]
     ontologies: tuple[OntologyRecord, ...]
@@ -478,6 +478,10 @@ class ControlConfig(StrictModel):
     query_rewrite_llm_enabled: Literal[False]
     embedding_model: Literal["bge-m3"]
     embedding_dimension: Literal[1024]
+    vector_search_exact: Literal[True]
+    vector_tie_completion_version: Literal[
+        "score-desc-chunk-id-asc-probe-51-102-201-fail-closed-v1"
+    ]
     hybrid_candidate_k: Literal[50]
     hybrid_rrf_k: Literal[60]
     hybrid_keyword_threshold_micros: Literal[300000]
@@ -573,7 +577,7 @@ def _validate_external_distribution_records(
 
 class FeasibilityManifest(StrictModel):
     schema_version: Literal["entity-linking-feasibility-manifest-v2"]
-    dataset_id: Literal["feasibility-v3"]
+    dataset_id: Literal["feasibility-v4"]
     g2_approval_commit: GitCommit
     g2_specification_tree_sha256: Sha256
     gold_ref: ArtifactRef
