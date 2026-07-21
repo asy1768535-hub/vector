@@ -192,6 +192,13 @@ class Settings(BaseSettings):
     revision_cleanup_batch_size: int = 16
     revision_cleanup_lease_seconds: int = 300
     revision_cleanup_max_attempts: int = 10
+    revision_coordinated_purge_enabled: bool = False
+    revision_coordinated_purge_batch_size: int = 10
+    revision_coordinated_purge_lease_seconds: int = 300
+    revision_coordinated_purge_max_attempts: int = 5
+    revision_coordinated_purge_max_evidence: int = 10_000
+    revision_coordinated_purge_max_affected_items: int = 1_000
+    revision_coordinated_purge_impact_sample: int = 50
 
     # ---- 检索可见性过滤（#6 批次 A，revision 维度）----
     retrieval_consistency_filter: bool = True   # 总开关；关掉则不回查 PG（灰度/回滚用）
@@ -577,6 +584,46 @@ def validate_revision_cleanup_startup(config: Settings) -> None:
     if not 1 <= config.revision_cleanup_max_attempts <= 100:
         raise RuntimeError(
             "[security] revision cleanup max attempts must be within 1..100"
+        )
+
+
+def validate_revision_coordinated_purge_startup(config: Settings) -> None:
+    if not config.revision_coordinated_purge_enabled:
+        return
+    dependencies = (
+        config.graph_publication_enabled,
+        config.revision_retention_enabled,
+        config.revision_file_storage_enabled,
+        config.revision_cleanup_enabled,
+    )
+    if not all(dependencies):
+        raise RuntimeError(
+            "[security] coordinated purge requires graph publication, retention, "
+            "revision file storage, and revision cleanup"
+        )
+    if not 1 <= config.revision_coordinated_purge_batch_size <= 100:
+        raise RuntimeError(
+            "[security] coordinated purge batch size must be within 1..100"
+        )
+    if not 30 <= config.revision_coordinated_purge_lease_seconds <= 3_600:
+        raise RuntimeError(
+            "[security] coordinated purge lease must be within 30..3600 seconds"
+        )
+    if not 1 <= config.revision_coordinated_purge_max_attempts <= 100:
+        raise RuntimeError(
+            "[security] coordinated purge max attempts must be within 1..100"
+        )
+    if not 1 <= config.revision_coordinated_purge_max_evidence <= 100_000:
+        raise RuntimeError(
+            "[security] coordinated purge Evidence limit must be within 1..100000"
+        )
+    if not 1 <= config.revision_coordinated_purge_max_affected_items <= 10_000:
+        raise RuntimeError(
+            "[security] coordinated purge item limit must be within 1..10000"
+        )
+    if not 1 <= config.revision_coordinated_purge_impact_sample <= 100:
+        raise RuntimeError(
+            "[security] coordinated purge impact sample must be within 1..100"
         )
 
 

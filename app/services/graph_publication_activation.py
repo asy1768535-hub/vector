@@ -15,6 +15,7 @@ from app.models.entity import GRAPH_FACT_STATUS_ACTIVE, Entity
 from app.models.evidence_unit import EvidenceUnit
 from app.models.document_revision_file import DocumentRevisionFile
 from app.models.graph_publication import (
+    GRAPH_PUBLICATION_SOURCE_COORDINATED_PURGE,
     GRAPH_PUBLICATION_SOURCE_ROLLBACK,
     GRAPH_PUBLICATION_STATUS_ACTIVE,
     GRAPH_PUBLICATION_STATUS_ACTIVATING,
@@ -37,6 +38,7 @@ from app.models.library import Library
 from app.models.ontology_version import ONTOLOGY_STATUS_ACTIVE, OntologyVersion
 from app.models.relation_evidence import RelationEvidence
 from app.models.revision_retention import RevisionRetentionRecord
+from app.models.revision_purge_operation import RevisionPurgeOperation
 from app.services import audit_log
 from app.services.graph_publication_planner import (
     GraphPublicationPlanResult,
@@ -207,9 +209,19 @@ def _validate_stored_snapshot(
         stored_by_key[key] = item
 
     candidate_by_key = {_item_key(item): item for item in candidate.items}
-    if publication.source_mode == GRAPH_PUBLICATION_SOURCE_ROLLBACK:
+    if publication.source_mode in {
+        GRAPH_PUBLICATION_SOURCE_ROLLBACK,
+        GRAPH_PUBLICATION_SOURCE_COORDINATED_PURGE,
+    }:
         if not set(stored_by_key).issubset(candidate_by_key):
-            raise GraphPublicationActivationError("rollback_item_ineligible", "rollback snapshot is no longer eligible")
+            code = (
+                "rollback_item_ineligible"
+                if publication.source_mode == GRAPH_PUBLICATION_SOURCE_ROLLBACK
+                else "coordinated_purge_item_ineligible"
+            )
+            raise GraphPublicationActivationError(
+                code, "publication snapshot is no longer eligible"
+            )
     else:
         if set(stored_by_key) != set(candidate_by_key):
             raise GraphPublicationActivationError("publication_snapshot_changed", "publication snapshot changed")
@@ -225,11 +237,12 @@ def _validate_stored_snapshot(
             or dict(stored.support_counts or {}) != dict(current.support_counts or {})
             or dict(stored.fact_snapshot or {}) != dict(current.fact_snapshot or {})
         ):
-            code = (
-                "rollback_item_ineligible"
-                if publication.source_mode == GRAPH_PUBLICATION_SOURCE_ROLLBACK
-                else "publication_item_changed"
-            )
+            if publication.source_mode == GRAPH_PUBLICATION_SOURCE_ROLLBACK:
+                code = "rollback_item_ineligible"
+            elif publication.source_mode == GRAPH_PUBLICATION_SOURCE_COORDINATED_PURGE:
+                code = "coordinated_purge_item_ineligible"
+            else:
+                code = "publication_item_changed"
             raise GraphPublicationActivationError(code, "publication item is no longer eligible")
 
     expected_manifest_hash = _manifest_hash(
@@ -295,6 +308,69 @@ async def _reject_retiring_support_evidence(
         raise GraphPublicationActivationError(
             "publication_evidence_retiring",
             "publication support Evidence is retiring",
+        )
+
+
+async def _reject_coordinated_target_evidence(
+    db: AsyncSession,
+    publication: GraphPublication,
+    items: list[GraphPublicationItem],
+) -> None:
+    if publication.source_mode != GRAPH_PUBLICATION_SOURCE_COORDINATED_PURGE:
+        return
+    operation = (
+        await db.execute(
+            select(RevisionPurgeOperation).where(
+                RevisionPurgeOperation.replacement_publication_id == publication.id,
+                RevisionPurgeOperation.library_id == publication.library_id,
+            )
+        )
+    ).scalars().first()
+    if operation is None or operation.status not in {"planned", "processing"}:
+        raise GraphPublicationActivationError(
+            "coordinated_purge_operation_invalid",
+            "coordinated purge operation is unavailable",
+        )
+    options = dict(publication.plan_options or {})
+    impact = dict(operation.impact_snapshot or {})
+    if (
+        options.get("retention_record_id") != str(operation.retention_record_id)
+        or options.get("confirmation_hash") != operation.confirmation_hash
+        or options.get("target_evidence_hash") != impact.get("target_evidence_hash")
+        or publication.manifest_hash != operation.replacement_manifest_hash
+        or publication.parent_publication_id != operation.source_publication_id
+    ):
+        raise GraphPublicationActivationError(
+            "coordinated_purge_operation_changed",
+            "coordinated purge operation identity changed",
+        )
+    support_ids: set[uuid.UUID] = set()
+    try:
+        for item in items:
+            support_ids.update(
+                uuid.UUID(str(value)) for value in (item.support_evidence_ids or [])
+            )
+    except (TypeError, ValueError, AttributeError):
+        raise GraphPublicationActivationError(
+            "publication_item_invalid", "publication support Evidence is invalid"
+        ) from None
+    if not support_ids:
+        return
+    target = (
+        await db.execute(
+            select(EvidenceUnit.id)
+            .where(
+                EvidenceUnit.library_id == publication.library_id,
+                EvidenceUnit.document_revision_id == operation.document_revision_id,
+                EvidenceUnit.id.in_(support_ids),
+            )
+            .limit(1)
+        )
+    ).first()
+    if target is not None:
+        raise GraphPublicationActivationError(
+            "coordinated_purge_target_evidence",
+            "coordinated replacement still cites target Evidence",
         )
 
 
@@ -429,6 +505,7 @@ async def _activate_locked(
         config=config,
     )
     _validate_stored_snapshot(publication, items, candidate, config=config)
+    await _reject_coordinated_target_evidence(db, publication, items)
     await _reject_retiring_support_evidence(db, publication, items)
 
     publication.status = GRAPH_PUBLICATION_STATUS_ACTIVATING

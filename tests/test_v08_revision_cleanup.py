@@ -588,10 +588,15 @@ def test_cleanup_scope_lock_order_starts_with_library_before_owned_rows():
 
     scope = _scope()
     results = [
-        _Result(first=SimpleNamespace(library_id=scope.library.id)),
+        _Result(
+            first=SimpleNamespace(
+                library_id=scope.library.id,
+                document_id=scope.document.id,
+            )
+        ),
         _Result([scope.library]),
-        _Result([scope.record]),
         _Result([scope.document]),
+        _Result([scope.record]),
         _Result([scope.old_revision, scope.replacement_revision]),
         _Result([scope.revision_file]),
     ]
@@ -614,8 +619,8 @@ def test_cleanup_scope_lock_order_starts_with_library_before_owned_rows():
     assert models == [
         RevisionRetentionRecord,
         Library,
-        RevisionRetentionRecord,
         Document,
+        RevisionRetentionRecord,
         DocumentRevision,
         DocumentRevisionFile,
     ]

@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import (
     settings,
+    validate_revision_coordinated_purge_startup,
     validate_revision_cleanup_startup,
     validate_revision_file_storage_startup,
     validate_revision_retention_startup,
@@ -190,6 +191,24 @@ async def run(watch: bool) -> None:
                     )
             except Exception:  # noqa: BLE001
                 log.exception("revision retention maintenance failed")
+        if settings.revision_coordinated_purge_enabled:
+            from app.services.revision_coordinated_purge_runner import (
+                run_coordinated_purge_batch,
+            )
+
+            try:
+                purge_result = await run_coordinated_purge_batch(
+                    async_session_factory,
+                    worker_id=worker_id,
+                )
+                if purge_result.cleanup_pending_ids or purge_result.failed_ids:
+                    log.info(
+                        "coordinated purge: cleanup_pending=%s failed=%s",
+                        len(purge_result.cleanup_pending_ids),
+                        len(purge_result.failed_ids),
+                    )
+            except Exception:  # noqa: BLE001
+                log.exception("coordinated purge batch failed")
         if settings.revision_cleanup_enabled:
             from app.services.revision_cleanup_runner import (
                 run_revision_cleanup_batch,
@@ -215,6 +234,26 @@ async def run(watch: bool) -> None:
                     )
             except Exception:  # noqa: BLE001
                 log.exception("revision cleanup batch failed")
+        if settings.revision_coordinated_purge_enabled:
+            from app.services.revision_coordinated_purge import (
+                reconcile_coordinated_purge_operations,
+            )
+
+            try:
+                async with async_session_factory() as purge_reconcile_session:
+                    async with purge_reconcile_session.begin():
+                        completed_operation_ids = (
+                            await reconcile_coordinated_purge_operations(
+                                purge_reconcile_session
+                            )
+                        )
+                if completed_operation_ids:
+                    log.info(
+                        "coordinated purge completed=%s",
+                        len(completed_operation_ids),
+                    )
+            except Exception:  # noqa: BLE001
+                log.exception("coordinated purge reconciliation failed")
         try:
             async with async_session_factory() as purge_session:
                 async with purge_session.begin():
@@ -255,6 +294,7 @@ def main() -> None:
     validate_revision_retention_startup(settings)
     validate_revision_file_storage_startup(settings)
     validate_revision_cleanup_startup(settings)
+    validate_revision_coordinated_purge_startup(settings)
     try:
         asyncio.run(run(watch=args.watch))
     except KeyboardInterrupt:

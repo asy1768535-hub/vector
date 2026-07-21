@@ -41,6 +41,7 @@ from app.models.migration_backfill_state import MigrationBackfillState
 from app.models.ontology_version import OntologyVersion
 from app.models.rebuild_operation import RebuildOperation
 from app.models.revision_retention import RevisionRetentionRecord
+from app.models.revision_purge_operation import RevisionPurgeOperation
 from app.models.relation_evidence import RelationEvidence
 from app.models.relation_type import RelationType
 from app.models.relation_type_constraint import RelationTypeConstraint
@@ -95,6 +96,7 @@ __all__ = [
     "OntologyVersion",
     "RebuildOperation",
     "RevisionRetentionRecord",
+    "RevisionPurgeOperation",
     "RelationEvidence",
     "RelationType",
     "RelationTypeConstraint",

@@ -44,6 +44,7 @@ from app.config import (
     settings,
     validate_revision_file_storage_startup,
     validate_revision_cleanup_startup,
+    validate_revision_coordinated_purge_startup,
     validate_revision_retention_startup,
     validate_entity_linking_startup,
     validate_graph_extraction_startup,
@@ -121,6 +122,7 @@ def assert_revision_file_storage_startup_security() -> None:
 def assert_revision_retention_startup_security() -> None:
     validate_revision_retention_startup(settings)
     validate_revision_cleanup_startup(settings)
+    validate_revision_coordinated_purge_startup(settings)
 
 
 def assert_graph_publication_startup_security() -> None:

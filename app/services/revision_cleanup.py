@@ -111,6 +111,7 @@ async def lock_cleanup_scope(
             select(
                 RevisionRetentionRecord.id,
                 RevisionRetentionRecord.library_id,
+                RevisionRetentionRecord.document_id,
             ).where(RevisionRetentionRecord.id == record_id)
         )
     ).first()
@@ -118,6 +119,16 @@ async def lock_cleanup_scope(
         return None
     library = await _lock_library(db, initial.library_id)
     if library is None:
+        return None
+    document = (
+        await db.execute(
+            select(Document)
+            .where(Document.id == initial.document_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalars().first()
+    if document is None or document.library_id != library.id:
         return None
     record = (
         await db.execute(
@@ -127,16 +138,12 @@ async def lock_cleanup_scope(
             .execution_options(populate_existing=True)
         )
     ).scalars().first()
-    if record is None or record.library_id != library.id:
+    if (
+        record is None
+        or record.library_id != library.id
+        or record.document_id != document.id
+    ):
         return None
-    document = (
-        await db.execute(
-            select(Document)
-            .where(Document.id == record.document_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-    ).scalars().first()
     revisions = list(
         (
             await db.execute(
