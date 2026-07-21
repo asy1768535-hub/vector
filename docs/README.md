@@ -1,5 +1,14 @@
 # 文档索引
 
+> **v0.7 corrective G2.8 UTF-8 evidence correction (2026-07-21):** The initial
+> PowerShell-to-Python qualification encoded the two Chinese public probes incorrectly;
+> its `21c8f3...` output-set SHA is preserved but is not release authority. Direct UTF-8
+> source execution bound the ordered probe inputs to
+> `84e98f3ccece28683758bbf21c6272faa673a66ec1efc047937e2026f5d3e907` and produced
+> stable full-float32 output-set SHA
+> `688c070c4db9b8ccaf59161c1120e49ce8c2c7ded288169c305772f2d3b27c55`
+> across all `64/64` calls. Scope and fresh identities are unchanged.
+>
 > **v0.7 corrective G2.8 (2026-07-21):** The user restarted bge-m3 as a
 > deterministic single instance. The pre-registered eight public probes each produced
 > one identical full-float32 hash across eight repetitions (`64/64`), with probe-set SHA
