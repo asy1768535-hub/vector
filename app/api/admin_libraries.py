@@ -35,6 +35,10 @@ from app.services import (
     qdrant,
     source_enrichment,
 )
+from app.services.organization_authorization import (
+    OrganizationAuthorizationError,
+    authorize_library_management,
+)
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin/libraries", tags=["admin"])
@@ -481,9 +485,19 @@ async def delete_library(
 
 
 # ── 常用问题（FAQ）：read 可看 active；admin/superuser 可管理 ───────────────
-def _can_manage_or_see_inactive(user: User, slug: str) -> bool:
+async def _can_manage_or_see_inactive(
+    db: AsyncSession,
+    user: User,
+    library: Library,
+) -> bool:
     """是否可管理 FAQ / 查看 inactive：superuser 直通，否则需库级 admin 权限。"""
-    return user.is_superuser or has_permission(str(user.id), slug, "admin")
+    if not settings.organization_authorization_enabled:
+        return user.is_superuser or has_permission(str(user.id), library.slug, "admin")
+    try:
+        await authorize_library_management(db, user=user, library=library)
+        return True
+    except OrganizationAuthorizationError:
+        return False
 
 
 @router.get("/{slug}/faqs", response_model=list[LibraryFAQRead])
@@ -495,7 +509,9 @@ async def list_library_faqs(
     db: AsyncSession = Depends(get_db),
 ) -> list[LibraryFAQQuestion]:
     # include_inactive 只对 admin/superuser 生效；普通 read 用户强制只看 active
-    effective_inactive = include_inactive and _can_manage_or_see_inactive(user, slug)
+    effective_inactive = include_inactive and await _can_manage_or_see_inactive(
+        db, user, lib
+    )
     return await library_faq.list_faqs(db, lib.id, include_inactive=effective_inactive)
 
 

@@ -182,6 +182,7 @@ class MembershipChangeCommand:
     role: str
     status: str
     actor_user_id: uuid.UUID | None = None
+    organization_id: uuid.UUID | None = None
 
     def __post_init__(self) -> None:
         _require_uuid(
@@ -190,6 +191,12 @@ class MembershipChangeCommand:
             "Organization membership identity is invalid",
         )
         _require_optional_actor(self.actor_user_id)
+        if self.organization_id is not None:
+            _require_uuid(
+                self.organization_id,
+                "organization_id_invalid",
+                "Organization identity is invalid",
+            )
         _require_choice(
             self.expected_role,
             ORGANIZATION_MEMBERSHIP_ROLES,
@@ -545,6 +552,13 @@ async def change_organization_membership(
     organization, membership = await _lock_membership_scope(
         db, command.membership_id
     )
+    if (
+        command.organization_id is not None
+        and organization.id != command.organization_id
+    ):
+        raise OrganizationIdentityError(
+            "organization_membership_not_found", "Membership was not found"
+        )
     if organization.status != "active":
         raise OrganizationIdentityError(
             "organization_suspended", "Organization is suspended"

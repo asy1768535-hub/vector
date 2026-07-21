@@ -42,6 +42,11 @@ from app.schemas.chat import (
 from app.schemas.dify import DifyRetrievalRequest, RetrievalSetting
 from app.services import chat_answer, chat_history
 from app.services.retrieval import run_retrieval
+from app.services.organization_authorization import (
+    OrganizationAuthorizationError,
+    authorize_library,
+    list_accessible_libraries,
+)
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -53,6 +58,8 @@ async def chat_libraries(
     db: AsyncSession = Depends(get_db),
 ) -> list[Library]:
     """当前用户可问答的库：superuser 看全部 active；普通用户只看有 read 权限的库。"""
+    if settings.organization_authorization_enabled:
+        return list(await list_accessible_libraries(db, user=user, action="read"))
     base = select(Library).where(Library.deleted_at.is_(None)).order_by(Library.name.asc())
     if user.is_superuser:
         rows = await db.execute(base)
@@ -119,11 +126,22 @@ async def _retrieve_for_chat(body: ChatMessageRequest, user: User, db: AsyncSess
     """开关 + read 权限 + 库状态校验，复用现有检索。返回 (lib, records)；不通过抛 HTTPException。"""
     if not settings.chat_enabled:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Chat 功能未启用")
-    lib = await load_active_library(body.library_slug, db)        # 不暴露存在性，统一 403
-    if lib is None:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden")
-    if not user.is_superuser and not has_permission(str(user.id), lib.slug, "read"):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden")
+    if settings.organization_authorization_enabled:
+        try:
+            lib = await authorize_library(
+                db,
+                user=user,
+                library_slug=body.library_slug,
+                action="read",
+            )
+        except OrganizationAuthorizationError as exc:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden") from exc
+    else:
+        lib = await load_active_library(body.library_slug, db)
+        if lib is None:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden")
+        if not user.is_superuser and not has_permission(str(user.id), lib.slug, "read"):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden")
     if lib.index_state in ("rebuilding", "failed"):
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "library index rebuilding")
     try:

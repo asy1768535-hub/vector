@@ -241,14 +241,17 @@ def test_0030_orm_migration_and_default_identity_match():
     assert "DELETE FROM" not in migration
 
 
-def test_0030_is_the_single_head_and_local_offline_sql_is_exactly_reversible():
+def test_0030_remains_linear_and_local_offline_sql_is_exactly_reversible():
     config = Config(str(ROOT / "alembic.ini"))
     script = ScriptDirectory.from_config(config)
     migration = script.get_revision("0030")
     assert migration is not None
     assert migration.down_revision == "0029"
     assert Path(migration.path).resolve() == MIGRATION.resolve()
-    assert script.get_heads() == ["0030"]
+    next_migration = script.get_revision("0031")
+    assert next_migration is not None
+    assert next_migration.down_revision == "0030"
+    assert script.get_heads() == ["0031"]
 
     upgrade = _offline("upgrade", "0029:0030")
     downgrade = _offline("downgrade", "0030:0029")
@@ -666,7 +669,6 @@ def test_update_organization_uses_expected_state_and_bounded_audit(monkeypatch):
 
 
 def test_foundation_does_not_mount_or_change_authorization_routes():
-    assert not Path("app/api/organizations.py").exists()
     service = Path("app/services/organization_identity.py").read_text(encoding="utf-8")
     assert "has_permission" not in service
     assert "ApiKey" not in service

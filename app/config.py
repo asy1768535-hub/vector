@@ -169,6 +169,7 @@ class Settings(BaseSettings):
     cookie_name: str = "vk_session"
     # 公开注册 /auth/register：内部部门平台默认关闭，只许超管经 /admin/users 建用户。
     allow_public_registration: bool = False
+    organization_authorization_enabled: bool = False
 
     # ---- 文件导入 ----
     # /import-file 单次上传字节上限（默认 50MiB），超出 413，避免一次性 read 打爆内存。
@@ -737,6 +738,16 @@ def validate_entity_linking_startup(config: Settings) -> None:
         or approved["min_margin_micros"] != config.entity_linking_min_margin_micros
     ):
         raise RuntimeError("[security] entity linking policy thresholds do not match runtime")
+
+
+def validate_organization_authorization_startup(config: Settings) -> None:
+    if (
+        config.organization_authorization_enabled
+        and config.allow_public_registration
+    ):
+        raise RuntimeError(
+            "[security] Organization authorization requires public registration to be disabled"
+        )
 
 
 @lru_cache(maxsize=1)
