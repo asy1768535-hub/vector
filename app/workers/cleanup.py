@@ -20,7 +20,12 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
+from app.config import (
+    settings,
+    validate_revision_cleanup_startup,
+    validate_revision_file_storage_startup,
+    validate_revision_retention_startup,
+)
 from app.db import async_session_factory
 from app.models.cleanup_outbox import CleanupOutbox
 from app.services import cleanup as cleanup_service
@@ -185,6 +190,31 @@ async def run(watch: bool) -> None:
                     )
             except Exception:  # noqa: BLE001
                 log.exception("revision retention maintenance failed")
+        if settings.revision_cleanup_enabled:
+            from app.services.revision_cleanup_runner import (
+                run_revision_cleanup_batch,
+            )
+
+            try:
+                cleanup_result = await run_revision_cleanup_batch(
+                    async_session_factory,
+                    worker_id=worker_id,
+                )
+                if (
+                    cleanup_result.queued_record_ids
+                    or cleanup_result.cleaned_record_ids
+                    or cleanup_result.released_record_ids
+                    or cleanup_result.failed_record_ids
+                ):
+                    log.info(
+                        "revision cleanup: queued=%s cleaned=%s released=%s failed=%s",
+                        len(cleanup_result.queued_record_ids),
+                        len(cleanup_result.cleaned_record_ids),
+                        len(cleanup_result.released_record_ids),
+                        len(cleanup_result.failed_record_ids),
+                    )
+            except Exception:  # noqa: BLE001
+                log.exception("revision cleanup batch failed")
         try:
             async with async_session_factory() as purge_session:
                 async with purge_session.begin():
@@ -222,6 +252,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Qdrant cleanup outbox worker.")
     parser.add_argument("--watch", action="store_true", help="Long-running; poll when idle.")
     args = parser.parse_args()
+    validate_revision_retention_startup(settings)
+    validate_revision_file_storage_startup(settings)
+    validate_revision_cleanup_startup(settings)
     try:
         asyncio.run(run(watch=args.watch))
     except KeyboardInterrupt:

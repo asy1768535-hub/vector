@@ -85,6 +85,33 @@ class RevisionRetentionRecord(Base):
             "held_by_user_id IS NULL AND held_at IS NULL))",
             name="ck_revision_retention_hold_shape",
         ),
+        CheckConstraint(
+            "attempt_count >= 0",
+            name="ck_revision_retention_attempt_count",
+        ),
+        CheckConstraint(
+            "((status = 'processing' AND worker_id IS NOT NULL AND "
+            "claim_token IS NOT NULL AND claimed_at IS NOT NULL AND "
+            "lease_expires_at IS NOT NULL AND lease_expires_at > claimed_at) OR "
+            "(status <> 'processing' AND worker_id IS NULL AND claim_token IS NULL AND "
+            "claimed_at IS NULL AND lease_expires_at IS NULL))",
+            name="ck_revision_retention_claim_shape",
+        ),
+        CheckConstraint(
+            "((status IN ('queued','failed') AND available_at IS NOT NULL) OR "
+            "(status NOT IN ('queued','failed') AND available_at IS NULL))",
+            name="ck_revision_retention_available_shape",
+        ),
+        CheckConstraint(
+            "((status = 'cleaned' AND finished_at IS NOT NULL) OR "
+            "(status <> 'cleaned' AND finished_at IS NULL))",
+            name="ck_revision_retention_finished_shape",
+        ),
+        CheckConstraint(
+            "((status = 'failed' AND last_error_code IS NOT NULL) OR "
+            "(status <> 'failed' AND last_error_code IS NULL))",
+            name="ck_revision_retention_error_shape",
+        ),
         UniqueConstraint(
             "revision_file_id",
             name="uq_revision_retention_revision_file",
@@ -107,6 +134,16 @@ class RevisionRetentionRecord(Base):
             "ix_revision_retention_library_status",
             "library_id",
             "status",
+        ),
+        Index(
+            "ix_revision_retention_cleanup_due",
+            "status",
+            "available_at",
+        ),
+        Index(
+            "ix_revision_retention_cleanup_lease",
+            "status",
+            "lease_expires_at",
         ),
     )
 
@@ -191,6 +228,26 @@ class RevisionRetentionRecord(Base):
     held_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    attempt_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    available_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    worker_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    claim_token: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PgUUID(as_uuid=True), nullable=True
+    )
+    claimed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    lease_expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error_code: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

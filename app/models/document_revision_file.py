@@ -64,6 +64,19 @@ class DocumentRevisionFile(Base):
             "source_locator->>'kind' = 'external_object')",
             name="ck_document_revision_files_external_ownership",
         ),
+        CheckConstraint(
+            "lifecycle_status IN ('available','deleting','deleted','released')",
+            name="ck_document_revision_files_lifecycle_status",
+        ),
+        CheckConstraint(
+            "((lifecycle_status IN ('available','deleting') AND deleted_at IS NULL AND "
+            "delete_verified_at IS NULL) OR "
+            "(lifecycle_status = 'deleted' AND deleted_at IS NOT NULL AND "
+            "delete_verified_at IS NOT NULL AND delete_verified_at >= deleted_at) OR "
+            "(lifecycle_status = 'released' AND deleted_at IS NOT NULL AND "
+            "delete_verified_at IS NULL))",
+            name="ck_document_revision_files_lifecycle_shape",
+        ),
         UniqueConstraint(
             "document_revision_id",
             name="uq_document_revision_files_revision",
@@ -106,6 +119,15 @@ class DocumentRevisionFile(Base):
     )
     source_locator: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
     verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    lifecycle_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="available", server_default="available"
+    )
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    delete_verified_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

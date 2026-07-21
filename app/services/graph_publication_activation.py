@@ -7,11 +7,13 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, settings
 from app.models.entity import GRAPH_FACT_STATUS_ACTIVE, Entity
+from app.models.evidence_unit import EvidenceUnit
+from app.models.document_revision_file import DocumentRevisionFile
 from app.models.graph_publication import (
     GRAPH_PUBLICATION_SOURCE_ROLLBACK,
     GRAPH_PUBLICATION_STATUS_ACTIVE,
@@ -34,6 +36,7 @@ from app.models.knowledge_relation import KnowledgeRelation
 from app.models.library import Library
 from app.models.ontology_version import ONTOLOGY_STATUS_ACTIVE, OntologyVersion
 from app.models.relation_evidence import RelationEvidence
+from app.models.revision_retention import RevisionRetentionRecord
 from app.services import audit_log
 from app.services.graph_publication_planner import (
     GraphPublicationPlanResult,
@@ -244,6 +247,57 @@ def _validate_stored_snapshot(
         raise GraphPublicationActivationError("publication_manifest_mismatch", "publication manifest mismatch")
 
 
+async def _reject_retiring_support_evidence(
+    db: AsyncSession,
+    publication: GraphPublication,
+    items: list[GraphPublicationItem],
+) -> None:
+    support_ids: set[uuid.UUID] = set()
+    try:
+        for item in items:
+            support_ids.update(
+                uuid.UUID(str(value)) for value in (item.support_evidence_ids or [])
+            )
+    except (TypeError, ValueError, AttributeError):
+        raise GraphPublicationActivationError(
+            "publication_item_invalid", "publication support Evidence is invalid"
+        ) from None
+    if not support_ids:
+        return
+    retiring = (
+        await db.execute(
+            select(RevisionRetentionRecord.id)
+            .select_from(EvidenceUnit)
+            .join(
+                RevisionRetentionRecord,
+                RevisionRetentionRecord.document_revision_id
+                == EvidenceUnit.document_revision_id,
+            )
+            .join(
+                DocumentRevisionFile,
+                DocumentRevisionFile.id == RevisionRetentionRecord.revision_file_id,
+            )
+            .where(
+                EvidenceUnit.library_id == publication.library_id,
+                EvidenceUnit.id.in_(support_ids),
+                RevisionRetentionRecord.library_id == publication.library_id,
+                or_(
+                    RevisionRetentionRecord.status.in_(
+                        ("queued", "processing", "cleaned")
+                    ),
+                    DocumentRevisionFile.lifecycle_status != "available",
+                ),
+            )
+            .limit(1)
+        )
+    ).first()
+    if retiring is not None:
+        raise GraphPublicationActivationError(
+            "publication_evidence_retiring",
+            "publication support Evidence is retiring",
+        )
+
+
 async def _supersede_previous_items(
     db: AsyncSession,
     previous: GraphPublication | None,
@@ -375,6 +429,7 @@ async def _activate_locked(
         config=config,
     )
     _validate_stored_snapshot(publication, items, candidate, config=config)
+    await _reject_retiring_support_evidence(db, publication, items)
 
     publication.status = GRAPH_PUBLICATION_STATUS_ACTIVATING
     await db.flush()

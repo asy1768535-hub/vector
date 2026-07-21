@@ -746,15 +746,16 @@ async def download_document_file(
             document=doc,
         )
         if revision_row is not None:
-            access = revision_file_access_from_row(revision_row)
-            await db.rollback()
-            adapter = build_object_storage_adapter()
             try:
+                access = revision_file_access_from_row(revision_row)
+                await db.rollback()
+                adapter = build_object_storage_adapter()
                 content = await verified_revision_file_bytes(adapter, access)
             except ObjectStorageError as exc:
+                await db.rollback()
                 http_status = (
                     status.HTTP_404_NOT_FOUND
-                    if exc.code == "object_not_found"
+                    if exc.code in {"object_not_found", "revision_file_unavailable"}
                     else status.HTTP_502_BAD_GATEWAY
                 )
                 raise HTTPException(

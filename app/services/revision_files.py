@@ -46,6 +46,7 @@ class RevisionFileAccess:
     size_bytes: int
     sha256: str
     locator: StorageLocatorV1
+    lifecycle_status: str
 
 
 def _file_metadata(file_name: str, content_type: str | None) -> tuple[str, str | None]:
@@ -71,7 +72,7 @@ def _managed_object_key(library_id: uuid.UUID, digest: str, file_name: str) -> s
     return f"libraries/{library_id}/objects/{digest}{_suffix(file_name)}"
 
 
-def _require_adapter_identity(adapter, locator: StorageLocatorV1) -> None:
+def require_storage_adapter_identity(adapter, locator: StorageLocatorV1) -> None:
     if (
         adapter.provider != locator.provider
         or adapter.endpoint_ref != locator.endpoint_ref
@@ -89,7 +90,7 @@ async def _verify_object(
     expected_sha256: str,
     expected_size_bytes: int,
 ) -> bytes:
-    _require_adapter_identity(adapter, locator)
+    require_storage_adapter_identity(adapter, locator)
     stat = await adapter.stat(locator.object_key, locator.object_version)
     if stat.size_bytes != expected_size_bytes:
         raise ObjectStorageError(
@@ -460,6 +461,10 @@ async def verified_revision_file_bytes(adapter, row: DocumentRevisionFile) -> by
     access = (
         row if isinstance(row, RevisionFileAccess) else revision_file_access_from_row(row)
     )
+    if access.lifecycle_status != "available":
+        raise ObjectStorageError(
+            "revision_file_unavailable", "revision file is not available"
+        )
     return await _verify_object(
         adapter=adapter,
         locator=access.locator,
@@ -469,10 +474,16 @@ async def verified_revision_file_bytes(adapter, row: DocumentRevisionFile) -> by
 
 
 def revision_file_access_from_row(row: DocumentRevisionFile) -> RevisionFileAccess:
+    lifecycle_status = getattr(row, "lifecycle_status", "available")
+    if lifecycle_status != "available":
+        raise ObjectStorageError(
+            "revision_file_unavailable", "revision file is not available"
+        )
     return RevisionFileAccess(
         file_name=row.file_name,
         content_type=row.content_type,
         size_bytes=row.size_bytes,
         sha256=row.sha256,
         locator=storage_locator_from_row(row),
+        lifecycle_status=lifecycle_status,
     )

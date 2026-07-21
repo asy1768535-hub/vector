@@ -188,6 +188,10 @@ class Settings(BaseSettings):
     revision_retention_enabled: bool = False
     revision_retention_batch_size: int = 50
     revision_retention_impact_evidence_sample: int = 20
+    revision_cleanup_enabled: bool = False
+    revision_cleanup_batch_size: int = 16
+    revision_cleanup_lease_seconds: int = 300
+    revision_cleanup_max_attempts: int = 10
 
     # ---- 检索可见性过滤（#6 批次 A，revision 维度）----
     retrieval_consistency_filter: bool = True   # 总开关；关掉则不回查 PG（灰度/回滚用）
@@ -548,6 +552,31 @@ def validate_revision_retention_startup(config: Settings) -> None:
     if not 1 <= config.revision_retention_impact_evidence_sample <= 100:
         raise RuntimeError(
             "[security] revision retention Evidence sample must be within 1..100"
+        )
+
+
+def validate_revision_cleanup_startup(config: Settings) -> None:
+    if not config.revision_cleanup_enabled:
+        return
+    if not config.revision_retention_enabled:
+        raise RuntimeError(
+            "[security] revision cleanup requires retention governance"
+        )
+    if not config.revision_file_storage_enabled:
+        raise RuntimeError(
+            "[security] revision cleanup requires revision file storage"
+        )
+    if not 1 <= config.revision_cleanup_batch_size <= 100:
+        raise RuntimeError(
+            "[security] revision cleanup batch size must be within 1..100"
+        )
+    if not 30 <= config.revision_cleanup_lease_seconds <= 3_600:
+        raise RuntimeError(
+            "[security] revision cleanup lease must be within 30..3600 seconds"
+        )
+    if not 1 <= config.revision_cleanup_max_attempts <= 100:
+        raise RuntimeError(
+            "[security] revision cleanup max attempts must be within 1..100"
         )
 
 
