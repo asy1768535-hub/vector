@@ -399,11 +399,34 @@ def _tree_sha256_at_commit(root: Path, commit: str, paths: tuple[str, ...]) -> s
 
 
 @lru_cache(maxsize=256)
-def _blob_hashes_at_commit(root: Path, commit: str, path: str) -> tuple[str, str]:
+def _blob_bytes_at_commit(root: Path, commit: str, path: str) -> bytes:
     oid = _git(root, "rev-parse", f"{commit}:{path}")
-    body = subprocess.check_output(("git", "cat-file", "blob", oid), cwd=root)
+    return subprocess.check_output(("git", "cat-file", "blob", oid), cwd=root)
+
+
+@lru_cache(maxsize=256)
+def _blob_hashes_at_commit(root: Path, commit: str, path: str) -> tuple[str, str]:
+    body = _blob_bytes_at_commit(root, commit, path)
     checkout_body = body.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
     return hashlib.sha256(body).hexdigest(), hashlib.sha256(checkout_body).hexdigest()
+
+
+def _canonical_lf_bytes(body: bytes) -> bytes:
+    return body.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+
+@lru_cache(maxsize=4)
+def _dependency_records_at_commit(root: Path, commit: str) -> tuple[tuple[str, str], ...]:
+    payload = _blob_bytes_at_commit(
+        root,
+        commit,
+        "eval/entity_linking/manifests/feasibility_v5.json",
+    )
+    manifest = FeasibilityManifest.model_validate(parse_json_bytes(payload))
+    return tuple(
+        (record.repository_relative_path, record.exact_file_sha256)
+        for record in manifest.accepted_dependency_closure_records
+    )
 
 
 def _verify_frozen_dependency_records(
@@ -411,15 +434,22 @@ def _verify_frozen_dependency_records(
     commit: str,
     records: Sequence[dict[str, str]],
 ) -> None:
+    frozen_records = dict(_dependency_records_at_commit(root, commit))
+    if len(frozen_records) != len(records):
+        raise EntityLinkingEvalError("dependency_closure_unresolved")
     for record in records:
         path = record["repository_relative_path"]
         expected = record["exact_file_sha256"]
-        if path in FINAL_RUNTIME_PROTECTED_PATHS:
-            observed = _blob_hashes_at_commit(root, commit, path)
-        else:
-            observed = (hashlib.sha256((root / path).read_bytes()).hexdigest(),)
-        if expected not in observed:
+        if frozen_records.get(path) != expected:
             raise EntityLinkingEvalError("dependency_closure_unresolved")
+        if path in FINAL_RUNTIME_PROTECTED_PATHS:
+            if expected not in _blob_hashes_at_commit(root, commit, path):
+                raise EntityLinkingEvalError("dependency_closure_unresolved")
+        else:
+            frozen_body = _blob_bytes_at_commit(root, commit, path)
+            current_body = (root / path).read_bytes()
+            if _canonical_lf_bytes(current_body) != _canonical_lf_bytes(frozen_body):
+                raise EntityLinkingEvalError("dependency_closure_unresolved")
 
 
 def verify_g2_approval(root: Path) -> dict[str, str]:

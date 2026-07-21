@@ -49,6 +49,7 @@ from eval.entity_linking.reference_scorer import (
 from eval.entity_linking.runtime import (
     CALIBRATION_RUN_ID,
     FINAL_RUNTIME_PROTECTED_PATHS,
+    FROZEN_EVALUATOR_COMMIT,
     G2_APPROVAL_COMMIT,
     G2_SPECIFICATION_TREE_SHA256,
     EntityLinkingEvalError,
@@ -57,6 +58,7 @@ from eval.entity_linking.runtime import (
     _embedding_vector_sha256,
     _publication_projection_cache,
     _performance_cases,
+    _verify_frozen_dependency_records,
     _validate_historical_family_disjoint,
     _validate_references,
     assert_private_data_absent,
@@ -529,6 +531,43 @@ def test_dependency_closure_and_distribution_identity_are_exact():
         "fastapi-users-db-sqlalchemy",
         "pydantic-settings",
     }
+
+
+def test_frozen_dependency_closure_accepts_platform_newlines_and_rejects_content_drift(
+    monkeypatch,
+):
+    manifest = load_dataset(ROOT).manifest
+    records = tuple(
+        record.model_dump(mode="json") for record in manifest.accepted_dependency_closure_records
+    )
+    target = ROOT / "app/db.py"
+    original_read_bytes = Path.read_bytes
+    target_body = original_read_bytes(target).replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+    def lf_checkout(path):
+        if path == target:
+            return target_body
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", lf_checkout)
+    _verify_frozen_dependency_records(ROOT, FROZEN_EVALUATOR_COMMIT, records)
+
+    def crlf_checkout(path):
+        if path == target:
+            return target_body.replace(b"\n", b"\r\n")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", crlf_checkout)
+    _verify_frozen_dependency_records(ROOT, FROZEN_EVALUATOR_COMMIT, records)
+
+    def tampered_checkout(path):
+        if path == target:
+            return target_body + b"# content drift\n"
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", tampered_checkout)
+    with pytest.raises(EntityLinkingEvalError, match="dependency_closure_unresolved"):
+        _verify_frozen_dependency_records(ROOT, FROZEN_EVALUATOR_COMMIT, records)
 
 
 def test_distribution_manifest_rejects_length_order_duplicates_and_wrong_version():
