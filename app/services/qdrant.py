@@ -198,6 +198,9 @@ async def search(
         next_score = float(results[requested_limit].get("score") or 0.0)
         if cutoff_score != next_score:
             return results[:requested_limit]
+        tail_score = float(results[-1].get("score") or 0.0)
+        if tail_score != cutoff_score:
+            return results[:requested_limit]
         if query_limit >= _EXACT_TIE_PROBE_MAX:
             raise QdrantDeterminismError("exact search tie exceeds deterministic probe bound")
         query_limit = min(query_limit * 2, _EXACT_TIE_PROBE_MAX)

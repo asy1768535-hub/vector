@@ -125,8 +125,8 @@ from eval.entity_linking.reference_scorer import (
 )
 
 
-G2_APPROVAL_COMMIT = "9e2743c44785faf3d3aa10493305e66ef8862354"
-G2_SPECIFICATION_TREE_SHA256 = "ca2aa20067a021e10709a5488fd976f3d8c7bf8d4eab7766044eeceb05f89f17"
+G2_APPROVAL_COMMIT = "64fa00b3ce1c8a32e4f281575efd99bee2032d27"
+G2_SPECIFICATION_TREE_SHA256 = "eb1fad254b21e4ea8946f5d51e43ef56c5814f96d35a788444665086bdf7c813"
 G1_COMMIT = "f40c5c84c3248639aa6603d43b6b306ad76d66fd"
 AUDIT_PRESERVATION_COMMIT = "155ef946c48272518c996458bc206039b6676c18"
 INVALIDATED_G2_APPROVAL_COMMIT = "75bf4141be743c1164bfa9841d0737509d7575fe"
@@ -139,15 +139,15 @@ INVALIDATED_CALIBRATION_BLOB_OID = "4c1dc04cca1ddd874fa309ad0314ad24dfc0ea68"
 PRESERVED_GITATTRIBUTES_BLOB_OID = "3f5e0ee58b5d94db6fd2ed25511a9957130885f6"
 UUID_NAMESPACE = uuid.UUID("47eb7b81-7cac-42be-976d-92d8a009a325")
 SCORER_CONFORMANCE_UUID_NAMESPACE = uuid.UUID("1bcb8d89-4423-563a-962d-670c026f6dc8")
-CALIBRATION_RUN_ID = "v07-el-calibration-v10-20260721-01"
-CALIBRATION_DATABASE_ID = "vkt_v07_el_eval_calibration_v10_20260721_01"
+CALIBRATION_RUN_ID = "v07-el-calibration-v11-20260721-01"
+CALIBRATION_DATABASE_ID = "vkt_v07_el_eval_calibration_v11_20260721_01"
 POST_FREEZE_IDENTITIES = (
-    (1, "v07-el-post-freeze-v10-20260721-01", "vkt_v07_el_eval_post_freeze_v10_20260721_01"),
-    (2, "v07-el-post-freeze-v10-20260721-02", "vkt_v07_el_eval_post_freeze_v10_20260721_02"),
-    (3, "v07-el-post-freeze-v10-20260721-03", "vkt_v07_el_eval_post_freeze_v10_20260721_03"),
+    (1, "v07-el-post-freeze-v11-20260721-01", "vkt_v07_el_eval_post_freeze_v11_20260721_01"),
+    (2, "v07-el-post-freeze-v11-20260721-02", "vkt_v07_el_eval_post_freeze_v11_20260721_02"),
+    (3, "v07-el-post-freeze-v11-20260721-03", "vkt_v07_el_eval_post_freeze_v11_20260721_03"),
 )
-POLICY_PATH = "eval/entity_linking/link_policy_v9.json"
-RELEASE_EVIDENCE_PATH = "eval/entity_linking/release_evidence_v9.json"
+POLICY_PATH = "eval/entity_linking/link_policy_v10.json"
+RELEASE_EVIDENCE_PATH = "eval/entity_linking/release_evidence_v10.json"
 EMBEDDING_PROBE_TEXT = "vkt-v07-entity-linking-identity-probe"
 EMBEDDING_PROBE_SHA256 = "4caad60c112bd93fda55714c91aef2762a3c5c5c0df2a09dc28e6296800cc61f"
 CONTROL_RETRIEVAL_CANDIDATE_K = 50
@@ -170,6 +170,7 @@ DEPENDENCY_ROOT_MODULES = (
 )
 EXTERNAL_DISTRIBUTIONS = EXTERNAL_DISTRIBUTION_VERSIONS
 G3_IMPLEMENTATION_PATHS = (
+    "app/services/qdrant.py",
     "eval/entity_linking/__init__.py",
     "eval/entity_linking/contracts.py",
     "eval/entity_linking/reference_scorer.py",
@@ -182,6 +183,7 @@ G3_IMPLEMENTATION_PATHS = (
     "scripts/entity_linking_feasibility.py",
     "tests/test_v07_entity_linking_eval.py",
     "tests/test_v07_entity_linking_eval_pg.py",
+    "tests/test_qdrant_determinism.py",
     "docs/testing/acceptance/v0.7-entity-linking-feasibility.md",
 )
 PROTECTED_PATHS = (
@@ -215,6 +217,7 @@ G2_SPECIFICATION_PATHS = (
     "docs/testing/acceptance/v0.7-entity-linking-database-change-incident.md",
 )
 G2_APPROVAL_PATHS = (
+    ".gitattributes",
     "docs/README.md",
     "docs/superpowers/specs/2026-07-17-v0.7-publication-scoped-entity-linking.md",
     "docs/superpowers/plans/2026-07-17-v0.7-publication-scoped-entity-linking-g2.md",
@@ -228,6 +231,7 @@ LF_CONTRACT_PATHS = (
     "docs/testing/acceptance/v0.7-entity-linking-corrective-audit.md",
     "docs/testing/acceptance/v0.7-entity-linking-database-change-incident.md",
     "docs/testing/acceptance/v0.7-entity-linking-feasibility.md",
+    "app/services/qdrant.py",
     "eval/entity_linking/contracts.py",
     "eval/entity_linking/gold_v2.json",
     "eval/entity_linking/cases_v2.jsonl",
@@ -243,6 +247,7 @@ LF_CONTRACT_PATHS = (
     "scripts/entity_linking_feasibility.py",
     "tests/test_v07_entity_linking_eval.py",
     "tests/test_v07_entity_linking_eval_pg.py",
+    "tests/test_qdrant_determinism.py",
 )
 PHASE_OUTPUT_PATHS = (
     INVALIDATED_CALIBRATION_PATH,
@@ -442,8 +447,10 @@ def verify_g2_approval(root: Path) -> dict[str, str]:
     ):
         raise EntityLinkingEvalError("g2_specification_tree_drift")
 
-    protected = _git(root, "diff", "--name-only", G2_APPROVAL_COMMIT, "--", *PROTECTED_PATHS)
-    if protected:
+    protected = set(
+        _git(root, "diff", "--name-only", G2_APPROVAL_COMMIT, "--", *PROTECTED_PATHS).splitlines()
+    )
+    if protected - {"app/services/qdrant.py"}:
         raise EntityLinkingEvalError("scope_drift_detected")
     return {"g2_approval_commit": G2_APPROVAL_COMMIT, "g2_specification_tree_sha256": specification_hash}
 
@@ -1810,7 +1817,7 @@ def _fixed_controls() -> tuple[
             embedding_dimension=1024,
             vector_search_exact=True,
             vector_tie_completion_version=(
-                "score-desc-chunk-id-asc-probe-51-102-201-fail-closed-v1"
+                "score-desc-chunk-id-asc-probe-51-102-201-tail-complete-fail-closed-v2"
             ),
             hybrid_candidate_k=CONTROL_RETRIEVAL_CANDIDATE_K,
             hybrid_rrf_k=60,

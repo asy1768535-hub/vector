@@ -85,6 +85,31 @@ async def test_exact_search_expands_only_when_tie_crosses_cutoff(monkeypatch):
     assert [item["id"] for item in results] == [f"{index:03d}" for index in range(50)]
 
 
+class _CompletedTieClient(_TieClient):
+    async def post(self, _url, *, headers, json):
+        del headers
+        type(self).request_limits.append(json["limit"])
+        points = [
+            {
+                "id": f"{index:03d}",
+                "score": 0.5 if index < 64 else 0.4,
+                "payload": {"chunk_id": f"{index:03d}"},
+            }
+            for index in range(250)
+        ]
+        return _Response(points[: json["limit"]])
+
+
+async def test_exact_search_stops_when_expanded_probe_completes_tie(monkeypatch):
+    _CompletedTieClient.request_limits = []
+    monkeypatch.setattr(qdrant.httpx, "AsyncClient", _CompletedTieClient)
+
+    results = await qdrant.search("collection", [1.0], limit=50, exact=True)
+
+    assert _CompletedTieClient.request_limits == [51, 102]
+    assert [item["id"] for item in results] == [f"{index:03d}" for index in range(50)]
+
+
 class _OverflowTieClient(_TieClient):
     async def post(self, _url, *, headers, json):
         del headers

@@ -480,7 +480,7 @@ class ControlConfig(StrictModel):
     embedding_dimension: Literal[1024]
     vector_search_exact: Literal[True]
     vector_tie_completion_version: Literal[
-        "score-desc-chunk-id-asc-probe-51-102-201-fail-closed-v1"
+        "score-desc-chunk-id-asc-probe-51-102-201-tail-complete-fail-closed-v2"
     ]
     hybrid_candidate_k: Literal[50]
     hybrid_rrf_k: Literal[60]
