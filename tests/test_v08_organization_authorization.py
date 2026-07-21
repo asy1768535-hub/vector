@@ -153,7 +153,10 @@ def test_0031_api_key_orm_migration_and_offline_sql_match():
     script = ScriptDirectory.from_config(Config("alembic.ini"))
     migration = script.get_revision("0031")
     assert migration is not None and migration.down_revision == "0030"
-    assert script.get_heads() == ["0031"]
+    next_migration = script.get_revision("0032")
+    assert next_migration is not None
+    assert next_migration.down_revision == "0031"
+    assert script.get_heads() == ["0032"]
     upgrade = _offline("upgrade", "0030:0031")
     downgrade = _offline("downgrade", "0031:0030")
     for fragment in (

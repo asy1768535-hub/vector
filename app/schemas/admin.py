@@ -17,7 +17,7 @@ from app.services.knowledge_artifact_policy import (
 # 库唯一ID：只允许大小写英文字母和下划线（其它一律不允许）。
 # 同时它也是 Dify knowledge_id、URL 路径段、Qdrant collection 名、约定全文源表名，
 # 限定为合法 SQL 标识符字符集可避免下游各处转义问题。
-_SLUG_RE = re.compile(r"^[A-Za-z_]{2,80}$")
+LIBRARY_SLUG_RE = re.compile(r"^[A-Za-z_]{2,80}$")
 
 
 class StrictBaseModel(BaseModel):
@@ -107,7 +107,7 @@ class LibraryCreate(BaseModel):
     @field_validator("slug")
     @classmethod
     def _check_slug(cls, v: str) -> str:
-        if not _SLUG_RE.match(v):
+        if not LIBRARY_SLUG_RE.fullmatch(v):
             raise ValueError("库唯一ID 只能包含大小写英文字母和下划线，长度 2-80")
         return v
 

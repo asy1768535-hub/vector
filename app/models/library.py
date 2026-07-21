@@ -30,6 +30,18 @@ class Library(Base):
             "revision_retention_notice_days < revision_retention_days",
             name="ck_lib_revision_retention_policy",
         ),
+        CheckConstraint(
+            "(num_nonnulls(embedding_probe_contract_version, embedding_probe_model, "
+            "embedding_probe_dimension, embedding_probe_endpoint_sha256, "
+            "embedding_probe_fingerprint, embedding_probe_verified_at) = 0 OR "
+            "(num_nonnulls(embedding_probe_contract_version, embedding_probe_model, "
+            "embedding_probe_dimension, embedding_probe_endpoint_sha256, "
+            "embedding_probe_fingerprint, embedding_probe_verified_at) = 6 AND "
+            "embedding_probe_dimension > 0 AND "
+            "embedding_probe_endpoint_sha256 ~ '^[0-9a-f]{64}$' AND "
+            "embedding_probe_fingerprint ~ '^[0-9a-f]{64}$'))",
+            name="ck_sys_libraries_embedding_probe_snapshot",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -54,6 +66,20 @@ class Library(Base):
     vector_distance: Mapped[str] = mapped_column(String(16), nullable=False, default="cosine")
     # 库级 embedding 服务 URL；null = 用全局 settings.embedding_base_url
     embedding_base_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    embedding_probe_contract_version: Mapped[Optional[str]] = mapped_column(
+        String(32), nullable=True
+    )
+    embedding_probe_model: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    embedding_probe_dimension: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    embedding_probe_endpoint_sha256: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )
+    embedding_probe_fingerprint: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )
+    embedding_probe_verified_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     chunk_size: Mapped[int] = mapped_column(Integer, nullable=False, default=1000)
     chunk_overlap: Mapped[int] = mapped_column(Integer, nullable=False, default=120)

@@ -31,6 +31,7 @@ from app.api.chat import router as chat_router
 from app.api.documents import router as documents_router
 from app.api.health import router as health_router
 from app.api.me import router as me_router
+from app.api.library_compatibility import router as library_compatibility_router
 from app.api.organizations import router as organizations_router
 from app.api.retrieval import router as retrieval_router
 from app.api.v02_m4 import router as v02_m4_router
@@ -50,6 +51,7 @@ from app.config import (
     validate_entity_linking_startup,
     validate_graph_extraction_startup,
     validate_knowledge_artifact_startup,
+    validate_library_compatibility_startup,
     validate_organization_authorization_startup,
     validate_graph_publication_startup,
     validate_graph_retrieval_startup,
@@ -143,6 +145,10 @@ def assert_organization_authorization_startup_security() -> None:
     validate_organization_authorization_startup(settings)
 
 
+def assert_library_compatibility_startup_security() -> None:
+    validate_library_compatibility_startup(settings)
+
+
 def resolve_console_ui_dir(root: Path) -> Path | None:
     """Resolve the configured console UI directory without implicit frontend fallback."""
     configured = Path(settings.console_ui_dir)
@@ -164,6 +170,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     assert_graph_retrieval_startup_security()
     assert_entity_linking_startup_security()
     assert_organization_authorization_startup_security()
+    assert_library_compatibility_startup_security()
     # 预热 Casbin enforcer，确保 policy 已加载入内存
     get_enforcer()
     # 启动自检：embedding 服务 / Qdrant 配置错配时大声报（非 fatal，不阻断启动）
@@ -206,6 +213,7 @@ def create_app() -> FastAPI:
     app.include_router(build_auth_router())
     app.include_router(api_keys_router)
     app.include_router(me_router)
+    app.include_router(library_compatibility_router)
     app.include_router(organizations_router)
     app.include_router(documents_router)
     app.include_router(v02_m4_router)

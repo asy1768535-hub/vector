@@ -235,6 +235,57 @@ async def resolve_library_access(
     )
 
 
+async def resolve_library_selection(
+    db,
+    *,
+    user: User,
+    library_slugs: tuple[str, ...],
+    action: Action = "read",
+) -> tuple[OrganizationAccess, ...]:
+    if action not in VALID_ACTIONS or not library_slugs:
+        raise OrganizationAuthorizationError("organization_forbidden")
+    rows = (
+        await db.execute(
+            select(Library, OrganizationMembership, Organization)
+            .join(Organization, Organization.id == Library.organization_id)
+            .join(
+                OrganizationMembership,
+                and_(
+                    OrganizationMembership.organization_id == Library.organization_id,
+                    OrganizationMembership.user_id == user.id,
+                ),
+            )
+            .where(
+                Library.slug.in_(library_slugs),
+                Library.deleted_at.is_(None),
+                Organization.status == "active",
+                OrganizationMembership.status == "active",
+            )
+        )
+    ).all()
+    by_slug = {library.slug: (library, membership) for library, membership, _ in rows}
+    if len(by_slug) != len(library_slugs):
+        raise OrganizationAuthorizationError("organization_forbidden")
+    scope = credential_organization_scope(user)
+    accesses: list[OrganizationAccess] = []
+    for slug in library_slugs:
+        library, membership = by_slug[slug]
+        if scope is not None and scope.organization_id != library.organization_id:
+            raise OrganizationAuthorizationError("organization_forbidden")
+        if not _action_allowed(user, membership, library, action):
+            raise OrganizationAuthorizationError("organization_forbidden")
+        accesses.append(
+            OrganizationAccess(
+                organization_id=library.organization_id,
+                membership_id=membership.id,
+                role=membership.role,
+                library=library,
+                action=action,
+            )
+        )
+    return tuple(accesses)
+
+
 async def authorize_library(
     db,
     *,
