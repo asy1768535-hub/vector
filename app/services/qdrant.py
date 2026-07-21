@@ -17,6 +17,11 @@ from app.config import settings
 log = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=60.0, write=60.0, pool=5.0)
+_EXACT_TIE_PROBE_MAX = 201
+
+
+class QdrantDeterminismError(RuntimeError):
+    pass
 
 
 def _headers() -> dict[str, str]:
@@ -152,21 +157,47 @@ async def search(
     score_threshold: float | None = None,
     payload_filter: dict[str, Any] | None = None,
     with_payload: bool = True,
+    exact: bool = False,
 ) -> list[dict[str, Any]]:
+    if limit < 1:
+        raise ValueError("limit must be positive")
+    if exact and limit >= _EXACT_TIE_PROBE_MAX:
+        raise ValueError("exact limit must be below deterministic probe bound")
+    requested_limit = limit
+    query_limit = min(limit + 1, _EXACT_TIE_PROBE_MAX) if exact else limit
     payload: dict[str, Any] = {
         "vector": vector,
-        "limit": limit,
+        "limit": query_limit,
         "with_payload": with_payload,
     }
     if score_threshold is not None and score_threshold > 0:
         payload["score_threshold"] = score_threshold
     if payload_filter:
         payload["filter"] = payload_filter
-    async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
-        resp = await client.post(
-            _url(f"/collections/{collection}/points/search"),
-            headers=_headers(),
-            json=payload,
+    if exact:
+        payload["params"] = {"exact": True}
+    while True:
+        payload["limit"] = query_limit
+        async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
+            resp = await client.post(
+                _url(f"/collections/{collection}/points/search"),
+                headers=_headers(),
+                json=payload,
+            )
+        resp.raise_for_status()
+        results = sorted(
+            resp.json().get("result", []),
+            key=lambda item: (
+                -float(item.get("score") or 0.0),
+                str((item.get("payload") or {}).get("chunk_id") or item.get("id")),
+            ),
         )
-    resp.raise_for_status()
-    return resp.json().get("result", [])
+        if not exact or len(results) <= requested_limit or len(results) < query_limit:
+            return results[:requested_limit]
+        cutoff_score = float(results[requested_limit - 1].get("score") or 0.0)
+        next_score = float(results[requested_limit].get("score") or 0.0)
+        if cutoff_score != next_score:
+            return results[:requested_limit]
+        if query_limit >= _EXACT_TIE_PROBE_MAX:
+            raise QdrantDeterminismError("exact search tie exceeds deterministic probe bound")
+        query_limit = min(query_limit * 2, _EXACT_TIE_PROBE_MAX)

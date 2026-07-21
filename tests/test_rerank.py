@@ -13,6 +13,15 @@ def test_parse_sorts_desc_and_truncates():
     assert rerank._parse_results(body, top_n=2) == [(0, 0.9), (1, 0.5)]
 
 
+def test_parse_ties_use_candidate_index():
+    body = {"results": [
+        {"index": 2, "relevance_score": 0.5},
+        {"index": 0, "relevance_score": 0.5},
+        {"index": 1, "relevance_score": 0.5},
+    ]}
+    assert rerank._parse_results(body, top_n=3) == [(0, 0.5), (1, 0.5), (2, 0.5)]
+
+
 def test_parse_skips_missing_index():
     body = {"results": [{"relevance_score": 0.9}, {"index": 3, "relevance_score": 0.2}]}
     assert rerank._parse_results(body, top_n=5) == [(3, 0.2)]

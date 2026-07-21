@@ -150,6 +150,7 @@ POLICY_PATH = "eval/entity_linking/link_policy_v8.json"
 RELEASE_EVIDENCE_PATH = "eval/entity_linking/release_evidence_v8.json"
 EMBEDDING_PROBE_TEXT = "vkt-v07-entity-linking-identity-probe"
 EMBEDDING_PROBE_SHA256 = "4caad60c112bd93fda55714c91aef2762a3c5c5c0df2a09dc28e6296800cc61f"
+CONTROL_RETRIEVAL_CANDIDATE_K = 50
 
 DEPENDENCY_ROOT_MODULES = (
     "app.config",
@@ -1790,7 +1791,7 @@ def _fixed_controls() -> tuple[
             query_rewrite_llm_enabled=False,
             embedding_model="bge-m3",
             embedding_dimension=1024,
-            hybrid_candidate_k=50,
+            hybrid_candidate_k=CONTROL_RETRIEVAL_CANDIDATE_K,
             hybrid_rrf_k=60,
             hybrid_keyword_threshold_micros=300000,
             hybrid_keyword_title_boost_micros=1500000,
@@ -3941,7 +3942,7 @@ async def _retrieval_settings(
         "rerank_enabled": False,
         "query_rewrite_enabled": False,
         "query_rewrite_llm_enabled": False,
-        "hybrid_candidate_k": 50,
+        "hybrid_candidate_k": CONTROL_RETRIEVAL_CANDIDATE_K,
         "hybrid_rrf_k": 60,
         "hybrid_keyword_threshold": 0.3,
         "hybrid_keyword_title_boost": 1.5,
@@ -3998,6 +3999,8 @@ async def run_old_retrieval_control(
             retrieval_mode=mode,
             db=db,
             library=library,
+            candidate_k=CONTROL_RETRIEVAL_CANDIDATE_K,
+            exact_vector_search=True,
         )
     evidence_keys = tuple(
         str(record.metadata["evidence_key"])

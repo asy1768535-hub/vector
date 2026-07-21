@@ -27,3 +27,10 @@ release holdout cannot be scored until a v2-schema policy is frozen from an expl
 After calibration is verified and its hashes and selected thresholds are published, execution must stop
 for explicit human Gate B approval. Policy, post-freeze, and release artifacts are forbidden before
 that approval.
+
+The v9 calibration, policy v8, three individually passing post-freeze v9 artifacts, and
+release-evidence v8 `NO_GO` are now immutable history. The final failure was limited to
+cross-run dense/hybrid response-set determinism across rebuilt Qdrant collections; candidate
+and exact-only hashes were stable. Source changes after that evidence implement a bounded
+deterministic-control trial only. A new calibration or holdout run requires separately frozen
+governance, fresh unobserved families, and new output identities.
