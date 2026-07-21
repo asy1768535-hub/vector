@@ -11,6 +11,7 @@ from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
+from app.models.organization import DEFAULT_ORGANIZATION_ID
 
 
 class Library(Base):
@@ -32,6 +33,18 @@ class Library(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey(
+            "sys_organizations.id",
+            ondelete="RESTRICT",
+            name="fk_sys_libraries_organization",
+        ),
+        nullable=False,
+        default=DEFAULT_ORGANIZATION_ID,
+        server_default=str(DEFAULT_ORGANIZATION_ID),
+        index=True,
+    )
     slug: Mapped[str] = mapped_column(String(80), unique=True, nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(160), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

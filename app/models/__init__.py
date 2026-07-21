@@ -39,6 +39,8 @@ from app.models.library import Library
 from app.models.library_faq import LibraryFAQQuestion
 from app.models.migration_backfill_state import MigrationBackfillState
 from app.models.ontology_version import OntologyVersion
+from app.models.organization import Organization
+from app.models.organization_membership import OrganizationMembership
 from app.models.rebuild_operation import RebuildOperation
 from app.models.revision_retention import RevisionRetentionRecord
 from app.models.revision_purge_operation import RevisionPurgeOperation
@@ -94,6 +96,8 @@ __all__ = [
     "LibraryFAQQuestion",
     "MigrationBackfillState",
     "OntologyVersion",
+    "Organization",
+    "OrganizationMembership",
     "RebuildOperation",
     "RevisionRetentionRecord",
     "RevisionPurgeOperation",

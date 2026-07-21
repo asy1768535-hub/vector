@@ -9,6 +9,7 @@ from typing import Any, Optional
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from app.services.graph_extraction_safety import normalize_allowed_security_levels
+from app.models.organization import DEFAULT_ORGANIZATION_ID
 from app.services.knowledge_artifact_policy import (
     normalize_knowledge_artifact_security_levels,
 )
@@ -220,6 +221,7 @@ class LibraryUpdate(BaseModel):
 
 class LibraryRead(BaseModel):
     id: uuid.UUID
+    organization_id: uuid.UUID = DEFAULT_ORGANIZATION_ID
     slug: str
     name: str
     description: Optional[str] = None
@@ -267,6 +269,11 @@ class LibraryRead(BaseModel):
     @classmethod
     def _default_retention_notice_days(cls, value):
         return 7 if value is None else value
+
+    @field_validator("organization_id", mode="before")
+    @classmethod
+    def _default_organization_id(cls, value):
+        return DEFAULT_ORGANIZATION_ID if value is None else value
 
     model_config = {"from_attributes": True}
 
