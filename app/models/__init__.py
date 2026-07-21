@@ -32,6 +32,8 @@ from app.models.graph_candidate_evidence import (
 from app.models.graph_candidates import GraphEntityCandidate, GraphRelationCandidate
 from app.models.graph_occurrences import GraphEntityOccurrence, GraphRelationOccurrence
 from app.models.graph_review import GraphEntityMergeCandidate, GraphExtractionConflict
+from app.models.knowledge_artifact import KnowledgeArtifact
+from app.models.knowledge_artifact_job import KnowledgeArtifactJob
 from app.models.knowledge_relation import KnowledgeRelation
 from app.models.library import Library
 from app.models.library_faq import LibraryFAQQuestion
@@ -83,6 +85,8 @@ __all__ = [
     "GraphRelationCandidateEvidence",
     "GraphEntityMergeCandidate",
     "GraphExtractionConflict",
+    "KnowledgeArtifact",
+    "KnowledgeArtifactJob",
     "KnowledgeRelation",
     "Library",
     "LibraryFAQQuestion",
