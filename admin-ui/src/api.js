@@ -183,6 +183,51 @@ export async function downloadDocumentFile(slug, documentId) {
     return { blob: await resp.blob(), filename: filename || 'document-file' };
 }
 
+// ── v0.8 Knowledge Catalog（严格 current Revision 只读投影） ─────
+const CATALOG_QUERY_KEYS = [
+    'title',
+    'status',
+    'classification_state',
+    'label_id',
+    'limit',
+    'cursor',
+];
+
+function catalogQuery(params = {}) {
+    return new URLSearchParams(
+        CATALOG_QUERY_KEYS
+            .map((key) => [key, params[key]])
+            .filter(([, value]) => (
+                value !== null && value !== undefined && value !== ''
+            )),
+    ).toString();
+}
+
+export const listCatalogDocuments = (slug, params = {}, forceRefresh) => {
+    const query = catalogQuery(params);
+    const key = `listCatalogDocuments:${slug}:${query}`;
+    return cachedRequest(
+        key,
+        () => request(`/libraries/${slug}/catalog/documents${query ? `?${query}` : ''}`),
+        10000,
+        forceRefresh,
+    );
+};
+export const getCatalogDocument = (slug, documentId, forceRefresh) => cachedRequest(
+    `getCatalogDocument:${slug}:${documentId}`,
+    () => request(`/libraries/${slug}/catalog/documents/${documentId}`),
+    10000,
+    forceRefresh,
+);
+export const getCatalogEvidence = (slug, evidenceId, forceRefresh) => cachedRequest(
+    `getCatalogEvidence:${slug}:${evidenceId}`,
+    () => request(`/libraries/${slug}/catalog/evidence/${evidenceId}`),
+    10000,
+    forceRefresh,
+);
+export const getCatalogFileAccess = (slug, revisionFileId) =>
+    request(`/libraries/${slug}/catalog/files/${revisionFileId}/access`);
+
 // ── Admin: Jobs ──────────────────────────────────────────────
 const _jobsKey = (params) => 'listJobs:' + new URLSearchParams(params).toString();
 export const listJobs = (params = {}, forceRefresh) => cachedRequest(_jobsKey(params), () => request('/admin/jobs?' + new URLSearchParams(params).toString()), 10000, forceRefresh);

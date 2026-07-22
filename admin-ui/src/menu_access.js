@@ -18,6 +18,9 @@ export function menuAccess(user, permissions) {
     const acts = actionSet(user, permissions);
     const can = (a) => isSuper || acts.has(a);
     return {
+        // Catalog requires Organization authorization; platform superuser is not a
+        // customer-content bypass. Organization admins receive effective read rows.
+        catalog: acts.has('read'),
         documents: can('read'),
         search: can('read'),
         chat: can('read'),
@@ -31,6 +34,10 @@ export function canAccessRoute(user, permissions, perm) {
     if (!perm) return true;
     if (user && user.is_superuser) return true;
     return actionSet(user, permissions).has(perm);
+}
+
+export function canAccessEffectiveRoute(permissions, action) {
+    return actionSet(null, permissions).has(action);
 }
 
 // 普通用户的可读库列表（按 read 过滤），元素 {slug, name}。superuser 走 listLibraries，不用这里。

@@ -66,10 +66,12 @@ test('each menu index has correct sidebar icon', () => {
     }
 });
 
-test('Layout.js menu count and permissions unchanged', () => {
-    // Verify no menu items were added or removed
+test('Layout.js adds one read-gated Catalog menu and preserves existing permissions', () => {
     const menuItems = layoutSource.match(/<el-menu-item\s+/g) || [];
-    assert.equal(menuItems.length, 13, '13 menu items total');
+    assert.equal(menuItems.length, 14, '14 menu items total');
+    assert.ok(layoutSource.includes('index="/catalog"'), 'Catalog menu exists');
+    assert.ok(layoutSource.includes('v-if="access.catalog"'), 'Catalog read guard exists');
+    assert.ok(layoutSource.includes('mdi:bookshelf'), 'Catalog uses local bookshelf icon');
     // Verify permission guards still present
     assert.ok(layoutSource.includes('v-if="access.chat"'), 'chat permission');
     assert.ok(layoutSource.includes('v-if="isSuper"'), 'admin group');

@@ -7,7 +7,7 @@ import zhCn from 'element-plus/locale/zh-cn';
 
 import { store, refreshAuth } from './store.js';
 import { setUnauthorizedHandler } from './api.js';
-import { canAccessRoute, menuAccess } from './menu_access.js';
+import { canAccessEffectiveRoute, canAccessRoute, menuAccess } from './menu_access.js';
 
 function defaultRoute(user, permissions) {
     if (!user) return '/login';
@@ -27,6 +27,7 @@ import Users from './views/Users.js';
 import Libraries from './views/Libraries.js';
 import Permissions from './views/Permissions.js';
 import Documents from './views/Documents.js';
+import KnowledgeCatalog from './views/KnowledgeCatalog.js';
 import Search from './views/Search.js';
 import Chat from './views/Chat.js';
 import ChatLogs from './views/ChatLogs.js';
@@ -48,6 +49,7 @@ const routes = [
             { path: 'libraries', component: Libraries, meta: { title: '库管理', admin: true } },
             { path: 'permissions', component: Permissions, meta: { title: '权限矩阵', admin: true } },
             { path: 'documents', component: Documents, meta: { title: '文档', perm: 'read' } },
+            { path: 'catalog', component: KnowledgeCatalog, meta: { title: '知识目录', perm: 'read', effectivePerm: 'read' } },
             { path: 'search', component: Search, meta: { title: '数据检索', perm: 'read' } },
             { path: 'chat', component: Chat, meta: { title: '智能问答', perm: 'read' } },
             { path: 'chat-logs', component: ChatLogs, meta: { title: '问答日志', admin: true } },
@@ -78,6 +80,10 @@ router.beforeEach(async (to) => {
         return { path: '/login', query: { redirect: to.fullPath } };
     }
     if (to.meta.admin && !store.user.is_superuser) {
+        ElMessage.warning('你没有访问该页面的权限');
+        return { path: defaultRoute(store.user, store.permissions) };
+    }
+    if (to.meta.effectivePerm && !canAccessEffectiveRoute(store.permissions, to.meta.effectivePerm)) {
         ElMessage.warning('你没有访问该页面的权限');
         return { path: defaultRoute(store.user, store.permissions) };
     }

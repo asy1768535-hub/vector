@@ -89,6 +89,10 @@ export default {
                     <el-icon><local-icon icon="sidebar:document"></local-icon></el-icon>
                     <template #title>文档</template>
                 </el-menu-item>
+                <el-menu-item v-if="access.catalog" index="/catalog">
+                    <el-icon><local-icon icon="mdi:bookshelf"></local-icon></el-icon>
+                    <template #title>知识目录</template>
+                </el-menu-item>
                 <el-menu-item v-if="access.search" index="/search">
                     <el-icon><local-icon icon="sidebar:search"></local-icon></el-icon>
                     <template #title>数据检索</template>
