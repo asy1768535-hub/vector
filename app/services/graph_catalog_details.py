@@ -40,6 +40,10 @@ from app.services.graph_catalog_contracts import (
     graph_catalog_invariant_boundary,
 )
 from app.services.graph_catalog_scope import resolve_graph_catalog_scope
+from app.services.graph_governance_actions import (
+    entity_governance_state_hash,
+    relation_governance_state_hash,
+)
 
 
 DETAIL_LIMIT = 100
@@ -339,6 +343,7 @@ def _entity_item(row, library: Library) -> GraphCatalogEntityListItemRead:
         source_type=entity.source_type,
         authority_level=entity.authority_level,
         confidence=entity.confidence,
+        governance_state_hash=entity_governance_state_hash(entity),
         publication_state="published" if publication is not None else "staged",
         publication=publication,
         counts=GraphCatalogEvidenceCountsRead(
@@ -388,6 +393,7 @@ def _relation_item(row, library: Library) -> GraphCatalogRelationListItemRead:
         source_type=relation.source_type,
         authority_level=relation.authority_level,
         confidence=relation.confidence,
+        governance_state_hash=relation_governance_state_hash(relation),
         publication_state="published" if publication is not None else "staged",
         publication=publication,
         counts=GraphCatalogEvidenceCountsRead(

@@ -126,6 +126,9 @@ class GraphCatalogEntityListItemRead(StrictBaseModel):
     source_type: GraphCatalogSourceType
     authority_level: str | None = Field(default=None, max_length=32)
     confidence: float | None = Field(default=None, ge=0, le=1)
+    governance_state_hash: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
     publication_state: Literal["published", "staged"]
     publication: GraphCatalogPublicationRead | None
     counts: GraphCatalogEvidenceCountsRead
@@ -159,6 +162,9 @@ class GraphCatalogRelationListItemRead(StrictBaseModel):
     source_type: GraphCatalogSourceType
     authority_level: str | None = Field(default=None, max_length=32)
     confidence: float | None = Field(default=None, ge=0, le=1)
+    governance_state_hash: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
     publication_state: Literal["published", "staged"]
     publication: GraphCatalogPublicationRead | None
     counts: GraphCatalogEvidenceCountsRead

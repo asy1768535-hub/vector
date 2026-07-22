@@ -39,6 +39,10 @@ from app.models.extraction_raw_output_attempt import ExtractionRawOutputAttempt
 from app.models.folder import Folder
 from app.models.graph_extraction_job import GraphExtractionJob
 from app.models.graph_extraction_unit import GraphExtractionUnit
+from app.models.graph_governance_action import (
+    GraphGovernanceAction,
+    GraphGovernanceActionItem,
+)
 from app.models.graph_publication import GraphPublication
 from app.models.graph_publication_item import GraphPublicationItem
 from app.models.graph_candidate_evidence import (
@@ -105,6 +109,8 @@ __all__ = [
     "Folder",
     "GraphExtractionJob",
     "GraphExtractionUnit",
+    "GraphGovernanceAction",
+    "GraphGovernanceActionItem",
     "GraphPublication",
     "GraphPublicationItem",
     "GraphEntityCandidate",

@@ -389,6 +389,9 @@ class Settings(BaseSettings):
     # ---- v0.9 Organization Graph Catalog (default fail closed) ----
     graph_catalog_enabled: bool = False
 
+    # ---- v0.9 Graph Governance Actions (default fail closed) ----
+    graph_governance_enabled: bool = False
+
     # ---- v0.5 Active Graph Publication (M1 defaults; fail closed) ----
     graph_publication_enabled: bool = False
     graph_publication_require_entity_evidence: bool = True
@@ -682,6 +685,17 @@ def validate_graph_catalog_startup(config: Settings) -> None:
         raise RuntimeError(
             "[security] graph Catalog requires Organization authorization "
             "and cross-Library compatibility"
+        )
+
+
+def validate_graph_governance_startup(config: Settings) -> None:
+    if config.graph_governance_enabled and not (
+        config.organization_authorization_enabled
+        and config.graph_publication_enabled
+    ):
+        raise RuntimeError(
+            "[security] graph governance requires Organization authorization "
+            "and graph publication"
         )
 
 

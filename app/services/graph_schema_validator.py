@@ -241,6 +241,7 @@ async def validate_entity_write(
     requested_status: str = GRAPH_FACT_STATUS_DRAFT,
     source_type: str = GRAPH_SOURCE_MANUAL,
     confidence: float | None = None,
+    exclude_entity_id: uuid.UUID | None = None,
 ) -> EntityWriteValidation:
     ontology_version = await _get_scoped_active_ontology(db, library, ontology_version_id)
     entity_type = await _get_active_entity_type(db, library, ontology_version.id, entity_type_id)
@@ -265,6 +266,7 @@ async def validate_entity_write(
         ontology_version.id,
         entity_type.id,
         shape.normalized_name,
+        exclude_entity_id=exclude_entity_id,
     )
 
     return EntityWriteValidation(
@@ -623,18 +625,19 @@ async def _reject_duplicate_active_entity(
     ontology_version_id: uuid.UUID,
     entity_type_id: uuid.UUID,
     normalized_name: str,
+    *,
+    exclude_entity_id: uuid.UUID | None = None,
 ) -> None:
-    result = await db.execute(
-        select(Entity)
-        .where(
+    statement = select(Entity).where(
             Entity.library_id == library.id,
             Entity.ontology_version_id == ontology_version_id,
             Entity.entity_type_id == entity_type_id,
             Entity.normalized_name == normalized_name,
             Entity.status == GRAPH_FACT_STATUS_ACTIVE,
         )
-        .limit(1)
-    )
+    if exclude_entity_id is not None:
+        statement = statement.where(Entity.id != exclude_entity_id)
+    result = await db.execute(statement.limit(1))
     if result.scalars().first() is not None:
         raise ValueError("duplicate active entity")
 
