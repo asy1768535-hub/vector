@@ -16,6 +16,7 @@ from sqlalchemy import CheckConstraint
 
 from app.config import Settings, settings, validate_classification_decision_startup
 from app.models.classification_decision import (
+    DocumentClassificationDecision,
     DocumentClassificationDecisionSet,
     DocumentClassificationProposal,
     DocumentClassificationRun,
@@ -770,6 +771,112 @@ def test_review_accept_creates_manual_decision_and_fences_state(monkeypatch):
     with pytest.raises(ClassificationDecisionError) as stale:
         service._fence_effective_set(None, uuid.uuid4())
     assert stale.value.code == "classification_decision_state_changed"
+
+
+def test_review_list_batches_document_effective_decisions_and_enabled_labels(
+    monkeypatch,
+):
+    organization, actor = _organization(), _user()
+    library, taxonomy = _library(organization), _taxonomy(organization)
+    document, revision = _document_revision(library)
+    primary = _label(taxonomy, "primary")
+    run = _run(library, taxonomy, document, revision)
+    proposal = DocumentClassificationProposal(
+        id=uuid.uuid4(),
+        run_id=run.id,
+        label_id=primary.id,
+        role="primary",
+        rank=0,
+        confidence_micros=850_000,
+        status="pending_review",
+        reason_codes=["primary_confidence_below_threshold"],
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    decision_set = DocumentClassificationDecisionSet(
+        id=uuid.uuid4(),
+        library_id=library.id,
+        document_id=document.id,
+        document_revision_id=revision.id,
+        taxonomy_version_id=taxonomy.id,
+        source="manual",
+        lifecycle="effective",
+        generation_no=1,
+        reviewed_by_user_id=actor.id,
+        reviewed_at=NOW,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    decision = DocumentClassificationDecision(
+        id=uuid.uuid4(),
+        decision_set_id=decision_set.id,
+        label_id=primary.id,
+        role="primary",
+        ordinal=0,
+        created_at=NOW,
+    )
+    monkeypatch.setattr(
+        service,
+        "_require_library_management",
+        AsyncMock(return_value=library),
+    )
+    db = _DB(
+        _Result(scalar=1),
+        _Result(rows=((run, document),)),
+        _Result(rows=(taxonomy,)),
+        _Result(rows=(primary,)),
+        _Result(rows=((proposal, primary),)),
+        _Result(rows=(decision_set,)),
+        _Result(rows=((decision, primary),)),
+    )
+
+    page = asyncio.run(
+        service.list_classification_review_runs(
+            db,
+            library_id=library.id,
+            actor_user_id=actor.id,
+            limit=20,
+            offset=0,
+        )
+    )
+
+    assert page.total == 1
+    assert page.taxonomy is taxonomy
+    assert page.available_labels == (primary,)
+    assert page.items[0].document is document
+    assert page.items[0].effective_decision_set is decision_set
+    assert page.items[0].effective_decisions == ((decision, primary),)
+    assert page.items[0].proposals == ((proposal, primary),)
+    assert db.results == []
+
+
+def test_empty_review_list_still_returns_current_enabled_labels(monkeypatch):
+    organization, actor = _organization(), _user()
+    library, taxonomy = _library(organization), _taxonomy(organization)
+    label = _label(taxonomy, "primary")
+    monkeypatch.setattr(
+        service,
+        "_require_library_management",
+        AsyncMock(return_value=library),
+    )
+    db = _DB(
+        _Result(scalar=0),
+        _Result(rows=()),
+        _Result(rows=(taxonomy,)),
+        _Result(rows=(label,)),
+    )
+
+    page = asyncio.run(
+        service.list_classification_review_runs(
+            db,
+            library_id=library.id,
+            actor_user_id=actor.id,
+        )
+    )
+
+    assert page.items == () and page.total == 0
+    assert page.taxonomy is taxonomy and page.available_labels == (label,)
+    assert db.results == []
 
 
 def test_second_reviewer_observes_stable_run_state_change(monkeypatch):

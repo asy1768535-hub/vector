@@ -23,6 +23,7 @@ export function menuAccess(user, permissions, organizations = []) {
     const acts = actionSet(user, permissions);
     const can = (a) => isSuper || acts.has(a);
     const organizationAdmin = hasOrganizationAdmin(organizations);
+    const classificationReview = manageableLibraries(permissions, organizations).length > 0;
     return {
         // Catalog requires Organization authorization; platform superuser is not a
         // customer-content bypass. Organization admins receive effective read rows.
@@ -33,6 +34,7 @@ export function menuAccess(user, permissions, organizations = []) {
         import: can('insert'),
         organizationAdmin,
         retrievalTest: organizationAdmin,
+        classificationReview,
         apiKeys: true,            // 始终显示
     };
 }
@@ -52,6 +54,10 @@ export function canAccessOrganizationRoute(organizations) {
     return hasOrganizationAdmin(organizations);
 }
 
+export function canAccessLibraryManagementRoute(permissions, organizations) {
+    return manageableLibraries(permissions, organizations).length > 0;
+}
+
 // 普通用户的可读库列表（按 read 过滤），元素 {slug, name}。superuser 走 listLibraries，不用这里。
 export function readableLibraries(permissions) {
     if (!Array.isArray(permissions)) return [];
@@ -63,14 +69,32 @@ export function readableLibraries(permissions) {
 export function canManageLibrary(permissions, organizations, librarySlug) {
     const slug = String(librarySlug || '');
     if (!slug || !Array.isArray(permissions)) return false;
-    const permission = permissions.find((item) => item?.library_slug === slug);
-    if (!permission) return false;
-    if ((permission.actions || []).includes('admin')) return true;
-    const organizationId = String(permission.organization_id || '');
-    return Boolean(organizationId && (organizations || []).some((item) => (
-        String(item?.organization_id || '') === organizationId
-        && item?.role === 'organization_admin'
-    )));
+    const matching = permissions.filter((item) => item?.library_slug === slug);
+    if (matching.some((item) => (item.actions || []).includes('admin'))) return true;
+    const adminOrganizations = new Set((organizations || [])
+        .filter((item) => item?.role === 'organization_admin')
+        .map((item) => String(item?.organization_id || ''))
+        .filter(Boolean));
+    return matching.some((item) => adminOrganizations.has(String(item.organization_id || '')));
+}
+
+export function manageableLibraries(permissions, organizations = []) {
+    if (!Array.isArray(permissions)) return [];
+    const rows = [];
+    const seen = new Set();
+    for (const item of permissions) {
+        const slug = typeof item?.library_slug === 'string' ? item.library_slug : '';
+        if (!slug || seen.has(slug) || !canManageLibrary(permissions, organizations, slug)) {
+            continue;
+        }
+        seen.add(slug);
+        rows.push({
+            slug,
+            name: item.library_name || slug,
+            organizationId: String(item.organization_id || ''),
+        });
+    }
+    return rows;
 }
 
 // 选默认 / 纠正选中 slug：当前 slug 仍在可见库中则保留，否则取第一个，没有可见库则 null。

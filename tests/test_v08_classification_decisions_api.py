@@ -19,6 +19,7 @@ from app.models.classification_decision import (
     DocumentClassificationRun,
 )
 from app.models.classification_taxonomy import ClassificationLabel
+from app.models.classification_taxonomy import ClassificationTaxonomy
 from app.models.document import Document
 from app.models.document_revision import DocumentRevision
 from app.models.library import Library
@@ -27,6 +28,7 @@ from app.models.user import User
 from app.services.classification_decision_contracts import ClassificationDecisionError
 from app.services.classification_decisions import (
     ClassificationReviewItem,
+    ClassificationReviewPage,
     ClassificationRunResult,
     EffectiveClassification,
 )
@@ -245,6 +247,75 @@ def test_bearer_api_key_cannot_enter_cookie_review_route():
             },
         )
     assert response.status_code == 401
+
+
+def test_review_list_returns_document_fence_effective_labels_and_choices():
+    user, organization = _user(), _organization()
+    library = _library(organization)
+    effective = _effective(library)
+    run = _run(library, effective)
+    proposal = DocumentClassificationProposal(
+        id=uuid.uuid4(),
+        run_id=run.id,
+        label_id=effective.decisions[0][1].id,
+        role="primary",
+        rank=0,
+        confidence_micros=850_000,
+        status="pending_review",
+        reason_codes=["primary_confidence_below_threshold"],
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    taxonomy = ClassificationTaxonomy(
+        id=run.taxonomy_version_id,
+        organization_id=organization.id,
+        version_key="document-category",
+        version_no=1,
+        status="active",
+        activated_at=NOW,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    page = ClassificationReviewPage(
+        items=(
+            ClassificationReviewItem(
+                run=run,
+                proposals=((proposal, effective.decisions[0][1]),),
+                document=effective.document,
+                effective_decision_set=effective.decision_set,
+                effective_decisions=effective.decisions,
+            ),
+        ),
+        total=1,
+        taxonomy=taxonomy,
+        available_labels=(effective.decisions[0][1],),
+    )
+    context = api.ClassificationManagementContext(user, library)
+    app.dependency_overrides[api.require_classification_management] = lambda: context
+    app.dependency_overrides[get_db] = lambda: AsyncMock()
+    try:
+        with patch.object(
+            api,
+            "list_classification_review_runs",
+            new=AsyncMock(return_value=page),
+        ):
+            response = TestClient(app).get(
+                f"/libraries/{library.slug}/classifications/reviews?limit=20&offset=0"
+            )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["taxonomy_version_id"] == str(taxonomy.id)
+        assert body["available_labels"][0]["label"] == "Legal"
+        assert body["items"][0]["document_title"] == effective.document.title
+        assert body["items"][0]["effective_decision_set_id"] == str(
+            effective.decision_set.id
+        )
+        assert body["items"][0]["effective_source"] == "manual"
+        assert body["items"][0]["effective_decisions"][0]["label"] == "Legal"
+        for forbidden in ("model_config_hash", "input_fingerprint", "hashed_password"):
+            assert forbidden not in response.text.lower()
+    finally:
+        app.dependency_overrides.clear()
 
 
 def test_review_commits_constructs_fenced_command_and_returns_bounded_projection():

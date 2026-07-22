@@ -4,8 +4,10 @@ import assert from 'node:assert/strict';
 import {
     canAccessEffectiveRoute,
     canAccessOrganizationRoute,
+    canAccessLibraryManagementRoute,
     canAccessRoute,
     menuAccess,
+    manageableLibraries,
     readableLibraries,
     resolveSelectedSlug,
 } from './menu_access.js';
@@ -20,15 +22,15 @@ const USER = { is_superuser: false };
 const cases = [
     // [name, user, perms, expected menuAccess]
     ['superuser 保留旧管理菜单但无有效 read 时不显示客户 Catalog', SUPER, NONE,
-        { catalog: false, documents: true, search: true, chat: true, import: true, organizationAdmin: false, retrievalTest: false, apiKeys: true }],
+        { catalog: false, documents: true, search: true, chat: true, import: true, organizationAdmin: false, retrievalTest: false, classificationReview: false, apiKeys: true }],
     ['只有 read：文档/检索/问答可见，导入隐藏', USER, READER,
-        { catalog: true, documents: true, search: true, chat: true, import: false, organizationAdmin: false, retrievalTest: false, apiKeys: true }],
+        { catalog: true, documents: true, search: true, chat: true, import: false, organizationAdmin: false, retrievalTest: false, classificationReview: false, apiKeys: true }],
     ['read+insert：全部业务菜单可见', USER, INSERTER,
-        { catalog: true, documents: true, search: true, chat: true, import: true, organizationAdmin: false, retrievalTest: false, apiKeys: true }],
+        { catalog: true, documents: true, search: true, chat: true, import: true, organizationAdmin: false, retrievalTest: false, classificationReview: false, apiKeys: true }],
     ['只有 insert：导入可见，读类隐藏', USER, INSERT_ONLY,
-        { catalog: false, documents: false, search: false, chat: false, import: true, organizationAdmin: false, retrievalTest: false, apiKeys: true }],
+        { catalog: false, documents: false, search: false, chat: false, import: true, organizationAdmin: false, retrievalTest: false, classificationReview: false, apiKeys: true }],
     ['无任何权限：仅 API Key 可见', USER, NONE,
-        { catalog: false, documents: false, search: false, chat: false, import: false, organizationAdmin: false, retrievalTest: false, apiKeys: true }],
+        { catalog: false, documents: false, search: false, chat: false, import: false, organizationAdmin: false, retrievalTest: false, classificationReview: false, apiKeys: true }],
 ];
 
 let passed = 0;
@@ -71,6 +73,21 @@ assert.equal(
     true,
     '[FAIL organization menu] exact role',
 );
+
+const managementPermissions = [
+    { organization_id: 'org-a', library_slug: 'reader', library_name: '只读库', actions: ['read'] },
+    { organization_id: 'org-a', library_slug: 'library-admin', library_name: '库管理员', actions: ['admin'] },
+    { organization_id: 'org-b', library_slug: 'org-admin', library_name: '组织库', actions: ['read'] },
+];
+const organizationRows = [{ organization_id: 'org-b', role: 'organization_admin' }];
+assert.deepEqual(manageableLibraries(managementPermissions, organizationRows), [
+    { slug: 'library-admin', name: '库管理员', organizationId: 'org-a' },
+    { slug: 'org-admin', name: '组织库', organizationId: 'org-b' },
+]);
+assert.equal(canAccessLibraryManagementRoute(managementPermissions, organizationRows), true);
+assert.equal(canAccessLibraryManagementRoute(READER, []), false);
+assert.equal(menuAccess(USER, managementPermissions, organizationRows).classificationReview, true);
+assert.equal(menuAccess(SUPER, NONE, []).classificationReview, false);
 
 // readableLibraries / resolveSelectedSlug：Documents 默认库（P1-2）
 let extra = 0;

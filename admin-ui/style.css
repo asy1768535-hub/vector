@@ -67,6 +67,222 @@
     --el-bg-color-page: #F5F7F8;
 }
 
+/* Classification review console */
+.classification-review-workspace {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    min-width: 0;
+    color: var(--app-text);
+}
+
+.classification-review-header,
+.classification-review-header-actions,
+.classification-review-section-heading,
+.classification-review-item-top,
+.classification-review-item-meta,
+.classification-review-detail-heading,
+.classification-review-title-line,
+.classification-review-current,
+.classification-review-actions,
+.classification-review-pagination {
+    display: flex;
+    align-items: center;
+}
+
+.classification-review-header {
+    justify-content: space-between;
+    gap: 20px;
+    min-width: 0;
+}
+
+.classification-review-header h2 {
+    margin: 0;
+    font-size: 24px;
+    letter-spacing: 0;
+}
+
+.classification-review-header p {
+    margin: 4px 0 0;
+    color: var(--app-text-secondary);
+    font-size: 13px;
+}
+
+.classification-review-header-actions { gap: 12px; flex: none; }
+.classification-review-header-actions > span { color: var(--app-text-secondary); font-size: 13px; }
+.classification-review-header-actions b { color: #8a5b22; }
+.classification-review-library { width: 240px; }
+.classification-review-alert { margin: 0; }
+
+.classification-review-grid {
+    display: grid;
+    grid-template-columns: minmax(300px, .72fr) minmax(0, 1.5fr);
+    min-width: 0;
+    min-height: 620px;
+    border-top: 1px solid var(--app-border-light);
+    border-bottom: 1px solid var(--app-border-light);
+    background: #fff;
+}
+
+.classification-review-queue,
+.classification-review-detail { min-width: 0; padding: 18px; }
+
+.classification-review-queue {
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid var(--app-border-light);
+    background: #f8fafc;
+}
+
+.classification-review-section-heading {
+    justify-content: space-between;
+    gap: 12px;
+    min-width: 0;
+    margin-bottom: 12px;
+}
+
+.classification-review-section-heading > div { min-width: 0; }
+.classification-review-section-heading h3 { margin: 0; font-size: 16px; letter-spacing: 0; }
+.classification-review-section-heading span { color: var(--app-text-secondary); font-size: 12px; }
+.classification-review-section-heading .el-button { flex: none; margin-left: 0; }
+.classification-review-section-heading .el-button local-icon,
+.classification-review-detail-heading .el-button local-icon { margin-right: 5px; }
+
+.classification-review-state,
+.classification-review-detail-empty {
+    display: flex;
+    flex: 1;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 10px;
+    min-height: 180px;
+    color: var(--app-text-secondary);
+    text-align: center;
+}
+
+.classification-review-state local-icon,
+.classification-review-detail-empty local-icon { color: #176b57; font-size: 34px; }
+.classification-review-state strong,
+.classification-review-detail-empty strong { color: var(--app-text); font-size: 14px; }
+.classification-review-list { display: flex; flex: 1; flex-direction: column; gap: 8px; }
+
+.classification-review-item {
+    display: flex;
+    width: 100%;
+    min-width: 0;
+    padding: 12px;
+    border: 1px solid var(--app-border-light);
+    border-radius: 6px;
+    background: #fff;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.classification-review-item:hover { border-color: #8aaed8; }
+.classification-review-item.is-selected { border-color: #3976c5; box-shadow: inset 3px 0 #3976c5; }
+.classification-review-item:disabled { cursor: default; opacity: .7; }
+.classification-review-item-top { justify-content: space-between; gap: 8px; min-width: 0; }
+.classification-review-item-top strong {
+    min-width: 0;
+    overflow: hidden;
+    font-size: 14px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.classification-review-item-top .el-tag { flex: none; }
+.classification-review-item-proposal { color: var(--app-text-secondary); font-size: 13px; }
+.classification-review-item-proposal small { margin-left: 4px; color: #8a5b22; }
+.classification-review-item-meta { flex-wrap: wrap; gap: 5px 12px; color: var(--app-text-muted); font-size: 11px; }
+.classification-review-pagination { justify-content: space-between; gap: 8px; margin-top: 14px; }
+.classification-review-pagination .el-button { margin-left: 0; min-width: 86px; }
+.classification-review-pagination local-icon { font-size: 16px; }
+.classification-review-pagination span { color: var(--app-text-secondary); font-size: 12px; }
+
+.classification-review-detail { overflow: hidden; }
+.classification-review-detail-heading { justify-content: space-between; align-items: flex-start; gap: 16px; }
+.classification-review-detail-heading > div { min-width: 0; }
+.classification-review-title-line { align-items: flex-start; flex-wrap: wrap; gap: 8px; }
+.classification-review-title-line h3 {
+    max-width: 100%;
+    margin: 0;
+    overflow-wrap: anywhere;
+    font-size: 20px;
+    letter-spacing: 0;
+}
+.classification-review-detail-heading p {
+    max-width: 100%;
+    margin: 6px 0 0;
+    overflow-wrap: anywhere;
+    color: var(--app-text-muted);
+    font-size: 11px;
+}
+.classification-review-detail-heading > .el-button { flex: none; margin-left: 0; }
+.classification-review-manual-warning { margin-top: 14px; }
+.classification-review-detail-section { min-width: 0; padding: 20px 0; border-bottom: 1px solid var(--app-border-light); }
+.classification-review-detail-section:last-child { border-bottom: 0; }
+.classification-review-proposals { border-top: 1px solid var(--app-border-light); }
+
+.classification-review-proposal {
+    display: grid;
+    grid-template-columns: 72px minmax(120px, 1fr) 68px minmax(160px, 1.2fr);
+    gap: 12px;
+    align-items: center;
+    min-width: 0;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--app-border-light);
+}
+.classification-review-proposal:last-child { border-bottom: 0; }
+.classification-review-proposal-role { color: var(--app-text-secondary); font-size: 12px; }
+.classification-review-proposal > div { min-width: 0; }
+.classification-review-proposal strong { display: block; overflow-wrap: anywhere; font-size: 14px; }
+.classification-review-proposal small { display: block; margin-top: 3px; color: #b42318; font-size: 11px; }
+.classification-review-proposal > b { color: #176b57; font-size: 13px; }
+.classification-review-reasons { display: flex; flex-wrap: wrap; gap: 4px 8px; }
+.classification-review-reasons span { color: #8a5b22; font-size: 11px; overflow-wrap: anywhere; }
+.classification-review-inline-empty { color: var(--app-text-muted); font-size: 13px; }
+.classification-review-current { flex-wrap: wrap; gap: 7px; }
+.classification-review-current strong { color: #176b57; font-size: 16px; }
+.classification-review-current > span { padding-left: 8px; border-left: 1px solid var(--app-border); color: var(--app-text-secondary); font-size: 13px; }
+.classification-review-current small { margin-left: auto; color: var(--app-text-muted); }
+.classification-review-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.classification-review-form label { display: flex; min-width: 0; flex-direction: column; gap: 6px; }
+.classification-review-form label > span { color: var(--app-text-secondary); font-size: 12px; }
+.classification-review-form .el-select { width: 100%; }
+.classification-review-actions { grid-column: 1 / -1; justify-content: flex-end; gap: 8px; }
+.classification-review-actions .el-button { min-width: 96px; margin-left: 0; }
+
+@media screen and (max-width: 1199px) {
+    .classification-review-grid { grid-template-columns: minmax(280px, .8fr) minmax(0, 1.2fr); }
+    .classification-review-proposal { grid-template-columns: 68px minmax(0, 1fr) 60px; }
+    .classification-review-reasons { grid-column: 2 / -1; }
+}
+
+@media screen and (max-width: 899px) {
+    .classification-review-workspace { gap: 12px; }
+    .classification-review-header { align-items: stretch; flex-direction: column; }
+    .classification-review-header h2 { font-size: 20px; }
+    .classification-review-header-actions { width: 100%; justify-content: space-between; }
+    .classification-review-library { flex: 1; width: auto; min-width: 0; }
+    .classification-review-grid { grid-template-columns: minmax(0, 1fr); min-height: 0; }
+    .classification-review-queue { border-right: 0; border-bottom: 1px solid var(--app-border-light); }
+    .classification-review-queue,
+    .classification-review-detail { padding: 14px 12px; }
+    .classification-review-list { max-height: 420px; overflow-y: auto; }
+    .classification-review-detail-heading { flex-direction: column; }
+    .classification-review-detail-heading > .el-button { align-self: flex-start; }
+    .classification-review-proposal { grid-template-columns: 64px minmax(0, 1fr) 58px; gap: 8px; }
+    .classification-review-form { grid-template-columns: minmax(0, 1fr); }
+    .classification-review-actions { grid-column: auto; align-items: stretch; flex-direction: column; }
+    .classification-review-actions .el-button { width: 100%; }
+    .classification-review-pagination { flex-wrap: wrap; }
+    .classification-review-current small { width: 100%; margin-left: 0; }
+}
+
 /* v0.8 Organization retrieval diagnostics */
 .retrieval-test-workspace {
     min-width: 0;
@@ -1436,6 +1652,12 @@ local-icon { display: inline-block; vertical-align: -0.125em; }
     display: flex; align-items: center; gap: 8px;
     cursor: pointer; padding: 6px 10px; border-radius: 10px;
     transition: background 0.15s;
+}
+.header-user-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 .header-user:hover { background: var(--app-panel-2); }
 .header-avatar {
@@ -3665,6 +3887,27 @@ local-icon { display: inline-block; vertical-align: -0.125em; }
         max-height: 54vh;
         font-size: 12px;
     }
+}
+
+@media (max-width: 520px) {
+    .layout-header { gap: 6px; padding: 0 8px; }
+    .header-left { flex: 1; min-width: 0; gap: 6px; overflow: hidden; }
+    .header-icon-btn { flex: none; padding: 5px; }
+    .header-breadcrumb { flex: 1; min-width: 0; gap: 0; }
+    .header-title {
+        min-width: 0;
+        overflow: hidden;
+        font-size: 16px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .header-breadcrumb-separator,
+    .header-product-name,
+    .header-user-label,
+    .header-user .el-tag { display: none; }
+    .header-right { flex: none; }
+    .header-user { gap: 4px; padding: 4px; }
+    .layout-main { padding: 12px; }
 }
 
 

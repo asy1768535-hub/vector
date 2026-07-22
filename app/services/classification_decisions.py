@@ -73,12 +73,19 @@ class ClassificationReviewItem:
     proposals: tuple[
         tuple[DocumentClassificationProposal, ClassificationLabel | None], ...
     ]
+    document: Document | None = None
+    effective_decision_set: DocumentClassificationDecisionSet | None = None
+    effective_decisions: tuple[
+        tuple[DocumentClassificationDecision, ClassificationLabel | None], ...
+    ] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class ClassificationReviewPage:
     items: tuple[ClassificationReviewItem, ...]
     total: int
+    taxonomy: ClassificationTaxonomy | None = None
+    available_labels: tuple[ClassificationLabel, ...] = ()
 
 
 def _now() -> datetime:
@@ -1021,7 +1028,7 @@ async def list_classification_review_runs(
     limit: int = 50,
     offset: int = 0,
 ) -> ClassificationReviewPage:
-    await _require_library_management(
+    library = await _require_library_management(
         db,
         library_id=library_id,
         actor_user_id=actor_user_id,
@@ -1042,6 +1049,7 @@ async def list_classification_review_runs(
     filters = (
         DocumentClassificationRun.library_id == library_id,
         DocumentClassificationRun.status.in_(statuses),
+        Document.library_id == library_id,
         Document.current_revision_id == DocumentClassificationRun.document_revision_id,
         Document.deleted_at.is_(None),
     )
@@ -1054,10 +1062,10 @@ async def list_classification_review_runs(
             )
         ).scalar_one()
     )
-    runs = tuple(
+    run_rows = tuple(
         (
             await db.execute(
-                select(DocumentClassificationRun)
+                select(DocumentClassificationRun, Document)
                 .join(Document, Document.id == DocumentClassificationRun.document_id)
                 .where(*filters)
                 .order_by(
@@ -1067,12 +1075,42 @@ async def list_classification_review_runs(
                 .limit(limit)
                 .offset(offset)
             )
-        )
-        .scalars()
-        .all()
+        ).all()
     )
-    if not runs:
-        return ClassificationReviewPage((), total)
+    taxonomy = (
+        await db.execute(
+            select(ClassificationTaxonomy).where(
+                ClassificationTaxonomy.organization_id == library.organization_id,
+                ClassificationTaxonomy.status == "active",
+            )
+        )
+    ).scalars().first()
+    available_labels: tuple[ClassificationLabel, ...] = ()
+    if taxonomy is not None:
+        available_labels = tuple(
+            (
+                await db.execute(
+                    select(ClassificationLabel)
+                    .join(
+                        LibraryClassificationLabel,
+                        LibraryClassificationLabel.label_id == ClassificationLabel.id,
+                    )
+                    .where(
+                        LibraryClassificationLabel.library_id == library.id,
+                        LibraryClassificationLabel.taxonomy_version_id == taxonomy.id,
+                        ClassificationLabel.taxonomy_version_id == taxonomy.id,
+                        ClassificationLabel.status == "active",
+                    )
+                    .order_by(LibraryClassificationLabel.ordinal)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    if not run_rows:
+        return ClassificationReviewPage((), total, taxonomy, available_labels)
+    runs = tuple(run for run, _document in run_rows)
+    documents_by_run = {run.id: document for run, document in run_rows}
     proposals = tuple(
         (
             await db.execute(
@@ -1103,11 +1141,78 @@ async def list_classification_review_runs(
     }
     for proposal, label in proposals:
         by_run[proposal.run_id].append((proposal, label))
+
+    revision_ids = tuple(run.document_revision_id for run in runs)
+    effective_sets = tuple(
+        (
+            await db.execute(
+                select(DocumentClassificationDecisionSet).where(
+                    DocumentClassificationDecisionSet.library_id == library.id,
+                    DocumentClassificationDecisionSet.document_revision_id.in_(
+                        revision_ids
+                    ),
+                    DocumentClassificationDecisionSet.lifecycle == "effective",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    effective_by_revision = {
+        decision_set.document_revision_id: decision_set
+        for decision_set in effective_sets
+    }
+    decisions_by_set: dict[
+        uuid.UUID,
+        list[tuple[DocumentClassificationDecision, ClassificationLabel | None]],
+    ] = {decision_set.id: [] for decision_set in effective_sets}
+    if effective_sets:
+        decision_rows = tuple(
+            (
+                await db.execute(
+                    select(DocumentClassificationDecision, ClassificationLabel)
+                    .outerjoin(
+                        ClassificationLabel,
+                        ClassificationLabel.id
+                        == DocumentClassificationDecision.label_id,
+                    )
+                    .where(
+                        DocumentClassificationDecision.decision_set_id.in_(
+                            tuple(decision_set.id for decision_set in effective_sets)
+                        )
+                    )
+                    .order_by(
+                        DocumentClassificationDecision.decision_set_id,
+                        DocumentClassificationDecision.ordinal,
+                    )
+                )
+            ).all()
+        )
+        for decision, label in decision_rows:
+            decisions_by_set[decision.decision_set_id].append((decision, label))
     return ClassificationReviewPage(
         tuple(
-            ClassificationReviewItem(run, tuple(by_run[run.id])) for run in runs
+            ClassificationReviewItem(
+                run=run,
+                proposals=tuple(by_run[run.id]),
+                document=documents_by_run[run.id],
+                effective_decision_set=effective_by_revision.get(
+                    run.document_revision_id
+                ),
+                effective_decisions=tuple(
+                    decisions_by_set.get(
+                        effective_by_revision[run.document_revision_id].id,
+                        (),
+                    )
+                )
+                if run.document_revision_id in effective_by_revision
+                else (),
+            )
+            for run in runs
         ),
         total,
+        taxonomy,
+        available_labels,
     )
 
 

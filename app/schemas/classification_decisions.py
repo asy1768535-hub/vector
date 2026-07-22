@@ -26,6 +26,26 @@ class ClassificationProposalRead(StrictBaseModel):
     created_at: datetime
 
 
+class ClassificationDecisionRead(StrictBaseModel):
+    id: uuid.UUID
+    label_id: uuid.UUID
+    label_key: str
+    label: str
+    role: Literal["primary", "secondary"]
+    ordinal: int
+    confidence_micros: int | None
+
+
+class ClassificationReviewLabelRead(StrictBaseModel):
+    id: uuid.UUID
+    taxonomy_version_id: uuid.UUID
+    key: str
+    label: str
+    description: str | None
+    parent_label_id: uuid.UUID | None
+    sort_order: int
+
+
 class ClassificationRunRead(StrictBaseModel):
     id: uuid.UUID
     library_id: uuid.UUID
@@ -45,25 +65,21 @@ class ClassificationRunRead(StrictBaseModel):
     prompt_version: str
     error_code: str | None
     proposals: list[ClassificationProposalRead]
+    document_title: str | None
+    effective_decision_set_id: uuid.UUID | None
+    effective_source: Literal["model", "manual"] | None
+    effective_decisions: list[ClassificationDecisionRead]
     created_at: datetime
     finished_at: datetime
 
 
 class ClassificationReviewPageRead(StrictBaseModel):
     items: list[ClassificationRunRead]
+    taxonomy_version_id: uuid.UUID | None
+    available_labels: list[ClassificationReviewLabelRead]
     total: int
     limit: int
     offset: int
-
-
-class ClassificationDecisionRead(StrictBaseModel):
-    id: uuid.UUID
-    label_id: uuid.UUID
-    label_key: str
-    label: str
-    role: Literal["primary", "secondary"]
-    ordinal: int
-    confidence_micros: int | None
 
 
 class EffectiveClassificationRead(StrictBaseModel):

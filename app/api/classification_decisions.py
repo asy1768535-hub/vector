@@ -18,6 +18,7 @@ from app.schemas.classification_decisions import (
     ClassificationDecisionRead,
     ClassificationProposalRead,
     ClassificationReviewPageRead,
+    ClassificationReviewLabelRead,
     ClassificationReviewRequest,
     ClassificationRunRead,
     EffectiveClassificationRead,
@@ -128,6 +129,26 @@ def _proposal_read(
 
 def _run_read(item: ClassificationReviewItem) -> ClassificationRunRead:
     run = item.run
+    effective_set = item.effective_decision_set
+    effective_decisions = []
+    if effective_set is not None:
+        for decision, label in item.effective_decisions:
+            if (
+                label is None
+                or label.taxonomy_version_id != effective_set.taxonomy_version_id
+            ):
+                continue
+            effective_decisions.append(
+                ClassificationDecisionRead(
+                    id=decision.id,
+                    label_id=label.id,
+                    label_key=label.key,
+                    label=label.label,
+                    role=decision.role,
+                    ordinal=decision.ordinal,
+                    confidence_micros=decision.confidence_micros,
+                )
+            )
     return ClassificationRunRead(
         id=run.id,
         library_id=run.library_id,
@@ -150,6 +171,14 @@ def _run_read(item: ClassificationReviewItem) -> ClassificationRunRead:
             _proposal_read(pair, taxonomy_version_id=run.taxonomy_version_id)
             for pair in item.proposals
         ],
+        document_title=item.document.title if item.document is not None else None,
+        effective_decision_set_id=(
+            effective_set.id if effective_set is not None else None
+        ),
+        effective_source=(
+            effective_set.source if effective_set is not None else None
+        ),
+        effective_decisions=effective_decisions,
         created_at=run.created_at,
         finished_at=run.finished_at,
     )
@@ -225,6 +254,21 @@ async def classification_reviews(
         raise _http_error(exc) from exc
     return ClassificationReviewPageRead(
         items=[_run_read(item) for item in page.items],
+        taxonomy_version_id=page.taxonomy.id if page.taxonomy is not None else None,
+        available_labels=[
+            ClassificationReviewLabelRead(
+                id=label.id,
+                taxonomy_version_id=label.taxonomy_version_id,
+                key=label.key,
+                label=label.label,
+                description=label.description,
+                parent_label_id=label.parent_label_id,
+                sort_order=label.sort_order,
+            )
+            for label in page.available_labels
+            if page.taxonomy is not None
+            and label.taxonomy_version_id == page.taxonomy.id
+        ],
         total=page.total,
         limit=limit,
         offset=offset,

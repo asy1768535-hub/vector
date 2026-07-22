@@ -9,6 +9,7 @@ import { store, refreshAuth } from './store.js';
 import { setUnauthorizedHandler } from './api.js';
 import {
     canAccessEffectiveRoute,
+    canAccessLibraryManagementRoute,
     canAccessOrganizationRoute,
     canAccessRoute,
     menuAccess,
@@ -20,6 +21,7 @@ function defaultRoute(user, permissions, organizations = []) {
     const access = menuAccess(user, permissions, organizations);
     if (access.chat || access.documents || access.search) return '/chat';
     if (access.import) return '/import';
+    if (access.classificationReview) return '/classification-review';
     if (access.retrievalTest) return '/retrieval-test';
     return '/api-keys';
 }
@@ -35,6 +37,7 @@ import Permissions from './views/Permissions.js';
 import Documents from './views/Documents.js';
 import KnowledgeCatalog from './views/KnowledgeCatalog.js';
 import RetrievalTest from './views/RetrievalTest.js';
+import ClassificationReview from './views/ClassificationReview.js';
 import Search from './views/Search.js';
 import Chat from './views/Chat.js';
 import ChatLogs from './views/ChatLogs.js';
@@ -58,6 +61,7 @@ const routes = [
             { path: 'documents', component: Documents, meta: { title: '文档', perm: 'read' } },
             { path: 'catalog', component: KnowledgeCatalog, meta: { title: '知识目录', perm: 'read', effectivePerm: 'read' } },
             { path: 'retrieval-test', component: RetrievalTest, meta: { title: '检索诊断', organizationAdmin: true } },
+            { path: 'classification-review', component: ClassificationReview, meta: { title: '分类审核', libraryManagement: true } },
             { path: 'search', component: Search, meta: { title: '数据检索', perm: 'read' } },
             { path: 'chat', component: Chat, meta: { title: '智能问答', perm: 'read' } },
             { path: 'chat-logs', component: ChatLogs, meta: { title: '问答日志', admin: true } },
@@ -92,6 +96,13 @@ router.beforeEach(async (to) => {
         return { path: defaultRoute(store.user, store.permissions, store.organizations) };
     }
     if (to.meta.organizationAdmin && !canAccessOrganizationRoute(store.organizations)) {
+        ElMessage.warning('你没有访问该页面的权限');
+        return { path: defaultRoute(store.user, store.permissions, store.organizations) };
+    }
+    if (to.meta.libraryManagement && !canAccessLibraryManagementRoute(
+        store.permissions,
+        store.organizations,
+    )) {
         ElMessage.warning('你没有访问该页面的权限');
         return { path: defaultRoute(store.user, store.permissions, store.organizations) };
     }

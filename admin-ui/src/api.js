@@ -241,6 +241,17 @@ export const retryCatalogDocumentProcessing = (slug, documentId, stage, body) =>
         jsonBody('POST', body),
     );
 
+// ── v0.8 Classification review console ──────────────────────────────────────
+export const listClassificationReviews = (slug, { limit = 20, offset = 0 } = {}) => {
+    const query = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    return request(`/libraries/${slug}/classifications/reviews?${query.toString()}`);
+};
+export const reviewClassificationRun = (slug, runId, body) =>
+    request(
+        `/libraries/${slug}/classifications/runs/${runId}/review`,
+        jsonBody('POST', body),
+    );
+
 // ── v0.8 Organization retrieval diagnostics ────────────────
 export const checkLibraryCompatibility = (body) =>
     request('/me/library-compatibility/check', jsonBody('POST', body));

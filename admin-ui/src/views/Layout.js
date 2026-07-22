@@ -98,6 +98,10 @@ export default {
                     <el-icon><local-icon icon="mdi:bookshelf"></local-icon></el-icon>
                     <template #title>知识目录</template>
                 </el-menu-item>
+                <el-menu-item v-if="access.classificationReview" index="/classification-review">
+                    <el-icon><local-icon icon="mdi:shield-key-outline"></local-icon></el-icon>
+                    <template #title>分类审核</template>
+                </el-menu-item>
                 <el-menu-item v-if="access.search" index="/search">
                     <el-icon><local-icon icon="sidebar:search"></local-icon></el-icon>
                     <template #title>数据检索</template>
@@ -180,7 +184,7 @@ export default {
                     <el-dropdown @command="onUserCommand">
                         <span class="header-user">
                             <span class="header-avatar">{{ avatarText }}</span>
-                            <span>{{ userLabel }}</span>
+                            <span class="header-user-label">{{ userLabel }}</span>
                             <el-tag v-if="isSuper" type="danger" size="small" effect="light">超管</el-tag>
                             <local-icon icon="mdi:chevron-down" style="color:var(--el-text-color-placeholder)"></local-icon>
                         </span>
