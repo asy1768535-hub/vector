@@ -135,9 +135,22 @@ python scripts/bootstrap_admin.py --email admin@example.com --password CHANGE_ME
 python -m app.main                       # API（端口读 .env，默认 8100）
 python -m app.workers.embedder --watch   # Embedding Worker
 python -m app.workers.cleanup  --watch   # Cleanup Worker
+python -m app.workers.knowledge_artifacts --watch  # v0.8 Summary/Outline Worker
 
 # 6. 后台：浏览器开 http://<host>:8100/console/
 ```
+
+Remote immutable revision-file storage is optional. Local storage is built in; configured
+MinIO or Alibaba OSS deployments install their lazy SDK adapters with:
+
+```bash
+pip install -e ".[object-storage]"
+```
+
+Revision-file retention governance is also default-off. Set
+`REVISION_RETENTION_ENABLED=true` and enable the Library policy to record replacement-ready
+deadlines, bounded graph impact, and pre-expiry notices. Migration `0027` does not delete
+objects or rows; physical cleanup remains a separately gated executor.
 
 详见 [docs/04 快速开始](./docs/04-quickstart.md)。
 

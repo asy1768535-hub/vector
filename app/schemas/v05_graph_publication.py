@@ -16,7 +16,12 @@ GraphPublicationStatus = Literal[
     "cancelled",
     "failed",
 ]
-GraphPublicationSourceMode = Literal["initial_seed", "manual_plan", "rollback"]
+GraphPublicationSourceMode = Literal[
+    "initial_seed",
+    "manual_plan",
+    "rollback",
+    "coordinated_purge",
+]
 GraphPublicationPlanSourceMode = Literal["initial_seed", "manual_plan"]
 GraphPublicationItemKind = Literal["entity", "relation"]
 GraphPublicationItemStatus = Literal["planned", "active", "stale", "degraded", "superseded"]

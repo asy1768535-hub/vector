@@ -7,7 +7,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import deps as deps_module
 from app.auth.backend import current_active_user
+from app.config import settings
 from app.db import get_db
 from app.deps import require_lib
 from app.models.document import Document
@@ -30,12 +32,35 @@ from app.schemas.graph_extraction_jobs import (
 )
 from app.services import graph_extraction_jobs
 from app.services.graph_extraction_jobs import GraphExtractionJobError
+from app.services.organization_authorization import (
+    OrganizationAuthorizationError,
+    authorize_library_management,
+)
 
 
 router = APIRouter(
     prefix="/libraries/{slug}/v04/graph-extractions",
     tags=["v0.4-graph-extraction"],
 )
+
+
+async def _require_graph_rerun_library(
+    slug: str,
+    user: User = Depends(current_active_user),
+    db: AsyncSession = Depends(get_db),
+) -> Library:
+    library = await deps_module.load_active_library(slug, db)
+    if library is None:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden")
+    if not settings.organization_authorization_enabled:
+        if user.is_superuser or deps_module.has_permission(str(user.id), slug, "insert"):
+            return library
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden")
+    try:
+        await authorize_library_management(db, user=user, library=library)
+        return library
+    except OrganizationAuthorizationError as exc:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "admin_required") from exc
 
 
 def _raise_job_error(exc: GraphExtractionJobError) -> None:
@@ -327,11 +352,11 @@ async def retry_graph_extraction(
 async def rerun_graph_extraction(
     job_id: uuid.UUID,
     body: GraphExtractionRerun,
-    library: Library = Depends(require_lib("insert")),
+    library: Library = Depends(_require_graph_rerun_library),
     user: User = Depends(current_active_user),
     db: AsyncSession = Depends(get_db),
 ) -> GraphExtractionJobRead:
-    if not user.is_superuser:
+    if not settings.organization_authorization_enabled and not user.is_superuser:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "admin_required")
     try:
         source = await graph_extraction_jobs.get_graph_extraction_job(

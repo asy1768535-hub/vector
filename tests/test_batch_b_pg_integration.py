@@ -12,12 +12,18 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import app.models  # noqa: F401
 from app.db import Base
 from app.models.cleanup_outbox import CleanupOutbox, EVENT_DELETE_DOCUMENT_ALL
 from app.models.library import Library
+from app.models.organization import (
+    DEFAULT_ORGANIZATION_ID,
+    DEFAULT_ORGANIZATION_SLUG,
+    Organization,
+)
 from app.services import cleanup as cleanup_svc
 from app.workers import cleanup as cleanup_worker
 
@@ -29,6 +35,17 @@ async def _engine():
     eng = create_async_engine(_DSN)
     async with eng.begin() as c:
         await c.run_sync(Base.metadata.create_all)
+        await c.execute(
+            insert(Organization)
+            .values(
+                id=DEFAULT_ORGANIZATION_ID,
+                slug=DEFAULT_ORGANIZATION_SLUG,
+                name="Default Organization",
+                deployment_profile="private",
+                status="active",
+            )
+            .on_conflict_do_nothing(index_elements=[Organization.id])
+        )
     return eng
 
 

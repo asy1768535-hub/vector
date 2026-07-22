@@ -232,13 +232,23 @@ def test_publication_commit_survives_auto_trigger_failure(monkeypatch):
         order.append("trigger_attempt")
         raise RuntimeError("enqueue failed")
 
+    async def artifact_trigger(**_kwargs):
+        order.append("artifact_trigger_attempt")
+        return ()
+
     db = MagicMock()
     db.execute = AsyncMock(side_effect=execute)
     db.rollback = AsyncMock()
     db.commit = AsyncMock(side_effect=commit)
-    with patch(
-        "app.services.graph_extraction_triggers.enqueue_ready_revision_graph_extraction",
-        new=AsyncMock(side_effect=trigger),
+    with (
+        patch(
+            "app.services.graph_extraction_triggers.enqueue_ready_revision_graph_extraction",
+            new=AsyncMock(side_effect=trigger),
+        ),
+        patch(
+            "app.services.knowledge_artifact_jobs.enqueue_ready_revision_artifacts",
+            new=AsyncMock(side_effect=artifact_trigger),
+        ),
     ):
         published = asyncio.run(
             embedder._publish_revision_after_qdrant(
@@ -249,5 +259,9 @@ def test_publication_commit_survives_auto_trigger_failure(monkeypatch):
         )
 
     assert published is True
-    assert order == ["publication_commit", "trigger_attempt"]
+    assert order == [
+        "publication_commit",
+        "trigger_attempt",
+        "artifact_trigger_attempt",
+    ]
     db.commit.assert_awaited_once()

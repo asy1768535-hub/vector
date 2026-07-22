@@ -28,9 +28,19 @@ from app.api.admin_permissions import router as admin_permissions_router
 from app.api.admin_users import router as admin_users_router
 from app.api.api_keys import router as api_keys_router
 from app.api.chat import router as chat_router
+from app.api.classification_taxonomies import router as classification_taxonomies_router
+from app.api.classification_taxonomy_bootstrap import (
+    router as classification_taxonomy_bootstrap_router,
+)
+from app.api.knowledge_catalog import router as knowledge_catalog_router
+from app.api.classification_decisions import router as classification_decisions_router
 from app.api.documents import router as documents_router
+from app.api.federated_retrieval import router as federated_retrieval_router
 from app.api.health import router as health_router
 from app.api.me import router as me_router
+from app.api.personal_library_scopes import router as personal_library_scopes_router
+from app.api.library_compatibility import router as library_compatibility_router
+from app.api.organizations import router as organizations_router
 from app.api.retrieval import router as retrieval_router
 from app.api.v02_m4 import router as v02_m4_router
 from app.api.v03_graph import router as v03_graph_router
@@ -42,8 +52,22 @@ from app.auth.routes import build_auth_router
 from app.casbin.enforcer import get_enforcer
 from app.config import (
     settings,
+    validate_revision_file_storage_startup,
+    validate_revision_cleanup_startup,
+    validate_revision_coordinated_purge_startup,
+    validate_revision_retention_startup,
     validate_entity_linking_startup,
+    validate_federated_retrieval_startup,
     validate_graph_extraction_startup,
+    validate_knowledge_artifact_startup,
+    validate_library_compatibility_startup,
+    validate_personal_library_scopes_startup,
+    validate_classification_taxonomy_startup,
+    validate_classification_decision_startup,
+    validate_classification_runtime_startup,
+    validate_classification_taxonomy_bootstrap_startup,
+    validate_knowledge_catalog_startup,
+    validate_organization_authorization_startup,
     validate_graph_publication_startup,
     validate_graph_retrieval_startup,
 )
@@ -93,6 +117,33 @@ def assert_graph_extraction_startup_security() -> None:
     validate_graph_extraction_startup(settings)
 
 
+def assert_knowledge_artifact_startup_security() -> None:
+    validate_knowledge_artifact_startup(settings)
+
+
+def assert_revision_file_storage_startup_security() -> None:
+    validate_revision_file_storage_startup(settings)
+    if (
+        settings.revision_file_storage_enabled
+        and settings.document_storage_provider == "local"
+    ):
+        from app.services.object_storage import build_object_storage_adapter
+        from app.services.object_storage_contracts import ObjectStorageError
+
+        try:
+            build_object_storage_adapter(settings)
+        except ObjectStorageError:
+            raise RuntimeError(
+                "[security] local document storage root is invalid"
+            ) from None
+
+
+def assert_revision_retention_startup_security() -> None:
+    validate_revision_retention_startup(settings)
+    validate_revision_cleanup_startup(settings)
+    validate_revision_coordinated_purge_startup(settings)
+
+
 def assert_graph_publication_startup_security() -> None:
     validate_graph_publication_startup(settings)
 
@@ -103,6 +154,42 @@ def assert_graph_retrieval_startup_security() -> None:
 
 def assert_entity_linking_startup_security() -> None:
     validate_entity_linking_startup(settings)
+
+
+def assert_organization_authorization_startup_security() -> None:
+    validate_organization_authorization_startup(settings)
+
+
+def assert_library_compatibility_startup_security() -> None:
+    validate_library_compatibility_startup(settings)
+
+
+def assert_federated_retrieval_startup_security() -> None:
+    validate_federated_retrieval_startup(settings)
+
+
+def assert_personal_library_scopes_startup_security() -> None:
+    validate_personal_library_scopes_startup(settings)
+
+
+def assert_classification_taxonomy_startup_security() -> None:
+    validate_classification_taxonomy_startup(settings)
+
+
+def assert_classification_decision_startup_security() -> None:
+    validate_classification_decision_startup(settings)
+
+
+def assert_classification_runtime_startup_security() -> None:
+    validate_classification_runtime_startup(settings)
+
+
+def assert_classification_taxonomy_bootstrap_startup_security() -> None:
+    validate_classification_taxonomy_bootstrap_startup(settings)
+
+
+def assert_knowledge_catalog_startup_security() -> None:
+    validate_knowledge_catalog_startup(settings)
 
 
 def resolve_console_ui_dir(root: Path) -> Path | None:
@@ -119,9 +206,21 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     # 安全前置校验：默认密钥等危险配置在启动时就拦下
     assert_startup_security()
     assert_graph_extraction_startup_security()
+    assert_knowledge_artifact_startup_security()
+    assert_revision_file_storage_startup_security()
+    assert_revision_retention_startup_security()
     assert_graph_publication_startup_security()
     assert_graph_retrieval_startup_security()
     assert_entity_linking_startup_security()
+    assert_organization_authorization_startup_security()
+    assert_library_compatibility_startup_security()
+    assert_federated_retrieval_startup_security()
+    assert_personal_library_scopes_startup_security()
+    assert_classification_taxonomy_startup_security()
+    assert_classification_decision_startup_security()
+    assert_classification_runtime_startup_security()
+    assert_classification_taxonomy_bootstrap_startup_security()
+    assert_knowledge_catalog_startup_security()
     # 预热 Casbin enforcer，确保 policy 已加载入内存
     get_enforcer()
     # 启动自检：embedding 服务 / Qdrant 配置错配时大声报（非 fatal，不阻断启动）
@@ -164,6 +263,14 @@ def create_app() -> FastAPI:
     app.include_router(build_auth_router())
     app.include_router(api_keys_router)
     app.include_router(me_router)
+    app.include_router(library_compatibility_router)
+    app.include_router(federated_retrieval_router)
+    app.include_router(personal_library_scopes_router)
+    app.include_router(classification_taxonomies_router)
+    app.include_router(classification_taxonomy_bootstrap_router)
+    app.include_router(knowledge_catalog_router)
+    app.include_router(classification_decisions_router)
+    app.include_router(organizations_router)
     app.include_router(documents_router)
     app.include_router(v02_m4_router)
     app.include_router(v03_graph_router)

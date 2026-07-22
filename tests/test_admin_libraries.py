@@ -49,6 +49,11 @@ def test_library_read_exposes_fail_closed_graph_extraction_defaults():
         graph_extraction_enabled=False,
         external_llm_enabled=False,
         graph_extraction_allowed_security_levels=[],
+        knowledge_artifact_auto_enabled=False,
+        summary_artifact_enabled=False,
+        outline_artifact_enabled=False,
+        knowledge_artifact_external_model_enabled=False,
+        knowledge_artifact_allowed_security_levels=[],
         created_at=datetime(2026, 7, 10, tzinfo=timezone.utc),
     )
 
@@ -57,6 +62,11 @@ def test_library_read_exposes_fail_closed_graph_extraction_defaults():
     assert result.graph_extraction_enabled is False
     assert result.external_llm_enabled is False
     assert result.graph_extraction_allowed_security_levels == []
+    assert result.knowledge_artifact_auto_enabled is False
+    assert result.summary_artifact_enabled is False
+    assert result.outline_artifact_enabled is False
+    assert result.knowledge_artifact_external_model_enabled is False
+    assert result.knowledge_artifact_allowed_security_levels == []
 
 
 def test_create_library_duplicate_slug_returns_clear_chinese_409():

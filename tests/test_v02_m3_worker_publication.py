@@ -225,16 +225,52 @@ def test_publish_revision_after_qdrant_sets_current_only_when_latest_matches(mon
     db = MagicMock()
     db.execute = AsyncMock(side_effect=execute)
     db.rollback = AsyncMock()
-    db.commit = AsyncMock()
+    events = []
+    db.commit = AsyncMock(side_effect=lambda: events.append("commit"))
 
-    ok = asyncio.run(
-        embedder._publish_revision_after_qdrant(
-            db, library=_lib(), job=_job(), now=datetime(2026, 7, 9, tzinfo=timezone.utc)
+    async def supersede_classification(*_args, **_kwargs):
+        events.append("supersede_classification")
+        return 1
+
+    async def enqueue_classification(**_kwargs):
+        events.append("enqueue_classification")
+        return (uuid.uuid4(),)
+
+    with (
+        patch(
+            "app.services.classification_jobs.supersede_revision_classification_jobs",
+            side_effect=supersede_classification,
+        ) as supersede,
+        patch(
+            "app.services.classification_jobs.enqueue_ready_revision_classification",
+            side_effect=enqueue_classification,
+        ) as enqueue,
+    ):
+        ok = asyncio.run(
+            embedder._publish_revision_after_qdrant(
+                db,
+                library=_lib(),
+                job=_job(),
+                now=datetime(2026, 7, 9, tzinfo=timezone.utc),
+            )
         )
-    )
 
     assert ok is True
     assert db.commit.await_count == 1
+    supersede.assert_awaited_once_with(
+        db,
+        library_id=LIB_ID,
+        document_id=DOC_ID,
+        document_revision_id=OLD_REV_ID,
+        now=datetime(2026, 7, 9, tzinfo=timezone.utc),
+    )
+    enqueue.assert_awaited_once_with(
+        library_id=LIB_ID,
+        document_id=DOC_ID,
+        revision_id=REV_ID,
+    )
+    assert events.index("supersede_classification") < events.index("commit")
+    assert events.index("commit") < events.index("enqueue_classification")
     joined_sql = "\n".join(calls).lower()
     assert "current_revision_id" in joined_sql
     assert "latest_revision_id" in joined_sql

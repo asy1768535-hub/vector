@@ -3,6 +3,22 @@ from app.models.api_key import ApiKey
 from app.models.audit import AuditLog
 from app.models.attribute_definition import AttributeDefinition
 from app.models.chat_history import ChatConversation, ChatMessage, ChatMessageSource
+from app.models.classification_taxonomy import (
+    ClassificationLabel,
+    ClassificationTaxonomy,
+    LibraryClassificationLabel,
+)
+from app.models.classification_decision import (
+    DocumentClassificationDecision,
+    DocumentClassificationDecisionSet,
+    DocumentClassificationProposal,
+    DocumentClassificationRun,
+)
+from app.models.classification_job import DocumentClassificationJob
+from app.models.classification_taxonomy_bootstrap import (
+    TaxonomyBootstrapRun,
+    TaxonomyBootstrapSource,
+)
 from app.models.chunk import Chunk
 from app.models.chunk_links import ChunkBlock, ChunkEvidence
 from app.models.cleanup_outbox import CleanupOutbox
@@ -32,18 +48,25 @@ from app.models.graph_candidate_evidence import (
 from app.models.graph_candidates import GraphEntityCandidate, GraphRelationCandidate
 from app.models.graph_occurrences import GraphEntityOccurrence, GraphRelationOccurrence
 from app.models.graph_review import GraphEntityMergeCandidate, GraphExtractionConflict
+from app.models.knowledge_artifact import KnowledgeArtifact
+from app.models.knowledge_artifact_job import KnowledgeArtifactJob
 from app.models.knowledge_relation import KnowledgeRelation
 from app.models.library import Library
 from app.models.library_faq import LibraryFAQQuestion
 from app.models.migration_backfill_state import MigrationBackfillState
 from app.models.ontology_version import OntologyVersion
+from app.models.organization import Organization
+from app.models.organization_membership import OrganizationMembership
 from app.models.rebuild_operation import RebuildOperation
+from app.models.revision_retention import RevisionRetentionRecord
+from app.models.revision_purge_operation import RevisionPurgeOperation
 from app.models.relation_evidence import RelationEvidence
 from app.models.relation_type import RelationType
 from app.models.relation_type_constraint import RelationTypeConstraint
 from app.models.service_heartbeat import ServiceHeartbeat
 from app.models.sync_source import SyncSource
 from app.models.user import User
+from app.models.user_library_scope import UserLibraryScope, UserLibraryScopeItem
 
 __all__ = [
     "ApiKey",
@@ -52,6 +75,15 @@ __all__ = [
     "ChatConversation",
     "ChatMessage",
     "ChatMessageSource",
+    "ClassificationLabel",
+    "ClassificationTaxonomy",
+    "DocumentClassificationDecision",
+    "DocumentClassificationDecisionSet",
+    "DocumentClassificationProposal",
+    "DocumentClassificationRun",
+    "DocumentClassificationJob",
+    "TaxonomyBootstrapRun",
+    "TaxonomyBootstrapSource",
     "Chunk",
     "ChunkBlock",
     "ChunkEvidence",
@@ -83,16 +115,25 @@ __all__ = [
     "GraphRelationCandidateEvidence",
     "GraphEntityMergeCandidate",
     "GraphExtractionConflict",
+    "KnowledgeArtifact",
+    "KnowledgeArtifactJob",
     "KnowledgeRelation",
     "Library",
+    "LibraryClassificationLabel",
     "LibraryFAQQuestion",
     "MigrationBackfillState",
     "OntologyVersion",
+    "Organization",
+    "OrganizationMembership",
     "RebuildOperation",
+    "RevisionRetentionRecord",
+    "RevisionPurgeOperation",
     "RelationEvidence",
     "RelationType",
     "RelationTypeConstraint",
     "ServiceHeartbeat",
     "SyncSource",
     "User",
+    "UserLibraryScope",
+    "UserLibraryScopeItem",
 ]

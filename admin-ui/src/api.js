@@ -80,6 +80,12 @@ export async function logout() {
 
 export const me = (forceRefresh) => cachedRequest('me', () => request('/users/me'), 30000, forceRefresh);
 export const myPermissions = (forceRefresh) => cachedRequest('myPermissions', () => request('/me/permissions'), 30000, forceRefresh);
+export const listMyOrganizations = (forceRefresh) => cachedRequest(
+    'listMyOrganizations',
+    () => request('/me/organizations'),
+    30000,
+    forceRefresh,
+);
 // 修改自己的资料/密码（复用 fastapi-users PATCH /users/me，不新建更新逻辑）
 export const updateMe = (data) => request('/users/me', jsonBody('PATCH', data));
 // 管理员重置某用户密码（专用端点；password 不混入普通 PATCH）
@@ -182,6 +188,75 @@ export async function downloadDocumentFile(slug, documentId) {
     else if (asciiMatch) filename = asciiMatch[1];
     return { blob: await resp.blob(), filename: filename || 'document-file' };
 }
+
+// ── v0.8 Knowledge Catalog（严格 current Revision 只读投影） ─────
+const CATALOG_QUERY_KEYS = [
+    'title',
+    'status',
+    'classification_state',
+    'label_id',
+    'limit',
+    'cursor',
+];
+
+function catalogQuery(params = {}) {
+    return new URLSearchParams(
+        CATALOG_QUERY_KEYS
+            .map((key) => [key, params[key]])
+            .filter(([, value]) => (
+                value !== null && value !== undefined && value !== ''
+            )),
+    ).toString();
+}
+
+export const listCatalogDocuments = (slug, params = {}, forceRefresh) => {
+    const query = catalogQuery(params);
+    const key = `listCatalogDocuments:${slug}:${query}`;
+    return cachedRequest(
+        key,
+        () => request(`/libraries/${slug}/catalog/documents${query ? `?${query}` : ''}`),
+        10000,
+        forceRefresh,
+    );
+};
+export const getCatalogDocument = (slug, documentId, forceRefresh) => cachedRequest(
+    `getCatalogDocument:${slug}:${documentId}`,
+    () => request(`/libraries/${slug}/catalog/documents/${documentId}`),
+    10000,
+    forceRefresh,
+);
+export const getCatalogEvidence = (slug, evidenceId, forceRefresh) => cachedRequest(
+    `getCatalogEvidence:${slug}:${evidenceId}`,
+    () => request(`/libraries/${slug}/catalog/evidence/${evidenceId}`),
+    10000,
+    forceRefresh,
+);
+export const getCatalogFileAccess = (slug, revisionFileId) =>
+    request(`/libraries/${slug}/catalog/files/${revisionFileId}/access`);
+export const getCatalogDocumentProcessing = (slug, documentId) =>
+    request(`/libraries/${slug}/catalog/documents/${documentId}/processing`);
+export const retryCatalogDocumentProcessing = (slug, documentId, stage, body) =>
+    request(
+        `/libraries/${slug}/catalog/documents/${documentId}/processing/${stage}/retry`,
+        jsonBody('POST', body),
+    );
+
+// ── v0.8 Classification review console ──────────────────────────────────────
+export const listClassificationReviews = (slug, { limit = 20, offset = 0 } = {}) => {
+    const query = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    return request(`/libraries/${slug}/classifications/reviews?${query.toString()}`);
+};
+export const reviewClassificationRun = (slug, runId, body) =>
+    request(
+        `/libraries/${slug}/classifications/runs/${runId}/review`,
+        jsonBody('POST', body),
+    );
+
+// ── v0.8 Organization retrieval diagnostics ────────────────
+export const checkLibraryCompatibility = (body) =>
+    request('/me/library-compatibility/check', jsonBody('POST', body));
+export const runOrganizationRetrievalTest = (organizationId, body) =>
+    request(`/organizations/${organizationId}/retrieval-tests`, jsonBody('POST', body));
 
 // ── Admin: Jobs ──────────────────────────────────────────────
 const _jobsKey = (params) => 'listJobs:' + new URLSearchParams(params).toString();

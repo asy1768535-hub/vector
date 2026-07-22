@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Start local four processes: API / Embedding Worker / Cleanup Worker / Graph Extractor
+  Start local API and enabled workers
 .DESCRIPTION
   Only starts project processes. Checks DB, Qdrant and port before starting.
   Logs written to .run_logs/. PID files track process IDs.
@@ -49,7 +49,7 @@ function Stop-ProcessByPidFile($pidFile, $name) {
 }
 
 # ── Pre-flight ────────────────────────────────────────────
-Write-Step "1/5 Pre-flight checks"
+Write-Step "1/6 Pre-flight checks"
 
 # Check .venv
 if (-not (Test-Path $venvPython)) {
@@ -80,6 +80,13 @@ $graphEnabledText = if ($env:GRAPH_EXTRACTION_ENABLED) {
 }
 $graphExtractionEnabled = $graphEnabledText -match '(?i)^(true|1|yes|on)$'
 Write-OK "GRAPH_EXTRACTION_ENABLED = $graphExtractionEnabled"
+$artifactEnabledText = if ($env:KNOWLEDGE_ARTIFACT_RUNTIME_ENABLED) {
+    $env:KNOWLEDGE_ARTIFACT_RUNTIME_ENABLED
+} else {
+    $envHash['KNOWLEDGE_ARTIFACT_RUNTIME_ENABLED']
+}
+$knowledgeArtifactEnabled = $artifactEnabledText -match '(?i)^(true|1|yes|on)$'
+Write-OK "KNOWLEDGE_ARTIFACT_RUNTIME_ENABLED = $knowledgeArtifactEnabled"
 
 # Check port
 $portCheck = netstat -ano | Select-String "LISTENING" | Select-String ":$apiPort\s"
@@ -99,6 +106,7 @@ if ($Force) {
     Stop-ProcessByPidFile (Join-Path $pidDir "api.pid") "API"
     Stop-ProcessByPidFile (Join-Path $pidDir "embedder.pid") "Embedder Worker"
     Stop-ProcessByPidFile (Join-Path $pidDir "graph_extractor.pid") "Graph Extractor"
+    Stop-ProcessByPidFile (Join-Path $pidDir "knowledge_artifacts.pid") "Knowledge Artifact Worker"
     Stop-ProcessByPidFile (Join-Path $pidDir "cleanup.pid") "Cleanup Worker"
 }
 
@@ -106,7 +114,7 @@ if ($Force) {
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
 # ── Start API ─────────────────────────────────────────────
-Write-Step "2/5 Starting API (python -m app.main)"
+Write-Step "2/6 Starting API (python -m app.main)"
 
 $apiPidFile = Join-Path $pidDir "api.pid"
 if (Test-ProcessAlive $apiPidFile) {
@@ -134,7 +142,7 @@ if (Test-ProcessAlive $apiPidFile) {
 }
 
 # ── Start Embedder Worker ─────────────────────────────────
-Write-Step "3/5 Starting Embedder Worker (python -m app.workers.embedder --watch)"
+Write-Step "3/6 Starting Embedder Worker (python -m app.workers.embedder --watch)"
 
 $embedPidFile = Join-Path $pidDir "embedder.pid"
 if (Test-ProcessAlive $embedPidFile) {
@@ -151,7 +159,7 @@ if (Test-ProcessAlive $embedPidFile) {
 }
 
 # ── Start Cleanup Worker ──────────────────────────────────
-Write-Step "4/5 Starting Cleanup Worker (python -m app.workers.cleanup --watch)"
+Write-Step "4/6 Starting Cleanup Worker (python -m app.workers.cleanup --watch)"
 
 $cleanPidFile = Join-Path $pidDir "cleanup.pid"
 if (Test-ProcessAlive $cleanPidFile) {
@@ -168,7 +176,7 @@ if (Test-ProcessAlive $cleanPidFile) {
 }
 
 # ── Start Graph Extraction Worker ─────────────────────────
-Write-Step "5/5 Starting Graph Extraction Worker"
+Write-Step "5/6 Starting Graph Extraction Worker"
 
 $graphPidFile = Join-Path $pidDir "graph_extractor.pid"
 if (-not $graphExtractionEnabled) {
@@ -184,6 +192,25 @@ if (-not $graphExtractionEnabled) {
         -RedirectStandardError (Join-Path $logDir "graph_extractor_stderr.log")
     $proc.Id | Out-File -FilePath $graphPidFile -Encoding utf8 -NoNewline
     Write-OK "Graph Extraction Worker started (PID $($proc.Id))"
+}
+
+# Start Knowledge Artifact Worker
+Write-Step "6/6 Starting Knowledge Artifact Worker"
+
+$artifactPidFile = Join-Path $pidDir "knowledge_artifacts.pid"
+if (-not $knowledgeArtifactEnabled) {
+    Write-OK "Knowledge Artifact Worker disabled; not started"
+} elseif (Test-ProcessAlive $artifactPidFile) {
+    Write-Warn "Knowledge Artifact Worker already running (PID $(Get-Content $artifactPidFile)), skipping"
+} else {
+    $proc = Start-Process -FilePath $venvPython `
+        -ArgumentList "-m", "app.workers.knowledge_artifacts", "--watch" `
+        -WorkingDirectory $projectDir `
+        -PassThru -WindowStyle Hidden `
+        -RedirectStandardOutput (Join-Path $logDir "knowledge_artifacts_stdout.log") `
+        -RedirectStandardError (Join-Path $logDir "knowledge_artifacts_stderr.log")
+    $proc.Id | Out-File -FilePath $artifactPidFile -Encoding utf8 -NoNewline
+    Write-OK "Knowledge Artifact Worker started (PID $($proc.Id))"
 }
 
 # ── Summary ───────────────────────────────────────────────

@@ -9,11 +9,18 @@ from typing import Any, Optional
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from app.services.graph_extraction_safety import normalize_allowed_security_levels
+from app.models.organization import DEFAULT_ORGANIZATION_ID
+from app.services.knowledge_artifact_policy import (
+    normalize_knowledge_artifact_security_levels,
+)
+from app.services.classification_runtime_policy import (
+    normalize_classification_security_levels,
+)
 
 # 库唯一ID：只允许大小写英文字母和下划线（其它一律不允许）。
 # 同时它也是 Dify knowledge_id、URL 路径段、Qdrant collection 名、约定全文源表名，
 # 限定为合法 SQL 标识符字符集可避免下游各处转义问题。
-_SLUG_RE = re.compile(r"^[A-Za-z_]{2,80}$")
+LIBRARY_SLUG_RE = re.compile(r"^[A-Za-z_]{2,80}$")
 
 
 class StrictBaseModel(BaseModel):
@@ -96,17 +103,21 @@ class LibraryCreate(BaseModel):
         default=None,
         description="高级用法：完整跨库补全配置；不传则按 source_enrichment_enabled 决定是否按约定自动生成。结构见 source_enrichment.parse_source_config。",
     )
+    revision_retention_enabled: bool = False
+    revision_retention_days: int = Field(default=60, ge=30, le=60)
+    revision_retention_notice_days: int = Field(default=7, ge=1, le=14)
 
     @field_validator("slug")
     @classmethod
     def _check_slug(cls, v: str) -> str:
-        if not _SLUG_RE.match(v):
+        if not LIBRARY_SLUG_RE.fullmatch(v):
             raise ValueError("库唯一ID 只能包含大小写英文字母和下划线，长度 2-80")
         return v
 
     @model_validator(mode="after")
     def _check_chunk_params(self):
-        return _validate_chunk_overlap(self)
+        _validate_chunk_overlap(self)
+        return _validate_revision_retention_policy(self)
 
 
 def _validate_chunk_overlap(model):
@@ -118,6 +129,18 @@ def _validate_chunk_overlap(model):
     size, overlap = model.chunk_size, model.chunk_overlap
     if size is not None and overlap is not None and overlap >= size:
         raise ValueError(f"chunk_overlap（{overlap}）必须小于 chunk_size（{size}）")
+    return model
+
+
+def _validate_revision_retention_policy(model):
+    retention_days = model.revision_retention_days
+    notice_days = model.revision_retention_notice_days
+    if (
+        retention_days is not None
+        and notice_days is not None
+        and notice_days >= retention_days
+    ):
+        raise ValueError("revision_retention_notice_days must be less than retention days")
     return model
 
 
@@ -143,6 +166,17 @@ class LibraryUpdate(BaseModel):
     graph_extraction_enabled: Optional[bool] = None
     external_llm_enabled: Optional[bool] = None
     graph_extraction_allowed_security_levels: Optional[list[str]] = None
+    knowledge_artifact_auto_enabled: Optional[bool] = None
+    summary_artifact_enabled: Optional[bool] = None
+    outline_artifact_enabled: Optional[bool] = None
+    knowledge_artifact_external_model_enabled: Optional[bool] = None
+    knowledge_artifact_allowed_security_levels: Optional[list[str]] = None
+    classification_auto_enabled: Optional[bool] = None
+    classification_external_model_enabled: Optional[bool] = None
+    classification_allowed_security_levels: Optional[list[str]] = None
+    revision_retention_enabled: Optional[bool] = None
+    revision_retention_days: Optional[int] = Field(default=None, ge=30, le=60)
+    revision_retention_notice_days: Optional[int] = Field(default=None, ge=1, le=14)
 
     @field_validator("graph_extraction_enabled", "external_llm_enabled", mode="before")
     @classmethod
@@ -158,13 +192,60 @@ class LibraryUpdate(BaseModel):
             raise ValueError("graph extraction security levels cannot be null")
         return normalize_allowed_security_levels(value)
 
+    @field_validator(
+        "knowledge_artifact_auto_enabled",
+        "summary_artifact_enabled",
+        "outline_artifact_enabled",
+        "knowledge_artifact_external_model_enabled",
+        mode="before",
+    )
+    @classmethod
+    def _reject_null_artifact_switch(cls, value):
+        if value is None:
+            raise ValueError("knowledge artifact switch cannot be null")
+        return value
+
+    @field_validator(
+        "classification_auto_enabled",
+        "classification_external_model_enabled",
+        mode="before",
+    )
+    @classmethod
+    def _reject_null_classification_switch(cls, value):
+        if value is None:
+            raise ValueError("classification switch cannot be null")
+        return value
+
+    @field_validator("revision_retention_enabled", mode="before")
+    @classmethod
+    def _reject_null_retention_switch(cls, value):
+        if value is None:
+            raise ValueError("revision retention switch cannot be null")
+        return value
+
+    @field_validator("knowledge_artifact_allowed_security_levels", mode="before")
+    @classmethod
+    def _validate_artifact_security_levels(cls, value):
+        if value is None:
+            raise ValueError("knowledge artifact security levels cannot be null")
+        return normalize_knowledge_artifact_security_levels(value)
+
+    @field_validator("classification_allowed_security_levels", mode="before")
+    @classmethod
+    def _validate_classification_security_levels(cls, value):
+        if value is None:
+            raise ValueError("classification security levels cannot be null")
+        return normalize_classification_security_levels(value)
+
     @model_validator(mode="after")
     def _check_chunk_params(self):
-        return _validate_chunk_overlap(self)
+        _validate_chunk_overlap(self)
+        return _validate_revision_retention_policy(self)
 
 
 class LibraryRead(BaseModel):
     id: uuid.UUID
+    organization_id: uuid.UUID = DEFAULT_ORGANIZATION_ID
     slug: str
     name: str
     description: Optional[str] = None
@@ -184,11 +265,56 @@ class LibraryRead(BaseModel):
     graph_extraction_enabled: bool = False
     external_llm_enabled: bool = False
     graph_extraction_allowed_security_levels: list[str] = Field(default_factory=list)
+    knowledge_artifact_auto_enabled: bool = False
+    summary_artifact_enabled: bool = False
+    outline_artifact_enabled: bool = False
+    knowledge_artifact_external_model_enabled: bool = False
+    knowledge_artifact_allowed_security_levels: list[str] = Field(default_factory=list)
+    classification_auto_enabled: bool = False
+    classification_external_model_enabled: bool = False
+    classification_allowed_security_levels: list[str] = Field(default_factory=list)
+    revision_retention_enabled: bool = False
+    revision_retention_days: int = 60
+    revision_retention_notice_days: int = 7
     lifecycle_mode: str = "managed"                 # #6 managed | external
     index_state: str = "ready"                      # #6 ready | rebuilding | failed
     active_rebuild_operation_id: Optional[uuid.UUID] = None
     created_at: datetime
     deleted_at: Optional[datetime] = None
+
+    @field_validator(
+        "classification_auto_enabled",
+        "classification_external_model_enabled",
+        mode="before",
+    )
+    @classmethod
+    def _default_classification_switches(cls, value):
+        return False if value is None else value
+
+    @field_validator("classification_allowed_security_levels", mode="before")
+    @classmethod
+    def _default_classification_security_levels(cls, value):
+        return [] if value is None else value
+
+    @field_validator("revision_retention_enabled", mode="before")
+    @classmethod
+    def _default_retention_enabled(cls, value):
+        return False if value is None else value
+
+    @field_validator("revision_retention_days", mode="before")
+    @classmethod
+    def _default_retention_days(cls, value):
+        return 60 if value is None else value
+
+    @field_validator("revision_retention_notice_days", mode="before")
+    @classmethod
+    def _default_retention_notice_days(cls, value):
+        return 7 if value is None else value
+
+    @field_validator("organization_id", mode="before")
+    @classmethod
+    def _default_organization_id(cls, value):
+        return DEFAULT_ORGANIZATION_ID if value is None else value
 
     model_config = {"from_attributes": True}
 
@@ -259,6 +385,8 @@ class PermissionMatrixRow(BaseModel):
     actions: list[str]
     # 可选：活动库的真实名称（仅 /me/permissions 填充，向后兼容；缺失时前端回退 slug）。
     library_name: Optional[str] = None
+    # Organization-aware mode exposes the service-owned scope for safe client grouping.
+    organization_id: Optional[uuid.UUID] = None
 
 
 # ── Audit log ────────────────────────────────────────────────────────────

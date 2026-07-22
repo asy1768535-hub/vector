@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Show local four-process status, port 8100, and /health
+  Show local project process status, port 8100, and /health
 .DESCRIPTION
   Checks PID files for process liveness, port occupancy, and calls /health.
   Does not print passwords, API keys, or JWT_SECRET.
@@ -27,6 +27,15 @@ $graphEnabledText = if ($env:GRAPH_EXTRACTION_ENABLED) {
     }
 }
 $graphExtractionEnabled = $graphEnabledText -match '(?i)^(true|1|yes|on)$'
+$artifactEnabledText = if ($env:KNOWLEDGE_ARTIFACT_RUNTIME_ENABLED) {
+    $env:KNOWLEDGE_ARTIFACT_RUNTIME_ENABLED
+} elseif (Test-Path $envPath) {
+    $match = Select-String -Path $envPath -Pattern '^\s*KNOWLEDGE_ARTIFACT_RUNTIME_ENABLED\s*=\s*(.*)' | Select-Object -First 1
+    if ($match -and $match.Matches.Groups[1].Value) {
+        $match.Matches.Groups[1].Value.Trim()
+    }
+}
+$knowledgeArtifactEnabled = $artifactEnabledText -match '(?i)^(true|1|yes|on)$'
 
 function Test-PidAlive($pidFile, $label) {
     if (-not (Test-Path $pidFile)) {
@@ -61,6 +70,11 @@ if ($graphExtractionEnabled) {
     $graphAlive = Test-PidAlive (Join-Path $pidDir "graph_extractor.pid") "Graph Extractor"
 } else {
     Write-Host "  Graph Extractor : DISABLED" -ForegroundColor DarkGray
+}
+if ($knowledgeArtifactEnabled) {
+    $artifactAlive = Test-PidAlive (Join-Path $pidDir "knowledge_artifacts.pid") "Knowledge Artifact Worker"
+} else {
+    Write-Host "  Knowledge Artifact Worker : DISABLED" -ForegroundColor DarkGray
 }
 
 Write-Host ""

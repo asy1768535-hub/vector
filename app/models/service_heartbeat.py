@@ -21,7 +21,8 @@ class ServiceHeartbeat(Base):
     __tablename__ = "service_heartbeats"
     __table_args__ = (
         CheckConstraint(
-            "service_type IN ('api','embedding_worker','cleanup_worker','graph_extractor')",
+            "service_type IN ('api','embedding_worker','cleanup_worker','graph_extractor',"
+            "'knowledge_artifact_worker','classification_worker')",
             name="ck_heartbeat_service_type",
         ),
         CheckConstraint("status IN ('online','stopping')", name="ck_heartbeat_status"),

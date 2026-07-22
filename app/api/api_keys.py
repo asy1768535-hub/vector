@@ -15,8 +15,14 @@ from app.auth.api_key import generate_api_key
 from app.auth.backend import current_cookie_user
 from app.db import get_db
 from app.models.api_key import ApiKey
+from app.models.organization import DEFAULT_ORGANIZATION_ID
 from app.models.user import User
 from app.schemas.api_keys import ApiKeyCreateRequest, ApiKeyCreated, ApiKeyRead
+from app.config import settings
+from app.services.organization_authorization import (
+    OrganizationAuthorizationError,
+    resolve_organization_membership,
+)
 
 router = APIRouter(prefix="/me/api-keys", tags=["api-keys"])
 
@@ -38,8 +44,24 @@ async def create_key(
     user: User = Depends(current_cookie_user),
     db: AsyncSession = Depends(get_db),
 ) -> ApiKeyCreated:
+    if settings.organization_authorization_enabled:
+        if body.organization_id is None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "organization_id is required",
+            )
+        try:
+            await resolve_organization_membership(
+                db,
+                organization_id=body.organization_id,
+                user_id=user.id,
+            )
+        except OrganizationAuthorizationError as exc:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden") from exc
+    organization_id = body.organization_id or DEFAULT_ORGANIZATION_ID
     plain, prefix, hashed = generate_api_key()
     row = ApiKey(
+        organization_id=organization_id,
         user_id=user.id,
         name=body.name,
         key_prefix=prefix,
@@ -51,6 +73,7 @@ async def create_key(
     await db.refresh(row)
     return ApiKeyCreated(
         id=row.id,
+        organization_id=row.organization_id,
         name=row.name,
         key_prefix=row.key_prefix,
         expires_at=row.expires_at,

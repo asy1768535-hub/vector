@@ -11,6 +11,7 @@ from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
+from app.models.organization import DEFAULT_ORGANIZATION_ID
 
 
 class Library(Base):
@@ -19,9 +20,47 @@ class Library(Base):
         CheckConstraint("lifecycle_mode IN ('managed','external')", name="ck_lib_lifecycle_mode"),
         CheckConstraint("index_state IN ('ready','rebuilding','failed')", name="ck_lib_index_state"),
         CheckConstraint("retrieval_mode IN ('dense','hybrid')", name="ck_lib_retrieval_mode"),
+        CheckConstraint(
+            "jsonb_typeof(knowledge_artifact_allowed_security_levels) = 'array'",
+            name="ck_lib_knowledge_artifact_security_levels_array",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(classification_allowed_security_levels) = 'array'",
+            name="ck_lib_classification_security_levels_array",
+        ),
+        CheckConstraint(
+            "revision_retention_days BETWEEN 30 AND 60 AND "
+            "revision_retention_notice_days BETWEEN 1 AND 14 AND "
+            "revision_retention_notice_days < revision_retention_days",
+            name="ck_lib_revision_retention_policy",
+        ),
+        CheckConstraint(
+            "(num_nonnulls(embedding_probe_contract_version, embedding_probe_model, "
+            "embedding_probe_dimension, embedding_probe_endpoint_sha256, "
+            "embedding_probe_fingerprint, embedding_probe_verified_at) = 0 OR "
+            "(num_nonnulls(embedding_probe_contract_version, embedding_probe_model, "
+            "embedding_probe_dimension, embedding_probe_endpoint_sha256, "
+            "embedding_probe_fingerprint, embedding_probe_verified_at) = 6 AND "
+            "embedding_probe_dimension > 0 AND "
+            "embedding_probe_endpoint_sha256 ~ '^[0-9a-f]{64}$' AND "
+            "embedding_probe_fingerprint ~ '^[0-9a-f]{64}$'))",
+            name="ck_sys_libraries_embedding_probe_snapshot",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey(
+            "sys_organizations.id",
+            ondelete="RESTRICT",
+            name="fk_sys_libraries_organization",
+        ),
+        nullable=False,
+        default=DEFAULT_ORGANIZATION_ID,
+        server_default=str(DEFAULT_ORGANIZATION_ID),
+        index=True,
+    )
     slug: Mapped[str] = mapped_column(String(80), unique=True, nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(160), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -31,6 +70,20 @@ class Library(Base):
     vector_distance: Mapped[str] = mapped_column(String(16), nullable=False, default="cosine")
     # 库级 embedding 服务 URL；null = 用全局 settings.embedding_base_url
     embedding_base_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    embedding_probe_contract_version: Mapped[Optional[str]] = mapped_column(
+        String(32), nullable=True
+    )
+    embedding_probe_model: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    embedding_probe_dimension: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    embedding_probe_endpoint_sha256: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )
+    embedding_probe_fingerprint: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )
+    embedding_probe_verified_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     chunk_size: Mapped[int] = mapped_column(Integer, nullable=False, default=1000)
     chunk_overlap: Mapped[int] = mapped_column(Integer, nullable=False, default=120)
@@ -59,6 +112,39 @@ class Library(Base):
     )
     graph_extraction_allowed_security_levels: Mapped[list[str]] = mapped_column(
         JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    knowledge_artifact_auto_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    summary_artifact_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    outline_artifact_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    knowledge_artifact_external_model_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    knowledge_artifact_allowed_security_levels: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    classification_auto_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    classification_external_model_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    classification_allowed_security_levels: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    revision_retention_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    revision_retention_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=60, server_default="60"
+    )
+    revision_retention_notice_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=7, server_default="7"
     )
 
     # 生命周期归属（#6/#7 设计 §4.5）：managed=本系统管理(参与 revision/tombstone 过滤)；

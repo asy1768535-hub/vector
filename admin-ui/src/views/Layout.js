@@ -19,7 +19,11 @@ export default {
 
         const isSuper = computed(() => !!store.user && store.user.is_superuser);
         // 按权限决定普通用户可见的菜单（superuser 全可见）。前端隐藏≠鉴权，后端仍校验。
-        const access = computed(() => menuAccess(store.user, store.permissions));
+        const access = computed(() => menuAccess(
+            store.user,
+            store.permissions,
+            store.organizations,
+        ));
 
         // 修改密码弹窗（复用 PATCH /users/me）
         const pwDialog = reactive({ open: false, pwd: '', confirm: '', loading: false });
@@ -58,6 +62,7 @@ export default {
             } finally {
                 store.user = null;
                 store.permissions = [];
+                store.organizations = [];
                 ElMessage.success('已注销');
                 router.push('/login');
             }
@@ -89,6 +94,14 @@ export default {
                     <el-icon><local-icon icon="sidebar:document"></local-icon></el-icon>
                     <template #title>文档</template>
                 </el-menu-item>
+                <el-menu-item v-if="access.catalog" index="/catalog">
+                    <el-icon><local-icon icon="mdi:bookshelf"></local-icon></el-icon>
+                    <template #title>知识目录</template>
+                </el-menu-item>
+                <el-menu-item v-if="access.classificationReview" index="/classification-review">
+                    <el-icon><local-icon icon="mdi:shield-key-outline"></local-icon></el-icon>
+                    <template #title>分类审核</template>
+                </el-menu-item>
                 <el-menu-item v-if="access.search" index="/search">
                     <el-icon><local-icon icon="sidebar:search"></local-icon></el-icon>
                     <template #title>数据检索</template>
@@ -101,6 +114,13 @@ export default {
                     <el-icon><local-icon icon="sidebar:api-key"></local-icon></el-icon>
                     <template #title>我的 API Key</template>
                 </el-menu-item>
+
+                <el-menu-item-group v-if="access.organizationAdmin" title="组织管理">
+                    <el-menu-item v-if="access.retrievalTest" index="/retrieval-test">
+                        <el-icon><local-icon icon="mdi:text-search"></local-icon></el-icon>
+                        <template #title>检索诊断</template>
+                    </el-menu-item>
+                </el-menu-item-group>
 
                 <el-menu-item-group v-if="isSuper" title="管理员">
                     <el-menu-item index="/dashboard">
@@ -164,7 +184,7 @@ export default {
                     <el-dropdown @command="onUserCommand">
                         <span class="header-user">
                             <span class="header-avatar">{{ avatarText }}</span>
-                            <span>{{ userLabel }}</span>
+                            <span class="header-user-label">{{ userLabel }}</span>
                             <el-tag v-if="isSuper" type="danger" size="small" effect="light">超管</el-tag>
                             <local-icon icon="mdi:chevron-down" style="color:var(--el-text-color-placeholder)"></local-icon>
                         </span>

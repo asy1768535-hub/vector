@@ -1,9 +1,9 @@
 <#
 .SYNOPSIS
-  Stop the four project processes started by start_local.ps1
+  Stop project processes started by start_local.ps1
 .DESCRIPTION
   Only stops processes recorded in PID files. Does not stop unrelated services.
-  Order: Graph Extractor -> Cleanup -> Embedder -> API
+  Order: Knowledge Artifacts -> Graph Extractor -> Cleanup -> Embedder -> API
 #>
 $ErrorActionPreference = "Continue"
 $projectDir = $PSScriptRoot | Split-Path -Parent
@@ -34,6 +34,7 @@ function Stop-ByPidFile($pidFile, $label) {
 Write-Host "=== Stop local project processes ===" -ForegroundColor Cyan
 
 # Stop workers first, then API
+Stop-ByPidFile (Join-Path $pidDir "knowledge_artifacts.pid") "Knowledge Artifact Worker"
 Stop-ByPidFile (Join-Path $pidDir "graph_extractor.pid") "Graph Extractor"
 Stop-ByPidFile (Join-Path $pidDir "cleanup.pid") "Cleanup Worker"
 Stop-ByPidFile (Join-Path $pidDir "embedder.pid") "Embedder Worker"

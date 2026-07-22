@@ -22,6 +22,7 @@ GRAPH_PUBLICATION_STATUS_FAILED = "failed"
 GRAPH_PUBLICATION_SOURCE_INITIAL_SEED = "initial_seed"
 GRAPH_PUBLICATION_SOURCE_MANUAL_PLAN = "manual_plan"
 GRAPH_PUBLICATION_SOURCE_ROLLBACK = "rollback"
+GRAPH_PUBLICATION_SOURCE_COORDINATED_PURGE = "coordinated_purge"
 
 
 class GraphPublication(Base):
@@ -32,7 +33,7 @@ class GraphPublication(Base):
             name="ck_graph_publications_status",
         ),
         CheckConstraint(
-            "source_mode IN ('initial_seed','manual_plan','rollback')",
+            "source_mode IN ('initial_seed','manual_plan','rollback','coordinated_purge')",
             name="ck_graph_publications_source_mode",
         ),
         CheckConstraint(

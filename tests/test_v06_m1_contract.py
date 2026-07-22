@@ -346,8 +346,10 @@ def test_v06_m4_mounts_only_query_route_and_adds_no_migration():
 
     v06_paths = [path for path in app.openapi()["paths"] if "/v06/" in path]
     assert v06_paths == ["/libraries/{slug}/v06/graph/query"]
-    assert ScriptDirectory.from_config(Config("alembic.ini")).get_heads() == ["0023"]
-    assert not list(Path("alembic/versions").glob("0024*"))
+    migration = ScriptDirectory.from_config(Config("alembic.ini")).get_revision("0023")
+    assert migration is not None
+    assert migration.down_revision == "0022"
+    assert not list(Path("alembic/versions").glob("*v06*.py"))
 
 
 def test_v06_m1_preserves_v05_healthy_publication_helpers():

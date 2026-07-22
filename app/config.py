@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import math
 import re
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlparse
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -167,12 +169,42 @@ class Settings(BaseSettings):
     cookie_name: str = "vk_session"
     # 公开注册 /auth/register：内部部门平台默认关闭，只许超管经 /admin/users 建用户。
     allow_public_registration: bool = False
+    organization_authorization_enabled: bool = False
+    cross_library_compatibility_enabled: bool = False
+    federated_retrieval_enabled: bool = False
+    personal_library_scopes_enabled: bool = False
+    classification_taxonomy_enabled: bool = False
+    classification_decision_enabled: bool = False
 
     # ---- 文件导入 ----
     # /import-file 单次上传字节上限（默认 50MiB），超出 413，避免一次性 read 打爆内存。
     max_import_file_bytes: int = 50 * 1024 * 1024
     # 原始上传文件持久化目录（相对路径基于仓库根目录）。
     document_files_dir: str = "storage/document_files"
+    revision_file_storage_enabled: bool = False
+    document_storage_provider: str = "local"
+    document_storage_endpoint_ref: str = "primary"
+    document_storage_endpoint_url: str = ""
+    document_storage_bucket: str = ""
+    document_storage_access_key: SecretStr = SecretStr("")
+    document_storage_secret_key: SecretStr = SecretStr("")
+    document_storage_region: str = ""
+    document_storage_max_read_bytes: int = 50 * 1024 * 1024
+    document_storage_signed_url_seconds: int = 300
+    revision_retention_enabled: bool = False
+    revision_retention_batch_size: int = 50
+    revision_retention_impact_evidence_sample: int = 20
+    revision_cleanup_enabled: bool = False
+    revision_cleanup_batch_size: int = 16
+    revision_cleanup_lease_seconds: int = 300
+    revision_cleanup_max_attempts: int = 10
+    revision_coordinated_purge_enabled: bool = False
+    revision_coordinated_purge_batch_size: int = 10
+    revision_coordinated_purge_lease_seconds: int = 300
+    revision_coordinated_purge_max_attempts: int = 5
+    revision_coordinated_purge_max_evidence: int = 10_000
+    revision_coordinated_purge_max_affected_items: int = 1_000
+    revision_coordinated_purge_impact_sample: int = 50
 
     # ---- 检索可见性过滤（#6 批次 A，revision 维度）----
     retrieval_consistency_filter: bool = True   # 总开关；关掉则不回查 PG（灰度/回滚用）
@@ -306,6 +338,54 @@ class Settings(BaseSettings):
     graph_extraction_raw_output_retention_days: int = 30
     graph_extraction_candidate_retention_days: int = 180
 
+    # ---- v0.8 Knowledge Artifact Runtime (default fail closed) ----
+    knowledge_artifact_runtime_enabled: bool = False
+    knowledge_artifact_auto_trigger_enabled: bool = False
+    knowledge_artifact_external_model_enabled: bool = False
+    knowledge_artifact_base_url: str = "https://api.deepseek.com/v1"
+    knowledge_artifact_model: str = "deepseek-v4-pro"
+    knowledge_artifact_api_key: SecretStr = SecretStr("")
+    knowledge_artifact_provider_timeout_seconds: float = 120.0
+    knowledge_artifact_short_summary_max_chars: int = 4_000
+    knowledge_artifact_model_max_source_chars: int = 24_000
+    knowledge_artifact_summary_extractor_version: str = "summary-extractor-v1"
+    knowledge_artifact_outline_extractor_version: str = "outline-extractor-v1"
+    knowledge_artifact_prompt_version: str = "summary-prompt-v1"
+    knowledge_artifact_worker_poll_seconds: float = 3.0
+    knowledge_artifact_worker_lease_seconds: int = 180
+    knowledge_artifact_worker_renew_seconds: int = 30
+    knowledge_artifact_worker_max_attempts: int = 3
+
+    # ---- v0.8 Document Classification Worker (default fail closed) ----
+    classification_runtime_enabled: bool = False
+    classification_auto_trigger_enabled: bool = False
+    classification_external_model_enabled: bool = False
+    classification_base_url: str = "https://api.deepseek.com/v1"
+    classification_model: str = "deepseek-v4-pro"
+    classification_api_key: SecretStr = SecretStr("")
+    classification_provider_timeout_seconds: float = 120.0
+    classification_model_max_source_chars: int = 24_000
+    classification_classifier_version: str = "document-classifier-v1"
+    classification_prompt_version: str = "classification-prompt-v1"
+    classification_worker_poll_seconds: float = 3.0
+    classification_worker_lease_seconds: int = 180
+    classification_worker_renew_seconds: int = 30
+    classification_worker_max_attempts: int = 3
+
+    # ---- v0.8 Classification Taxonomy Bootstrap (default fail closed) ----
+    classification_taxonomy_bootstrap_enabled: bool = False
+    classification_taxonomy_bootstrap_llm_enabled: bool = False
+    classification_taxonomy_bootstrap_max_samples: int = 20
+    classification_taxonomy_bootstrap_max_source_chars: int = 24_000
+    classification_taxonomy_bootstrap_attempt_seconds: int = 180
+    classification_taxonomy_bootstrap_prompt_version: str = "taxonomy-bootstrap-v1"
+
+    # ---- v0.8 Document-First Knowledge Catalog (default fail closed) ----
+    knowledge_catalog_enabled: bool = False
+    knowledge_catalog_max_entity_cards: int = 50
+    knowledge_catalog_max_relation_cards: int = 50
+    knowledge_catalog_max_evidence_per_fact: int = 20
+
     # ---- v0.5 Active Graph Publication (M1 defaults; fail closed) ----
     graph_publication_enabled: bool = False
     graph_publication_require_entity_evidence: bool = True
@@ -391,6 +471,333 @@ def validate_graph_extraction_startup(config: Settings) -> None:
     ):
         raise RuntimeError(
             "[security] GRAPH_EXTRACTION_API_KEY is required when auto trigger is enabled"
+        )
+
+
+def validate_knowledge_artifact_startup(config: Settings) -> None:
+    if config.knowledge_artifact_auto_trigger_enabled and not (
+        config.knowledge_artifact_runtime_enabled
+    ):
+        raise RuntimeError(
+            "[security] knowledge artifact auto trigger requires the runtime"
+        )
+
+    positive_values = (
+        config.knowledge_artifact_provider_timeout_seconds,
+        config.knowledge_artifact_short_summary_max_chars,
+        config.knowledge_artifact_model_max_source_chars,
+        config.knowledge_artifact_worker_poll_seconds,
+        config.knowledge_artifact_worker_lease_seconds,
+        config.knowledge_artifact_worker_renew_seconds,
+        config.knowledge_artifact_worker_max_attempts,
+    )
+    if any(not math.isfinite(value) or value <= 0 for value in positive_values):
+        raise RuntimeError("[security] knowledge artifact runtime limits must be positive")
+    if (
+        config.knowledge_artifact_short_summary_max_chars
+        > config.knowledge_artifact_model_max_source_chars
+    ):
+        raise RuntimeError(
+            "[security] short Summary limit must not exceed model source limit"
+        )
+    lease = config.knowledge_artifact_worker_lease_seconds
+    if config.knowledge_artifact_worker_renew_seconds >= lease / 2:
+        raise RuntimeError(
+            "[security] knowledge artifact lease renew must be less than half the lease"
+        )
+    if config.knowledge_artifact_provider_timeout_seconds >= lease:
+        raise RuntimeError(
+            "[security] knowledge artifact provider timeout must be below the lease"
+        )
+    version_values = (
+        config.knowledge_artifact_summary_extractor_version,
+        config.knowledge_artifact_outline_extractor_version,
+        config.knowledge_artifact_prompt_version,
+    )
+    if any(not value.strip() or len(value) > 64 for value in version_values):
+        raise RuntimeError(
+            "[security] knowledge artifact versions must be nonblank and bounded"
+        )
+    if not config.knowledge_artifact_external_model_enabled:
+        return
+    if (
+        config.knowledge_artifact_base_url != "https://api.deepseek.com/v1"
+        or config.knowledge_artifact_model != "deepseek-v4-pro"
+    ):
+        raise RuntimeError(
+            "[security] knowledge artifact model requires the approved DeepSeek identity"
+        )
+    if not config.knowledge_artifact_api_key.get_secret_value().strip():
+        raise RuntimeError(
+            "[security] KNOWLEDGE_ARTIFACT_API_KEY is required for model generation"
+        )
+
+
+def validate_classification_runtime_startup(config: Settings) -> None:
+    if config.classification_runtime_enabled and not (
+        config.classification_decision_enabled
+        and config.classification_taxonomy_enabled
+        and config.organization_authorization_enabled
+    ):
+        raise RuntimeError(
+            "[security] classification runtime requires decisions, taxonomy, and "
+            "Organization authorization"
+        )
+    if config.classification_auto_trigger_enabled and not (
+        config.classification_runtime_enabled
+        and config.classification_external_model_enabled
+    ):
+        raise RuntimeError(
+            "[security] classification auto trigger requires runtime and model"
+        )
+    if config.classification_external_model_enabled and not (
+        config.classification_runtime_enabled
+        or config.classification_taxonomy_bootstrap_llm_enabled
+    ):
+        raise RuntimeError(
+            "[security] classification external model requires classifier runtime "
+            "or taxonomy bootstrap LLM"
+        )
+    positive_values = (
+        config.classification_provider_timeout_seconds,
+        config.classification_model_max_source_chars,
+        config.classification_worker_poll_seconds,
+        config.classification_worker_lease_seconds,
+        config.classification_worker_renew_seconds,
+        config.classification_worker_max_attempts,
+    )
+    if any(not math.isfinite(value) or value <= 0 for value in positive_values):
+        raise RuntimeError("[security] classification runtime limits must be positive")
+    if not 1_000 <= config.classification_model_max_source_chars <= 100_000:
+        raise RuntimeError(
+            "[security] classification source limit must be within 1000..100000"
+        )
+    lease = config.classification_worker_lease_seconds
+    if config.classification_worker_renew_seconds >= lease / 2:
+        raise RuntimeError(
+            "[security] classification lease renew must be less than half the lease"
+        )
+    if config.classification_provider_timeout_seconds >= lease:
+        raise RuntimeError(
+            "[security] classification provider timeout must be below the lease"
+        )
+    versions = (
+        config.classification_classifier_version,
+        config.classification_prompt_version,
+    )
+    if any(not value.strip() or len(value) > 64 for value in versions):
+        raise RuntimeError(
+            "[security] classification versions must be nonblank and bounded"
+        )
+    if not config.classification_external_model_enabled:
+        return
+    if (
+        config.classification_base_url != "https://api.deepseek.com/v1"
+        or config.classification_model != "deepseek-v4-pro"
+    ):
+        raise RuntimeError(
+            "[security] classification requires the approved DeepSeek identity"
+        )
+    if not config.classification_api_key.get_secret_value().strip():
+        raise RuntimeError(
+            "[security] CLASSIFICATION_API_KEY is required for classification"
+        )
+
+
+def validate_classification_taxonomy_bootstrap_startup(config: Settings) -> None:
+    if config.classification_taxonomy_bootstrap_enabled and not (
+        config.organization_authorization_enabled
+        and config.classification_taxonomy_enabled
+    ):
+        raise RuntimeError(
+            "[security] taxonomy bootstrap requires Organization authorization "
+            "and classification taxonomy"
+        )
+    if config.classification_taxonomy_bootstrap_llm_enabled and not (
+        config.classification_taxonomy_bootstrap_enabled
+        and config.classification_external_model_enabled
+    ):
+        raise RuntimeError(
+            "[security] taxonomy bootstrap LLM requires bootstrap and the approved model"
+        )
+    values = (
+        config.classification_taxonomy_bootstrap_max_samples,
+        config.classification_taxonomy_bootstrap_max_source_chars,
+        config.classification_taxonomy_bootstrap_attempt_seconds,
+    )
+    if any(isinstance(value, bool) or not isinstance(value, int) for value in values):
+        raise RuntimeError("[security] taxonomy bootstrap limits must be integers")
+    if not 1 <= config.classification_taxonomy_bootstrap_max_samples <= 20:
+        raise RuntimeError("[security] taxonomy bootstrap sample limit must be within 1..20")
+    if not 1_000 <= config.classification_taxonomy_bootstrap_max_source_chars <= 100_000:
+        raise RuntimeError(
+            "[security] taxonomy bootstrap source limit must be within 1000..100000"
+        )
+    if not 1 <= config.classification_taxonomy_bootstrap_attempt_seconds <= 900:
+        raise RuntimeError(
+            "[security] taxonomy bootstrap attempt lifetime must be within 1..900 seconds"
+        )
+    if (
+        config.classification_taxonomy_bootstrap_llm_enabled
+        and config.classification_provider_timeout_seconds
+        >= config.classification_taxonomy_bootstrap_attempt_seconds
+    ):
+        raise RuntimeError(
+            "[security] taxonomy bootstrap attempt lifetime must exceed provider timeout "
+            "and be at most 900 seconds"
+        )
+    version = config.classification_taxonomy_bootstrap_prompt_version
+    if not version.strip() or len(version) > 64:
+        raise RuntimeError("[security] taxonomy bootstrap prompt version is invalid")
+
+
+def validate_knowledge_catalog_startup(config: Settings) -> None:
+    if config.knowledge_catalog_enabled and not config.organization_authorization_enabled:
+        raise RuntimeError(
+            "[security] knowledge Catalog requires Organization authorization"
+        )
+    values = (
+        config.knowledge_catalog_max_entity_cards,
+        config.knowledge_catalog_max_relation_cards,
+        config.knowledge_catalog_max_evidence_per_fact,
+    )
+    if any(isinstance(value, bool) or not isinstance(value, int) for value in values):
+        raise RuntimeError("[security] knowledge Catalog limits must be integers")
+    if not 1 <= config.knowledge_catalog_max_entity_cards <= 100:
+        raise RuntimeError("[security] knowledge Catalog entity limit must be within 1..100")
+    if not 1 <= config.knowledge_catalog_max_relation_cards <= 100:
+        raise RuntimeError("[security] knowledge Catalog relation limit must be within 1..100")
+    if not 1 <= config.knowledge_catalog_max_evidence_per_fact <= 20:
+        raise RuntimeError("[security] knowledge Catalog Evidence limit must be within 1..20")
+
+
+def validate_revision_file_storage_startup(config: Settings) -> None:
+    if not config.revision_file_storage_enabled:
+        return
+    if config.document_storage_max_read_bytes <= 0:
+        raise RuntimeError("[security] document storage read limit must be positive")
+    if not 30 <= config.document_storage_signed_url_seconds <= 3_600:
+        raise RuntimeError(
+            "[security] document storage signed URL lifetime must be within 30..3600 seconds"
+        )
+    if not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}",
+        config.document_storage_endpoint_ref,
+    ):
+        raise RuntimeError("[security] document storage endpoint reference is invalid")
+    if config.document_storage_provider not in {"local", "minio", "oss"}:
+        raise RuntimeError("[security] document storage provider is unsupported")
+    if not config.enable_evidence_write_path:
+        raise RuntimeError(
+            "[security] revision file storage requires the evidence Revision write path"
+        )
+    if config.document_storage_provider == "local":
+        if not config.document_files_dir.strip():
+            raise RuntimeError("[security] local document storage root is required")
+        return
+    parsed = urlparse(config.document_storage_endpoint_url)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise RuntimeError("[security] remote document storage endpoint is invalid")
+    if config.document_storage_provider == "oss" and parsed.scheme != "https":
+        raise RuntimeError("[security] OSS document storage requires HTTPS")
+    if not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._-]{0,254}", config.document_storage_bucket
+    ):
+        raise RuntimeError("[security] remote document storage bucket is invalid")
+    if not config.document_storage_access_key.get_secret_value().strip() or not (
+        config.document_storage_secret_key.get_secret_value().strip()
+    ):
+        raise RuntimeError("[security] remote document storage credentials are required")
+    dependency = "minio" if config.document_storage_provider == "minio" else "oss2"
+    if importlib.util.find_spec(dependency) is None:
+        raise RuntimeError(
+            f"[security] document storage optional dependency '{dependency}' is required"
+        )
+
+
+def validate_revision_retention_startup(config: Settings) -> None:
+    if not config.revision_retention_enabled:
+        return
+    if not 1 <= config.revision_retention_batch_size <= 500:
+        raise RuntimeError(
+            "[security] revision retention batch size must be within 1..500"
+        )
+    if not 1 <= config.revision_retention_impact_evidence_sample <= 100:
+        raise RuntimeError(
+            "[security] revision retention Evidence sample must be within 1..100"
+        )
+
+
+def validate_revision_cleanup_startup(config: Settings) -> None:
+    if not config.revision_cleanup_enabled:
+        return
+    if not config.revision_retention_enabled:
+        raise RuntimeError(
+            "[security] revision cleanup requires retention governance"
+        )
+    if not config.revision_file_storage_enabled:
+        raise RuntimeError(
+            "[security] revision cleanup requires revision file storage"
+        )
+    if not 1 <= config.revision_cleanup_batch_size <= 100:
+        raise RuntimeError(
+            "[security] revision cleanup batch size must be within 1..100"
+        )
+    if not 30 <= config.revision_cleanup_lease_seconds <= 3_600:
+        raise RuntimeError(
+            "[security] revision cleanup lease must be within 30..3600 seconds"
+        )
+    if not 1 <= config.revision_cleanup_max_attempts <= 100:
+        raise RuntimeError(
+            "[security] revision cleanup max attempts must be within 1..100"
+        )
+
+
+def validate_revision_coordinated_purge_startup(config: Settings) -> None:
+    if not config.revision_coordinated_purge_enabled:
+        return
+    dependencies = (
+        config.graph_publication_enabled,
+        config.revision_retention_enabled,
+        config.revision_file_storage_enabled,
+        config.revision_cleanup_enabled,
+    )
+    if not all(dependencies):
+        raise RuntimeError(
+            "[security] coordinated purge requires graph publication, retention, "
+            "revision file storage, and revision cleanup"
+        )
+    if not 1 <= config.revision_coordinated_purge_batch_size <= 100:
+        raise RuntimeError(
+            "[security] coordinated purge batch size must be within 1..100"
+        )
+    if not 30 <= config.revision_coordinated_purge_lease_seconds <= 3_600:
+        raise RuntimeError(
+            "[security] coordinated purge lease must be within 30..3600 seconds"
+        )
+    if not 1 <= config.revision_coordinated_purge_max_attempts <= 100:
+        raise RuntimeError(
+            "[security] coordinated purge max attempts must be within 1..100"
+        )
+    if not 1 <= config.revision_coordinated_purge_max_evidence <= 100_000:
+        raise RuntimeError(
+            "[security] coordinated purge Evidence limit must be within 1..100000"
+        )
+    if not 1 <= config.revision_coordinated_purge_max_affected_items <= 10_000:
+        raise RuntimeError(
+            "[security] coordinated purge item limit must be within 1..10000"
+        )
+    if not 1 <= config.revision_coordinated_purge_impact_sample <= 100:
+        raise RuntimeError(
+            "[security] coordinated purge impact sample must be within 1..100"
         )
 
 
@@ -504,6 +911,69 @@ def validate_entity_linking_startup(config: Settings) -> None:
         or approved["min_margin_micros"] != config.entity_linking_min_margin_micros
     ):
         raise RuntimeError("[security] entity linking policy thresholds do not match runtime")
+
+
+def validate_organization_authorization_startup(config: Settings) -> None:
+    if (
+        config.organization_authorization_enabled
+        and config.allow_public_registration
+    ):
+        raise RuntimeError(
+            "[security] Organization authorization requires public registration to be disabled"
+        )
+
+
+def validate_library_compatibility_startup(config: Settings) -> None:
+    if (
+        config.cross_library_compatibility_enabled
+        and not config.organization_authorization_enabled
+    ):
+        raise RuntimeError(
+            "[security] Cross-Library compatibility requires Organization authorization"
+        )
+
+
+def validate_federated_retrieval_startup(config: Settings) -> None:
+    if config.federated_retrieval_enabled and not (
+        config.organization_authorization_enabled
+        and config.cross_library_compatibility_enabled
+    ):
+        raise RuntimeError(
+            "[security] Federated retrieval requires Organization authorization "
+            "and cross-Library compatibility"
+        )
+
+
+def validate_personal_library_scopes_startup(config: Settings) -> None:
+    if config.personal_library_scopes_enabled and not (
+        config.organization_authorization_enabled
+        and config.cross_library_compatibility_enabled
+    ):
+        raise RuntimeError(
+            "[security] Personal Library scopes require Organization authorization "
+            "and cross-Library compatibility"
+        )
+
+
+def validate_classification_taxonomy_startup(config: Settings) -> None:
+    if (
+        config.classification_taxonomy_enabled
+        and not config.organization_authorization_enabled
+    ):
+        raise RuntimeError(
+            "[security] Classification taxonomy requires Organization authorization"
+        )
+
+
+def validate_classification_decision_startup(config: Settings) -> None:
+    if config.classification_decision_enabled and not (
+        config.organization_authorization_enabled
+        and config.classification_taxonomy_enabled
+    ):
+        raise RuntimeError(
+            "[security] Classification decisions require Organization authorization "
+            "and classification taxonomy"
+        )
 
 
 @lru_cache(maxsize=1)

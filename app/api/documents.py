@@ -11,6 +11,7 @@ import uuid
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Query, Response, status, File, UploadFile
 from fastapi.responses import FileResponse
@@ -47,6 +48,17 @@ from app.services import cleanup as cleanup_service
 from app.services.metadata_guard import MetadataValidationError
 from app.services import rerank as rerank_svc
 from app.services import retrieval as retrieval_svc
+from app.services.object_storage import build_object_storage_adapter
+from app.services.object_storage_contracts import ObjectStorageError
+from app.services.revision_files import (
+    PreparedStoredFile,
+    bind_prepared_file_object,
+    current_revision_file,
+    persist_revision_file_capture,
+    prepare_managed_file_object,
+    revision_file_access_from_row,
+    verified_revision_file_bytes,
+)
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/libraries/{slug}", tags=["documents"])
@@ -117,13 +129,36 @@ async def _upsert_document_file(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(content)
     rel_path = str(path.relative_to(_document_files_root()))
+    await _upsert_document_file_values(
+        db,
+        document_id=document_id,
+        revision=revision,
+        filename=filename,
+        content_type=content_type,
+        storage_path=rel_path,
+        size_bytes=len(content),
+        sha256=digest,
+    )
+
+
+async def _upsert_document_file_values(
+    db: AsyncSession,
+    *,
+    document_id: uuid.UUID,
+    revision: int,
+    filename: str,
+    content_type: str | None,
+    storage_path: str,
+    size_bytes: int,
+    sha256: str,
+) -> None:
     values = {
         "revision": revision,
         "file_name": filename,
         "content_type": content_type,
-        "storage_path": rel_path,
-        "size_bytes": len(content),
-        "sha256": digest,
+        "storage_path": storage_path,
+        "size_bytes": size_bytes,
+        "sha256": sha256,
     }
     existing = await db.get(DocumentFile, document_id)
     if existing is None:
@@ -141,12 +176,37 @@ async def _store_original_file_for_result(
     filename: str,
     content_type: str | None,
     content: bytes,
+    prepared_file: PreparedStoredFile | None = None,
 ) -> None:
     document_id = uuid.UUID(str(result["document_id"]))
     try:
         revision = int(result.get("_revision") or 1)
     except (TypeError, ValueError):
         revision = 1
+    if settings.revision_file_storage_enabled:
+        revision_id = _uuid_or_none(result.get("_document_revision_id"))
+        if prepared_file is None or revision_id is None:
+            raise ObjectStorageError(
+                "revision_file_scope_missing",
+                "structured file storage requires a DocumentRevision",
+            )
+        bound = bind_prepared_file_object(
+            prepared_file,
+            document_id=document_id,
+            document_revision_id=revision_id,
+        )
+        revision_file = await persist_revision_file_capture(db, prepared=bound)
+        await _upsert_document_file_values(
+            db,
+            document_id=document_id,
+            revision=revision,
+            filename=revision_file.file_name,
+            content_type=revision_file.content_type,
+            storage_path=revision_file.object_key,
+            size_bytes=revision_file.size_bytes,
+            sha256=revision_file.sha256,
+        )
+        return
     await _upsert_document_file(
         db,
         lib=lib,
@@ -156,6 +216,32 @@ async def _store_original_file_for_result(
         content_type=content_type,
         content=content,
     )
+
+
+async def _ingest_and_store_import_item(
+    db: AsyncSession,
+    *,
+    lib: Library,
+    user: User,
+    doc_data: dict,
+    filename: str,
+    content_type: str | None,
+    content: bytes,
+    prepared_file: PreparedStoredFile | None,
+) -> dict:
+    result = await _ingest_or_upsert(db, lib, user, doc_data)
+    await _store_original_file_for_result(
+        db,
+        lib=lib,
+        result=result,
+        filename=filename,
+        content_type=content_type,
+        content=content,
+        prepared_file=prepared_file,
+    )
+    result.pop("_revision", None)
+    result.pop("_document_revision_id", None)
+    return result
 
 
 async def _lock_writable(db: AsyncSession, lib: Library) -> Library:
@@ -195,6 +281,16 @@ def _uuid_or_none(value) -> uuid.UUID | None:
 
 def _str_or_none(value) -> str | None:
     return value if isinstance(value, str) else None
+
+
+def _result_revision_id(doc: Document, job: EmbeddingJob | None) -> str | None:
+    value = (
+        getattr(job, "document_revision_id", None)
+        if job is not None
+        else doc.latest_revision_id or doc.current_revision_id
+    )
+    revision_id = _uuid_or_none(value)
+    return str(revision_id) if revision_id is not None else None
 
 
 def _ingest_response(doc: Document, job: EmbeddingJob | None, chunk_count: int) -> DocumentIngestResponse:
@@ -367,6 +463,7 @@ async def _ingest_or_upsert(db: AsyncSession, lib: Library, user: User, doc_data
                 "job_id": str(job.id) if job is not None else None, "external_id": ext,
                 "operation": "updated" if changed else "unchanged",
                 "_revision": existing.current_revision,
+                "_document_revision_id": _result_revision_id(existing, job),
             }
 
     doc, job, chunk_count, was_existing = await ingest_service.ingest_text(
@@ -386,6 +483,7 @@ async def _ingest_or_upsert(db: AsyncSession, lib: Library, user: User, doc_data
         "external_id": doc.external_id if was_existing else ext,
         "operation": "unchanged" if was_existing else "created",
         "_revision": doc.current_revision,
+        "_document_revision_id": _result_revision_id(doc, job),
     }
 
 
@@ -424,6 +522,7 @@ async def _replace_document(db: AsyncSession, lib: Library, target_id: uuid.UUID
         "external_id": target.external_id,   # 保留目标原 external_id（替换不改身份）
         "operation": "updated",              # force=True 必然走新代际
         "_revision": target.current_revision,
+        "_document_revision_id": _result_revision_id(target, job),
     }
 
 
@@ -639,6 +738,37 @@ async def download_document_file(
     doc = await db.get(Document, document_id)
     if doc is None or doc.library_id != lib.id or doc.deleted_at is not None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "document not found")
+
+    if settings.revision_file_storage_enabled:
+        revision_row = await current_revision_file(
+            db,
+            library_id=lib.id,
+            document=doc,
+        )
+        if revision_row is not None:
+            try:
+                access = revision_file_access_from_row(revision_row)
+                await db.rollback()
+                adapter = build_object_storage_adapter()
+                content = await verified_revision_file_bytes(adapter, access)
+            except ObjectStorageError as exc:
+                await db.rollback()
+                http_status = (
+                    status.HTTP_404_NOT_FOUND
+                    if exc.code in {"object_not_found", "revision_file_unavailable"}
+                    else status.HTTP_502_BAD_GATEWAY
+                )
+                raise HTTPException(
+                    http_status, "stored document file is unavailable"
+                ) from None
+            encoded_name = quote(access.file_name, safe="")
+            return Response(
+                content=content,
+                media_type=access.content_type or "application/octet-stream",
+                headers={
+                    "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}",
+                },
+            )
 
     row = await db.get(DocumentFile, document_id)
     if row is None:
@@ -859,7 +989,10 @@ async def import_file(
     user: User = Depends(current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
-    await _lock_writable(db, lib)
+    structured_storage = settings.revision_file_storage_enabled
+    library_id = lib.id
+    if not structured_storage:
+        await _lock_writable(db, lib)
     filename = file.filename or "imported_file"
     # #13：后缀大小写不敏感 + 白名单。未知格式直接 415，不再「当纯文本」误吞二进制。
     lower_name = filename.lower()
@@ -872,6 +1005,26 @@ async def import_file(
 
     # #12：分块读取并在累计超限时立即 413（不先整文件入内存）。
     content = await _read_capped(file, settings.max_import_file_bytes)
+    prepared_file = None
+    if structured_storage:
+        await db.rollback()
+        try:
+            prepared_file = await prepare_managed_file_object(
+                adapter=build_object_storage_adapter(),
+                library_id=library_id,
+                file_name=filename,
+                content_type=file.content_type,
+                content=content,
+            )
+        except ObjectStorageError:
+            raise HTTPException(
+                status.HTTP_502_BAD_GATEWAY,
+                "document file storage failed verification",
+            ) from None
+        lib = await db.get(Library, library_id)
+        if lib is None or lib.deleted_at is not None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "library not found")
+        await _lock_writable(db, lib)
 
     documents_to_ingest = []
 
@@ -1070,8 +1223,17 @@ async def import_file(
                 filename=filename,
                 content_type=file.content_type,
                 content=content,
+                prepared_file=prepared_file,
             )
             result.pop("_revision", None)
+            result.pop("_document_revision_id", None)
+        except ObjectStorageError as exc:
+            http_status = (
+                status.HTTP_409_CONFLICT
+                if exc.code == "revision_file_identity_conflict"
+                else status.HTTP_502_BAD_GATEWAY
+            )
+            raise HTTPException(http_status, "document file storage failed") from None
         except ValueError as exc:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
         await db.commit()
@@ -1089,17 +1251,38 @@ async def import_file(
     errors = []
     for idx, doc_data in enumerate(documents_to_ingest):
         try:
-            result = await _ingest_or_upsert(db, lib, user, doc_data)
-            await _store_original_file_for_result(
-                db,
-                lib=lib,
-                result=result,
-                filename=filename,
-                content_type=file.content_type,
-                content=content,
-            )
-            result.pop("_revision", None)
+            if structured_storage:
+                async with db.begin_nested():
+                    result = await _ingest_and_store_import_item(
+                        db,
+                        lib=lib,
+                        user=user,
+                        doc_data=doc_data,
+                        filename=filename,
+                        content_type=file.content_type,
+                        content=content,
+                        prepared_file=prepared_file,
+                    )
+            else:
+                result = await _ingest_and_store_import_item(
+                    db,
+                    lib=lib,
+                    user=user,
+                    doc_data=doc_data,
+                    filename=filename,
+                    content_type=file.content_type,
+                    content=content,
+                    prepared_file=prepared_file,
+                )
             ingested.append(result)
+        except ObjectStorageError as exc:
+            log.warning("Import doc[%s] storage failed: code=%s", idx, exc.code)
+            errors.append({
+                "index": idx,
+                "title": doc_data.get("title"),
+                "external_id": doc_data.get("external_id"),
+                "error": "document file storage failed",
+            })
         except ValueError as exc:
             log.warning("Import doc[%s] failed: %s", idx, str(exc))
             errors.append({

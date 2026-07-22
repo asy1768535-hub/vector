@@ -20,7 +20,13 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
+from app.config import (
+    settings,
+    validate_revision_coordinated_purge_startup,
+    validate_revision_cleanup_startup,
+    validate_revision_file_storage_startup,
+    validate_revision_retention_startup,
+)
 from app.db import async_session_factory
 from app.models.cleanup_outbox import CleanupOutbox
 from app.services import cleanup as cleanup_service
@@ -160,6 +166,94 @@ async def run(watch: bool) -> None:
             purge_expired_graph_extraction_payloads,
         )
 
+        if settings.revision_retention_enabled:
+            from app.services.revision_retention import (
+                run_revision_retention_maintenance,
+            )
+
+            try:
+                async with async_session_factory() as retention_session:
+                    async with retention_session.begin():
+                        retention = await run_revision_retention_maintenance(
+                            retention_session
+                        )
+                if (
+                    retention.created_record_ids
+                    or retention.notice_record_ids
+                    or retention.refreshed_record_ids
+                ):
+                    log.info(
+                        "revision retention maintenance: created=%s notices=%s "
+                        "refreshed=%s",
+                        len(retention.created_record_ids),
+                        len(retention.notice_record_ids),
+                        len(retention.refreshed_record_ids),
+                    )
+            except Exception:  # noqa: BLE001
+                log.exception("revision retention maintenance failed")
+        if settings.revision_coordinated_purge_enabled:
+            from app.services.revision_coordinated_purge_runner import (
+                run_coordinated_purge_batch,
+            )
+
+            try:
+                purge_result = await run_coordinated_purge_batch(
+                    async_session_factory,
+                    worker_id=worker_id,
+                )
+                if purge_result.cleanup_pending_ids or purge_result.failed_ids:
+                    log.info(
+                        "coordinated purge: cleanup_pending=%s failed=%s",
+                        len(purge_result.cleanup_pending_ids),
+                        len(purge_result.failed_ids),
+                    )
+            except Exception:  # noqa: BLE001
+                log.exception("coordinated purge batch failed")
+        if settings.revision_cleanup_enabled:
+            from app.services.revision_cleanup_runner import (
+                run_revision_cleanup_batch,
+            )
+
+            try:
+                cleanup_result = await run_revision_cleanup_batch(
+                    async_session_factory,
+                    worker_id=worker_id,
+                )
+                if (
+                    cleanup_result.queued_record_ids
+                    or cleanup_result.cleaned_record_ids
+                    or cleanup_result.released_record_ids
+                    or cleanup_result.failed_record_ids
+                ):
+                    log.info(
+                        "revision cleanup: queued=%s cleaned=%s released=%s failed=%s",
+                        len(cleanup_result.queued_record_ids),
+                        len(cleanup_result.cleaned_record_ids),
+                        len(cleanup_result.released_record_ids),
+                        len(cleanup_result.failed_record_ids),
+                    )
+            except Exception:  # noqa: BLE001
+                log.exception("revision cleanup batch failed")
+        if settings.revision_coordinated_purge_enabled:
+            from app.services.revision_coordinated_purge import (
+                reconcile_coordinated_purge_operations,
+            )
+
+            try:
+                async with async_session_factory() as purge_reconcile_session:
+                    async with purge_reconcile_session.begin():
+                        completed_operation_ids = (
+                            await reconcile_coordinated_purge_operations(
+                                purge_reconcile_session
+                            )
+                        )
+                if completed_operation_ids:
+                    log.info(
+                        "coordinated purge completed=%s",
+                        len(completed_operation_ids),
+                    )
+            except Exception:  # noqa: BLE001
+                log.exception("coordinated purge reconciliation failed")
         try:
             async with async_session_factory() as purge_session:
                 async with purge_session.begin():
@@ -197,6 +291,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Qdrant cleanup outbox worker.")
     parser.add_argument("--watch", action="store_true", help="Long-running; poll when idle.")
     args = parser.parse_args()
+    validate_revision_retention_startup(settings)
+    validate_revision_file_storage_startup(settings)
+    validate_revision_cleanup_startup(settings)
+    validate_revision_coordinated_purge_startup(settings)
     try:
         asyncio.run(run(watch=args.watch))
     except KeyboardInterrupt:

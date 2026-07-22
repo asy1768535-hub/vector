@@ -28,10 +28,18 @@ from app.schemas.admin import (
 )
 from app.services import (
     audit_log,
+    classification_jobs,
+    classification_runtime_policy,
     graph_extraction_safety,
+    knowledge_artifact_jobs,
+    knowledge_artifact_policy,
     library_faq,
     qdrant,
     source_enrichment,
+)
+from app.services.organization_authorization import (
+    OrganizationAuthorizationError,
+    authorize_library_management,
 )
 
 log = logging.getLogger(__name__)
@@ -100,6 +108,9 @@ async def create_library(
         chunk_overlap=chunk_overlap,
         qdrant_collection="",  # 写完 ID 后再 set
         source_config=source_config,
+        revision_retention_enabled=body.revision_retention_enabled,
+        revision_retention_days=body.revision_retention_days,
+        revision_retention_notice_days=body.revision_retention_notice_days,
         created_by=actor.id,
     )
     lib.qdrant_collection = _collection_name(body.slug)
@@ -273,6 +284,118 @@ async def update_library(
             )
         )
 
+    cancelled_artifact_types: set[str] = set()
+    cancel_model_artifact_jobs = (
+        "external_llm_enabled" in body.model_fields_set
+        and body.external_llm_enabled is False
+        and bool(lib.knowledge_artifact_external_model_enabled)
+    )
+    for field in (
+        "knowledge_artifact_auto_enabled",
+        "summary_artifact_enabled",
+        "outline_artifact_enabled",
+        "knowledge_artifact_external_model_enabled",
+    ):
+        if field not in body.model_fields_set:
+            continue
+        value = getattr(body, field)
+        setattr(lib, field, value)
+        changes[field] = value
+        if value is False and field == "summary_artifact_enabled":
+            cancelled_artifact_types.add("summary")
+        elif value is False and field == "outline_artifact_enabled":
+            cancelled_artifact_types.add("outline")
+        elif value is False and field == "knowledge_artifact_external_model_enabled":
+            cancel_model_artifact_jobs = True
+
+    artifact_policy_changed = False
+    if "knowledge_artifact_allowed_security_levels" in body.model_fields_set:
+        old_levels = list(lib.knowledge_artifact_allowed_security_levels or [])
+        levels = knowledge_artifact_policy.normalize_knowledge_artifact_security_levels(
+            body.knowledge_artifact_allowed_security_levels
+        )
+        lib.knowledge_artifact_allowed_security_levels = levels
+        changes["knowledge_artifact_allowed_security_levels"] = levels
+        artifact_policy_changed = levels != old_levels
+        cancel_model_artifact_jobs = cancel_model_artifact_jobs or artifact_policy_changed
+
+    retention_fields = {
+        "revision_retention_enabled",
+        "revision_retention_days",
+        "revision_retention_notice_days",
+    }
+    if retention_fields & body.model_fields_set:
+        retention_days = (
+            body.revision_retention_days
+            if "revision_retention_days" in body.model_fields_set
+            else lib.revision_retention_days
+        )
+        notice_days = (
+            body.revision_retention_notice_days
+            if "revision_retention_notice_days" in body.model_fields_set
+            else lib.revision_retention_notice_days
+        )
+        if notice_days >= retention_days:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "revision retention notice days must be less than retention days",
+            )
+        for field in sorted(retention_fields & body.model_fields_set):
+            value = getattr(body, field)
+            setattr(lib, field, value)
+            changes[field] = value
+
+    if cancelled_artifact_types or cancel_model_artifact_jobs:
+        error_code = (
+            "library_artifact_policy_changed"
+            if artifact_policy_changed or cancel_model_artifact_jobs
+            else "library_artifact_type_disabled"
+        )
+        changes["cancelled_knowledge_artifact_jobs"] = (
+            await knowledge_artifact_jobs.cancel_library_artifact_jobs_for_policy_change(
+                db,
+                library_id=lib.id,
+                error_code=error_code,
+                artifact_types=tuple(sorted(cancelled_artifact_types)),
+                include_model_jobs=cancel_model_artifact_jobs,
+            )
+        )
+
+    cancel_classification_jobs = (
+        "external_llm_enabled" in body.model_fields_set
+        and body.external_llm_enabled is False
+        and bool(lib.classification_external_model_enabled)
+    )
+    for field in (
+        "classification_auto_enabled",
+        "classification_external_model_enabled",
+    ):
+        if field not in body.model_fields_set:
+            continue
+        value = getattr(body, field)
+        setattr(lib, field, value)
+        changes[field] = value
+        if value is False:
+            cancel_classification_jobs = True
+
+    if "classification_allowed_security_levels" in body.model_fields_set:
+        old_levels = list(lib.classification_allowed_security_levels or [])
+        levels = classification_runtime_policy.normalize_classification_security_levels(
+            body.classification_allowed_security_levels
+        )
+        lib.classification_allowed_security_levels = levels
+        changes["classification_allowed_security_levels"] = levels
+        cancel_classification_jobs = cancel_classification_jobs or levels != old_levels
+
+    if cancel_classification_jobs:
+        changes["cancelled_classification_jobs"] = (
+            await classification_jobs.cancel_library_classification_jobs_for_policy_change(
+                db,
+                library_id=lib.id,
+                error_code="library_classification_policy_changed",
+            )
+        )
+
     if changes:
         await audit_log.record(db, actor.id, "library.update", {"slug": slug, **changes})
     await db.commit()
@@ -399,9 +522,19 @@ async def delete_library(
 
 
 # ── 常用问题（FAQ）：read 可看 active；admin/superuser 可管理 ───────────────
-def _can_manage_or_see_inactive(user: User, slug: str) -> bool:
+async def _can_manage_or_see_inactive(
+    db: AsyncSession,
+    user: User,
+    library: Library,
+) -> bool:
     """是否可管理 FAQ / 查看 inactive：superuser 直通，否则需库级 admin 权限。"""
-    return user.is_superuser or has_permission(str(user.id), slug, "admin")
+    if not settings.organization_authorization_enabled:
+        return user.is_superuser or has_permission(str(user.id), library.slug, "admin")
+    try:
+        await authorize_library_management(db, user=user, library=library)
+        return True
+    except OrganizationAuthorizationError:
+        return False
 
 
 @router.get("/{slug}/faqs", response_model=list[LibraryFAQRead])
@@ -413,7 +546,9 @@ async def list_library_faqs(
     db: AsyncSession = Depends(get_db),
 ) -> list[LibraryFAQQuestion]:
     # include_inactive 只对 admin/superuser 生效；普通 read 用户强制只看 active
-    effective_inactive = include_inactive and _can_manage_or_see_inactive(user, slug)
+    effective_inactive = include_inactive and await _can_manage_or_see_inactive(
+        db, user, lib
+    )
     return await library_faq.list_faqs(db, lib.id, include_inactive=effective_inactive)
 
 

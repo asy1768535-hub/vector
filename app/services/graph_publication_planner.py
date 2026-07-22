@@ -23,6 +23,7 @@ from app.models.entity_mention import EntityMention
 from app.models.entity_type import SCHEMA_STATUS_ACTIVE, EntityType
 from app.models.evidence_unit import EVIDENCE_STATUS_ACTIVE, EvidenceUnit
 from app.models.graph_publication import (
+    GRAPH_PUBLICATION_SOURCE_COORDINATED_PURGE,
     GRAPH_PUBLICATION_SOURCE_INITIAL_SEED,
     GRAPH_PUBLICATION_SOURCE_MANUAL_PLAN,
     GraphPublication,
@@ -690,7 +691,11 @@ async def plan_graph_publication(
     requested_by_user_id: uuid.UUID | None = None,
     config: Settings = settings,
 ) -> GraphPublicationPlanResult:
-    if source_mode not in {GRAPH_PUBLICATION_SOURCE_INITIAL_SEED, GRAPH_PUBLICATION_SOURCE_MANUAL_PLAN, "rollback"}:
+    if source_mode not in {
+        GRAPH_PUBLICATION_SOURCE_INITIAL_SEED,
+        GRAPH_PUBLICATION_SOURCE_MANUAL_PLAN,
+        "rollback",
+    }:
         raise GraphPublicationPlanError("invalid_source_mode", "invalid graph publication source mode")
     if not idempotency_key:
         idempotency_key = f"plan:{uuid.uuid4()}"
@@ -732,6 +737,60 @@ async def plan_graph_publication(
         include_drafts=include_drafts,
         config=config,
     )
+    return await _persist_graph_publication_snapshot(
+        db,
+        library,
+        ontology,
+        parent=parent,
+        snapshot=snapshot,
+        source_mode=source_mode,
+        include_drafts=include_drafts,
+        dry_run=dry_run,
+        idempotency_key=idempotency_key,
+        requested_by_user_id=requested_by_user_id,
+        config=config,
+    )
+
+
+def graph_publication_snapshot_manifest_hash(
+    *,
+    library_id: uuid.UUID,
+    ontology_version_id: uuid.UUID,
+    source_mode: str,
+    parent_publication_id: uuid.UUID,
+    include_drafts: bool,
+    snapshot: GraphPublicationSnapshot,
+    config: Settings = settings,
+) -> str:
+    return _manifest_hash(
+        config=config,
+        policy_snapshot_hash=snapshot.policy_snapshot_hash,
+        library_id=library_id,
+        ontology_version_id=ontology_version_id,
+        source_mode=source_mode,
+        parent_publication_id=parent_publication_id,
+        include_drafts=include_drafts,
+        items=list(snapshot.items),
+        blocked_counts=snapshot.blocked_counts,
+    )
+
+
+async def _persist_graph_publication_snapshot(
+    db: AsyncSession,
+    library: Library,
+    ontology: OntologyVersion,
+    *,
+    parent: GraphPublication | None,
+    snapshot: GraphPublicationSnapshot,
+    source_mode: str,
+    include_drafts: bool,
+    dry_run: bool,
+    idempotency_key: str,
+    requested_by_user_id: uuid.UUID | None,
+    plan_options: dict[str, Any] | None = None,
+    allow_manifest_reuse: bool = True,
+    config: Settings,
+) -> GraphPublicationPlanResult:
     items = list(snapshot.items)
     blocked = snapshot.blocked_counts
     policy_snapshot = snapshot.policy_snapshot
@@ -747,7 +806,7 @@ async def plan_graph_publication(
         items=items,
         blocked_counts=blocked,
     )
-    if not dry_run:
+    if not dry_run and allow_manifest_reuse:
         reusable = await _load_reusable_publication(
             db,
             library_id=library.id,
@@ -774,7 +833,11 @@ async def plan_graph_publication(
         manifest_hash=manifest_hash,
         idempotency_key=idempotency_key,
         include_drafts=include_drafts,
-        plan_options={"include_drafts": include_drafts, "dry_run": dry_run},
+        plan_options={
+            "include_drafts": include_drafts,
+            "dry_run": dry_run,
+            **dict(plan_options or {}),
+        },
         parent_publication_id=getattr(parent, "id", None),
         planned_by_user_id=requested_by_user_id,
         entity_count=sum(1 for item in items if item.item_kind == "entity"),
@@ -804,4 +867,87 @@ async def plan_graph_publication(
         policy_snapshot_hash=policy_snapshot_hash,
         blocked_counts=dict(sorted(blocked.items())),
         dry_run=dry_run,
+    )
+
+
+async def plan_explicit_graph_publication_snapshot(
+    db: AsyncSession,
+    library: Library,
+    *,
+    ontology_version_id: uuid.UUID,
+    snapshot: GraphPublicationSnapshot,
+    source_mode: str,
+    include_drafts: bool,
+    idempotency_key: str,
+    expected_parent_publication_id: uuid.UUID,
+    requested_by_user_id: uuid.UUID | None = None,
+    plan_options: dict[str, Any] | None = None,
+    config: Settings = settings,
+) -> GraphPublicationPlanResult:
+    if source_mode != GRAPH_PUBLICATION_SOURCE_COORDINATED_PURGE:
+        raise GraphPublicationPlanError(
+            "invalid_source_mode", "explicit graph snapshot source mode is invalid"
+        )
+    if not idempotency_key:
+        raise GraphPublicationPlanError(
+            "idempotency_key_required", "idempotency key is required"
+        )
+    ontology = await _active_ontology(db, library, ontology_version_id)
+    await _lock_publication_scope(db, library.id)
+    parent = await _load_current_publication(
+        db,
+        library_id=library.id,
+        ontology_version_id=ontology.id,
+    )
+    if parent is None or parent.id != expected_parent_publication_id:
+        raise GraphPublicationPlanError(
+            "expected_parent_mismatch",
+            "current publication does not match the expected parent",
+        )
+    expected_manifest_hash = graph_publication_snapshot_manifest_hash(
+        library_id=library.id,
+        ontology_version_id=ontology.id,
+        source_mode=source_mode,
+        parent_publication_id=parent.id,
+        include_drafts=include_drafts,
+        snapshot=snapshot,
+        config=config,
+    )
+    idempotent = await _load_idempotent_publication(
+        db,
+        library_id=library.id,
+        ontology_version_id=ontology.id,
+        idempotency_key=idempotency_key,
+    )
+    if idempotent is not None:
+        if (
+            idempotent.source_mode != source_mode
+            or idempotent.parent_publication_id != parent.id
+            or idempotent.manifest_hash != expected_manifest_hash
+        ):
+            raise GraphPublicationPlanError(
+                "idempotency_conflict", "idempotency key conflicts"
+            )
+        return GraphPublicationPlanResult(
+            publication=idempotent,
+            items=(),
+            manifest_hash=idempotent.manifest_hash,
+            policy_snapshot_hash=_sha256_json(idempotent.policy_snapshot),
+            blocked_counts=dict(idempotent.blocked_counts or {}),
+            reused=True,
+        )
+    return await _persist_graph_publication_snapshot(
+        db,
+        library,
+        ontology,
+        parent=parent,
+        snapshot=snapshot,
+        source_mode=source_mode,
+        include_drafts=include_drafts,
+        dry_run=False,
+        idempotency_key=idempotency_key,
+        requested_by_user_id=requested_by_user_id,
+        plan_options=plan_options,
+        allow_manifest_reuse=False,
+        config=config,
     )

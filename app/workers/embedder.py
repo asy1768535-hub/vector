@@ -325,6 +325,28 @@ async def _publish_revision_after_qdrant(
         )
     )
     if old_current_revision_id is not None and old_current_revision_id != job.document_revision_id:
+        from app.services.knowledge_artifact_publication import (
+            supersede_revision_artifacts,
+        )
+
+        await supersede_revision_artifacts(
+            db,
+            library_id=library.id,
+            document_id=job.document_id,
+            document_revision_id=old_current_revision_id,
+            now=now,
+        )
+        from app.services.classification_jobs import (
+            supersede_revision_classification_jobs,
+        )
+
+        await supersede_revision_classification_jobs(
+            db,
+            library_id=library.id,
+            document_id=job.document_id,
+            document_revision_id=old_current_revision_id,
+            now=now,
+        )
         await db.execute(
             update(DocumentRevision)
             .where(DocumentRevision.id == old_current_revision_id)
@@ -333,7 +355,37 @@ async def _publish_revision_after_qdrant(
         await cleanup_service.enqueue_delete_document_revision(
             db, library, job.document_id, old_current_revision_id
         )
+    retention_scope = (
+        (library.id, job.document_id, old_current_revision_id, job.document_revision_id)
+        if (
+            settings.revision_retention_enabled
+            and getattr(library, "revision_retention_enabled", False)
+            and old_current_revision_id is not None
+            and old_current_revision_id != job.document_revision_id
+        )
+        else None
+    )
     await db.commit()
+    if retention_scope is not None:
+        try:
+            from app.services.revision_retention import schedule_revision_retention
+
+            await schedule_revision_retention(
+                db,
+                library_id=retention_scope[0],
+                document_id=retention_scope[1],
+                document_revision_id=retention_scope[2],
+                replacement_revision_id=retention_scope[3],
+            )
+            await db.commit()
+        except Exception:  # noqa: BLE001
+            await db.rollback()
+            log.exception(
+                "revision retention scheduling failed after publication: "
+                "doc=%s revision=%s",
+                retention_scope[1],
+                retention_scope[2],
+            )
     try:
         from app.services.graph_extraction_triggers import (
             enqueue_ready_revision_graph_extraction,
@@ -347,6 +399,40 @@ async def _publish_revision_after_qdrant(
     except Exception:  # noqa: BLE001
         log.exception(
             "graph extraction auto trigger failed after publication: doc=%s revision=%s",
+            job.document_id,
+            job.document_revision_id,
+        )
+    try:
+        from app.services.knowledge_artifact_jobs import (
+            enqueue_ready_revision_artifacts,
+        )
+
+        await enqueue_ready_revision_artifacts(
+            library_id=library.id,
+            document_id=job.document_id,
+            revision_id=job.document_revision_id,
+        )
+    except Exception:  # noqa: BLE001
+        log.exception(
+            "knowledge artifact auto trigger failed after publication: "
+            "doc=%s revision=%s",
+            job.document_id,
+            job.document_revision_id,
+        )
+    try:
+        from app.services.classification_jobs import (
+            enqueue_ready_revision_classification,
+        )
+
+        await enqueue_ready_revision_classification(
+            library_id=library.id,
+            document_id=job.document_id,
+            revision_id=job.document_revision_id,
+        )
+    except Exception:  # noqa: BLE001
+        log.exception(
+            "classification auto trigger failed after publication: "
+            "doc=%s revision=%s",
             job.document_id,
             job.document_revision_id,
         )
