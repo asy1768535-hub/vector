@@ -126,8 +126,9 @@ def test_0033_orm_migration_and_offline_sql_are_reversible():
     constraints = {item.name for item in UserLibraryScope.__table__.constraints if isinstance(item, CheckConstraint)}
     assert "ck_user_library_scopes_name_shape" in constraints
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_heads() == ["0033"]
+    assert script.get_heads() == ["0034"]
     assert script.get_revision("0033").down_revision == "0032"
+    assert script.get_revision("0034").down_revision == "0033"
     upgrade = _offline("upgrade", "0032:0033")
     downgrade = _offline("downgrade", "0033:0032")
     assert "create table user_library_scopes" in upgrade

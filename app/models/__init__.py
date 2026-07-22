@@ -3,6 +3,11 @@ from app.models.api_key import ApiKey
 from app.models.audit import AuditLog
 from app.models.attribute_definition import AttributeDefinition
 from app.models.chat_history import ChatConversation, ChatMessage, ChatMessageSource
+from app.models.classification_taxonomy import (
+    ClassificationLabel,
+    ClassificationTaxonomy,
+    LibraryClassificationLabel,
+)
 from app.models.chunk import Chunk
 from app.models.chunk_links import ChunkBlock, ChunkEvidence
 from app.models.cleanup_outbox import CleanupOutbox
@@ -59,6 +64,8 @@ __all__ = [
     "ChatConversation",
     "ChatMessage",
     "ChatMessageSource",
+    "ClassificationLabel",
+    "ClassificationTaxonomy",
     "Chunk",
     "ChunkBlock",
     "ChunkEvidence",
@@ -94,6 +101,7 @@ __all__ = [
     "KnowledgeArtifactJob",
     "KnowledgeRelation",
     "Library",
+    "LibraryClassificationLabel",
     "LibraryFAQQuestion",
     "MigrationBackfillState",
     "OntologyVersion",
