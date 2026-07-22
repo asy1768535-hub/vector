@@ -380,6 +380,12 @@ class Settings(BaseSettings):
     classification_taxonomy_bootstrap_attempt_seconds: int = 180
     classification_taxonomy_bootstrap_prompt_version: str = "taxonomy-bootstrap-v1"
 
+    # ---- v0.8 Document-First Knowledge Catalog (default fail closed) ----
+    knowledge_catalog_enabled: bool = False
+    knowledge_catalog_max_entity_cards: int = 50
+    knowledge_catalog_max_relation_cards: int = 50
+    knowledge_catalog_max_evidence_per_fact: int = 20
+
     # ---- v0.5 Active Graph Publication (M1 defaults; fail closed) ----
     graph_publication_enabled: bool = False
     graph_publication_require_entity_evidence: bool = True
@@ -643,6 +649,26 @@ def validate_classification_taxonomy_bootstrap_startup(config: Settings) -> None
     version = config.classification_taxonomy_bootstrap_prompt_version
     if not version.strip() or len(version) > 64:
         raise RuntimeError("[security] taxonomy bootstrap prompt version is invalid")
+
+
+def validate_knowledge_catalog_startup(config: Settings) -> None:
+    if config.knowledge_catalog_enabled and not config.organization_authorization_enabled:
+        raise RuntimeError(
+            "[security] knowledge Catalog requires Organization authorization"
+        )
+    values = (
+        config.knowledge_catalog_max_entity_cards,
+        config.knowledge_catalog_max_relation_cards,
+        config.knowledge_catalog_max_evidence_per_fact,
+    )
+    if any(isinstance(value, bool) or not isinstance(value, int) for value in values):
+        raise RuntimeError("[security] knowledge Catalog limits must be integers")
+    if not 1 <= config.knowledge_catalog_max_entity_cards <= 100:
+        raise RuntimeError("[security] knowledge Catalog entity limit must be within 1..100")
+    if not 1 <= config.knowledge_catalog_max_relation_cards <= 100:
+        raise RuntimeError("[security] knowledge Catalog relation limit must be within 1..100")
+    if not 1 <= config.knowledge_catalog_max_evidence_per_fact <= 20:
+        raise RuntimeError("[security] knowledge Catalog Evidence limit must be within 1..20")
 
 
 def validate_revision_file_storage_startup(config: Settings) -> None:

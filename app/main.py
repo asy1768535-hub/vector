@@ -32,6 +32,7 @@ from app.api.classification_taxonomies import router as classification_taxonomie
 from app.api.classification_taxonomy_bootstrap import (
     router as classification_taxonomy_bootstrap_router,
 )
+from app.api.knowledge_catalog import router as knowledge_catalog_router
 from app.api.classification_decisions import router as classification_decisions_router
 from app.api.documents import router as documents_router
 from app.api.federated_retrieval import router as federated_retrieval_router
@@ -65,6 +66,7 @@ from app.config import (
     validate_classification_decision_startup,
     validate_classification_runtime_startup,
     validate_classification_taxonomy_bootstrap_startup,
+    validate_knowledge_catalog_startup,
     validate_organization_authorization_startup,
     validate_graph_publication_startup,
     validate_graph_retrieval_startup,
@@ -186,6 +188,10 @@ def assert_classification_taxonomy_bootstrap_startup_security() -> None:
     validate_classification_taxonomy_bootstrap_startup(settings)
 
 
+def assert_knowledge_catalog_startup_security() -> None:
+    validate_knowledge_catalog_startup(settings)
+
+
 def resolve_console_ui_dir(root: Path) -> Path | None:
     """Resolve the configured console UI directory without implicit frontend fallback."""
     configured = Path(settings.console_ui_dir)
@@ -214,6 +220,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     assert_classification_decision_startup_security()
     assert_classification_runtime_startup_security()
     assert_classification_taxonomy_bootstrap_startup_security()
+    assert_knowledge_catalog_startup_security()
     # 预热 Casbin enforcer，确保 policy 已加载入内存
     get_enforcer()
     # 启动自检：embedding 服务 / Qdrant 配置错配时大声报（非 fatal，不阻断启动）
@@ -261,6 +268,7 @@ def create_app() -> FastAPI:
     app.include_router(personal_library_scopes_router)
     app.include_router(classification_taxonomies_router)
     app.include_router(classification_taxonomy_bootstrap_router)
+    app.include_router(knowledge_catalog_router)
     app.include_router(classification_decisions_router)
     app.include_router(organizations_router)
     app.include_router(documents_router)
