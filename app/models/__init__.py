@@ -8,6 +8,12 @@ from app.models.classification_taxonomy import (
     ClassificationTaxonomy,
     LibraryClassificationLabel,
 )
+from app.models.classification_decision import (
+    DocumentClassificationDecision,
+    DocumentClassificationDecisionSet,
+    DocumentClassificationProposal,
+    DocumentClassificationRun,
+)
 from app.models.chunk import Chunk
 from app.models.chunk_links import ChunkBlock, ChunkEvidence
 from app.models.cleanup_outbox import CleanupOutbox
@@ -66,6 +72,10 @@ __all__ = [
     "ChatMessageSource",
     "ClassificationLabel",
     "ClassificationTaxonomy",
+    "DocumentClassificationDecision",
+    "DocumentClassificationDecisionSet",
+    "DocumentClassificationProposal",
+    "DocumentClassificationRun",
     "Chunk",
     "ChunkBlock",
     "ChunkEvidence",

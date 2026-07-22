@@ -174,6 +174,7 @@ class Settings(BaseSettings):
     federated_retrieval_enabled: bool = False
     personal_library_scopes_enabled: bool = False
     classification_taxonomy_enabled: bool = False
+    classification_decision_enabled: bool = False
 
     # ---- 文件导入 ----
     # /import-file 单次上传字节上限（默认 50MiB），超出 413，避免一次性 read 打爆内存。
@@ -793,6 +794,17 @@ def validate_classification_taxonomy_startup(config: Settings) -> None:
     ):
         raise RuntimeError(
             "[security] Classification taxonomy requires Organization authorization"
+        )
+
+
+def validate_classification_decision_startup(config: Settings) -> None:
+    if config.classification_decision_enabled and not (
+        config.organization_authorization_enabled
+        and config.classification_taxonomy_enabled
+    ):
+        raise RuntimeError(
+            "[security] Classification decisions require Organization authorization "
+            "and classification taxonomy"
         )
 
 
