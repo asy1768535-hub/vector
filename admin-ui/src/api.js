@@ -233,6 +233,13 @@ export const getCatalogEvidence = (slug, evidenceId, forceRefresh) => cachedRequ
 );
 export const getCatalogFileAccess = (slug, revisionFileId) =>
     request(`/libraries/${slug}/catalog/files/${revisionFileId}/access`);
+export const getCatalogDocumentProcessing = (slug, documentId) =>
+    request(`/libraries/${slug}/catalog/documents/${documentId}/processing`);
+export const retryCatalogDocumentProcessing = (slug, documentId, stage, body) =>
+    request(
+        `/libraries/${slug}/catalog/documents/${documentId}/processing/${stage}/retry`,
+        jsonBody('POST', body),
+    );
 
 // ── v0.8 Organization retrieval diagnostics ────────────────
 export const checkLibraryCompatibility = (body) =>

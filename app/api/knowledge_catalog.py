@@ -1,16 +1,24 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import deps as deps_module
+from app.auth.backend import current_cookie_user
 from app.config import settings
 from app.db import get_db
 from app.deps import require_lib
 from app.models.library import Library
+from app.models.user import User
+from app.schemas.document_processing import (
+    DocumentProcessingRead,
+    DocumentProcessingRetryRequest,
+)
 from app.schemas.knowledge_catalog import (
     CatalogDocumentDetailRead,
     CatalogDocumentPageRead,
@@ -27,9 +35,21 @@ from app.services.knowledge_catalog_contracts import (
     CatalogDocumentQuery,
     KnowledgeCatalogError,
 )
+from app.services.document_processing_contracts import (
+    DocumentProcessingError,
+    ProcessingStage,
+)
+from app.services.document_processing_diagnostics import (
+    get_document_processing_diagnostics,
+    retry_document_processing_stage,
+)
 from app.services.object_storage import build_object_storage_adapter
 from app.services.object_storage_contracts import ObjectStorageError
 from app.services.revision_files import require_storage_adapter_identity
+from app.services.organization_authorization import (
+    OrganizationAuthorizationError,
+    authorize_library_management,
+)
 
 
 router = APIRouter(
@@ -38,9 +58,31 @@ router = APIRouter(
 )
 
 
+@dataclass(frozen=True, slots=True)
+class CatalogManagementContext:
+    user: User
+    library: Library
+
+
 def require_knowledge_catalog_enabled() -> None:
     if not settings.knowledge_catalog_enabled:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "not found")
+
+
+async def require_catalog_management(
+    slug: str,
+    user: User = Depends(current_cookie_user),
+    db: AsyncSession = Depends(get_db),
+) -> CatalogManagementContext:
+    require_knowledge_catalog_enabled()
+    library = await deps_module.load_active_library(slug, db)
+    if library is None:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden")
+    try:
+        await authorize_library_management(db, user=user, library=library)
+    except OrganizationAuthorizationError as exc:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden") from exc
+    return CatalogManagementContext(user, library)
 
 
 def _http_error(exc: KnowledgeCatalogError) -> HTTPException:
@@ -52,6 +94,14 @@ def _http_error(exc: KnowledgeCatalogError) -> HTTPException:
             "catalog_unavailable",
         )
     return HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, exc.code)
+
+
+def _processing_http_error(exc: DocumentProcessingError) -> HTTPException:
+    if exc.code == "processing_document_not_found":
+        return HTTPException(status.HTTP_404_NOT_FOUND, "not found")
+    if exc.code == "processing_invariant_failed":
+        return HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, exc.code)
+    return HTTPException(status.HTTP_409_CONFLICT, exc.code)
 
 
 @router.get(
@@ -113,6 +163,56 @@ async def catalog_document_detail(
     except KnowledgeCatalogError as exc:
         await db.rollback()
         raise _http_error(exc) from exc
+
+
+@router.get(
+    "/documents/{document_id}/processing",
+    response_model=DocumentProcessingRead,
+)
+async def catalog_document_processing(
+    document_id: uuid.UUID,
+    _: None = Depends(require_knowledge_catalog_enabled),
+    context: CatalogManagementContext = Depends(require_catalog_management),
+    db: AsyncSession = Depends(get_db),
+) -> DocumentProcessingRead:
+    try:
+        return await get_document_processing_diagnostics(
+            db,
+            library=context.library,
+            document_id=document_id,
+        )
+    except DocumentProcessingError as exc:
+        await db.rollback()
+        raise _processing_http_error(exc) from exc
+
+
+@router.post(
+    "/documents/{document_id}/processing/{stage}/retry",
+    response_model=DocumentProcessingRead,
+)
+async def retry_catalog_document_processing(
+    document_id: uuid.UUID,
+    stage: ProcessingStage,
+    body: DocumentProcessingRetryRequest,
+    _: None = Depends(require_knowledge_catalog_enabled),
+    context: CatalogManagementContext = Depends(require_catalog_management),
+    db: AsyncSession = Depends(get_db),
+) -> DocumentProcessingRead:
+    try:
+        result = await retry_document_processing_stage(
+            db,
+            library=context.library,
+            document_id=document_id,
+            stage=stage,
+            source_job_id=body.source_job_id,
+            observed_retry_generation=body.retry_generation,
+            actor_user_id=context.user.id,
+        )
+        await db.commit()
+        return result
+    except DocumentProcessingError as exc:
+        await db.rollback()
+        raise _processing_http_error(exc) from exc
 
 
 @router.get(

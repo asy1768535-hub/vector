@@ -55,6 +55,56 @@ const SOURCE_TYPE_LABELS = {
     extracted: '模型抽取',
 };
 
+const PROCESSING_STAGE_LABELS = {
+    summary: '摘要',
+    outline: '大纲',
+    classification: '分类',
+    graph: '图谱抽取',
+};
+
+const PROCESSING_STATUS_LABELS = {
+    not_started: '尚未开始',
+    queued: '等待处理',
+    processing: '处理中',
+    succeeded: '已完成',
+    failed: '失败',
+    cancelled: '已取消',
+    superseded: '已过期',
+    partially_succeeded: '部分完成',
+};
+
+const PROCESSING_STATUS_TAGS = {
+    not_started: 'info',
+    queued: 'warning',
+    processing: 'warning',
+    succeeded: 'success',
+    failed: 'danger',
+    cancelled: 'info',
+    superseded: 'info',
+    partially_succeeded: 'warning',
+};
+
+const PROCESSING_ERROR_LABELS = {
+    attempt_limit_exceeded: '已达到最大尝试次数',
+    cancelled_by_user: '任务已被取消',
+    claim_lost: '处理任务已失去执行权',
+    historical_revision: '任务对应的文档版本已过期',
+    invalid_provider_json: '模型返回格式无效',
+    invalid_provider_payload: '模型返回内容无效',
+    job_identity_stale: '任务配置已发生变化',
+    job_input_stale: '任务输入已发生变化',
+    lease_expired: '处理任务执行超时',
+    lease_expired_attempt_limit: '处理超时且已达到尝试上限',
+    provider_http_error: '模型服务返回失败',
+    provider_network_error: '模型服务网络异常',
+    provider_timeout: '模型服务响应超时',
+    revision_content_changed: '文档内容已发生变化',
+    revision_not_ready: '当前文档版本尚未就绪',
+    security_level_denied: '当前文档安全级别不允许处理',
+    security_level_missing: '当前文档缺少安全级别',
+    stage_failed: '该阶段处理失败',
+};
+
 export function catalogOverallLabel(value) {
     return OVERALL_LABELS[value] || '未知';
 }
@@ -85,6 +135,49 @@ export function capabilityEntries(capabilities) {
 
 export function classificationStateLabel(value) {
     return CLASSIFICATION_LABELS[value] || '未知';
+}
+
+export function processingStageLabel(value) {
+    return PROCESSING_STAGE_LABELS[value] || '未知阶段';
+}
+
+export function processingStatusLabel(value) {
+    return PROCESSING_STATUS_LABELS[value] || '未知状态';
+}
+
+export function processingStatusTag(value) {
+    return PROCESSING_STATUS_TAGS[value] || 'info';
+}
+
+export function processingErrorLabel(value) {
+    return PROCESSING_ERROR_LABELS[value] || '该阶段处理失败';
+}
+
+export function processingErrorKind(error) {
+    if (error?.status === 403) return 'forbidden';
+    if (error?.status === 404) return 'unavailable';
+    if (error?.status === 409) return 'conflict';
+    return 'error';
+}
+
+export function processingStageRetryable(stage) {
+    return Boolean(
+        Object.hasOwn(PROCESSING_STAGE_LABELS, stage?.stage)
+        && stage?.availability === 'enabled'
+        && stage?.retryable === true
+        && stage?.job_id
+        && Number.isInteger(stage?.retry_generation)
+        && stage.retry_generation >= 0
+    );
+}
+
+export function processingResponseMatches(value, identity) {
+    return Boolean(
+        value
+        && String(value.library_id || '') === String(identity?.libraryId || '')
+        && String(value.document_id || '') === String(identity?.documentId || '')
+        && String(value.document_revision_id || '') === String(identity?.revisionId || '')
+    );
 }
 
 export function classificationPrimary(classification) {

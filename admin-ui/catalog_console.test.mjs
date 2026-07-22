@@ -10,10 +10,22 @@ import {
     catalogOverallTag,
     collectCatalogLabels,
     formatCatalogConfidence,
+    processingErrorKind,
+    processingErrorLabel,
+    processingResponseMatches,
+    processingStageLabel,
+    processingStageRetryable,
+    processingStatusLabel,
+    processingStatusTag,
     retreatCatalogCursor,
     safeCatalogAccessUrl,
 } from './src/catalog_ui.js';
-import { listCatalogDocuments } from './src/api.js';
+import {
+    getCatalogDocumentProcessing,
+    listCatalogDocuments,
+    retryCatalogDocumentProcessing,
+} from './src/api.js';
+import { canManageLibrary } from './src/menu_access.js';
 
 const view = readFileSync(new URL('./src/views/KnowledgeCatalog.js', import.meta.url), 'utf8');
 const api = readFileSync(new URL('./src/api.js', import.meta.url), 'utf8');
@@ -61,6 +73,71 @@ test('formats confidence defensively', () => {
     assert.equal(formatCatalogConfidence(1), '100%');
     assert.equal(formatCatalogConfidence(null), '—');
     assert.equal(formatCatalogConfidence(Number.NaN), '—');
+});
+
+test('maps bounded processing stages, statuses, failures, and retry eligibility', () => {
+    assert.equal(processingStageLabel('summary'), '摘要');
+    assert.equal(processingStageLabel('graph'), '图谱抽取');
+    assert.equal(processingStageLabel('other'), '未知阶段');
+    assert.equal(processingStatusLabel('partially_succeeded'), '部分完成');
+    assert.equal(processingStatusLabel('other'), '未知状态');
+    assert.equal(processingStatusTag('failed'), 'danger');
+    assert.equal(processingStatusTag('other'), 'info');
+    assert.equal(processingErrorLabel('provider_timeout'), '模型服务响应超时');
+    assert.equal(processingErrorLabel('private_provider_trace'), '该阶段处理失败');
+    assert.equal(processingErrorKind({ status: 409 }), 'conflict');
+    assert.equal(processingErrorKind({ status: 403 }), 'forbidden');
+    assert.equal(processingStageRetryable({
+        stage: 'summary',
+        availability: 'enabled',
+        retryable: true,
+        job_id: 'job-1',
+        retry_generation: 2,
+    }), true);
+    assert.equal(processingStageRetryable({
+        stage: 'summary',
+        availability: 'disabled',
+        retryable: true,
+        job_id: 'job-1',
+        retry_generation: 2,
+    }), false);
+    assert.equal(processingStageRetryable({
+        stage: 'unknown',
+        availability: 'enabled',
+        retryable: true,
+        job_id: 'job-1',
+        retry_generation: 2,
+    }), false);
+});
+
+test('processing response identity and management scope fail closed', () => {
+    const identity = { libraryId: 'lib-1', documentId: 'doc-1', revisionId: 'rev-1' };
+    assert.equal(processingResponseMatches({
+        library_id: 'lib-1',
+        document_id: 'doc-1',
+        document_revision_id: 'rev-1',
+    }, identity), true);
+    assert.equal(processingResponseMatches({
+        library_id: 'lib-1',
+        document_id: 'doc-1',
+        document_revision_id: 'old-revision',
+    }, identity), false);
+
+    const permissions = [
+        { library_slug: 'managed', organization_id: 'org-1', actions: ['read', 'admin'] },
+        { library_slug: 'implicit', organization_id: 'org-2', actions: ['read'] },
+        { library_slug: 'reader', organization_id: 'org-3', actions: ['read'] },
+    ];
+    const organizations = [
+        { organization_id: 'org-2', role: 'organization_admin' },
+        { organization_id: 'org-3', role: 'member' },
+    ];
+    assert.equal(canManageLibrary(permissions, organizations, 'managed'), true);
+    assert.equal(canManageLibrary(permissions, organizations, 'implicit'), true);
+    assert.equal(canManageLibrary(permissions, organizations, 'reader'), false);
+    assert.equal(canManageLibrary(permissions, [
+        { organization_id: 'org-other', role: 'organization_admin' },
+    ], 'implicit'), false);
 });
 
 test('translates absolute evidence offsets into bounded window parts', () => {
@@ -143,6 +220,46 @@ test('catalog list API serializes only the strict query allowlist', async () => 
     );
 });
 
+test('processing API uses the exact current-document routes and fenced retry body', async () => {
+    const originalFetch = globalThis.fetch;
+    const requests = [];
+    globalThis.fetch = async (path, options = {}) => {
+        requests.push({ path: String(path), options });
+        return new Response(JSON.stringify({
+            contract_version: 'document-processing-v1',
+            library_id: 'lib-1',
+            document_id: 'doc-1',
+            document_revision_id: 'rev-1',
+            stages: [],
+        }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+        });
+    };
+    try {
+        await getCatalogDocumentProcessing('contracts', 'doc-1');
+        await retryCatalogDocumentProcessing('contracts', 'doc-1', 'summary', {
+            source_job_id: 'job-1',
+            retry_generation: 3,
+        });
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+    assert.equal(
+        requests[0].path,
+        '/libraries/contracts/catalog/documents/doc-1/processing',
+    );
+    assert.equal(
+        requests[1].path,
+        '/libraries/contracts/catalog/documents/doc-1/processing/summary/retry',
+    );
+    assert.equal(requests[1].options.method, 'POST');
+    assert.deepEqual(JSON.parse(requests[1].options.body), {
+        source_job_id: 'job-1',
+        retry_generation: 3,
+    });
+});
+
 test('wires a read-gated Catalog route and sidebar entry', () => {
     assert.match(app, /path:\s*'catalog'/);
     assert.match(app, /KnowledgeCatalog/);
@@ -155,12 +272,14 @@ test('wires a read-gated Catalog route and sidebar entry', () => {
     assert.match(layout, /知识目录/);
 });
 
-test('uses only the four strict Catalog APIs', () => {
+test('uses the strict Catalog read and processing APIs', () => {
     for (const token of [
         'listCatalogDocuments',
         'getCatalogDocument',
         'getCatalogEvidence',
         'getCatalogFileAccess',
+        'getCatalogDocumentProcessing',
+        'retryCatalogDocumentProcessing',
     ]) assert.ok(api.includes(`export const ${token}`), `missing ${token}`);
     for (const path of [
         '/catalog/documents',
@@ -186,6 +305,14 @@ test('view keeps list, deep-linked detail, evidence, and file access in one read
         'noopener noreferrer',
         'entities_truncated',
         'relations_truncated',
+        'canManageProcessing',
+        'processingRequestSeq',
+        'processingMutationSeq',
+        'api.getCatalogDocumentProcessing',
+        'api.retryCatalogDocumentProcessing',
+        'processingResponseMatches',
+        'source_job_id: stage.job_id',
+        'retry_generation: stage.retry_generation',
     ]) assert.ok(view.includes(token), `missing view contract ${token}`);
     assert.ok(!view.includes('v-html'), 'Evidence and source content must use escaped Vue text');
     assert.ok(!view.includes('api.listLibraries'), 'member Catalog must not use admin Library list');
@@ -199,10 +326,13 @@ test('catalog styles are compact, responsive, and bounded', () => {
         '.catalog-filter-band',
         '.catalog-capability-grid',
         '.catalog-graph-grid',
+        '.catalog-processing-list',
+        '.catalog-processing-row',
         '.catalog-evidence-drawer',
         '@media screen and (max-width: 1199px)',
         '@media screen and (max-width: 899px)',
     ]) assert.ok(css.includes(token), `missing CSS token ${token}`);
     assert.match(css, /\.catalog-graph-card\s*\{[^}]*border-radius:\s*8px/s);
     assert.match(css, /\.catalog-table-shell\s*\{[^}]*overflow-x:\s*auto/s);
+    assert.match(css, /\.catalog-processing-row\s*\{[^}]*grid-template-columns:\s*10px minmax\(0, 1fr\) auto/s);
 });

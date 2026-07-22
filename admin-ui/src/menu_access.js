@@ -60,6 +60,19 @@ export function readableLibraries(permissions) {
         .map((p) => ({ slug: p.library_slug, name: p.library_name || p.library_slug }));
 }
 
+export function canManageLibrary(permissions, organizations, librarySlug) {
+    const slug = String(librarySlug || '');
+    if (!slug || !Array.isArray(permissions)) return false;
+    const permission = permissions.find((item) => item?.library_slug === slug);
+    if (!permission) return false;
+    if ((permission.actions || []).includes('admin')) return true;
+    const organizationId = String(permission.organization_id || '');
+    return Boolean(organizationId && (organizations || []).some((item) => (
+        String(item?.organization_id || '') === organizationId
+        && item?.role === 'organization_admin'
+    )));
+}
+
 // 选默认 / 纠正选中 slug：当前 slug 仍在可见库中则保留，否则取第一个，没有可见库则 null。
 export function resolveSelectedSlug(current, libs) {
     const slugs = (libs || []).map((l) => l && l.slug);

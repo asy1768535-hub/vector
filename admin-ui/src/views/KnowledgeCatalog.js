@@ -23,12 +23,19 @@ import {
     formatCatalogBytes,
     formatCatalogConfidence,
     formatCatalogTime,
+    processingErrorKind,
+    processingErrorLabel,
+    processingResponseMatches,
+    processingStageLabel,
+    processingStageRetryable,
+    processingStatusLabel,
+    processingStatusTag,
     retreatCatalogCursor,
     safeCatalogAccessUrl,
     shortCatalogId,
 } from '../catalog_ui.js';
 import { dataEmpty, serviceError } from '../illustrations.js';
-import { readableLibraries, resolveSelectedSlug } from '../menu_access.js';
+import { canManageLibrary, readableLibraries, resolveSelectedSlug } from '../menu_access.js';
 import { store } from '../store.js';
 
 const EMPTY_FILTERS = {
@@ -49,6 +56,13 @@ function fixedErrorMessage(kind) {
     if (kind === 'forbidden') return '你没有读取该知识库目录的权限';
     if (kind === 'unavailable') return '知识目录暂未启用，或当前内容已不可用';
     return '知识目录加载失败，请稍后重试';
+}
+
+function fixedProcessingErrorMessage(kind) {
+    if (kind === 'forbidden') return '你没有查看该文档处理详情的权限';
+    if (kind === 'unavailable') return '文档处理诊断暂不可用';
+    if (kind === 'conflict') return '文档或任务状态已变化，请刷新后重试';
+    return '文档处理详情加载失败，请稍后重试';
 }
 
 export default {
@@ -84,12 +98,22 @@ export default {
             errorKind: '',
             errorMessage: '',
         });
+        const processing = reactive({
+            data: null,
+            loading: false,
+            errorKind: '',
+            errorMessage: '',
+            retryingStage: '',
+            retryError: '',
+        });
         const fileLoadingId = ref('');
 
         let requestSeq = 0;
         let detailRequestSeq = 0;
         let evidenceRequestSeq = 0;
         let fileRequestSeq = 0;
+        let processingRequestSeq = 0;
+        let processingMutationSeq = 0;
         let routeReady = false;
 
         const documentId = computed(() => String(route.query.document || ''));
@@ -97,6 +121,11 @@ export default {
         const pageNumber = computed(() => cursor.history.length + 1);
         const selectedLibrary = computed(() => (
             libraries.value.find((item) => item.slug === selectedSlug.value) || null
+        ));
+        const canManageProcessing = computed(() => canManageLibrary(
+            store.permissions,
+            store.organizations,
+            selectedSlug.value,
         ));
         const hasAppliedFilters = computed(() => Object.values(appliedFilters).some(Boolean));
         const hasDraftFilters = computed(() => Object.values(filterDraft).some(Boolean));
@@ -114,6 +143,17 @@ export default {
             setCursorState({ history: [], current: null });
         }
 
+        function clearProcessing(resetMutation = true) {
+            processingRequestSeq += 1;
+            if (resetMutation) processingMutationSeq += 1;
+            processing.data = null;
+            processing.loading = false;
+            processing.errorKind = '';
+            processing.errorMessage = '';
+            processing.retryError = '';
+            if (resetMutation) processing.retryingStage = '';
+        }
+
         function clearDetail() {
             detailRequestSeq += 1;
             fileRequestSeq += 1;
@@ -122,6 +162,7 @@ export default {
             detail.loading = false;
             detail.errorKind = '';
             detail.errorMessage = '';
+            clearProcessing();
             closeEvidence();
         }
 
@@ -200,6 +241,7 @@ export default {
         async function loadDetail(id, forceRefresh = false) {
             if (!selectedSlug.value || !id) return;
             const token = ++detailRequestSeq;
+            clearProcessing(false);
             detail.loading = true;
             detail.data = null;
             detail.errorKind = '';
@@ -213,6 +255,7 @@ export default {
                 );
                 if (token !== detailRequestSeq) return;
                 detail.data = response;
+                if (canManageProcessing.value) void loadProcessing(id);
             } catch (error) {
                 if (token !== detailRequestSeq) return;
                 const kind = catalogErrorKind(error);
@@ -222,6 +265,83 @@ export default {
                     : fixedErrorMessage(kind);
             } finally {
                 if (token === detailRequestSeq) detail.loading = false;
+            }
+        }
+
+        async function loadProcessing(id) {
+            if (!canManageProcessing.value || !selectedSlug.value || !id || !detail.data) {
+                clearProcessing(false);
+                return;
+            }
+            const token = ++processingRequestSeq;
+            const slug = selectedSlug.value;
+            const identity = {
+                libraryId: detail.data.library_id,
+                documentId: id,
+                revisionId: detail.data.revision_id,
+            };
+            processing.loading = true;
+            processing.data = null;
+            processing.errorKind = '';
+            processing.errorMessage = '';
+            processing.retryError = '';
+            try {
+                const response = await api.getCatalogDocumentProcessing(slug, id);
+                if (token !== processingRequestSeq || selectedSlug.value !== slug
+                    || documentId.value !== String(id)) return;
+                if (!processingResponseMatches(response, identity)) {
+                    processing.errorKind = 'conflict';
+                    processing.errorMessage = fixedProcessingErrorMessage('conflict');
+                    return;
+                }
+                processing.data = response;
+            } catch (error) {
+                if (token !== processingRequestSeq) return;
+                const kind = processingErrorKind(error);
+                processing.errorKind = kind;
+                processing.errorMessage = fixedProcessingErrorMessage(kind);
+            } finally {
+                if (token === processingRequestSeq) processing.loading = false;
+            }
+        }
+
+        async function retryProcessing(stage) {
+            if (!processingStageRetryable(stage) || processing.retryingStage
+                || !selectedSlug.value || !detail.data || !canManageProcessing.value) return;
+            const token = ++processingMutationSeq;
+            const slug = selectedSlug.value;
+            const id = String(detail.data.document_id);
+            const identity = {
+                libraryId: detail.data.library_id,
+                documentId: id,
+                revisionId: detail.data.revision_id,
+            };
+            processing.retryingStage = stage.stage;
+            processing.retryError = '';
+            try {
+                const response = await api.retryCatalogDocumentProcessing(
+                    slug,
+                    id,
+                    stage.stage,
+                    {
+                        source_job_id: stage.job_id,
+                        retry_generation: stage.retry_generation,
+                    },
+                );
+                if (token !== processingMutationSeq || selectedSlug.value !== slug
+                    || documentId.value !== id) return;
+                if (!processingResponseMatches(response, identity)) {
+                    processing.retryError = fixedProcessingErrorMessage('conflict');
+                    return;
+                }
+                processing.data = response;
+                ElMessage.success(`${processingStageLabel(stage.stage)}已重新排队`);
+                await loadDetail(id, true);
+            } catch (error) {
+                if (token !== processingMutationSeq) return;
+                processing.retryError = fixedProcessingErrorMessage(processingErrorKind(error));
+            } finally {
+                if (token === processingMutationSeq) processing.retryingStage = '';
             }
         }
 
@@ -388,6 +508,11 @@ export default {
             () => { if (routeReady) syncFromRoute(); },
         );
 
+        watch(canManageProcessing, (allowed) => {
+            if (!allowed) clearProcessing();
+            else if (detail.data && documentId.value) void loadProcessing(documentId.value);
+        });
+
         onMounted(async () => {
             routeReady = true;
             await syncFromRoute();
@@ -399,9 +524,11 @@ export default {
             pageSize, page, pageNumber, cursor,
             showingDetail, detail, detailCapabilities, detailPrimary, detailSecondary,
             evidence, evidenceParts, fileLoadingId,
+            canManageProcessing, processing,
             selectLibrary, applyFilters, resetFilters, loadList,
             nextPage, previousPage, changePageSize,
             openDocument, backToList, refreshCurrent, openEvidence, closeEvidence,
+            loadProcessing, retryProcessing,
             isCurrentFile, openFileById,
             listClassification, listSecondary, rowCapabilities,
             catalogOverallLabel, catalogOverallTag,
@@ -409,6 +536,8 @@ export default {
             classificationStateLabel, formatCatalogConfidence, formatCatalogTime,
             formatCatalogBytes, catalogSourceTypeLabel, catalogReviewLabel,
             catalogPageLabel, catalogTitlePath, shortCatalogId,
+            processingStageLabel, processingStageRetryable,
+            processingStatusLabel, processingStatusTag, processingErrorLabel,
             dataEmpty, serviceError,
         };
     },
@@ -620,6 +749,59 @@ export default {
                 </el-tag>
               </div>
             </div>
+          </section>
+
+          <section v-if="canManageProcessing" class="catalog-detail-section catalog-processing-section">
+            <div class="catalog-section-heading">
+              <h3>文档处理</h3>
+              <span v-if="processing.loading">正在更新...</span>
+            </div>
+            <div v-if="processing.loading && !processing.data" class="catalog-processing-loading">
+              正在加载处理状态...
+            </div>
+            <el-alert v-else-if="processing.errorKind" :title="processing.errorMessage"
+                      type="warning" :closable="false" show-icon>
+              <template #default>
+                <el-button link type="primary" @click="loadProcessing(detail.data.document_id)">重试</el-button>
+              </template>
+            </el-alert>
+            <template v-else-if="processing.data">
+              <el-alert v-if="processing.retryError" class="catalog-processing-alert"
+                        :title="processing.retryError" type="warning" :closable="false" show-icon />
+              <div class="catalog-processing-list">
+                <article v-for="stage in processing.data.stages" :key="stage.stage"
+                         class="catalog-processing-row">
+                  <span class="catalog-processing-marker"
+                        :class="'is-' + stage.status" aria-hidden="true"></span>
+                  <div class="catalog-processing-copy">
+                    <div class="catalog-processing-title">
+                      <strong>{{ processingStageLabel(stage.stage) }}</strong>
+                      <el-tag :type="processingStatusTag(stage.status)" size="small">
+                        {{ stage.availability === 'disabled' ? '未启用' : processingStatusLabel(stage.status) }}
+                      </el-tag>
+                    </div>
+                    <div class="catalog-processing-meta">
+                      <span v-if="stage.updated_at">更新 {{ formatCatalogTime(stage.updated_at) }}</span>
+                      <span v-if="stage.retry_generation">重试代次 {{ stage.retry_generation }}</span>
+                      <span v-if="stage.attempt_count !== null">尝试 {{ stage.attempt_count }} 次</span>
+                      <span v-if="stage.graph_counts">
+                        单元 {{ stage.graph_counts.succeeded }}/{{ stage.graph_counts.total }} 完成
+                      </span>
+                    </div>
+                    <p v-if="stage.safe_error_code" class="catalog-processing-error">
+                      {{ processingErrorLabel(stage.safe_error_code) }}
+                    </p>
+                  </div>
+                  <el-button v-if="processingStageRetryable(stage)" type="primary" plain
+                             :loading="processing.retryingStage === stage.stage"
+                             :disabled="Boolean(processing.retryingStage)"
+                             :title="'重试' + processingStageLabel(stage.stage)"
+                             @click="retryProcessing(stage)">
+                    <local-icon icon="status:retry"></local-icon>重试
+                  </el-button>
+                </article>
+              </div>
+            </template>
           </section>
 
           <section class="catalog-detail-section catalog-knowledge-grid">
