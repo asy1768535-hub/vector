@@ -276,7 +276,7 @@ def test_0035_orm_migration_and_offline_sql_are_reversible():
     indexes = {item.name for item in DocumentClassificationDecisionSet.__table__.indexes}
     assert "uq_document_classification_decision_sets_effective_revision" in indexes
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_heads() == ["0035"]
+    assert script.get_heads() == ["0036"]
     assert script.get_revision("0035").down_revision == "0034"
     upgrade = _offline("upgrade", "0034:0035")
     downgrade = _offline("downgrade", "0035:0034")
@@ -552,6 +552,11 @@ def test_manual_effective_set_blocks_model_rerun(monkeypatch):
         AsyncMock(return_value=(taxonomy, (primary,), {primary.id: primary})),
     )
     monkeypatch.setattr(service, "_effective_set", AsyncMock(return_value=manual))
+    monkeypatch.setattr(
+        service,
+        "_normalize_effective_set_for_scope",
+        AsyncMock(return_value=manual),
+    )
     replace = AsyncMock()
     monkeypatch.setattr(service, "_replace_decision_set", replace)
     monkeypatch.setattr(service.audit_log, "record", AsyncMock())
@@ -885,3 +890,38 @@ def test_manual_selection_rejects_duplicate_or_out_of_subset_labels():
     with pytest.raises(ClassificationDecisionError) as outside:
         service._validate_selection_enabled(selection, enabled)
     assert outside.value.code == "classification_label_selection_invalid"
+
+
+def test_effective_manual_set_is_superseded_when_taxonomy_scope_changes():
+    organization = _organization()
+    library = _library(organization)
+    old_taxonomy = _taxonomy(organization)
+    new_taxonomy = _taxonomy(organization)
+    document, revision = _document_revision(library)
+    current = DocumentClassificationDecisionSet(
+        id=uuid.uuid4(),
+        library_id=library.id,
+        document_id=document.id,
+        document_revision_id=revision.id,
+        taxonomy_version_id=old_taxonomy.id,
+        source="manual",
+        lifecycle="effective",
+        generation_no=1,
+        reviewed_at=NOW,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    enabled = (_label(new_taxonomy, "current"),)
+    db = _DB()
+    normalized = asyncio.run(
+        service._normalize_effective_set_for_scope(
+            db,
+            current=current,
+            taxonomy=new_taxonomy,
+            enabled=enabled,
+        )
+    )
+    assert normalized is None
+    assert current.lifecycle == "superseded" and current.superseded_at is not None
+    assert db.flush_count == 1
+    db.commit.assert_not_awaited()

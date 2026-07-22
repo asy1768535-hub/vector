@@ -252,6 +252,25 @@ async def _lock_taxonomy_and_enabled_labels(
     return taxonomy, enabled, {label.id: label for label in all_labels}
 
 
+async def lock_classification_scope(
+    db,
+    *,
+    library: Library,
+    expected_taxonomy_id: uuid.UUID | None = None,
+    expected_enabled_label_ids: tuple[uuid.UUID, ...] | None = None,
+) -> tuple[
+    ClassificationTaxonomy,
+    tuple[ClassificationLabel, ...],
+    dict[uuid.UUID, ClassificationLabel],
+]:
+    return await _lock_taxonomy_and_enabled_labels(
+        db,
+        library=library,
+        expected_taxonomy_id=expected_taxonomy_id,
+        expected_enabled_label_ids=expected_enabled_label_ids,
+    )
+
+
 async def _effective_set(
     db,
     revision_id: uuid.UUID,
@@ -282,6 +301,38 @@ async def _latest_decision_set(
     if lock:
         statement = statement.with_for_update().execution_options(populate_existing=True)
     return (await db.execute(statement)).scalars().first()
+
+
+async def _normalize_effective_set_for_scope(
+    db,
+    *,
+    current: DocumentClassificationDecisionSet | None,
+    taxonomy: ClassificationTaxonomy,
+    enabled: tuple[ClassificationLabel, ...],
+) -> DocumentClassificationDecisionSet | None:
+    if current is None:
+        return None
+    valid = current.taxonomy_version_id == taxonomy.id
+    if valid:
+        selected_ids = set(
+            (
+                await db.execute(
+                    select(DocumentClassificationDecision.label_id).where(
+                        DocumentClassificationDecision.decision_set_id == current.id
+                    )
+                )
+            ).scalars().all()
+        )
+        enabled_ids = {label.id for label in enabled}
+        valid = bool(selected_ids) and selected_ids.issubset(enabled_ids)
+    if valid:
+        return current
+    now = _now()
+    current.lifecycle = "superseded"
+    current.superseded_at = now
+    current.updated_at = now
+    await db.flush()
+    return None
 
 
 def _fence_effective_set(
@@ -475,6 +526,12 @@ async def submit_classification_run(
         for label_id in referenced_ids
     }
     current = await _effective_set(db, revision.id, lock=True)
+    current = await _normalize_effective_set_for_scope(
+        db,
+        current=current,
+        taxonomy=taxonomy,
+        enabled=enabled,
+    )
     latest_decision = current
     if latest_decision is None:
         latest_decision = await _latest_decision_set(db, revision.id, lock=True)
@@ -482,7 +539,9 @@ async def submit_classification_run(
         command.proposals,
         known_labels=states,
         has_manual_decision_protection=(
-            latest_decision is not None and latest_decision.source == "manual"
+            latest_decision is not None
+            and latest_decision.source == "manual"
+            and latest_decision.lifecycle in {"effective", "removed"}
         ),
     )
     highest_generation = (

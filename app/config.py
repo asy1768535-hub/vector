@@ -356,6 +356,22 @@ class Settings(BaseSettings):
     knowledge_artifact_worker_renew_seconds: int = 30
     knowledge_artifact_worker_max_attempts: int = 3
 
+    # ---- v0.8 Document Classification Worker (default fail closed) ----
+    classification_runtime_enabled: bool = False
+    classification_auto_trigger_enabled: bool = False
+    classification_external_model_enabled: bool = False
+    classification_base_url: str = "https://api.deepseek.com/v1"
+    classification_model: str = "deepseek-v4-pro"
+    classification_api_key: SecretStr = SecretStr("")
+    classification_provider_timeout_seconds: float = 120.0
+    classification_model_max_source_chars: int = 24_000
+    classification_classifier_version: str = "document-classifier-v1"
+    classification_prompt_version: str = "classification-prompt-v1"
+    classification_worker_poll_seconds: float = 3.0
+    classification_worker_lease_seconds: int = 180
+    classification_worker_renew_seconds: int = 30
+    classification_worker_max_attempts: int = 3
+
     # ---- v0.5 Active Graph Publication (M1 defaults; fail closed) ----
     graph_publication_enabled: bool = False
     graph_publication_require_entity_evidence: bool = True
@@ -500,6 +516,75 @@ def validate_knowledge_artifact_startup(config: Settings) -> None:
     if not config.knowledge_artifact_api_key.get_secret_value().strip():
         raise RuntimeError(
             "[security] KNOWLEDGE_ARTIFACT_API_KEY is required for model generation"
+        )
+
+
+def validate_classification_runtime_startup(config: Settings) -> None:
+    if config.classification_runtime_enabled and not (
+        config.classification_decision_enabled
+        and config.classification_taxonomy_enabled
+        and config.organization_authorization_enabled
+    ):
+        raise RuntimeError(
+            "[security] classification runtime requires decisions, taxonomy, and "
+            "Organization authorization"
+        )
+    if config.classification_auto_trigger_enabled and not (
+        config.classification_runtime_enabled
+        and config.classification_external_model_enabled
+    ):
+        raise RuntimeError(
+            "[security] classification auto trigger requires runtime and model"
+        )
+    if config.classification_external_model_enabled and not (
+        config.classification_runtime_enabled
+    ):
+        raise RuntimeError(
+            "[security] classification external model requires the runtime"
+        )
+    positive_values = (
+        config.classification_provider_timeout_seconds,
+        config.classification_model_max_source_chars,
+        config.classification_worker_poll_seconds,
+        config.classification_worker_lease_seconds,
+        config.classification_worker_renew_seconds,
+        config.classification_worker_max_attempts,
+    )
+    if any(not math.isfinite(value) or value <= 0 for value in positive_values):
+        raise RuntimeError("[security] classification runtime limits must be positive")
+    if not 1_000 <= config.classification_model_max_source_chars <= 100_000:
+        raise RuntimeError(
+            "[security] classification source limit must be within 1000..100000"
+        )
+    lease = config.classification_worker_lease_seconds
+    if config.classification_worker_renew_seconds >= lease / 2:
+        raise RuntimeError(
+            "[security] classification lease renew must be less than half the lease"
+        )
+    if config.classification_provider_timeout_seconds >= lease:
+        raise RuntimeError(
+            "[security] classification provider timeout must be below the lease"
+        )
+    versions = (
+        config.classification_classifier_version,
+        config.classification_prompt_version,
+    )
+    if any(not value.strip() or len(value) > 64 for value in versions):
+        raise RuntimeError(
+            "[security] classification versions must be nonblank and bounded"
+        )
+    if not config.classification_external_model_enabled:
+        return
+    if (
+        config.classification_base_url != "https://api.deepseek.com/v1"
+        or config.classification_model != "deepseek-v4-pro"
+    ):
+        raise RuntimeError(
+            "[security] classification requires the approved DeepSeek identity"
+        )
+    if not config.classification_api_key.get_secret_value().strip():
+        raise RuntimeError(
+            "[security] CLASSIFICATION_API_KEY is required for classification"
         )
 
 

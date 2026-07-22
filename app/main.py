@@ -60,6 +60,7 @@ from app.config import (
     validate_personal_library_scopes_startup,
     validate_classification_taxonomy_startup,
     validate_classification_decision_startup,
+    validate_classification_runtime_startup,
     validate_organization_authorization_startup,
     validate_graph_publication_startup,
     validate_graph_retrieval_startup,
@@ -173,6 +174,10 @@ def assert_classification_decision_startup_security() -> None:
     validate_classification_decision_startup(settings)
 
 
+def assert_classification_runtime_startup_security() -> None:
+    validate_classification_runtime_startup(settings)
+
+
 def resolve_console_ui_dir(root: Path) -> Path | None:
     """Resolve the configured console UI directory without implicit frontend fallback."""
     configured = Path(settings.console_ui_dir)
@@ -199,6 +204,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     assert_personal_library_scopes_startup_security()
     assert_classification_taxonomy_startup_security()
     assert_classification_decision_startup_security()
+    assert_classification_runtime_startup_security()
     # 预热 Casbin enforcer，确保 policy 已加载入内存
     get_enforcer()
     # 启动自检：embedding 服务 / Qdrant 配置错配时大声报（非 fatal，不阻断启动）

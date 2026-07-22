@@ -25,6 +25,10 @@ class Library(Base):
             name="ck_lib_knowledge_artifact_security_levels_array",
         ),
         CheckConstraint(
+            "jsonb_typeof(classification_allowed_security_levels) = 'array'",
+            name="ck_lib_classification_security_levels_array",
+        ),
+        CheckConstraint(
             "revision_retention_days BETWEEN 30 AND 60 AND "
             "revision_retention_notice_days BETWEEN 1 AND 14 AND "
             "revision_retention_notice_days < revision_retention_days",
@@ -122,6 +126,15 @@ class Library(Base):
         Boolean, nullable=False, default=False, server_default="false"
     )
     knowledge_artifact_allowed_security_levels: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    classification_auto_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    classification_external_model_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    classification_allowed_security_levels: Mapped[list[str]] = mapped_column(
         JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
     )
     revision_retention_enabled: Mapped[bool] = mapped_column(

@@ -22,6 +22,7 @@ from app.models.library import Library
 from app.models.organization import Organization
 from app.models.user import User
 from app.services import classification_taxonomies as service
+from app.services import classification_jobs
 
 
 NOW = datetime(2026, 7, 22, 16, 0, tzinfo=timezone.utc)
@@ -176,7 +177,7 @@ def test_0034_orm_migration_and_offline_sql_are_reversible():
     assert "ck_classification_taxonomies_activation_shape" in taxonomy_checks
     assert "ck_classification_labels_parent_not_self" in label_checks
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_heads() == ["0035"]
+    assert script.get_heads() == ["0036"]
     assert script.get_revision("0034").down_revision == "0033"
     upgrade = _offline("upgrade", "0033:0034")
     downgrade = _offline("downgrade", "0034:0033")
@@ -339,6 +340,12 @@ def test_activation_disables_prior_and_clears_library_bindings(monkeypatch):
     monkeypatch.setattr(service, "_require_admin_scope", AsyncMock())
     monkeypatch.setattr(service, "_load_taxonomy", AsyncMock(return_value=draft))
     monkeypatch.setattr(service.audit_log, "record", AsyncMock())
+    cancel_jobs = AsyncMock(return_value=2)
+    monkeypatch.setattr(
+        classification_jobs,
+        "cancel_organization_classification_jobs_for_taxonomy_change",
+        cancel_jobs,
+    )
     db = _DB(_Result(rows=(label,)), _Result(rows=(prior,)), _Result())
     activated = asyncio.run(
         service.activate_taxonomy(
@@ -356,6 +363,11 @@ def test_activation_disables_prior_and_clears_library_bindings(monkeypatch):
     assert activated.activated_by_user_id == actor.id
     assert prior.status == "disabled"
     assert db.flush_count == 1
+    cancel_jobs.assert_awaited_once_with(
+        db,
+        organization_id=organization.id,
+        now=draft.activated_at,
+    )
     assert not db.results
     db.commit.assert_not_awaited()
 
@@ -369,6 +381,12 @@ def test_library_subset_is_ordered_fenced_and_idempotent(monkeypatch):
     monkeypatch.setattr(service, "_require_admin_scope", AsyncMock())
     audit = AsyncMock()
     monkeypatch.setattr(service.audit_log, "record", audit)
+    cancel_jobs = AsyncMock(return_value=2)
+    monkeypatch.setattr(
+        classification_jobs,
+        "cancel_library_classification_jobs_for_policy_change",
+        cancel_jobs,
+    )
     command = service.ReplaceLibraryClassificationLabelsCommand(
         organization_id=organization.id,
         actor_user_id=actor.id,
@@ -393,6 +411,11 @@ def test_library_subset_is_ordered_fenced_and_idempotent(monkeypatch):
         (first.id, 1),
     ]
     audit.assert_awaited_once()
+    cancel_jobs.assert_awaited_once_with(
+        db,
+        library_id=library.id,
+        error_code="library_classification_labels_changed",
+    )
     db.commit.assert_not_awaited()
 
     current = tuple(bindings)

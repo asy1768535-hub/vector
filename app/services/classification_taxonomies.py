@@ -642,6 +642,15 @@ async def activate_taxonomy(
             LibraryClassificationLabel.library_id.in_(library_ids)
         )
     )
+    from app.services.classification_jobs import (
+        cancel_organization_classification_jobs_for_taxonomy_change,
+    )
+
+    cancelled_jobs = await cancel_organization_classification_jobs_for_taxonomy_change(
+        db,
+        organization_id=command.organization_id,
+        now=now,
+    )
     await audit_log.record(
         db,
         command.actor_user_id,
@@ -651,6 +660,7 @@ async def activate_taxonomy(
             "taxonomy_id": str(taxonomy.id),
             "prior_taxonomy_id": str(prior.id) if prior is not None else None,
             "active_label_count": sum(label.status == "active" for label in labels),
+            "cancelled_classification_jobs": cancelled_jobs,
         },
     )
     return taxonomy
@@ -801,6 +811,15 @@ async def replace_library_classification_labels(
         )
         for ordinal, label in enumerate(labels)
     )
+    from app.services.classification_jobs import (
+        cancel_library_classification_jobs_for_policy_change,
+    )
+
+    cancelled_jobs = await cancel_library_classification_jobs_for_policy_change(
+        db,
+        library_id=library.id,
+        error_code="library_classification_labels_changed",
+    )
     await audit_log.record(
         db,
         command.actor_user_id,
@@ -811,6 +830,7 @@ async def replace_library_classification_labels(
             "taxonomy_id": str(taxonomy.id),
             "previous_count": len(current_ids),
             "label_count": len(labels),
+            "cancelled_classification_jobs": cancelled_jobs,
         },
     )
     return LibraryClassificationSelection(library, taxonomy, labels)

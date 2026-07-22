@@ -46,6 +46,7 @@ _SERVICE_TYPES = (
     "cleanup_worker",
     "graph_extractor",
     "knowledge_artifact_worker",
+    "classification_worker",
 )
 
 # last_error 仅取摘要，截断到 200 字符，绝不含完整堆栈。

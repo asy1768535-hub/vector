@@ -28,6 +28,8 @@ from app.schemas.admin import (
 )
 from app.services import (
     audit_log,
+    classification_jobs,
+    classification_runtime_policy,
     graph_extraction_safety,
     knowledge_artifact_jobs,
     knowledge_artifact_policy,
@@ -356,6 +358,41 @@ async def update_library(
                 error_code=error_code,
                 artifact_types=tuple(sorted(cancelled_artifact_types)),
                 include_model_jobs=cancel_model_artifact_jobs,
+            )
+        )
+
+    cancel_classification_jobs = (
+        "external_llm_enabled" in body.model_fields_set
+        and body.external_llm_enabled is False
+        and bool(lib.classification_external_model_enabled)
+    )
+    for field in (
+        "classification_auto_enabled",
+        "classification_external_model_enabled",
+    ):
+        if field not in body.model_fields_set:
+            continue
+        value = getattr(body, field)
+        setattr(lib, field, value)
+        changes[field] = value
+        if value is False:
+            cancel_classification_jobs = True
+
+    if "classification_allowed_security_levels" in body.model_fields_set:
+        old_levels = list(lib.classification_allowed_security_levels or [])
+        levels = classification_runtime_policy.normalize_classification_security_levels(
+            body.classification_allowed_security_levels
+        )
+        lib.classification_allowed_security_levels = levels
+        changes["classification_allowed_security_levels"] = levels
+        cancel_classification_jobs = cancel_classification_jobs or levels != old_levels
+
+    if cancel_classification_jobs:
+        changes["cancelled_classification_jobs"] = (
+            await classification_jobs.cancel_library_classification_jobs_for_policy_change(
+                db,
+                library_id=lib.id,
+                error_code="library_classification_policy_changed",
             )
         )
 

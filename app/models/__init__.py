@@ -14,6 +14,7 @@ from app.models.classification_decision import (
     DocumentClassificationProposal,
     DocumentClassificationRun,
 )
+from app.models.classification_job import DocumentClassificationJob
 from app.models.chunk import Chunk
 from app.models.chunk_links import ChunkBlock, ChunkEvidence
 from app.models.cleanup_outbox import CleanupOutbox
@@ -76,6 +77,7 @@ __all__ = [
     "DocumentClassificationDecisionSet",
     "DocumentClassificationProposal",
     "DocumentClassificationRun",
+    "DocumentClassificationJob",
     "Chunk",
     "ChunkBlock",
     "ChunkEvidence",

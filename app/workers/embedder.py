@@ -336,6 +336,17 @@ async def _publish_revision_after_qdrant(
             document_revision_id=old_current_revision_id,
             now=now,
         )
+        from app.services.classification_jobs import (
+            supersede_revision_classification_jobs,
+        )
+
+        await supersede_revision_classification_jobs(
+            db,
+            library_id=library.id,
+            document_id=job.document_id,
+            document_revision_id=old_current_revision_id,
+            now=now,
+        )
         await db.execute(
             update(DocumentRevision)
             .where(DocumentRevision.id == old_current_revision_id)
@@ -404,6 +415,23 @@ async def _publish_revision_after_qdrant(
     except Exception:  # noqa: BLE001
         log.exception(
             "knowledge artifact auto trigger failed after publication: "
+            "doc=%s revision=%s",
+            job.document_id,
+            job.document_revision_id,
+        )
+    try:
+        from app.services.classification_jobs import (
+            enqueue_ready_revision_classification,
+        )
+
+        await enqueue_ready_revision_classification(
+            library_id=library.id,
+            document_id=job.document_id,
+            revision_id=job.document_revision_id,
+        )
+    except Exception:  # noqa: BLE001
+        log.exception(
+            "classification auto trigger failed after publication: "
             "doc=%s revision=%s",
             job.document_id,
             job.document_revision_id,

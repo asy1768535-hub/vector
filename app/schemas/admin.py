@@ -13,6 +13,9 @@ from app.models.organization import DEFAULT_ORGANIZATION_ID
 from app.services.knowledge_artifact_policy import (
     normalize_knowledge_artifact_security_levels,
 )
+from app.services.classification_runtime_policy import (
+    normalize_classification_security_levels,
+)
 
 # 库唯一ID：只允许大小写英文字母和下划线（其它一律不允许）。
 # 同时它也是 Dify knowledge_id、URL 路径段、Qdrant collection 名、约定全文源表名，
@@ -168,6 +171,9 @@ class LibraryUpdate(BaseModel):
     outline_artifact_enabled: Optional[bool] = None
     knowledge_artifact_external_model_enabled: Optional[bool] = None
     knowledge_artifact_allowed_security_levels: Optional[list[str]] = None
+    classification_auto_enabled: Optional[bool] = None
+    classification_external_model_enabled: Optional[bool] = None
+    classification_allowed_security_levels: Optional[list[str]] = None
     revision_retention_enabled: Optional[bool] = None
     revision_retention_days: Optional[int] = Field(default=None, ge=30, le=60)
     revision_retention_notice_days: Optional[int] = Field(default=None, ge=1, le=14)
@@ -199,6 +205,17 @@ class LibraryUpdate(BaseModel):
             raise ValueError("knowledge artifact switch cannot be null")
         return value
 
+    @field_validator(
+        "classification_auto_enabled",
+        "classification_external_model_enabled",
+        mode="before",
+    )
+    @classmethod
+    def _reject_null_classification_switch(cls, value):
+        if value is None:
+            raise ValueError("classification switch cannot be null")
+        return value
+
     @field_validator("revision_retention_enabled", mode="before")
     @classmethod
     def _reject_null_retention_switch(cls, value):
@@ -212,6 +229,13 @@ class LibraryUpdate(BaseModel):
         if value is None:
             raise ValueError("knowledge artifact security levels cannot be null")
         return normalize_knowledge_artifact_security_levels(value)
+
+    @field_validator("classification_allowed_security_levels", mode="before")
+    @classmethod
+    def _validate_classification_security_levels(cls, value):
+        if value is None:
+            raise ValueError("classification security levels cannot be null")
+        return normalize_classification_security_levels(value)
 
     @model_validator(mode="after")
     def _check_chunk_params(self):
@@ -246,6 +270,9 @@ class LibraryRead(BaseModel):
     outline_artifact_enabled: bool = False
     knowledge_artifact_external_model_enabled: bool = False
     knowledge_artifact_allowed_security_levels: list[str] = Field(default_factory=list)
+    classification_auto_enabled: bool = False
+    classification_external_model_enabled: bool = False
+    classification_allowed_security_levels: list[str] = Field(default_factory=list)
     revision_retention_enabled: bool = False
     revision_retention_days: int = 60
     revision_retention_notice_days: int = 7
@@ -254,6 +281,20 @@ class LibraryRead(BaseModel):
     active_rebuild_operation_id: Optional[uuid.UUID] = None
     created_at: datetime
     deleted_at: Optional[datetime] = None
+
+    @field_validator(
+        "classification_auto_enabled",
+        "classification_external_model_enabled",
+        mode="before",
+    )
+    @classmethod
+    def _default_classification_switches(cls, value):
+        return False if value is None else value
+
+    @field_validator("classification_allowed_security_levels", mode="before")
+    @classmethod
+    def _default_classification_security_levels(cls, value):
+        return [] if value is None else value
 
     @field_validator("revision_retention_enabled", mode="before")
     @classmethod
