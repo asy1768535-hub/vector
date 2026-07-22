@@ -80,6 +80,12 @@ export async function logout() {
 
 export const me = (forceRefresh) => cachedRequest('me', () => request('/users/me'), 30000, forceRefresh);
 export const myPermissions = (forceRefresh) => cachedRequest('myPermissions', () => request('/me/permissions'), 30000, forceRefresh);
+export const listMyOrganizations = (forceRefresh) => cachedRequest(
+    'listMyOrganizations',
+    () => request('/me/organizations'),
+    30000,
+    forceRefresh,
+);
 // 修改自己的资料/密码（复用 fastapi-users PATCH /users/me，不新建更新逻辑）
 export const updateMe = (data) => request('/users/me', jsonBody('PATCH', data));
 // 管理员重置某用户密码（专用端点；password 不混入普通 PATCH）
@@ -227,6 +233,12 @@ export const getCatalogEvidence = (slug, evidenceId, forceRefresh) => cachedRequ
 );
 export const getCatalogFileAccess = (slug, revisionFileId) =>
     request(`/libraries/${slug}/catalog/files/${revisionFileId}/access`);
+
+// ── v0.8 Organization retrieval diagnostics ────────────────
+export const checkLibraryCompatibility = (body) =>
+    request('/me/library-compatibility/check', jsonBody('POST', body));
+export const runOrganizationRetrievalTest = (organizationId, body) =>
+    request(`/organizations/${organizationId}/retrieval-tests`, jsonBody('POST', body));
 
 // ── Admin: Jobs ──────────────────────────────────────────────
 const _jobsKey = (params) => 'listJobs:' + new URLSearchParams(params).toString();

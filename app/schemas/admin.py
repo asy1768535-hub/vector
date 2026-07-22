@@ -385,6 +385,8 @@ class PermissionMatrixRow(BaseModel):
     actions: list[str]
     # 可选：活动库的真实名称（仅 /me/permissions 填充，向后兼容；缺失时前端回退 slug）。
     library_name: Optional[str] = None
+    # Organization-aware mode exposes the service-owned scope for safe client grouping.
+    organization_id: Optional[uuid.UUID] = None
 
 
 # ── Audit log ────────────────────────────────────────────────────────────

@@ -13,10 +13,16 @@ function actionSet(user, permissions) {
     return acts;
 }
 
-export function menuAccess(user, permissions) {
+export function hasOrganizationAdmin(organizations) {
+    return Array.isArray(organizations)
+        && organizations.some((item) => item?.role === 'organization_admin');
+}
+
+export function menuAccess(user, permissions, organizations = []) {
     const isSuper = !!(user && user.is_superuser);
     const acts = actionSet(user, permissions);
     const can = (a) => isSuper || acts.has(a);
+    const organizationAdmin = hasOrganizationAdmin(organizations);
     return {
         // Catalog requires Organization authorization; platform superuser is not a
         // customer-content bypass. Organization admins receive effective read rows.
@@ -25,6 +31,8 @@ export function menuAccess(user, permissions) {
         search: can('read'),
         chat: can('read'),
         import: can('insert'),
+        organizationAdmin,
+        retrievalTest: organizationAdmin,
         apiKeys: true,            // 始终显示
     };
 }
@@ -38,6 +46,10 @@ export function canAccessRoute(user, permissions, perm) {
 
 export function canAccessEffectiveRoute(permissions, action) {
     return actionSet(null, permissions).has(action);
+}
+
+export function canAccessOrganizationRoute(organizations) {
+    return hasOrganizationAdmin(organizations);
 }
 
 // 普通用户的可读库列表（按 read 过滤），元素 {slug, name}。superuser 走 listLibraries，不用这里。

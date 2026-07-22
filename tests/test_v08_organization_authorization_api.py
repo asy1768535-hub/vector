@@ -13,10 +13,11 @@ from pydantic import ValidationError
 
 from app.api import admin_libraries as admin_libraries_api
 from app.api import api_keys as api_keys_api
+from app.api import me as me_api
 from app.api import organizations as organizations_api
 from app.api import v02_m4 as v02_m4_api
 from app.api import v04_graph_extraction as graph_extraction_api
-from app.auth.backend import current_cookie_user
+from app.auth.backend import current_active_user, current_cookie_user
 from app.auth.user_manager import get_user_manager
 from app.config import settings
 from app.db import get_db
@@ -29,6 +30,7 @@ from app.schemas.organizations import (
     OrganizationMemberCreate,
     OrganizationPermissionGrant,
 )
+from app.schemas.admin import PermissionMatrixRow
 from app.schemas.v02_m4 import SyncBatchRequest
 from app.services.organization_accounts import (
     OrganizationAccountError,
@@ -39,6 +41,7 @@ from app.services.organization_permissions import OrganizationPermissionError
 from app.services.organization_authorization import (
     OrganizationAdminContext,
     OrganizationAuthorizationError,
+    PermissionProjection,
 )
 
 
@@ -153,6 +156,53 @@ def test_me_organizations_returns_only_service_projection():
         ]
     finally:
         app.dependency_overrides.clear()
+
+
+def test_me_permissions_exposes_service_owned_organization_identity():
+    user = _user()
+    organization = _organization()
+    library = _library(organization)
+    app.dependency_overrides[current_active_user] = lambda: user
+    app.dependency_overrides[get_db] = lambda: AsyncMock()
+    try:
+        with (
+            patch.object(settings, "organization_authorization_enabled", True),
+            patch.object(
+                me_api,
+                "list_effective_permissions",
+                new=AsyncMock(
+                    return_value=(
+                        PermissionProjection(
+                            organization_id=organization.id,
+                            library_slug=library.slug,
+                            library_name=library.name,
+                            actions=("read",),
+                        ),
+                    )
+                ),
+            ),
+        ):
+            response = TestClient(app).get("/me/permissions")
+        assert response.status_code == 200
+        assert response.json() == [
+            {
+                "library_slug": library.slug,
+                "library_name": library.name,
+                "actions": ["read"],
+                "organization_id": str(organization.id),
+            }
+        ]
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_permission_row_keeps_legacy_organization_identity_optional():
+    row = PermissionMatrixRow(
+        library_slug="legacy-library",
+        library_name="Legacy Library",
+        actions=["read"],
+    )
+    assert row.organization_id is None
 
 
 def test_organization_admin_creates_member_without_credential_leak():

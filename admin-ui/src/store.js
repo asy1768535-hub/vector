@@ -5,6 +5,7 @@ import * as api from './api.js';
 export const store = reactive({
     user: null,            // { id, email, is_superuser, username, ... } 或 null
     permissions: [],       // [{ library_slug, actions: [] }]
+    organizations: [],     // [{ organization_id, slug, name, role }]
     ready: false,          // 首次加载完成？
 });
 
@@ -14,19 +15,23 @@ export async function refreshAuth() {
         const resp = await fetch('/users/me', { credentials: 'include' });
         if (resp.ok) {
             store.user = await resp.json();
-            try {
-                const pResp = await fetch('/me/permissions', { credentials: 'include' });
-                store.permissions = pResp.ok ? await pResp.json() : [];
-            } catch (_) {
-                store.permissions = [];
-            }
+            [store.permissions, store.organizations] = await Promise.all([
+                fetch('/me/permissions', { credentials: 'include' })
+                    .then((value) => (value.ok ? value.json() : []))
+                    .catch(() => []),
+                fetch('/me/organizations', { credentials: 'include' })
+                    .then((value) => (value.ok ? value.json() : []))
+                    .catch(() => []),
+            ]);
         } else {
             store.user = null;
             store.permissions = [];
+            store.organizations = [];
         }
     } catch (_) {
         store.user = null;
         store.permissions = [];
+        store.organizations = [];
     } finally {
         store.ready = true;
     }
@@ -43,6 +48,7 @@ export function setMockUser() {
         is_active: true,
     };
     store.permissions = [];
+    store.organizations = [];
     store.ready = true;
 }
 

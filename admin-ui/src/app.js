@@ -7,14 +7,20 @@ import zhCn from 'element-plus/locale/zh-cn';
 
 import { store, refreshAuth } from './store.js';
 import { setUnauthorizedHandler } from './api.js';
-import { canAccessEffectiveRoute, canAccessRoute, menuAccess } from './menu_access.js';
+import {
+    canAccessEffectiveRoute,
+    canAccessOrganizationRoute,
+    canAccessRoute,
+    menuAccess,
+} from './menu_access.js';
 
-function defaultRoute(user, permissions) {
+function defaultRoute(user, permissions, organizations = []) {
     if (!user) return '/login';
     if (user.is_superuser) return '/dashboard';
-    const access = menuAccess(user, permissions);
+    const access = menuAccess(user, permissions, organizations);
     if (access.chat || access.documents || access.search) return '/chat';
     if (access.import) return '/import';
+    if (access.retrievalTest) return '/retrieval-test';
     return '/api-keys';
 }
 import './preview_mode.js';
@@ -28,6 +34,7 @@ import Libraries from './views/Libraries.js';
 import Permissions from './views/Permissions.js';
 import Documents from './views/Documents.js';
 import KnowledgeCatalog from './views/KnowledgeCatalog.js';
+import RetrievalTest from './views/RetrievalTest.js';
 import Search from './views/Search.js';
 import Chat from './views/Chat.js';
 import ChatLogs from './views/ChatLogs.js';
@@ -43,13 +50,14 @@ const routes = [
         path: '/',
         component: Layout,
         children: [
-            { path: '', redirect: (to) => defaultRoute(store.user, store.permissions) },
+            { path: '', redirect: (to) => defaultRoute(store.user, store.permissions, store.organizations) },
             { path: 'dashboard', component: Dashboard, meta: { title: '概览', admin: true } },
             { path: 'users', component: Users, meta: { title: '用户管理', admin: true } },
             { path: 'libraries', component: Libraries, meta: { title: '库管理', admin: true } },
             { path: 'permissions', component: Permissions, meta: { title: '权限矩阵', admin: true } },
             { path: 'documents', component: Documents, meta: { title: '文档', perm: 'read' } },
             { path: 'catalog', component: KnowledgeCatalog, meta: { title: '知识目录', perm: 'read', effectivePerm: 'read' } },
+            { path: 'retrieval-test', component: RetrievalTest, meta: { title: '检索诊断', organizationAdmin: true } },
             { path: 'search', component: Search, meta: { title: '数据检索', perm: 'read' } },
             { path: 'chat', component: Chat, meta: { title: '智能问答', perm: 'read' } },
             { path: 'chat-logs', component: ChatLogs, meta: { title: '问答日志', admin: true } },
@@ -60,7 +68,7 @@ const routes = [
             { path: 'audit', component: Audit, meta: { title: '审计日志', admin: true } },
         ],
     },
-    { path: '/:catchAll(.*)', redirect: (to) => defaultRoute(store.user, store.permissions) },
+    { path: '/:catchAll(.*)', redirect: (to) => defaultRoute(store.user, store.permissions, store.organizations) },
 ];
 
 const router = createRouter({
@@ -73,7 +81,7 @@ router.beforeEach(async (to) => {
         await refreshAuth();
     }
     if (to.meta.guest) {
-        if (store.user) return { path: defaultRoute(store.user, store.permissions) };
+        if (store.user) return { path: defaultRoute(store.user, store.permissions, store.organizations) };
         return true;
     }
     if (!store.user) {
@@ -81,16 +89,20 @@ router.beforeEach(async (to) => {
     }
     if (to.meta.admin && !store.user.is_superuser) {
         ElMessage.warning('你没有访问该页面的权限');
-        return { path: defaultRoute(store.user, store.permissions) };
+        return { path: defaultRoute(store.user, store.permissions, store.organizations) };
+    }
+    if (to.meta.organizationAdmin && !canAccessOrganizationRoute(store.organizations)) {
+        ElMessage.warning('你没有访问该页面的权限');
+        return { path: defaultRoute(store.user, store.permissions, store.organizations) };
     }
     if (to.meta.effectivePerm && !canAccessEffectiveRoute(store.permissions, to.meta.effectivePerm)) {
         ElMessage.warning('你没有访问该页面的权限');
-        return { path: defaultRoute(store.user, store.permissions) };
+        return { path: defaultRoute(store.user, store.permissions, store.organizations) };
     }
     // 直接输入无权限页面 URL → 跳首页并中文提示（前端隐藏不替代后端鉴权）
     if (to.meta.perm && !canAccessRoute(store.user, store.permissions, to.meta.perm)) {
         ElMessage.warning('你没有访问该页面的权限');
-        return { path: defaultRoute(store.user, store.permissions) };
+        return { path: defaultRoute(store.user, store.permissions, store.organizations) };
     }
     return true;
 });
@@ -100,6 +112,7 @@ let lastUnauthorizedAt = 0;
 setUnauthorizedHandler(() => {
     store.user = null;
     store.permissions = [];
+    store.organizations = [];
     const now = Date.now();
     if (now - lastUnauthorizedAt < 3000) return;   // 3s 抖动窗口内只处理一次
     lastUnauthorizedAt = now;

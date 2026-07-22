@@ -194,6 +194,7 @@ def test_me_permissions_attaches_name_and_filters_deleted():
         assert rows[0]["library_slug"] == "alpha"
         assert rows[0]["library_name"] == "Alpha 知识库"
         assert rows[0]["actions"] == ["read"]
+        assert "organization_id" not in rows[0]
         assert all(x["library_slug"] != "ghost" for x in rows)   # 已删除库被过滤
     finally:
         app.dependency_overrides.clear()

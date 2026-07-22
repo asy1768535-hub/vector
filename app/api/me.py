@@ -20,7 +20,11 @@ from app.services.organization_authorization import list_effective_permissions
 router = APIRouter(prefix="/me", tags=["me"])
 
 
-@router.get("/permissions", response_model=list[PermissionMatrixRow])
+@router.get(
+    "/permissions",
+    response_model=list[PermissionMatrixRow],
+    response_model_exclude_none=True,
+)
 async def my_permissions(
     user: User = Depends(current_active_user),
     db: AsyncSession = Depends(get_db),
@@ -52,6 +56,7 @@ async def my_permissions(
             library_slug=row.library_slug,
             actions=list(row.actions),
             library_name=row.library_name,
+            organization_id=row.organization_id,
         )
         for row in projections
     ]
