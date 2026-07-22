@@ -7,12 +7,11 @@ import uuid
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import text
 from sqlalchemy.engine import URL, make_url
-from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.config import settings
 from app.models.organization import DEFAULT_ORGANIZATION_ID
+from tests.v08_pg_support import execute_sql
 
 
 _DSN = os.getenv("VECTOR_KB_PG_TEST_DSN")
@@ -50,13 +49,7 @@ def _database_url(name: str) -> URL:
 
 
 async def _execute(name: str, sql: str):
-    engine = create_async_engine(_database_url(name))
-    try:
-        async with engine.begin() as connection:
-            result = await connection.execute(text(sql))
-            return result.fetchall() if result.returns_rows else None
-    finally:
-        await engine.dispose()
+    return await execute_sql(_database_url(name), sql)
 
 
 def _configure_alembic(monkeypatch, name: str) -> None:

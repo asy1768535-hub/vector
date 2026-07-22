@@ -7,7 +7,7 @@ import uuid
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -18,6 +18,7 @@ from app.services.knowledge_catalog import (
     get_catalog_document_detail,
     get_catalog_evidence_detail,
 )
+from tests.v08_pg_support import execute_sql
 
 
 _DSN = os.getenv("VECTOR_KB_PG_TEST_DSN")
@@ -67,10 +68,9 @@ async def _exercise(name: str, ids: dict[str, uuid.UUID]) -> None:
     engine = create_async_engine(_database_url(name))
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     try:
-        async with engine.begin() as connection:
-            await connection.execute(
-                text(
-                    f"""
+        await execute_sql(
+            _database_url(name),
+            f"""
                     INSERT INTO sys_libraries (
                         id, organization_id, slug, name, embedding_model, embedding_dim,
                         vector_distance, chunk_size, chunk_overlap, qdrant_collection
@@ -146,9 +146,8 @@ async def _exercise(name: str, ids: dict[str, uuid.UUID]) -> None:
                         '{ids['ontology']}', 'entity', '{ids['entity']}', '{'c' * 64}',
                         'active', '["{ids['evidence']}"]'::jsonb
                     );
-                    """
-                )
-            )
+            """,
+        )
         async with sessions() as db:
             library = (
                 await db.execute(select(Library).where(Library.id == ids["library"]))

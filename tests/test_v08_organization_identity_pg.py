@@ -7,7 +7,7 @@ import uuid
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -23,6 +23,7 @@ from app.services.organization_identity import (
     add_organization_membership,
     change_organization_membership,
 )
+from tests.v08_pg_support import execute_sql
 
 
 _DSN = os.getenv("VECTOR_KB_PG_TEST_DSN")
@@ -60,13 +61,7 @@ def _database_url(name: str) -> URL:
 
 
 async def _execute(name: str, sql: str):
-    engine = create_async_engine(_database_url(name))
-    try:
-        async with engine.begin() as connection:
-            result = await connection.execute(text(sql))
-            return result.fetchall() if result.returns_rows else None
-    finally:
-        await engine.dispose()
+    return await execute_sql(_database_url(name), sql)
 
 
 def _configure_alembic(monkeypatch, name: str) -> None:
@@ -234,85 +229,84 @@ def test_concurrent_membership_and_final_admin_fences(monkeypatch):
     name, url = _create_database(monkeypatch, "vkt_v08_org_concurrency")
     try:
         command.upgrade(Config("alembic.ini"), "0030")
-        engine = create_async_engine(url)
-        Session = async_sessionmaker(engine, expire_on_commit=False)
-        member, admin_a, admin_b = asyncio.run(_seed_users(Session, 3))
+        async def scenario():
+            engine = create_async_engine(url)
+            Session = async_sessionmaker(engine, expire_on_commit=False)
+            try:
+                member, admin_a, admin_b = await _seed_users(Session, 3)
+                membership_command = MembershipCreateCommand(
+                    organization_id=DEFAULT_ORGANIZATION_ID,
+                    user_id=member.id,
+                    role="member",
+                )
+                results = await asyncio.gather(
+                    _add_membership(Session, membership_command),
+                    _add_membership(Session, membership_command),
+                )
+                assert results[0].id == results[1].id
 
-        membership_command = MembershipCreateCommand(
-            organization_id=DEFAULT_ORGANIZATION_ID,
-            user_id=member.id,
-            role="member",
-        )
-
-        async def add_twice():
-            return await asyncio.gather(
-                _add_membership(Session, membership_command),
-                _add_membership(Session, membership_command),
-            )
-
-        results = asyncio.run(add_twice())
-        assert results[0].id == results[1].id
-
-        async def create_admins():
-            return await asyncio.gather(
-                _add_membership(
-                    Session,
-                    MembershipCreateCommand(
-                        organization_id=DEFAULT_ORGANIZATION_ID,
-                        user_id=admin_a.id,
-                        role="organization_admin",
+                admin_memberships = await asyncio.gather(
+                    _add_membership(
+                        Session,
+                        MembershipCreateCommand(
+                            organization_id=DEFAULT_ORGANIZATION_ID,
+                            user_id=admin_a.id,
+                            role="organization_admin",
+                        ),
                     ),
-                ),
-                _add_membership(
-                    Session,
-                    MembershipCreateCommand(
-                        organization_id=DEFAULT_ORGANIZATION_ID,
-                        user_id=admin_b.id,
-                        role="organization_admin",
+                    _add_membership(
+                        Session,
+                        MembershipCreateCommand(
+                            organization_id=DEFAULT_ORGANIZATION_ID,
+                            user_id=admin_b.id,
+                            role="organization_admin",
+                        ),
                     ),
-                ),
-            )
-
-        admin_memberships = asyncio.run(create_admins())
-        commands = tuple(
-            MembershipChangeCommand(
-                membership_id=row.id,
-                expected_role="organization_admin",
-                expected_status="active",
-                role="member",
-                status="disabled",
-            )
-            for row in admin_memberships
-        )
-
-        async def disable_both():
-            return await asyncio.gather(
-                _change_membership(Session, commands[0]),
-                _change_membership(Session, commands[1]),
-            )
-
-        outcomes = asyncio.run(disable_both())
-        assert sum(isinstance(value, OrganizationMembership) for value in outcomes) == 1
-        errors = [
-            value for value in outcomes if isinstance(value, OrganizationIdentityError)
-        ]
-        assert len(errors) == 1
-        assert errors[0].code == "organization_last_admin"
-
-        async def active_admin_count():
-            async with Session() as db:
-                return (
-                    await db.execute(
-                        select(func.count(OrganizationMembership.id)).where(
-                            OrganizationMembership.organization_id
-                            == DEFAULT_ORGANIZATION_ID,
-                            OrganizationMembership.role == "organization_admin",
-                            OrganizationMembership.status == "active",
-                        )
+                )
+                commands = tuple(
+                    MembershipChangeCommand(
+                        membership_id=row.id,
+                        expected_role="organization_admin",
+                        expected_status="active",
+                        role="member",
+                        status="disabled",
                     )
-                ).scalar_one()
+                    for row in admin_memberships
+                )
+                outcomes = await asyncio.gather(
+                    _change_membership(Session, commands[0]),
+                    _change_membership(Session, commands[1]),
+                )
+                assert (
+                    sum(
+                        isinstance(value, OrganizationMembership)
+                        for value in outcomes
+                    )
+                    == 1
+                )
+                errors = [
+                    value
+                    for value in outcomes
+                    if isinstance(value, OrganizationIdentityError)
+                ]
+                assert len(errors) == 1
+                assert errors[0].code == "organization_last_admin"
 
-        assert asyncio.run(active_admin_count()) == 1
-        asyncio.run(engine.dispose())
+                async with Session() as db:
+                    active_admin_count = (
+                        await db.execute(
+                            select(func.count(OrganizationMembership.id)).where(
+                                OrganizationMembership.organization_id
+                                == DEFAULT_ORGANIZATION_ID,
+                                OrganizationMembership.role == "organization_admin",
+                                OrganizationMembership.status == "active",
+                            )
+                        )
+                    ).scalar_one()
+                assert active_admin_count == 1
+            finally:
+                await engine.dispose()
+
+        asyncio.run(scenario())
     finally:
         _drop_database(name)

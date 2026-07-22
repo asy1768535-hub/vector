@@ -185,6 +185,7 @@ async def _seed_cleanup(Session):
                 revision_retention_enabled=True,
             )
         )
+        await db.flush()
         db.add(
             Document(
                 id=document_id,
@@ -197,6 +198,7 @@ async def _seed_cleanup(Session):
                 status="ready",
             )
         )
+        await db.flush()
         db.add_all(
             [
                 DocumentRevision(
@@ -226,6 +228,7 @@ async def _seed_cleanup(Session):
                 ),
             ]
         )
+        await db.flush()
         db.add(
             DocumentRevisionFile(
                 id=revision_file_id,
@@ -245,6 +248,7 @@ async def _seed_cleanup(Session):
                 lifecycle_status="available",
             )
         )
+        await db.flush()
         db.add(
             RevisionRetentionRecord(
                 id=record_id,
@@ -289,37 +293,37 @@ async def _claim(Session, record_id, worker_id, config):
 def test_concurrent_cleanup_claim_has_one_authoritative_winner(monkeypatch):
     name, url = _create_database(monkeypatch, "vkt_v08_cleanup_claim")
     try:
-        command.upgrade(Config("alembic.ini"), "0028")
-        engine = create_async_engine(url)
-        Session = async_sessionmaker(engine, expire_on_commit=False)
-        record_id, revision_file_id = asyncio.run(_seed_cleanup(Session))
-        config = Settings(
-            _env_file=None,
-            revision_cleanup_enabled=True,
-            revision_retention_enabled=True,
-            revision_file_storage_enabled=True,
-        )
+        command.upgrade(Config("alembic.ini"), "head")
+        async def scenario():
+            engine = create_async_engine(url)
+            Session = async_sessionmaker(engine, expire_on_commit=False)
+            try:
+                record_id, revision_file_id = await _seed_cleanup(Session)
+                config = Settings(
+                    _env_file=None,
+                    revision_cleanup_enabled=True,
+                    revision_retention_enabled=True,
+                    revision_file_storage_enabled=True,
+                )
+                claims = await asyncio.gather(
+                    _claim(Session, record_id, "worker-a", config),
+                    _claim(Session, record_id, "worker-b", config),
+                )
+                assert sum(claim is not None for claim in claims) == 1
 
-        async def run_claims():
-            return await asyncio.gather(
-                _claim(Session, record_id, "worker-a", config),
-                _claim(Session, record_id, "worker-b", config),
-            )
+                async with Session() as db:
+                    record = await db.get(RevisionRetentionRecord, record_id)
+                    revision_file = await db.get(
+                        DocumentRevisionFile,
+                        revision_file_id,
+                    )
+                assert record.status == "processing"
+                assert record.attempt_count == 1
+                assert record.claim_token is not None
+                assert revision_file.lifecycle_status == "deleting"
+            finally:
+                await engine.dispose()
 
-        claims = asyncio.run(run_claims())
-        assert sum(claim is not None for claim in claims) == 1
-
-        async def state():
-            async with Session() as db:
-                record = await db.get(RevisionRetentionRecord, record_id)
-                revision_file = await db.get(DocumentRevisionFile, revision_file_id)
-                return record, revision_file
-
-        record, revision_file = asyncio.run(state())
-        assert record.status == "processing"
-        assert record.attempt_count == 1
-        assert record.claim_token is not None
-        assert revision_file.lifecycle_status == "deleting"
-        asyncio.run(engine.dispose())
+        asyncio.run(scenario())
     finally:
         _drop_database(name)

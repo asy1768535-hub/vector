@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import text
+from sqlalchemy import null, text
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -200,6 +200,7 @@ async def _seed_operation(Session, *, activated: bool, expired: bool = False):
                 revision_retention_enabled=True,
             )
         )
+        await db.flush()
         db.add(
             OntologyVersion(
                 id=ontology_id,
@@ -221,6 +222,7 @@ async def _seed_operation(Session, *, activated: bool, expired: bool = False):
                 status="ready",
             )
         )
+        await db.flush()
         db.add_all(
             [
                 DocumentRevision(
@@ -250,6 +252,7 @@ async def _seed_operation(Session, *, activated: bool, expired: bool = False):
                 ),
             ]
         )
+        await db.flush()
         db.add(
             DocumentRevisionFile(
                 id=revision_file_id,
@@ -269,6 +272,7 @@ async def _seed_operation(Session, *, activated: bool, expired: bool = False):
                 lifecycle_status="available",
             )
         )
+        await db.flush()
         db.add(
             RevisionRetentionRecord(
                 id=retention_id,
@@ -347,7 +351,7 @@ async def _seed_operation(Session, *, activated: bool, expired: bool = False):
                 source_manifest_hash=source_manifest,
                 replacement_manifest_hash=replacement_manifest,
                 attempt_count=1 if expired else 0,
-                available_at=None if expired else now - timedelta(minutes=1),
+                available_at=null() if expired else now - timedelta(minutes=1),
                 worker_id="interrupted-worker" if expired else None,
                 claim_token=uuid.uuid4() if expired else None,
                 claimed_at=now - timedelta(minutes=10) if expired else None,
@@ -372,32 +376,28 @@ async def _claim_purge(Session, operation_id, worker_id, config):
 def test_concurrent_coordinated_claim_has_one_authoritative_winner(monkeypatch):
     name, url = _create_database(monkeypatch, "vkt_v08_coordinated_claim")
     try:
-        command.upgrade(Config("alembic.ini"), "0029")
-        engine = create_async_engine(url)
-        Session = async_sessionmaker(engine, expire_on_commit=False)
-        operation_id, _ = asyncio.run(
-            _seed_operation(Session, activated=False)
-        )
-        config = _runtime_config()
+        command.upgrade(Config("alembic.ini"), "head")
+        async def scenario():
+            engine = create_async_engine(url)
+            Session = async_sessionmaker(engine, expire_on_commit=False)
+            try:
+                operation_id, _ = await _seed_operation(Session, activated=False)
+                config = _runtime_config()
+                claims = await asyncio.gather(
+                    _claim_purge(Session, operation_id, "worker-a", config),
+                    _claim_purge(Session, operation_id, "worker-b", config),
+                )
+                assert sum(claim is not None for claim in claims) == 1
 
-        async def run_claims():
-            return await asyncio.gather(
-                _claim_purge(Session, operation_id, "worker-a", config),
-                _claim_purge(Session, operation_id, "worker-b", config),
-            )
+                async with Session() as db:
+                    operation = await db.get(RevisionPurgeOperation, operation_id)
+                assert operation.status == "processing"
+                assert operation.attempt_count == 1
+                assert operation.claim_token is not None
+            finally:
+                await engine.dispose()
 
-        claims = asyncio.run(run_claims())
-        assert sum(claim is not None for claim in claims) == 1
-
-        async def state():
-            async with Session() as db:
-                return await db.get(RevisionPurgeOperation, operation_id)
-
-        operation = asyncio.run(state())
-        assert operation.status == "processing"
-        assert operation.attempt_count == 1
-        assert operation.claim_token is not None
-        asyncio.run(engine.dispose())
+        asyncio.run(scenario())
     finally:
         _drop_database(name)
 
@@ -405,66 +405,65 @@ def test_concurrent_coordinated_claim_has_one_authoritative_winner(monkeypatch):
 def test_active_replacement_recovers_before_physical_cleanup(monkeypatch):
     name, url = _create_database(monkeypatch, "vkt_v08_coordinated_recovery")
     try:
-        command.upgrade(Config("alembic.ini"), "0029")
-        engine = create_async_engine(url)
-        Session = async_sessionmaker(engine, expire_on_commit=False)
-        operation_id, retention_id = asyncio.run(
-            _seed_operation(Session, activated=True, expired=True)
-        )
-        config = _runtime_config()
+        command.upgrade(Config("alembic.ini"), "head")
+        async def scenario():
+            engine = create_async_engine(url)
+            Session = async_sessionmaker(engine, expire_on_commit=False)
+            try:
+                operation_id, retention_id = await _seed_operation(
+                    Session,
+                    activated=True,
+                    expired=True,
+                )
+                config = _runtime_config()
 
-        async def before_release():
-            async with Session() as db:
-                async with db.begin():
-                    return await queue_eligible_revision_cleanups(
-                        db, config=config
-                    )
+                async with Session() as db:
+                    async with db.begin():
+                        before_release = await queue_eligible_revision_cleanups(
+                            db, config=config
+                        )
+                assert before_release == ()
 
-        assert asyncio.run(before_release()) == ()
-        claim = asyncio.run(
-            _claim_purge(Session, operation_id, "recovery-worker", config)
-        )
-        assert claim is not None
-        assert claim.attempt_count == 2
+                claim = await _claim_purge(
+                    Session,
+                    operation_id,
+                    "recovery-worker",
+                    config,
+                )
+                assert claim is not None
+                assert claim.attempt_count == 2
 
-        async def finalize():
-            async with Session() as db:
-                async with db.begin():
-                    return await finalize_coordinated_purge_activation(
-                        db,
-                        claim=claim,
-                        config=config,
-                    )
+                async with Session() as db:
+                    async with db.begin():
+                        result = await finalize_coordinated_purge_activation(
+                            db,
+                            claim=claim,
+                            config=config,
+                        )
+                assert result.status == "cleanup_pending"
 
-        result = asyncio.run(finalize())
-        assert result.status == "cleanup_pending"
+                async with Session() as db:
+                    async with db.begin():
+                        queued = await queue_eligible_revision_cleanups(
+                            db, config=config
+                        )
+                async with Session() as db:
+                    async with db.begin():
+                        cleanup_claim = await claim_revision_cleanup(
+                            db,
+                            record_id=retention_id,
+                            worker_id="cleanup-worker",
+                            config=config,
+                        )
+                assert queued == (retention_id,)
+                assert cleanup_claim is not None
 
-        async def queue_and_claim_cleanup():
-            async with Session() as db:
-                async with db.begin():
-                    queued = await queue_eligible_revision_cleanups(
-                        db, config=config
-                    )
-            async with Session() as db:
-                async with db.begin():
-                    cleanup_claim = await claim_revision_cleanup(
-                        db,
-                        record_id=retention_id,
-                        worker_id="cleanup-worker",
-                        config=config,
-                    )
-            return queued, cleanup_claim
+                async with Session() as db:
+                    operation = await db.get(RevisionPurgeOperation, operation_id)
+                assert operation.status == "cleanup_pending"
+            finally:
+                await engine.dispose()
 
-        queued, cleanup_claim = asyncio.run(queue_and_claim_cleanup())
-        assert queued == (retention_id,)
-        assert cleanup_claim is not None
-
-        async def operation_state():
-            async with Session() as db:
-                return await db.get(RevisionPurgeOperation, operation_id)
-
-        operation = asyncio.run(operation_state())
-        assert operation.status == "cleanup_pending"
-        asyncio.run(engine.dispose())
+        asyncio.run(scenario())
     finally:
         _drop_database(name)

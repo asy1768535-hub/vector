@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import text
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -24,6 +23,7 @@ from app.services.organization_authorization import (
     bind_credential_organization,
     resolve_library_access,
 )
+from tests.v08_pg_support import execute_sql
 
 
 _DSN = os.getenv("VECTOR_KB_PG_TEST_DSN")
@@ -61,13 +61,7 @@ def _database_url(name: str) -> URL:
 
 
 async def _execute(name: str, sql: str):
-    engine = create_async_engine(_database_url(name))
-    try:
-        async with engine.begin() as connection:
-            result = await connection.execute(text(sql))
-            return result.fetchall() if result.returns_rows else None
-    finally:
-        await engine.dispose()
+    return await execute_sql(_database_url(name), sql)
 
 
 def _configure_alembic(monkeypatch, name: str) -> None:
@@ -147,87 +141,91 @@ def test_0031_backfills_and_downgrades_without_key_loss(monkeypatch):
 def test_enabled_access_rechecks_membership_and_key_scope(monkeypatch):
     name, url = _create_database(monkeypatch, "vkt_v08_org_auth_access")
     try:
-        command.upgrade(Config("alembic.ini"), "0031")
-        engine = create_async_engine(url)
-        Session = async_sessionmaker(engine, expire_on_commit=False)
+        command.upgrade(Config("alembic.ini"), "head")
+        monkeypatch.setattr(settings, "organization_authorization_enabled", True)
 
         async def scenario():
-            organization = Organization(
-                id=uuid.uuid4(),
-                slug=f"org-{uuid.uuid4().hex[:8]}",
-                name="Customer",
-                deployment_profile="hosted",
-                status="active",
-            )
-            user = User(
-                id=uuid.uuid4(),
-                email=f"{uuid.uuid4().hex}@example.com",
-                hashed_password="hash",
-                is_active=True,
-                is_superuser=True,
-                is_verified=True,
-            )
-            membership = OrganizationMembership(
-                id=uuid.uuid4(),
-                organization_id=organization.id,
-                user_id=user.id,
-                role="organization_admin",
-                status="active",
-            )
-            library = Library(
-                id=uuid.uuid4(),
-                organization_id=organization.id,
-                slug=f"lib_{uuid.uuid4().hex[:8]}",
-                name="Library",
-                embedding_model="bge-m3",
-                embedding_dim=1024,
-                qdrant_collection=f"lib_{uuid.uuid4().hex[:8]}",
-            )
-            key = ApiKey(
-                id=uuid.uuid4(),
-                organization_id=organization.id,
-                user_id=user.id,
-                name="key",
-                key_prefix="vk_pg_key",
-                key_hash="hash",
-            )
-            async with Session() as db:
-                db.add_all((organization, user, membership, library, key))
-                await db.commit()
-            async with Session() as db:
-                access = await resolve_library_access(
-                    db,
-                    user=user,
-                    library_slug=library.slug,
-                    action="read",
+            engine = create_async_engine(url)
+            Session = async_sessionmaker(engine, expire_on_commit=False)
+            try:
+                organization = Organization(
+                    id=uuid.uuid4(),
+                    slug=f"org-{uuid.uuid4().hex[:8]}",
+                    name="Customer",
+                    deployment_profile="hosted",
+                    status="active",
                 )
-                assert access.organization_id == organization.id
-            bind_credential_organization(user, uuid.uuid4())
-            async with Session() as db:
-                with pytest.raises(OrganizationAuthorizationError):
-                    await resolve_library_access(
+                user = User(
+                    id=uuid.uuid4(),
+                    email=f"{uuid.uuid4().hex}@example.com",
+                    hashed_password="hash",
+                    is_active=True,
+                    is_superuser=True,
+                    is_verified=True,
+                )
+                membership = OrganizationMembership(
+                    id=uuid.uuid4(),
+                    organization_id=organization.id,
+                    user_id=user.id,
+                    role="organization_admin",
+                    status="active",
+                )
+                library = Library(
+                    id=uuid.uuid4(),
+                    organization_id=organization.id,
+                    slug=f"lib_{uuid.uuid4().hex[:8]}",
+                    name="Library",
+                    embedding_model="bge-m3",
+                    embedding_dim=1024,
+                    qdrant_collection=f"lib_{uuid.uuid4().hex[:8]}",
+                )
+                key = ApiKey(
+                    id=uuid.uuid4(),
+                    organization_id=organization.id,
+                    user_id=user.id,
+                    name="key",
+                    key_prefix="vk_pg_key",
+                    key_hash="hash",
+                )
+                async with Session() as db:
+                    db.add_all((organization, user))
+                    await db.flush()
+                    db.add_all((membership, library, key))
+                    await db.commit()
+                async with Session() as db:
+                    access = await resolve_library_access(
                         db,
                         user=user,
                         library_slug=library.slug,
                         action="read",
                     )
-            del user.__dict__["_organization_credential_scope"]
-            async with Session() as db:
-                row = await db.get(OrganizationMembership, membership.id)
-                row.status = "disabled"
-                row.disabled_at = datetime.now(timezone.utc)
-                await db.commit()
-            async with Session() as db:
-                with pytest.raises(OrganizationAuthorizationError):
-                    await resolve_library_access(
-                        db,
-                        user=user,
-                        library_slug=library.slug,
-                        action="read",
-                    )
+                    assert access.organization_id == organization.id
+                bind_credential_organization(user, uuid.uuid4())
+                async with Session() as db:
+                    with pytest.raises(OrganizationAuthorizationError):
+                        await resolve_library_access(
+                            db,
+                            user=user,
+                            library_slug=library.slug,
+                            action="read",
+                        )
+                del user.__dict__["_organization_credential_scope"]
+                async with Session() as db:
+                    row = await db.get(OrganizationMembership, membership.id)
+                    row.status = "disabled"
+                    row.disabled_at = datetime.now(timezone.utc)
+                    await db.commit()
+                async with Session() as db:
+                    with pytest.raises(OrganizationAuthorizationError):
+                        await resolve_library_access(
+                            db,
+                            user=user,
+                            library_slug=library.slug,
+                            action="read",
+                        )
+            finally:
+                await engine.dispose()
 
-        monkeypatch.setattr(settings, "organization_authorization_enabled", True)
         asyncio.run(scenario())
-        asyncio.run(engine.dispose())
     finally:
         _drop_database(name)
