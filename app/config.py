@@ -386,6 +386,9 @@ class Settings(BaseSettings):
     knowledge_catalog_max_relation_cards: int = 50
     knowledge_catalog_max_evidence_per_fact: int = 20
 
+    # ---- v0.9 Organization Graph Catalog (default fail closed) ----
+    graph_catalog_enabled: bool = False
+
     # ---- v0.5 Active Graph Publication (M1 defaults; fail closed) ----
     graph_publication_enabled: bool = False
     graph_publication_require_entity_evidence: bool = True
@@ -669,6 +672,17 @@ def validate_knowledge_catalog_startup(config: Settings) -> None:
         raise RuntimeError("[security] knowledge Catalog relation limit must be within 1..100")
     if not 1 <= config.knowledge_catalog_max_evidence_per_fact <= 20:
         raise RuntimeError("[security] knowledge Catalog Evidence limit must be within 1..20")
+
+
+def validate_graph_catalog_startup(config: Settings) -> None:
+    if config.graph_catalog_enabled and not (
+        config.organization_authorization_enabled
+        and config.cross_library_compatibility_enabled
+    ):
+        raise RuntimeError(
+            "[security] graph Catalog requires Organization authorization "
+            "and cross-Library compatibility"
+        )
 
 
 def validate_revision_file_storage_startup(config: Settings) -> None:
