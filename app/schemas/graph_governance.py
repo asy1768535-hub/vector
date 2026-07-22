@@ -199,6 +199,35 @@ class GraphGovernancePublicationPlanRead(StrictGovernanceModel):
     reused: bool
 
 
+class GraphGovernanceEntityTypeOptionRead(StrictGovernanceModel):
+    id: uuid.UUID
+    key: str = Field(min_length=1, max_length=128)
+    label: str = Field(min_length=1, max_length=255)
+
+
+class GraphGovernanceRelationTypeOptionRead(GraphGovernanceEntityTypeOptionRead):
+    direction: Literal["directed", "undirected"]
+    default_review_policy: Literal["auto_active", "pending_review", "manual_only"]
+    requires_evidence: bool
+
+
+class GraphGovernanceOntologyOptionRead(StrictGovernanceModel):
+    id: uuid.UUID
+    version_key: str = Field(min_length=1, max_length=128)
+    version_no: int = Field(ge=1)
+    entity_types: list[GraphGovernanceEntityTypeOptionRead] = Field(max_length=100)
+    relation_types: list[GraphGovernanceRelationTypeOptionRead] = Field(max_length=100)
+
+
+class GraphGovernanceWriteContextRead(StrictGovernanceModel):
+    contract_version: Literal["graph-governance-context-v1"] = (
+        "graph-governance-context-v1"
+    )
+    library_id: uuid.UUID
+    library_slug: str = Field(min_length=1, max_length=80)
+    ontology_versions: list[GraphGovernanceOntologyOptionRead] = Field(max_length=20)
+
+
 class GraphGovernanceActionItemRead(StrictGovernanceModel):
     id: uuid.UUID
     action_id: uuid.UUID

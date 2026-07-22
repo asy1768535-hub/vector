@@ -41,6 +41,7 @@ from app.services.graph_catalog_contracts import (
 )
 from app.services.graph_catalog_scope import resolve_graph_catalog_scope
 from app.services.graph_governance_actions import (
+    alias_governance_state_hash,
     entity_governance_state_hash,
     relation_governance_state_hash,
 )
@@ -463,6 +464,7 @@ async def _entity_aliases(db, library: Library, entity_id: uuid.UUID):
             source_type=row.source_type,
             confidence=row.confidence,
             status=row.status,
+            governance_state_hash=alias_governance_state_hash(row),
         )
         for row in rows
     ], int(total)

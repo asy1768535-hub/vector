@@ -218,6 +218,7 @@ class GraphCatalogAliasRead(StrictBaseModel):
     source_type: GraphCatalogSourceType
     confidence: float | None = Field(default=None, ge=0, le=1)
     status: Literal["pending_review", "active", "rejected", "disabled"]
+    governance_state_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class GraphCatalogEntityDetailRead(StrictBaseModel):

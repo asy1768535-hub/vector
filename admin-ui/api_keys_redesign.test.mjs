@@ -113,10 +113,10 @@ test('API calls unchanged: listApiKeys, createApiKey, revokeApiKey', () => {
 
 test('API usage card focuses on retrieval chunks without new backend behavior', () => {
     for (const token of [
-        'API 接入说明：检索知识库切片',
+        'API 接入说明：调用知识库检索切片',
         'Authorization: Bearer',
         '/libraries/{LIBRARY_ID}/query',
-        '/query</code> 返回召回切片，不是最终回答',
+        '/query</code> 返回 <code>results</code> 检索切片，不是最终回答',
         'VECTOR_KB_BASE_URL',
         'VECTOR_KB_LIBRARY_ID',
         'VECTOR_KB_API_KEY',

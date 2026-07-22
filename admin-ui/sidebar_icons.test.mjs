@@ -66,12 +66,15 @@ test('each menu index has correct sidebar icon', () => {
     }
 });
 
-test('Layout.js adds v0.8 knowledge management menus and preserves permissions', () => {
+test('Layout.js adds knowledge management menus and preserves permissions', () => {
     const menuItems = layoutSource.match(/<el-menu-item\s+/g) || [];
-    assert.equal(menuItems.length, 16, '16 menu items total');
+    assert.equal(menuItems.length, 17, '17 menu items total');
     assert.ok(layoutSource.includes('index="/catalog"'), 'Catalog menu exists');
     assert.ok(layoutSource.includes('v-if="access.catalog"'), 'Catalog read guard exists');
     assert.ok(layoutSource.includes('mdi:bookshelf'), 'Catalog uses local bookshelf icon');
+    assert.ok(layoutSource.includes('index="/knowledge-graph"'), 'knowledge graph menu exists');
+    assert.ok(layoutSource.includes('v-if="access.knowledgeGraph"'), 'knowledge graph read guard exists');
+    assert.ok(layoutSource.includes('carbon:chart-relationship'), 'knowledge graph uses local relationship icon');
     assert.ok(layoutSource.includes('index="/retrieval-test"'), 'retrieval menu exists');
     assert.ok(layoutSource.includes('v-if="access.retrievalTest"'), 'retrieval admin guard exists');
     assert.ok(layoutSource.includes('index="/classification-review"'), 'classification review menu exists');

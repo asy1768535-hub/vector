@@ -183,12 +183,14 @@ class CatalogEvidenceFactRefRead(StrictBaseModel):
     item_kind: Literal["entity", "relation"]
     item_id: uuid.UUID
     fact_id: uuid.UUID
+    chunk_id: uuid.UUID | None
     item_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class CatalogEvidenceDetailRead(StrictBaseModel):
     contract_version: Literal["catalog-evidence-v1"] = "catalog-evidence-v1"
     evidence_id: uuid.UUID
+    library_id: uuid.UUID
     document_id: uuid.UUID
     document_revision_id: uuid.UUID
     revision_file_id: uuid.UUID | None

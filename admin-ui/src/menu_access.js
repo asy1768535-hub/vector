@@ -28,6 +28,7 @@ export function menuAccess(user, permissions, organizations = []) {
         // Catalog requires Organization authorization; platform superuser is not a
         // customer-content bypass. Organization admins receive effective read rows.
         catalog: acts.has('read'),
+        knowledgeGraph: acts.has('read'),
         documents: can('read'),
         search: can('read'),
         chat: can('read'),

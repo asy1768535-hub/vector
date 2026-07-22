@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.models.entity import Entity
+from app.models.entity_alias import EntityAlias
 from app.models.knowledge_relation import KnowledgeRelation
 from app.models.library import Library
 from app.models.user import User
@@ -202,6 +203,32 @@ async def test_relation_detail_composes_published_fact():
     assert detail.relation.publication_state == "published"
     assert detail.relation.source.canonical_name == "Acme"
     assert detail.properties == {"percent": 10}
+
+
+@pytest.mark.asyncio
+async def test_entity_alias_projection_repeats_governance_state_hash():
+    library = _library()
+    alias = EntityAlias(
+        id=uuid.uuid4(),
+        library_id=library.id,
+        entity_id=uuid.uuid4(),
+        alias="ACME",
+        normalized_alias="acme",
+        source_type="manual",
+        status="active",
+    )
+    rows = SimpleNamespace(all=lambda: [alias])
+    db = SimpleNamespace(
+        execute=AsyncMock(
+            side_effect=[
+                SimpleNamespace(scalar_one=lambda: 1),
+                SimpleNamespace(scalars=lambda: rows),
+            ]
+        )
+    )
+    projected, total = await service._entity_aliases(db, library, alias.entity_id)
+    assert total == 1
+    assert projected[0].governance_state_hash == service.alias_governance_state_hash(alias)
 
 
 @pytest.mark.asyncio

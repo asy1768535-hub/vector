@@ -28,6 +28,7 @@ from app.schemas.graph_governance import (
     GraphGovernanceRelationCorrectionRequest,
     GraphGovernanceRelationReviewRequest,
     GraphGovernanceStateRequest,
+    GraphGovernanceWriteContextRead,
 )
 from app.services.graph_governance_actions import (
     GraphGovernanceActionResult,
@@ -51,6 +52,7 @@ from app.services.graph_governance_contracts import (
     DecideGraphGovernanceActionCommand,
     GraphGovernanceError,
     MergeConflictResolutionInput,
+    PlanGraphGovernancePublicationCommand,
     ReviewRelationCommand,
     StageAliasDisableCommand,
     StageEntityMergeCommand,
@@ -61,8 +63,8 @@ from app.services.graph_governance_contracts import (
     SubmitManualEntityCommand,
     SubmitManualRelationCommand,
     SubmitRelationCorrectionCommand,
-    PlanGraphGovernancePublicationCommand,
 )
+from app.services.graph_governance_context import load_graph_governance_write_context
 from app.services.graph_governance_publication import (
     plan_graph_governance_publication,
 )
@@ -122,6 +124,33 @@ async def require_governance_management(
     db: AsyncSession = Depends(get_db),
 ) -> GraphGovernanceContext:
     context = await _load_context(slug, user, db)
+    try:
+        await resolve_loaded_library_management(
+            db,
+            user=user,
+            library=context.library,
+        )
+    except OrganizationAuthorizationError as exc:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden") from exc
+    return context
+
+
+async def require_governance_writer(
+    slug: str,
+    user: User = Depends(current_cookie_user),
+    db: AsyncSession = Depends(get_db),
+) -> GraphGovernanceContext:
+    context = await _load_context(slug, user, db)
+    try:
+        await resolve_loaded_library_access(
+            db,
+            user=user,
+            library=context.library,
+            action="insert",
+        )
+        return context
+    except OrganizationAuthorizationError:
+        pass
     try:
         await resolve_loaded_library_management(
             db,
@@ -219,6 +248,18 @@ async def _mutate(db: AsyncSession, operation) -> GraphGovernanceActionRead:
         await db.rollback()
         raise
     return _read(result)
+
+
+@router.get("/context", response_model=GraphGovernanceWriteContextRead)
+async def governance_write_context(
+    context: GraphGovernanceContext = Depends(require_governance_writer),
+    db: AsyncSession = Depends(get_db),
+) -> GraphGovernanceWriteContextRead:
+    try:
+        return await load_graph_governance_write_context(db, library=context.library)
+    except GraphGovernanceError as exc:
+        await db.rollback()
+        raise _http_error(exc) from exc
 
 
 @router.get("/actions", response_model=GraphGovernanceActionPageRead)

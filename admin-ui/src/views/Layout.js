@@ -98,6 +98,10 @@ export default {
                     <el-icon><local-icon icon="mdi:bookshelf"></local-icon></el-icon>
                     <template #title>知识目录</template>
                 </el-menu-item>
+                <el-menu-item v-if="access.knowledgeGraph" index="/knowledge-graph">
+                    <el-icon><local-icon icon="carbon:chart-relationship"></local-icon></el-icon>
+                    <template #title>知识图谱</template>
+                </el-menu-item>
                 <el-menu-item v-if="access.classificationReview" index="/classification-review">
                     <el-icon><local-icon icon="mdi:shield-key-outline"></local-icon></el-icon>
                     <template #title>分类审核</template>

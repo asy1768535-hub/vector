@@ -258,6 +258,202 @@ export const checkLibraryCompatibility = (body) =>
 export const runOrganizationRetrievalTest = (organizationId, body) =>
     request(`/organizations/${organizationId}/retrieval-tests`, jsonBody('POST', body));
 
+const GRAPH_ENTITY_SEARCH_KEYS = [
+    'library_slugs',
+    'scope_id',
+    'query',
+    'ontology_version_ids',
+    'type_keys',
+    'statuses',
+    'source_types',
+    'publication_state',
+    'cursor',
+    'limit',
+];
+const GRAPH_RELATION_SEARCH_KEYS = [...GRAPH_ENTITY_SEARCH_KEYS, 'review_statuses'];
+
+function graphBody(source, keys) {
+    const body = {};
+    for (const key of keys) {
+        if (Object.hasOwn(source || {}, key) && source[key] !== undefined) body[key] = source[key];
+    }
+    return body;
+}
+
+function graphCommand(path, body, keys) {
+    return request(path, jsonBody('POST', graphBody(body, keys)));
+}
+
+export const searchGraphEntities = (organizationId, body = {}) => graphCommand(
+    `/organizations/${organizationId}/graph-catalog/entities:search`,
+    body,
+    GRAPH_ENTITY_SEARCH_KEYS,
+);
+export const searchGraphRelations = (organizationId, body = {}) => graphCommand(
+    `/organizations/${organizationId}/graph-catalog/relations:search`,
+    body,
+    GRAPH_RELATION_SEARCH_KEYS,
+);
+export const getGraphEntity = (organizationId, librarySlug, entityId) => request(
+    `/organizations/${organizationId}/graph-catalog/libraries/${librarySlug}/entities/${entityId}`,
+);
+export const getGraphRelation = (organizationId, librarySlug, relationId) => request(
+    `/organizations/${organizationId}/graph-catalog/libraries/${librarySlug}/relations/${relationId}`,
+);
+
+export const getGraphGovernanceContext = (slug) =>
+    request(`/libraries/${slug}/graph-governance/context`);
+export const listGraphGovernanceActions = (
+    slug,
+    { statuses = [], limit = 50, offset = 0 } = {},
+) => {
+    const query = new URLSearchParams();
+    for (const value of statuses || []) query.append('status', value);
+    query.set('limit', String(limit));
+    query.set('offset', String(offset));
+    return request(`/libraries/${slug}/graph-governance/actions?${query.toString()}`);
+};
+export const getGraphGovernanceAction = (slug, actionId) =>
+    request(`/libraries/${slug}/graph-governance/actions/${actionId}`);
+export const decideGraphGovernanceAction = (slug, actionId, body) => graphCommand(
+    `/libraries/${slug}/graph-governance/actions/${actionId}/decision`,
+    body,
+    ['expected_status', 'decision', 'reason_code'],
+);
+export const cancelGraphGovernanceAction = (slug, actionId, body) => graphCommand(
+    `/libraries/${slug}/graph-governance/actions/${actionId}/cancel`,
+    body,
+    ['expected_status', 'reason_code'],
+);
+
+export const submitGraphEntity = (slug, body) => graphCommand(
+    `/libraries/${slug}/graph-governance/entities`,
+    body,
+    ['ontology_version_id', 'entity_type_id', 'canonical_name', 'properties', 'idempotency_key'],
+);
+export const submitGraphRelation = (slug, body) => graphCommand(
+    `/libraries/${slug}/graph-governance/relations`,
+    body,
+    [
+        'ontology_version_id',
+        'relation_type_id',
+        'source_entity_id',
+        'target_entity_id',
+        'properties',
+        'idempotency_key',
+    ],
+);
+export const correctGraphEntity = (slug, entityId, body) => graphCommand(
+    `/libraries/${slug}/graph-governance/entities/${entityId}/corrections`,
+    body,
+    ['expected_state_hash', 'canonical_name', 'properties', 'idempotency_key'],
+);
+export const correctGraphRelation = (slug, relationId, body) => graphCommand(
+    `/libraries/${slug}/graph-governance/relations/${relationId}/corrections`,
+    body,
+    ['expected_state_hash', 'source_entity_id', 'target_entity_id', 'properties', 'idempotency_key'],
+);
+export const addGraphEntityAlias = (slug, entityId, body) => graphCommand(
+    `/libraries/${slug}/graph-governance/entities/${entityId}/aliases`,
+    body,
+    ['expected_entity_state_hash', 'alias', 'idempotency_key'],
+);
+export const reviewGraphRelation = (slug, relationId, body) => graphCommand(
+    `/libraries/${slug}/graph-governance/relations/${relationId}/review`,
+    body,
+    ['expected_state_hash', 'decision', 'reason_code', 'idempotency_key'],
+);
+
+const GRAPH_STATE_KEYS = ['expected_state_hash', 'reason_code', 'idempotency_key'];
+export const disableGraphEntity = (slug, entityId, body) => graphCommand(
+    `/libraries/${slug}/graph-governance/entities/${entityId}/disable`,
+    body,
+    GRAPH_STATE_KEYS,
+);
+export const restoreGraphEntity = (slug, entityId, body) => graphCommand(
+    `/libraries/${slug}/graph-governance/entities/${entityId}/restore`,
+    body,
+    GRAPH_STATE_KEYS,
+);
+export const disableGraphRelation = (slug, relationId, body) => graphCommand(
+    `/libraries/${slug}/graph-governance/relations/${relationId}/disable`,
+    body,
+    GRAPH_STATE_KEYS,
+);
+export const restoreGraphRelation = (slug, relationId, body) => graphCommand(
+    `/libraries/${slug}/graph-governance/relations/${relationId}/restore`,
+    body,
+    GRAPH_STATE_KEYS,
+);
+export const disableGraphAlias = (slug, aliasId, body) => graphCommand(
+    `/libraries/${slug}/graph-governance/aliases/${aliasId}/disable`,
+    body,
+    GRAPH_STATE_KEYS,
+);
+export const mergeGraphEntities = (slug, body) => graphCommand(
+    `/libraries/${slug}/graph-governance/entities/merge`,
+    body,
+    [
+        'ontology_version_id',
+        'survivor_entity_id',
+        'loser_entity_id',
+        'expected_survivor_state_hash',
+        'expected_loser_state_hash',
+        'reason_code',
+        'resolutions',
+        'idempotency_key',
+    ],
+);
+export const planGraphGovernancePublication = (slug, body) => graphCommand(
+    `/libraries/${slug}/graph-governance/publications/plan`,
+    body,
+    [
+        'ontology_version_id',
+        'action_ids',
+        'expected_parent_publication_id',
+        'dry_run',
+        'idempotency_key',
+    ],
+);
+
+export const listGraphPublications = (slug, params = {}) => {
+    const query = new URLSearchParams();
+    for (const key of ['status', 'source_mode', 'ontology_version_id', 'page', 'page_size']) {
+        const value = params?.[key];
+        if (value !== null && value !== undefined && value !== '') query.set(key, String(value));
+    }
+    const suffix = query.toString();
+    return request(`/libraries/${slug}/v05/graph-publications/${suffix ? `?${suffix}` : ''}`);
+};
+export const getActiveGraphPublication = (slug, ontologyVersionId = '') => {
+    const query = ontologyVersionId
+        ? `?${new URLSearchParams({ ontology_version_id: ontologyVersionId }).toString()}`
+        : '';
+    return request(`/libraries/${slug}/v05/graph-publications/active${query}`);
+};
+export const getGraphPublication = (slug, publicationId) =>
+    request(`/libraries/${slug}/v05/graph-publications/${publicationId}`);
+export const activateGraphPublication = (slug, publicationId, body) => graphCommand(
+    `/libraries/${slug}/v05/graph-publications/${publicationId}/activate`,
+    body,
+    ['idempotency_key', 'expected_manifest_hash'],
+);
+export const cancelGraphPublication = (slug, publicationId, body) => graphCommand(
+    `/libraries/${slug}/v05/graph-publications/${publicationId}/cancel`,
+    body,
+    ['idempotency_key', 'reason_code'],
+);
+export const rollbackGraphPublication = (slug, publicationId, body) => graphCommand(
+    `/libraries/${slug}/v05/graph-publications/${publicationId}/rollback`,
+    body,
+    ['idempotency_key', 'dry_run'],
+);
+export const rerunGraphExtraction = (slug, jobId, body) => graphCommand(
+    `/libraries/${slug}/v04/graph-extractions/${jobId}/rerun`,
+    body,
+    ['client_idempotency_key'],
+);
+
 // ── Admin: Jobs ──────────────────────────────────────────────
 const _jobsKey = (params) => 'listJobs:' + new URLSearchParams(params).toString();
 export const listJobs = (params = {}, forceRefresh) => cachedRequest(_jobsKey(params), () => request('/admin/jobs?' + new URLSearchParams(params).toString()), 10000, forceRefresh);
