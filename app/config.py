@@ -372,6 +372,14 @@ class Settings(BaseSettings):
     classification_worker_renew_seconds: int = 30
     classification_worker_max_attempts: int = 3
 
+    # ---- v0.8 Classification Taxonomy Bootstrap (default fail closed) ----
+    classification_taxonomy_bootstrap_enabled: bool = False
+    classification_taxonomy_bootstrap_llm_enabled: bool = False
+    classification_taxonomy_bootstrap_max_samples: int = 20
+    classification_taxonomy_bootstrap_max_source_chars: int = 24_000
+    classification_taxonomy_bootstrap_attempt_seconds: int = 180
+    classification_taxonomy_bootstrap_prompt_version: str = "taxonomy-bootstrap-v1"
+
     # ---- v0.5 Active Graph Publication (M1 defaults; fail closed) ----
     graph_publication_enabled: bool = False
     graph_publication_require_entity_evidence: bool = True
@@ -538,9 +546,11 @@ def validate_classification_runtime_startup(config: Settings) -> None:
         )
     if config.classification_external_model_enabled and not (
         config.classification_runtime_enabled
+        or config.classification_taxonomy_bootstrap_llm_enabled
     ):
         raise RuntimeError(
-            "[security] classification external model requires the runtime"
+            "[security] classification external model requires classifier runtime "
+            "or taxonomy bootstrap LLM"
         )
     positive_values = (
         config.classification_provider_timeout_seconds,
@@ -586,6 +596,53 @@ def validate_classification_runtime_startup(config: Settings) -> None:
         raise RuntimeError(
             "[security] CLASSIFICATION_API_KEY is required for classification"
         )
+
+
+def validate_classification_taxonomy_bootstrap_startup(config: Settings) -> None:
+    if config.classification_taxonomy_bootstrap_enabled and not (
+        config.organization_authorization_enabled
+        and config.classification_taxonomy_enabled
+    ):
+        raise RuntimeError(
+            "[security] taxonomy bootstrap requires Organization authorization "
+            "and classification taxonomy"
+        )
+    if config.classification_taxonomy_bootstrap_llm_enabled and not (
+        config.classification_taxonomy_bootstrap_enabled
+        and config.classification_external_model_enabled
+    ):
+        raise RuntimeError(
+            "[security] taxonomy bootstrap LLM requires bootstrap and the approved model"
+        )
+    values = (
+        config.classification_taxonomy_bootstrap_max_samples,
+        config.classification_taxonomy_bootstrap_max_source_chars,
+        config.classification_taxonomy_bootstrap_attempt_seconds,
+    )
+    if any(isinstance(value, bool) or not isinstance(value, int) for value in values):
+        raise RuntimeError("[security] taxonomy bootstrap limits must be integers")
+    if not 1 <= config.classification_taxonomy_bootstrap_max_samples <= 20:
+        raise RuntimeError("[security] taxonomy bootstrap sample limit must be within 1..20")
+    if not 1_000 <= config.classification_taxonomy_bootstrap_max_source_chars <= 100_000:
+        raise RuntimeError(
+            "[security] taxonomy bootstrap source limit must be within 1000..100000"
+        )
+    if not 1 <= config.classification_taxonomy_bootstrap_attempt_seconds <= 900:
+        raise RuntimeError(
+            "[security] taxonomy bootstrap attempt lifetime must be within 1..900 seconds"
+        )
+    if (
+        config.classification_taxonomy_bootstrap_llm_enabled
+        and config.classification_provider_timeout_seconds
+        >= config.classification_taxonomy_bootstrap_attempt_seconds
+    ):
+        raise RuntimeError(
+            "[security] taxonomy bootstrap attempt lifetime must exceed provider timeout "
+            "and be at most 900 seconds"
+        )
+    version = config.classification_taxonomy_bootstrap_prompt_version
+    if not version.strip() or len(version) > 64:
+        raise RuntimeError("[security] taxonomy bootstrap prompt version is invalid")
 
 
 def validate_revision_file_storage_startup(config: Settings) -> None:

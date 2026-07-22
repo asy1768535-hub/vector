@@ -15,6 +15,10 @@ from app.models.classification_decision import (
     DocumentClassificationRun,
 )
 from app.models.classification_job import DocumentClassificationJob
+from app.models.classification_taxonomy_bootstrap import (
+    TaxonomyBootstrapRun,
+    TaxonomyBootstrapSource,
+)
 from app.models.chunk import Chunk
 from app.models.chunk_links import ChunkBlock, ChunkEvidence
 from app.models.cleanup_outbox import CleanupOutbox
@@ -78,6 +82,8 @@ __all__ = [
     "DocumentClassificationProposal",
     "DocumentClassificationRun",
     "DocumentClassificationJob",
+    "TaxonomyBootstrapRun",
+    "TaxonomyBootstrapSource",
     "Chunk",
     "ChunkBlock",
     "ChunkEvidence",

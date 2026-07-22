@@ -71,6 +71,21 @@ async def _require_admin_scope(
     return organization
 
 
+async def lock_classification_admin_scope(
+    db,
+    *,
+    organization_id: uuid.UUID,
+    actor_user_id: uuid.UUID,
+    lock: bool,
+) -> Organization:
+    return await _require_admin_scope(
+        db,
+        organization_id=organization_id,
+        actor_user_id=actor_user_id,
+        lock=lock,
+    )
+
+
 async def _load_taxonomy(
     db,
     *,
