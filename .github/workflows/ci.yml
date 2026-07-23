@@ -31,10 +31,13 @@ jobs:
         run: pip install -c .github/constraints-v07-release.txt -e ".[dev,ocr]"
       - name: Ruff
         run: ruff check app tests scripts
-      # v0.7 entity-linking evaluation is immutable release evidence. It intentionally
-      # rejects post-v0.7 files and is verified only in its frozen acceptance workflow.
-      - name: Pytest (mocked; excludes frozen v0.7 release evidence)
-        run: pytest -q --ignore=tests/test_v07_entity_linking_eval.py
+      # Frozen release self-tests intentionally reject later release files. Verify them
+      # only in their matching acceptance workflows, not against the current release.
+      - name: Pytest (mocked; excludes frozen release self-tests)
+        run: >-
+          pytest -q
+          --ignore=tests/test_v07_entity_linking_eval.py
+          --ignore=tests/test_v09_first_slice_acceptance.py
       - name: Release safety check
         run: python scripts/check_release_safety.py
 

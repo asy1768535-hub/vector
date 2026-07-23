@@ -54,7 +54,9 @@ def _git(*args: str) -> str:
 
 
 def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    # The frozen manifest was recorded from the accepted Windows worktree.
+    content = path.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+    return hashlib.sha256(content).hexdigest()
 
 
 def _manifest() -> dict:
