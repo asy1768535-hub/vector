@@ -142,6 +142,7 @@
 | v0.5 Acceptance | [Active Graph Publication acceptance](./testing/acceptance/v0.5-active-graph-publication.md) | Dirty boundary, release gates, compatibility, privacy/scope audit and release decision |
 | v0.6 Acceptance | [Published Graph Retrieval acceptance](./testing/acceptance/v0.6-published-graph-retrieval.md) | Frozen M5 evidence, non-skipped PostgreSQL, compatibility, privacy/scope, rollback and release decision |
 | v0.9 First-Slice Acceptance | [Knowledge Platform first-slice acceptance](./testing/acceptance/v0.9-first-slice.md) | Exact M1-M7 candidate, focused/full regressions, PostgreSQL, browser, privacy, cleanup, and default-off decision |
+| v0.9 MCP | [MCP knowledge adapter](./mcp-knowledge-adapter.md) | Read-only tools/resources over the accepted `/api/v1`, stdio/Streamable HTTP operation, credentials, and rollback |
 | v0.3 | [Graph Relation Foundation spec](./superpowers/specs/2026-07-09-v0.3-graph-relation-foundation.md) | Ontology, graph facts, evidence binding, lifecycle, API and acceptance contracts |
 | v0.4 | [Graph Extraction Pipeline Master Plan](./superpowers/plans/2026-07-10-v0.4-graph-extraction-pipeline.md) | M1-M6 boundaries, evidence/schema contracts, safety, evaluation and release gates |
 | v0.5 | [Active Graph Publication Master Plan](./superpowers/plans/2026-07-15-v0.5-active-graph-publication.md) | M1-M6 plan for graph publication schema, manifests, activation, API, reconciliation and acceptance |
