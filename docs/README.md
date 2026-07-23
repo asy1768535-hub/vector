@@ -145,6 +145,7 @@
 | v0.9 MCP | [MCP knowledge adapter](./mcp-knowledge-adapter.md) | Read-only tools/resources over the accepted `/api/v1`, stdio/Streamable HTTP operation, credentials, and rollback |
 | v0.9 External Graph Sync | [External graph fact synchronization](./external-graph-sync.md) | SyncSource policy, entity/relation identity, authority conflicts, tombstones, snapshots, Publication safety, and rollback |
 | v0.9 Deployment | [Supported deployment runbook](./39-v0.9-supported-deployment.md) | Hosted/private initialization, readiness, Organization rollout, backup/restore, upgrade, and rollback |
+| v0.9 Final Acceptance | [Final integration acceptance](./testing/acceptance/v0.9-final.md) | Frozen M1-M11 dependency closure, full gates, real recovery evidence, cleanup, and GO eligibility |
 | v0.3 | [Graph Relation Foundation spec](./superpowers/specs/2026-07-09-v0.3-graph-relation-foundation.md) | Ontology, graph facts, evidence binding, lifecycle, API and acceptance contracts |
 | v0.4 | [Graph Extraction Pipeline Master Plan](./superpowers/plans/2026-07-10-v0.4-graph-extraction-pipeline.md) | M1-M6 boundaries, evidence/schema contracts, safety, evaluation and release gates |
 | v0.5 | [Active Graph Publication Master Plan](./superpowers/plans/2026-07-15-v0.5-active-graph-publication.md) | M1-M6 plan for graph publication schema, manifests, activation, API, reconciliation and acceptance |
