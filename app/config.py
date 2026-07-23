@@ -392,6 +392,9 @@ class Settings(BaseSettings):
     # ---- v0.9 Graph Governance Actions (default fail closed) ----
     graph_governance_enabled: bool = False
 
+    # ---- v0.9 Schema Lifecycle Console (default fail closed) ----
+    schema_lifecycle_enabled: bool = False
+
     # ---- v0.5 Active Graph Publication (M1 defaults; fail closed) ----
     graph_publication_enabled: bool = False
     graph_publication_require_entity_evidence: bool = True
@@ -696,6 +699,13 @@ def validate_graph_governance_startup(config: Settings) -> None:
         raise RuntimeError(
             "[security] graph governance requires Organization authorization "
             "and graph publication"
+        )
+
+
+def validate_schema_lifecycle_startup(config: Settings) -> None:
+    if config.schema_lifecycle_enabled and not config.organization_authorization_enabled:
+        raise RuntimeError(
+            "[security] Schema lifecycle requires Organization authorization"
         )
 
 

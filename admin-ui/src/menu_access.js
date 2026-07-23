@@ -36,6 +36,7 @@ export function menuAccess(user, permissions, organizations = []) {
         organizationAdmin,
         retrievalTest: organizationAdmin,
         classificationReview,
+        schemaLifecycle: classificationReview,
         apiKeys: true,            // 始终显示
     };
 }

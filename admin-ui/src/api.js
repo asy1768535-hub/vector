@@ -542,4 +542,78 @@ export async function streamChatMessage(payload, handlers = {}, signal = null) {
 }
 
 // ── Health ───────────────────────────────────────────────────
+const SCHEMA_COMMON_KEYS = ['expected_version_state_hash', 'idempotency_key'];
+const SCHEMA_ENTITY_KEYS = [...SCHEMA_COMMON_KEYS, 'key', 'label', 'description', 'properties_schema'];
+const SCHEMA_RELATION_KEYS = [
+    ...SCHEMA_ENTITY_KEYS, 'direction', 'requires_evidence', 'default_review_policy',
+];
+const SCHEMA_ATTRIBUTE_KEYS = [
+    ...SCHEMA_COMMON_KEYS, 'owner_kind', 'owner_type_id', 'key', 'label',
+    'value_type', 'required', 'enum_values', 'validation_schema', 'indexed',
+];
+const SCHEMA_CONSTRAINT_KEYS = [
+    ...SCHEMA_COMMON_KEYS, 'relation_type_id', 'source_entity_type_id',
+    'target_entity_type_id', 'cardinality', 'requires_review',
+];
+
+function schemaBody(source, keys) {
+    const body = {};
+    for (const key of keys) {
+        if (Object.hasOwn(source || {}, key) && source[key] !== undefined) body[key] = source[key];
+    }
+    return body;
+}
+
+const schemaPath = (slug, versionId, suffix = '') => (
+    `/libraries/${slug}/schema-lifecycle/versions/${versionId}${suffix}`
+);
+
+export const listSchemaVersions = (slug) => request(`/libraries/${slug}/schema-lifecycle/versions`);
+export const getSchemaVersion = (slug, versionId) => request(schemaPath(slug, versionId));
+export const validateSchemaVersion = (slug, versionId) =>
+    request(schemaPath(slug, versionId, '/validate'), { method: 'POST' });
+export const getSchemaImpact = (slug, versionId) => request(schemaPath(slug, versionId, '/impact'));
+export const cloneSchemaVersion = (slug, versionId, body) => request(
+    schemaPath(slug, versionId, '/clone'),
+    jsonBody('POST', schemaBody(body, [...SCHEMA_COMMON_KEYS, 'description'])),
+);
+export const activateSchemaVersion = (slug, versionId, body) => request(
+    schemaPath(slug, versionId, '/activate'),
+    jsonBody('POST', schemaBody(body, [
+        ...SCHEMA_COMMON_KEYS, 'expected_active_version_id', 'confirmation',
+    ])),
+);
+export const createSchemaEntityType = (slug, versionId, body) => request(
+    schemaPath(slug, versionId, '/entity-types'),
+    jsonBody('POST', schemaBody(body, SCHEMA_ENTITY_KEYS)),
+);
+export const createSchemaRelationType = (slug, versionId, body) => request(
+    schemaPath(slug, versionId, '/relation-types'),
+    jsonBody('POST', schemaBody(body, SCHEMA_RELATION_KEYS)),
+);
+export const createSchemaAttribute = (slug, versionId, body) => request(
+    schemaPath(slug, versionId, '/attributes'),
+    jsonBody('POST', schemaBody(body, SCHEMA_ATTRIBUTE_KEYS)),
+);
+export const createSchemaConstraint = (slug, versionId, body) => request(
+    schemaPath(slug, versionId, '/constraints'),
+    jsonBody('POST', schemaBody(body, SCHEMA_CONSTRAINT_KEYS)),
+);
+export const updateSchemaItem = (slug, versionId, kind, itemId, body) => {
+    const keys = ({
+        'entity-types': SCHEMA_ENTITY_KEYS,
+        'relation-types': SCHEMA_RELATION_KEYS,
+        attributes: SCHEMA_ATTRIBUTE_KEYS,
+        constraints: SCHEMA_CONSTRAINT_KEYS,
+    })[kind] || SCHEMA_COMMON_KEYS;
+    return request(
+        schemaPath(slug, versionId, `/${kind}/${itemId}`),
+        jsonBody('PATCH', schemaBody(body, keys)),
+    );
+};
+export const disableSchemaItem = (slug, versionId, kind, itemId, body) => request(
+    schemaPath(slug, versionId, `/${kind}/${itemId}/disable`),
+    jsonBody('POST', schemaBody(body, SCHEMA_COMMON_KEYS)),
+);
+
 export const health = (forceRefresh) => cachedRequest('health', () => request('/health'), 60000, forceRefresh);

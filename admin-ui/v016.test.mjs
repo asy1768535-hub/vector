@@ -44,7 +44,8 @@ const icons = [
     'mdi:key-variant', 'mdi:account-group-outline', 'mdi:bookshelf',
     'mdi:shield-key-outline', 'mdi:cog-sync-outline', 'mdi:heart-pulse', 'mdi:history',
     'mdi:comment-text-multiple-outline', 'mdi:chevron-down', 'mdi:lock-reset',
-    'mdi:logout', 'mdi:menu', 'mdi:backburger', 'carbon:chart-relationship',
+    'mdi:logout', 'mdi:menu', 'mdi:backburger', 'mdi:refresh',
+    'mdi:certificate-outline', 'mdi:publish', 'carbon:chart-relationship',
 ];
 
 for (const name of icons) {

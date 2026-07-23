@@ -237,7 +237,7 @@ def test_0037_orm_migration_and_offline_sql_are_reversible():
     ]
     assert max(map(len, names)) <= 63
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_heads() == ["0038"]
+    assert script.get_heads() == ["0039"]
     assert script.get_revision("0037").down_revision == "0036"
     upgrade = _offline("upgrade", "0036:0037")
     downgrade = _offline("downgrade", "0037:0036")

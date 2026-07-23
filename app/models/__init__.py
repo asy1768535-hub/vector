@@ -67,6 +67,7 @@ from app.models.revision_purge_operation import RevisionPurgeOperation
 from app.models.relation_evidence import RelationEvidence
 from app.models.relation_type import RelationType
 from app.models.relation_type_constraint import RelationTypeConstraint
+from app.models.schema_lifecycle_action import SchemaLifecycleAction
 from app.models.service_heartbeat import ServiceHeartbeat
 from app.models.sync_source import SyncSource
 from app.models.user import User
@@ -137,6 +138,7 @@ __all__ = [
     "RelationEvidence",
     "RelationType",
     "RelationTypeConstraint",
+    "SchemaLifecycleAction",
     "ServiceHeartbeat",
     "SyncSource",
     "User",
