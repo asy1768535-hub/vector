@@ -18,6 +18,7 @@ from app.models.document import Document
 from app.models.document_revision import DocumentRevision
 from app.models.evidence_unit import EvidenceUnit
 from app.models.library import Library
+from app.models.organization import DEFAULT_ORGANIZATION_ID, Organization
 from app.schemas.dify import DifyRetrievalRequest
 from app.services import qdrant
 from app.services.retrieval import run_retrieval
@@ -58,6 +59,13 @@ async def _run_real_stack_acceptance(monkeypatch) -> None:
 
         await qdrant.ensure_collection(collection, dim=3, quantization_type=None)
 
+        organization = Organization(
+            id=DEFAULT_ORGANIZATION_ID,
+            slug="default",
+            name="Real-stack acceptance",
+            deployment_profile="private",
+            status="active",
+        )
         lib = Library(
             slug="v02-m5-" + uuid.uuid4().hex[:8],
             name="v0.2 M5 acceptance",
@@ -71,6 +79,8 @@ async def _run_real_stack_acceptance(monkeypatch) -> None:
         )
         body = "m5 evidence acceptance body"
         async with Session() as db:
+            db.add(organization)
+            await db.flush()
             db.add(lib)
             await db.flush()
             doc = Document(

@@ -66,17 +66,23 @@ test('each menu index has correct sidebar icon', () => {
     }
 });
 
-test('Layout.js adds v0.8 knowledge management menus and preserves permissions', () => {
+test('Layout.js adds knowledge management menus and preserves permissions', () => {
     const menuItems = layoutSource.match(/<el-menu-item\s+/g) || [];
-    assert.equal(menuItems.length, 16, '16 menu items total');
+    assert.equal(menuItems.length, 18, '18 menu items total');
     assert.ok(layoutSource.includes('index="/catalog"'), 'Catalog menu exists');
     assert.ok(layoutSource.includes('v-if="access.catalog"'), 'Catalog read guard exists');
     assert.ok(layoutSource.includes('mdi:bookshelf'), 'Catalog uses local bookshelf icon');
+    assert.ok(layoutSource.includes('index="/knowledge-graph"'), 'knowledge graph menu exists');
+    assert.ok(layoutSource.includes('v-if="access.knowledgeGraph"'), 'knowledge graph read guard exists');
+    assert.ok(layoutSource.includes('carbon:chart-relationship'), 'knowledge graph uses local relationship icon');
     assert.ok(layoutSource.includes('index="/retrieval-test"'), 'retrieval menu exists');
     assert.ok(layoutSource.includes('v-if="access.retrievalTest"'), 'retrieval admin guard exists');
     assert.ok(layoutSource.includes('index="/classification-review"'), 'classification review menu exists');
     assert.ok(layoutSource.includes('v-if="access.classificationReview"'), 'classification management guard exists');
     assert.ok(layoutSource.includes('mdi:shield-key-outline'), 'classification review uses a local icon');
+    assert.ok(layoutSource.includes('index="/schema-lifecycle"'), 'Schema lifecycle menu exists');
+    assert.ok(layoutSource.includes('v-if="access.schemaLifecycle"'), 'Schema lifecycle management guard exists');
+    assert.ok(layoutSource.includes('mdi:cog-sync-outline'), 'Schema lifecycle uses a local icon');
     // Verify permission guards still present
     assert.ok(layoutSource.includes('v-if="access.chat"'), 'chat permission');
     assert.ok(layoutSource.includes('v-if="isSuper"'), 'admin group');

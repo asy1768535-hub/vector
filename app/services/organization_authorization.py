@@ -29,6 +29,7 @@ class OrganizationAuthorizationError(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class CredentialOrganizationScope:
     organization_id: uuid.UUID
+    api_key_id: uuid.UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,13 +56,22 @@ class PermissionProjection:
     actions: tuple[str, ...]
 
 
-def bind_credential_organization(user: User, organization_id: uuid.UUID) -> None:
+def bind_credential_organization(
+    user: User,
+    organization_id: uuid.UUID,
+    api_key_id: uuid.UUID | None = None,
+) -> None:
     if not isinstance(organization_id, uuid.UUID):
         raise OrganizationAuthorizationError("credential_organization_invalid")
+    if api_key_id is not None and not isinstance(api_key_id, uuid.UUID):
+        raise OrganizationAuthorizationError("credential_api_key_invalid")
     setattr(
         user,
         _CREDENTIAL_SCOPE_ATTRIBUTE,
-        CredentialOrganizationScope(organization_id=organization_id),
+        CredentialOrganizationScope(
+            organization_id=organization_id,
+            api_key_id=api_key_id,
+        ),
     )
 
 

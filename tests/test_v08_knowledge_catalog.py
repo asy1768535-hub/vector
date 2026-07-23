@@ -420,6 +420,8 @@ def test_evidence_detail_requires_current_publication_support(monkeypatch):
         )
     )
     assert result.fact_refs[0].item_id == item_id
+    assert result.library_id == library.id
+    assert result.fact_refs[0].chunk_id is None
     assert result.title_path == ["Agreement", "Terms"]
     assert "private" not in result.model_dump_json()
 

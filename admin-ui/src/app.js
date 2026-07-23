@@ -36,6 +36,8 @@ import Libraries from './views/Libraries.js';
 import Permissions from './views/Permissions.js';
 import Documents from './views/Documents.js';
 import KnowledgeCatalog from './views/KnowledgeCatalog.js';
+import GraphGovernance from './views/GraphGovernance.js';
+import SchemaLifecycle from './views/SchemaLifecycle.js';
 import RetrievalTest from './views/RetrievalTest.js';
 import ClassificationReview from './views/ClassificationReview.js';
 import Search from './views/Search.js';
@@ -53,6 +55,8 @@ const routes = [
         path: '/',
         component: Layout,
         children: [
+            { path: 'knowledge-graph', component: GraphGovernance, meta: { title: '知识图谱', perm: 'read', effectivePerm: 'read' } },
+            { path: 'schema-lifecycle', component: SchemaLifecycle, meta: { title: 'Schema 管理', libraryManagement: true } },
             { path: '', redirect: (to) => defaultRoute(store.user, store.permissions, store.organizations) },
             { path: 'dashboard', component: Dashboard, meta: { title: '概览', admin: true } },
             { path: 'users', component: Users, meta: { title: '用户管理', admin: true } },

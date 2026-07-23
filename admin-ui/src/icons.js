@@ -52,6 +52,12 @@ const ICONS = {
         '<path fill="currentColor" d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2Z"/>',
     'mdi:content-copy':
         '<path fill="currentColor" d="M19 21H8a2 2 0 0 1-2-2V8h2v11h11v2m3-5H11a2 2 0 0 1-2-2V3a2 2 0 0 1 2-2h8l5 5v8a2 2 0 0 1-2 2m-3-13v4h4l-4-4Z"/>',
+    'mdi:refresh':
+        '<path fill="currentColor" d="M17.65 6.35A7.96 7.96 0 0 0 12 4a8 8 0 1 0 7.75 10h-2.1A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35Z"/>',
+    'mdi:certificate-outline':
+        '<path fill="currentColor" d="M23 12l-2.44-2.79.34-3.69-3.61-.82L15.4 1.5 12 2.96 8.6 1.5 6.71 4.69l-3.61.82.34 3.69L1 12l2.44 2.79-.34 3.69 3.61.82 1.89 3.19L12 21.03l3.4 1.46 1.89-3.19 3.61-.82-.34-3.69L23 12m-12.91 4.72-3.8-3.81 1.48-1.48 2.32 2.33 5.85-5.87 1.48 1.48-7.33 7.35Z"/>',
+    'mdi:publish':
+        '<path fill="currentColor" d="M9 16v-6H5l7-7 7 7h-4v6H9m-4 4v-2h14v2H5Z"/>',
     'mdi:chevron-left':
         '<path fill="currentColor" d="M15.41 16.58 10.83 12l4.58-4.59L14 6l-6 6 6 6 1.41-1.42Z"/>',
     'mdi:chevron-right':

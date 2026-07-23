@@ -161,6 +161,8 @@ class Settings(BaseSettings):
     api_port: int = 8100
     app_debug: bool = False
     console_ui_dir: str = "admin-ui"
+    deployment_profile: str = "development"
+    readiness_dependency_timeout_seconds: float = 3.0
 
     # ---- Auth ----
     jwt_secret: str = Field(default="please-change-me-in-env", min_length=16)
@@ -385,6 +387,37 @@ class Settings(BaseSettings):
     knowledge_catalog_max_entity_cards: int = 50
     knowledge_catalog_max_relation_cards: int = 50
     knowledge_catalog_max_evidence_per_fact: int = 20
+
+    # ---- v0.9 Organization Graph Catalog (default fail closed) ----
+    graph_catalog_enabled: bool = False
+
+    # ---- v0.9 Graph Governance Actions (default fail closed) ----
+    graph_governance_enabled: bool = False
+
+    # ---- v0.9 Schema Lifecycle Console (default fail closed) ----
+    schema_lifecycle_enabled: bool = False
+
+    # ---- v0.9 Public Read API v1 (default fail closed) ----
+    public_api_v1_enabled: bool = False
+
+    # ---- v0.9 Public API operational controls (default inert) ----
+    public_api_operations_enabled: bool = False
+    public_api_limits_enabled: bool = False
+    public_api_limit_private_organizations: bool = False
+    public_api_organization_requests_per_minute: int = 600
+    public_api_api_key_requests_per_minute: int = 120
+    public_api_organization_concurrent_answers: int = 20
+    public_api_api_key_concurrent_answers: int = 4
+    public_api_answer_max_seconds: int = 300
+    public_api_answer_lease_seconds: int = 330
+    public_api_request_retention_days: int = 30
+    public_api_cleanup_batch_size: int = 1000
+    public_api_cleanup_interval_seconds: int = 3600
+
+    # ---- v0.9 External graph fact synchronization (default fail closed) ----
+    external_graph_sync_enabled: bool = False
+    external_graph_sync_max_batch_items: int = 100
+    external_graph_sync_max_item_bytes: int = 65536
 
     # ---- v0.5 Active Graph Publication (M1 defaults; fail closed) ----
     graph_publication_enabled: bool = False
@@ -669,6 +702,172 @@ def validate_knowledge_catalog_startup(config: Settings) -> None:
         raise RuntimeError("[security] knowledge Catalog relation limit must be within 1..100")
     if not 1 <= config.knowledge_catalog_max_evidence_per_fact <= 20:
         raise RuntimeError("[security] knowledge Catalog Evidence limit must be within 1..20")
+
+
+def validate_graph_catalog_startup(config: Settings) -> None:
+    if config.graph_catalog_enabled and not (
+        config.organization_authorization_enabled
+        and config.cross_library_compatibility_enabled
+    ):
+        raise RuntimeError(
+            "[security] graph Catalog requires Organization authorization "
+            "and cross-Library compatibility"
+        )
+
+
+def validate_graph_governance_startup(config: Settings) -> None:
+    if config.graph_governance_enabled and not (
+        config.organization_authorization_enabled
+        and config.graph_publication_enabled
+    ):
+        raise RuntimeError(
+            "[security] graph governance requires Organization authorization "
+            "and graph publication"
+        )
+
+
+def validate_external_graph_sync_startup(config: Settings) -> None:
+    if config.external_graph_sync_enabled and not (
+        config.organization_authorization_enabled
+        and config.graph_governance_enabled
+        and config.graph_publication_enabled
+        and config.enable_sync_source_api
+    ):
+        raise RuntimeError(
+            "[security] external graph sync requires Organization authorization, "
+            "graph governance, graph publication, and SyncSource API"
+        )
+    if not 1 <= config.external_graph_sync_max_batch_items <= 100:
+        raise RuntimeError("[security] external graph sync batch limit must be within 1..100")
+    if not 1024 <= config.external_graph_sync_max_item_bytes <= 65536:
+        raise RuntimeError(
+            "[security] external graph sync item bytes must be within 1024..65536"
+        )
+
+
+def validate_schema_lifecycle_startup(config: Settings) -> None:
+    if config.schema_lifecycle_enabled and not config.organization_authorization_enabled:
+        raise RuntimeError(
+            "[security] Schema lifecycle requires Organization authorization"
+        )
+
+
+def validate_public_api_v1_startup(config: Settings) -> None:
+    if not config.public_api_v1_enabled:
+        return
+    dependencies = (
+        config.organization_authorization_enabled,
+        config.cross_library_compatibility_enabled,
+        config.personal_library_scopes_enabled,
+        config.federated_retrieval_enabled,
+        config.knowledge_catalog_enabled,
+        config.graph_catalog_enabled,
+    )
+    if not all(dependencies):
+        raise RuntimeError(
+            "[security] Public API v1 requires Organization authorization, "
+            "cross-Library compatibility, personal scopes, federated retrieval, "
+            "Knowledge Catalog, and Graph Catalog"
+        )
+
+
+def validate_public_api_operations_startup(config: Settings) -> None:
+    rate_limits = (
+        config.public_api_organization_requests_per_minute,
+        config.public_api_api_key_requests_per_minute,
+    )
+    if any(value < 1 or value > 1_000_000 for value in rate_limits):
+        raise RuntimeError(
+            "[security] Public API request limits must be within 1..1000000"
+        )
+    concurrent_limits = (
+        config.public_api_organization_concurrent_answers,
+        config.public_api_api_key_concurrent_answers,
+    )
+    if any(value < 1 or value > 10_000 for value in concurrent_limits):
+        raise RuntimeError(
+            "[security] Public API concurrent answer limits must be within 1..10000"
+        )
+    if not 1 <= config.public_api_answer_max_seconds <= 3_600:
+        raise RuntimeError(
+            "[security] Public API answer timeout must be within 1..3600 seconds"
+        )
+    if not (
+        config.public_api_answer_max_seconds + 30
+        <= config.public_api_answer_lease_seconds
+        <= 7_200
+    ):
+        raise RuntimeError(
+            "[security] Public API answer lease must exceed the timeout by at least 30 "
+            "seconds and be at most 7200 seconds"
+        )
+    if not 1 <= config.public_api_request_retention_days <= 3_650:
+        raise RuntimeError(
+            "[security] Public API request retention must be within 1..3650 days"
+        )
+    if not 1 <= config.public_api_cleanup_batch_size <= 10_000:
+        raise RuntimeError(
+            "[security] Public API cleanup batch size must be within 1..10000"
+        )
+    if not 60 <= config.public_api_cleanup_interval_seconds <= 86_400:
+        raise RuntimeError(
+            "[security] Public API cleanup interval must be within 60..86400 seconds"
+        )
+    if config.public_api_operations_enabled and not (
+        config.public_api_v1_enabled and config.organization_authorization_enabled
+    ):
+        raise RuntimeError(
+            "[security] Public API operations require Public API v1 and Organization "
+            "authorization"
+        )
+    if config.public_api_limits_enabled and not config.public_api_operations_enabled:
+        raise RuntimeError(
+            "[security] Public API limits require Public API operations"
+        )
+    if (
+        config.public_api_limit_private_organizations
+        and not config.public_api_limits_enabled
+    ):
+        raise RuntimeError(
+            "[security] Private Organization limits require Public API limits"
+        )
+
+
+def validate_supported_deployment_startup(config: Settings) -> None:
+    """Reject unsafe or ambiguous supported-deployment configuration."""
+    if config.deployment_profile not in {"development", "hosted", "private"}:
+        raise RuntimeError("[deployment] DEPLOYMENT_PROFILE must be development, hosted, or private")
+    if not 0.2 <= config.readiness_dependency_timeout_seconds <= 30:
+        raise RuntimeError("[deployment] readiness dependency timeout must be within 0.2..30 seconds")
+    if config.deployment_profile == "development":
+        return
+    if config.app_debug:
+        raise RuntimeError("[deployment] APP_DEBUG must be false in supported profiles")
+    if config.allow_public_registration:
+        raise RuntimeError("[deployment] public registration is forbidden in supported profiles")
+    if config.jwt_secret == "please-change-me-in-env":
+        raise RuntimeError("[deployment] a non-default JWT_SECRET is required")
+    if not config.db_password:
+        raise RuntimeError("[deployment] DB_PASSWORD is required")
+    if not config.cookie_secure:
+        raise RuntimeError("[deployment] COOKIE_SECURE must be true")
+    if not config.organization_authorization_enabled:
+        raise RuntimeError("[deployment] organization authorization must be enabled")
+    if config.public_api_v1_enabled and not config.public_api_operations_enabled:
+        raise RuntimeError("[deployment] public API operations must be enabled with public API v1")
+    if not config.revision_file_storage_enabled:
+        raise RuntimeError("[deployment] immutable revision file storage must be enabled")
+    if config.deployment_profile == "hosted" and config.document_storage_provider == "local":
+        raise RuntimeError("[deployment] hosted profile requires remote document storage")
+    for name, value in (
+        ("QDRANT_URL", config.qdrant_url),
+        ("EMBEDDING_BASE_URL", config.embedding_base_url),
+    ):
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise RuntimeError(f"[deployment] {name} is invalid")
+        if config.deployment_profile == "hosted" and parsed.scheme != "https":
+            raise RuntimeError(f"[deployment] hosted {name} must use HTTPS")
 
 
 def validate_revision_file_storage_startup(config: Settings) -> None:

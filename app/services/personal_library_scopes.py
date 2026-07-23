@@ -382,6 +382,33 @@ async def resolve_named_scope(
     return await _resolve_scope(db, user=user, scope=scope, membership_checked=True)
 
 
+async def read_named_scope_library_ids(
+    db,
+    *,
+    user: User,
+    organization_id: uuid.UUID,
+    scope_id: uuid.UUID,
+) -> tuple[uuid.UUID, ...]:
+    """Return the stored ordered selection without applying restore/removal policy."""
+    await _require_membership(db, organization_id, user.id)
+    scope = await _load_owned_scope(
+        db,
+        scope_id=scope_id,
+        organization_id=organization_id,
+        user_id=user.id,
+        kind="named",
+    )
+    return tuple(
+        (
+            await db.execute(
+                select(UserLibraryScopeItem.library_id)
+                .where(UserLibraryScopeItem.scope_id == scope.id)
+                .order_by(UserLibraryScopeItem.ordinal)
+            )
+        ).scalars().all()
+    )
+
+
 async def resolve_last_used_scope(
     db, *, user: User, organization_id: uuid.UUID
 ) -> ResolvedScope:

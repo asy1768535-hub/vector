@@ -258,6 +258,238 @@ export const checkLibraryCompatibility = (body) =>
 export const runOrganizationRetrievalTest = (organizationId, body) =>
     request(`/organizations/${organizationId}/retrieval-tests`, jsonBody('POST', body));
 
+const GRAPH_ENTITY_SEARCH_KEYS = [
+    'library_slugs',
+    'scope_id',
+    'query',
+    'ontology_version_ids',
+    'type_keys',
+    'statuses',
+    'source_types',
+    'publication_state',
+    'cursor',
+    'limit',
+];
+const GRAPH_RELATION_SEARCH_KEYS = [...GRAPH_ENTITY_SEARCH_KEYS, 'review_statuses'];
+
+function graphBody(source, keys) {
+    const body = {};
+    for (const key of keys) {
+        if (Object.hasOwn(source || {}, key) && source[key] !== undefined) body[key] = source[key];
+    }
+    return body;
+}
+
+function graphCommand(path, body, keys) {
+    return request(path, jsonBody('POST', graphBody(body, keys)));
+}
+
+export const searchGraphEntities = (organizationId, body = {}) => graphCommand(
+    `/organizations/${organizationId}/graph-catalog/entities:search`,
+    body,
+    GRAPH_ENTITY_SEARCH_KEYS,
+);
+export const searchGraphRelations = (organizationId, body = {}) => graphCommand(
+    `/organizations/${organizationId}/graph-catalog/relations:search`,
+    body,
+    GRAPH_RELATION_SEARCH_KEYS,
+);
+export const getGraphEntity = (organizationId, librarySlug, entityId) => request(
+    `/organizations/${organizationId}/graph-catalog/libraries/${librarySlug}/entities/${entityId}`,
+);
+export const getGraphRelation = (organizationId, librarySlug, relationId) => request(
+    `/organizations/${organizationId}/graph-catalog/libraries/${librarySlug}/relations/${relationId}`,
+);
+
+function boundedInteger(value, minimum, maximum, fallback) {
+    if (!Number.isInteger(value)) return fallback;
+    return Math.min(maximum, Math.max(minimum, value));
+}
+
+function graphTraversalBody(source = {}) {
+    const direction = ['outbound', 'inbound', 'both'].includes(source.direction)
+        ? source.direction
+        : 'both';
+    const relationTypeKeys = [];
+    for (const value of Array.isArray(source.relation_type_keys) ? source.relation_type_keys : []) {
+        if (typeof value !== 'string') continue;
+        const key = value.trim();
+        if (!key || key.length > 128 || relationTypeKeys.includes(key)) continue;
+        relationTypeKeys.push(key);
+        if (relationTypeKeys.length === 8) break;
+    }
+    const seed = Array.isArray(source.seeds) ? source.seeds[0] : null;
+    return {
+        ontology_version_id: source.ontology_version_id,
+        expected_publication_id: source.expected_publication_id,
+        seeds: seed?.entity_id ? [{ entity_id: seed.entity_id }] : [],
+        direction,
+        relation_type_keys: relationTypeKeys,
+        max_hops: boundedInteger(source.max_hops, 1, 2, 1),
+        max_nodes: boundedInteger(source.max_nodes, 1, 100, 60),
+        max_relations: boundedInteger(source.max_relations, 1, 200, 100),
+        include_evidence_locators: true,
+    };
+}
+
+export const queryPublishedGraph = (librarySlug, body = {}) => request(
+    `/libraries/${librarySlug}/v06/graph/query`,
+    jsonBody('POST', graphTraversalBody(body)),
+);
+
+export const getGraphGovernanceContext = (slug) =>
+    request(`/libraries/${slug}/graph-governance/context`);
+export const listGraphGovernanceActions = (
+    slug,
+    { statuses = [], limit = 50, offset = 0 } = {},
+) => {
+    const query = new URLSearchParams();
+    for (const value of statuses || []) query.append('status', value);
+    query.set('limit', String(limit));
+    query.set('offset', String(offset));
+    return request(`/libraries/${slug}/graph-governance/actions?${query.toString()}`);
+};
+export const getGraphGovernanceAction = (slug, actionId) =>
+    request(`/libraries/${slug}/graph-governance/actions/${actionId}`);
+export const decideGraphGovernanceAction = (slug, actionId, body) => graphCommand(
+    `/libraries/${slug}/graph-governance/actions/${actionId}/decision`,
+    body,
+    ['expected_status', 'decision', 'reason_code'],
+);
+export const cancelGraphGovernanceAction = (slug, actionId, body) => graphCommand(
+    `/libraries/${slug}/graph-governance/actions/${actionId}/cancel`,
+    body,
+    ['expected_status', 'reason_code'],
+);
+
+export const submitGraphEntity = (slug, body) => graphCommand(
+    `/libraries/${slug}/graph-governance/entities`,
+    body,
+    ['ontology_version_id', 'entity_type_id', 'canonical_name', 'properties', 'idempotency_key'],
+);
+export const submitGraphRelation = (slug, body) => graphCommand(
+    `/libraries/${slug}/graph-governance/relations`,
+    body,
+    [
+        'ontology_version_id',
+        'relation_type_id',
+        'source_entity_id',
+        'target_entity_id',
+        'properties',
+        'idempotency_key',
+    ],
+);
+export const correctGraphEntity = (slug, entityId, body) => graphCommand(
+    `/libraries/${slug}/graph-governance/entities/${entityId}/corrections`,
+    body,
+    ['expected_state_hash', 'canonical_name', 'properties', 'idempotency_key'],
+);
+export const correctGraphRelation = (slug, relationId, body) => graphCommand(
+    `/libraries/${slug}/graph-governance/relations/${relationId}/corrections`,
+    body,
+    ['expected_state_hash', 'source_entity_id', 'target_entity_id', 'properties', 'idempotency_key'],
+);
+export const addGraphEntityAlias = (slug, entityId, body) => graphCommand(
+    `/libraries/${slug}/graph-governance/entities/${entityId}/aliases`,
+    body,
+    ['expected_entity_state_hash', 'alias', 'idempotency_key'],
+);
+export const reviewGraphRelation = (slug, relationId, body) => graphCommand(
+    `/libraries/${slug}/graph-governance/relations/${relationId}/review`,
+    body,
+    ['expected_state_hash', 'decision', 'reason_code', 'idempotency_key'],
+);
+
+const GRAPH_STATE_KEYS = ['expected_state_hash', 'reason_code', 'idempotency_key'];
+export const disableGraphEntity = (slug, entityId, body) => graphCommand(
+    `/libraries/${slug}/graph-governance/entities/${entityId}/disable`,
+    body,
+    GRAPH_STATE_KEYS,
+);
+export const restoreGraphEntity = (slug, entityId, body) => graphCommand(
+    `/libraries/${slug}/graph-governance/entities/${entityId}/restore`,
+    body,
+    GRAPH_STATE_KEYS,
+);
+export const disableGraphRelation = (slug, relationId, body) => graphCommand(
+    `/libraries/${slug}/graph-governance/relations/${relationId}/disable`,
+    body,
+    GRAPH_STATE_KEYS,
+);
+export const restoreGraphRelation = (slug, relationId, body) => graphCommand(
+    `/libraries/${slug}/graph-governance/relations/${relationId}/restore`,
+    body,
+    GRAPH_STATE_KEYS,
+);
+export const disableGraphAlias = (slug, aliasId, body) => graphCommand(
+    `/libraries/${slug}/graph-governance/aliases/${aliasId}/disable`,
+    body,
+    GRAPH_STATE_KEYS,
+);
+export const mergeGraphEntities = (slug, body) => graphCommand(
+    `/libraries/${slug}/graph-governance/entities/merge`,
+    body,
+    [
+        'ontology_version_id',
+        'survivor_entity_id',
+        'loser_entity_id',
+        'expected_survivor_state_hash',
+        'expected_loser_state_hash',
+        'reason_code',
+        'resolutions',
+        'idempotency_key',
+    ],
+);
+export const planGraphGovernancePublication = (slug, body) => graphCommand(
+    `/libraries/${slug}/graph-governance/publications/plan`,
+    body,
+    [
+        'ontology_version_id',
+        'action_ids',
+        'expected_parent_publication_id',
+        'dry_run',
+        'idempotency_key',
+    ],
+);
+
+export const listGraphPublications = (slug, params = {}) => {
+    const query = new URLSearchParams();
+    for (const key of ['status', 'source_mode', 'ontology_version_id', 'page', 'page_size']) {
+        const value = params?.[key];
+        if (value !== null && value !== undefined && value !== '') query.set(key, String(value));
+    }
+    const suffix = query.toString();
+    return request(`/libraries/${slug}/v05/graph-publications/${suffix ? `?${suffix}` : ''}`);
+};
+export const getActiveGraphPublication = (slug, ontologyVersionId = '') => {
+    const query = ontologyVersionId
+        ? `?${new URLSearchParams({ ontology_version_id: ontologyVersionId }).toString()}`
+        : '';
+    return request(`/libraries/${slug}/v05/graph-publications/active${query}`);
+};
+export const getGraphPublication = (slug, publicationId) =>
+    request(`/libraries/${slug}/v05/graph-publications/${publicationId}`);
+export const activateGraphPublication = (slug, publicationId, body) => graphCommand(
+    `/libraries/${slug}/v05/graph-publications/${publicationId}/activate`,
+    body,
+    ['idempotency_key', 'expected_manifest_hash'],
+);
+export const cancelGraphPublication = (slug, publicationId, body) => graphCommand(
+    `/libraries/${slug}/v05/graph-publications/${publicationId}/cancel`,
+    body,
+    ['idempotency_key', 'reason_code'],
+);
+export const rollbackGraphPublication = (slug, publicationId, body) => graphCommand(
+    `/libraries/${slug}/v05/graph-publications/${publicationId}/rollback`,
+    body,
+    ['idempotency_key', 'dry_run'],
+);
+export const rerunGraphExtraction = (slug, jobId, body) => graphCommand(
+    `/libraries/${slug}/v04/graph-extractions/${jobId}/rerun`,
+    body,
+    ['client_idempotency_key'],
+);
+
 // ── Admin: Jobs ──────────────────────────────────────────────
 const _jobsKey = (params) => 'listJobs:' + new URLSearchParams(params).toString();
 export const listJobs = (params = {}, forceRefresh) => cachedRequest(_jobsKey(params), () => request('/admin/jobs?' + new URLSearchParams(params).toString()), 10000, forceRefresh);
@@ -346,4 +578,78 @@ export async function streamChatMessage(payload, handlers = {}, signal = null) {
 }
 
 // ── Health ───────────────────────────────────────────────────
+const SCHEMA_COMMON_KEYS = ['expected_version_state_hash', 'idempotency_key'];
+const SCHEMA_ENTITY_KEYS = [...SCHEMA_COMMON_KEYS, 'key', 'label', 'description', 'properties_schema'];
+const SCHEMA_RELATION_KEYS = [
+    ...SCHEMA_ENTITY_KEYS, 'direction', 'requires_evidence', 'default_review_policy',
+];
+const SCHEMA_ATTRIBUTE_KEYS = [
+    ...SCHEMA_COMMON_KEYS, 'owner_kind', 'owner_type_id', 'key', 'label',
+    'value_type', 'required', 'enum_values', 'validation_schema', 'indexed',
+];
+const SCHEMA_CONSTRAINT_KEYS = [
+    ...SCHEMA_COMMON_KEYS, 'relation_type_id', 'source_entity_type_id',
+    'target_entity_type_id', 'cardinality', 'requires_review',
+];
+
+function schemaBody(source, keys) {
+    const body = {};
+    for (const key of keys) {
+        if (Object.hasOwn(source || {}, key) && source[key] !== undefined) body[key] = source[key];
+    }
+    return body;
+}
+
+const schemaPath = (slug, versionId, suffix = '') => (
+    `/libraries/${slug}/schema-lifecycle/versions/${versionId}${suffix}`
+);
+
+export const listSchemaVersions = (slug) => request(`/libraries/${slug}/schema-lifecycle/versions`);
+export const getSchemaVersion = (slug, versionId) => request(schemaPath(slug, versionId));
+export const validateSchemaVersion = (slug, versionId) =>
+    request(schemaPath(slug, versionId, '/validate'), { method: 'POST' });
+export const getSchemaImpact = (slug, versionId) => request(schemaPath(slug, versionId, '/impact'));
+export const cloneSchemaVersion = (slug, versionId, body) => request(
+    schemaPath(slug, versionId, '/clone'),
+    jsonBody('POST', schemaBody(body, [...SCHEMA_COMMON_KEYS, 'description'])),
+);
+export const activateSchemaVersion = (slug, versionId, body) => request(
+    schemaPath(slug, versionId, '/activate'),
+    jsonBody('POST', schemaBody(body, [
+        ...SCHEMA_COMMON_KEYS, 'expected_active_version_id', 'confirmation',
+    ])),
+);
+export const createSchemaEntityType = (slug, versionId, body) => request(
+    schemaPath(slug, versionId, '/entity-types'),
+    jsonBody('POST', schemaBody(body, SCHEMA_ENTITY_KEYS)),
+);
+export const createSchemaRelationType = (slug, versionId, body) => request(
+    schemaPath(slug, versionId, '/relation-types'),
+    jsonBody('POST', schemaBody(body, SCHEMA_RELATION_KEYS)),
+);
+export const createSchemaAttribute = (slug, versionId, body) => request(
+    schemaPath(slug, versionId, '/attributes'),
+    jsonBody('POST', schemaBody(body, SCHEMA_ATTRIBUTE_KEYS)),
+);
+export const createSchemaConstraint = (slug, versionId, body) => request(
+    schemaPath(slug, versionId, '/constraints'),
+    jsonBody('POST', schemaBody(body, SCHEMA_CONSTRAINT_KEYS)),
+);
+export const updateSchemaItem = (slug, versionId, kind, itemId, body) => {
+    const keys = ({
+        'entity-types': SCHEMA_ENTITY_KEYS,
+        'relation-types': SCHEMA_RELATION_KEYS,
+        attributes: SCHEMA_ATTRIBUTE_KEYS,
+        constraints: SCHEMA_CONSTRAINT_KEYS,
+    })[kind] || SCHEMA_COMMON_KEYS;
+    return request(
+        schemaPath(slug, versionId, `/${kind}/${itemId}`),
+        jsonBody('PATCH', schemaBody(body, keys)),
+    );
+};
+export const disableSchemaItem = (slug, versionId, kind, itemId, body) => request(
+    schemaPath(slug, versionId, `/${kind}/${itemId}/disable`),
+    jsonBody('POST', schemaBody(body, SCHEMA_COMMON_KEYS)),
+);
+
 export const health = (forceRefresh) => cachedRequest('health', () => request('/health'), 60000, forceRefresh);

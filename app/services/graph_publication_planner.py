@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
+from types import SimpleNamespace
 from typing import Any, Iterable
 
 from sqlalchemy import select
@@ -74,6 +76,150 @@ class GraphPublicationSnapshot:
     blocked_counts: dict[str, int]
     policy_snapshot: dict[str, Any]
     policy_snapshot_hash: str
+    governance_action_set_hash: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class GraphPublicationProjection:
+    entity_states: dict[uuid.UUID, dict[str, Any]]
+    relation_states: dict[uuid.UUID, dict[str, Any]]
+    action_ids: tuple[uuid.UUID, ...] = ()
+    action_set_hash: str | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            any(not isinstance(key, uuid.UUID) or not isinstance(value, dict) for key, value in self.entity_states.items())
+            or any(not isinstance(key, uuid.UUID) or not isinstance(value, dict) for key, value in self.relation_states.items())
+            or any(not isinstance(value, uuid.UUID) for value in self.action_ids)
+            or len(set(self.action_ids)) != len(self.action_ids)
+            or (self.action_ids and self.action_set_hash is None)
+            or (
+                self.action_set_hash is not None
+                and (
+                    len(self.action_set_hash) != 64
+                    or any(character not in "0123456789abcdef" for character in self.action_set_hash)
+                )
+            )
+        ):
+            raise GraphPublicationPlanError(
+                "governance_projection_invalid",
+                "graph governance projection is invalid",
+            )
+
+
+def _project_entity(entity: Entity, state: dict[str, Any]) -> SimpleNamespace:
+    allowed = {
+        "authority_level",
+        "canonical_name",
+        "confidence",
+        "normalized_name",
+        "properties",
+        "status",
+    }
+    if not set(state).issubset(
+        allowed
+        | {
+            "entity_type_id",
+            "library_id",
+            "ontology_version_id",
+            "source_type",
+        }
+    ):
+        raise GraphPublicationPlanError(
+            "governance_projection_invalid", "entity projection is invalid"
+        )
+    identity = {
+        "entity_type_id": str(entity.entity_type_id),
+        "library_id": str(entity.library_id),
+        "ontology_version_id": str(entity.ontology_version_id),
+        "source_type": entity.source_type,
+    }
+    if any(key in state and state[key] != value for key, value in identity.items()):
+        raise GraphPublicationPlanError(
+            "governance_projection_invalid", "entity projection identity changed"
+        )
+    values = {
+        key: deepcopy(getattr(entity, key))
+        for key in {
+            "authority_level",
+            "canonical_name",
+            "confidence",
+            "entity_type_id",
+            "id",
+            "library_id",
+            "normalized_name",
+            "ontology_version_id",
+            "properties",
+            "source_type",
+            "status",
+        }
+    }
+    values.update({key: deepcopy(state[key]) for key in allowed.intersection(state)})
+    return SimpleNamespace(**values)
+
+
+def _project_relation(
+    relation: KnowledgeRelation, state: dict[str, Any]
+) -> SimpleNamespace:
+    allowed = {
+        "authority_level",
+        "confidence",
+        "properties",
+        "review_status",
+        "source_entity_id",
+        "status",
+        "target_entity_id",
+    }
+    if not set(state).issubset(
+        allowed
+        | {
+            "library_id",
+            "ontology_version_id",
+            "relation_type_id",
+            "source_type",
+        }
+    ):
+        raise GraphPublicationPlanError(
+            "governance_projection_invalid", "relation projection is invalid"
+        )
+    identity = {
+        "library_id": str(relation.library_id),
+        "ontology_version_id": str(relation.ontology_version_id),
+        "relation_type_id": str(relation.relation_type_id),
+        "source_type": relation.source_type,
+    }
+    if any(key in state and state[key] != value for key, value in identity.items()):
+        raise GraphPublicationPlanError(
+            "governance_projection_invalid", "relation projection identity changed"
+        )
+    values = {
+        key: deepcopy(getattr(relation, key))
+        for key in {
+            "authority_level",
+            "confidence",
+            "id",
+            "library_id",
+            "ontology_version_id",
+            "properties",
+            "relation_type_id",
+            "review_status",
+            "source_entity_id",
+            "source_type",
+            "status",
+            "target_entity_id",
+        }
+    }
+    for key in allowed.intersection(state):
+        value = state[key]
+        if key in {"source_entity_id", "target_entity_id"}:
+            try:
+                value = uuid.UUID(str(value))
+            except (TypeError, ValueError, AttributeError):
+                raise GraphPublicationPlanError(
+                    "governance_projection_invalid", "relation endpoint is invalid"
+                ) from None
+        values[key] = deepcopy(value)
+    return SimpleNamespace(**values)
 
 
 def _uuid_text(value: uuid.UUID | None) -> str | None:
@@ -503,11 +649,11 @@ def _manifest_hash(
     include_drafts: bool,
     items: list[GraphPublicationItem],
     blocked_counts: dict[str, int],
+    governance_action_set_hash: str | None = None,
 ) -> str:
     entity_hashes = sorted(item.item_hash for item in items if item.item_kind == "entity")
     relation_hashes = sorted(item.item_hash for item in items if item.item_kind == "relation")
-    return _sha256_json(
-        {
+    payload = {
             "manifest_version": config.graph_publication_manifest_version,
             "policy_version": config.graph_publication_policy_version,
             "policy_snapshot_hash": policy_snapshot_hash,
@@ -520,7 +666,9 @@ def _manifest_hash(
             "sorted_relation_item_hashes": relation_hashes,
             "blocked_count_by_reason": dict(sorted(blocked_counts.items())),
         }
-    )
+    if governance_action_set_hash is not None:
+        payload["governance_action_set_hash"] = governance_action_set_hash
+    return _sha256_json(payload)
 
 
 async def build_graph_publication_snapshot(
@@ -530,6 +678,7 @@ async def build_graph_publication_snapshot(
     *,
     include_drafts: bool,
     enforce_item_limit: bool = True,
+    projection: GraphPublicationProjection | None = None,
     config: Settings = settings,
 ) -> GraphPublicationSnapshot:
     if ontology.library_id != library.id or ontology.status != ONTOLOGY_STATUS_ACTIVE:
@@ -580,6 +729,24 @@ async def build_graph_publication_snapshot(
             KnowledgeRelation.ontology_version_id == ontology.id,
         ),
     )
+    if projection is not None:
+        entity_by_id = {row.id: row for row in entities}
+        relation_by_id = {row.id: row for row in relations}
+        if not set(projection.entity_states).issubset(entity_by_id) or not set(
+            projection.relation_states
+        ).issubset(relation_by_id):
+            raise GraphPublicationPlanError(
+                "governance_projection_invalid",
+                "graph governance projection target is unavailable",
+            )
+        entities = [
+            _project_entity(row, projection.entity_states.get(row.id, {}))
+            for row in entities
+        ]
+        relations = [
+            _project_relation(row, projection.relation_states.get(row.id, {}))
+            for row in relations
+        ]
     mentions = await _list_rows(
         db,
         select(EntityMention).where(
@@ -649,6 +816,9 @@ async def build_graph_publication_snapshot(
         blocked_counts=dict(sorted(blocked.items())),
         policy_snapshot=policy_snapshot,
         policy_snapshot_hash=_sha256_json(policy_snapshot),
+        governance_action_set_hash=(
+            projection.action_set_hash if projection is not None else None
+        ),
     )
 
 
@@ -689,6 +859,7 @@ async def plan_graph_publication(
     idempotency_key: str | None = None,
     expected_parent_publication_id: uuid.UUID | None = None,
     requested_by_user_id: uuid.UUID | None = None,
+    projection: GraphPublicationProjection | None = None,
     config: Settings = settings,
 ) -> GraphPublicationPlanResult:
     if source_mode not in {
@@ -709,6 +880,17 @@ async def plan_graph_publication(
             idempotency_key=idempotency_key,
         )
         if idempotent is not None:
+            if projection is not None:
+                governance = dict(idempotent.plan_options or {}).get("graph_governance")
+                expected = {
+                    "action_ids": [str(value) for value in projection.action_ids],
+                    "action_set_hash": projection.action_set_hash,
+                    "contract_version": "graph-governance-v1",
+                }
+                if governance != expected:
+                    raise GraphPublicationPlanError(
+                        "idempotency_conflict", "idempotency key conflicts"
+                    )
             return GraphPublicationPlanResult(
                 publication=idempotent,
                 items=(),
@@ -735,6 +917,7 @@ async def plan_graph_publication(
         library,
         ontology,
         include_drafts=include_drafts,
+        projection=projection,
         config=config,
     )
     return await _persist_graph_publication_snapshot(
@@ -748,6 +931,17 @@ async def plan_graph_publication(
         dry_run=dry_run,
         idempotency_key=idempotency_key,
         requested_by_user_id=requested_by_user_id,
+        plan_options=(
+            {
+                "graph_governance": {
+                    "action_ids": [str(value) for value in projection.action_ids],
+                    "action_set_hash": projection.action_set_hash,
+                    "contract_version": "graph-governance-v1",
+                }
+            }
+            if projection is not None
+            else None
+        ),
         config=config,
     )
 
@@ -772,6 +966,7 @@ def graph_publication_snapshot_manifest_hash(
         include_drafts=include_drafts,
         items=list(snapshot.items),
         blocked_counts=snapshot.blocked_counts,
+        governance_action_set_hash=snapshot.governance_action_set_hash,
     )
 
 
@@ -805,6 +1000,7 @@ async def _persist_graph_publication_snapshot(
         include_drafts=include_drafts,
         items=items,
         blocked_counts=blocked,
+        governance_action_set_hash=snapshot.governance_action_set_hash,
     )
     if not dry_run and allow_manifest_reuse:
         reusable = await _load_reusable_publication(

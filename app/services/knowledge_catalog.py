@@ -1566,6 +1566,7 @@ def _evidence_fact_statement(
             projection.c.ontology_version_id,
             projection.c.item_id,
             fact_id.label("fact_id"),
+            binding.chunk_id.label("chunk_id"),
             projection.c.item_hash,
         )
         .select_from(projection)
@@ -1660,6 +1661,7 @@ async def get_catalog_evidence_detail(
             item_kind=item_kind,
             item_id=row.item_id,
             fact_id=row.fact_id,
+            chunk_id=getattr(row, "chunk_id", None),
             item_hash=row.item_hash,
         )
         for item_kind, row in combined[:100]
@@ -1677,6 +1679,7 @@ async def get_catalog_evidence_detail(
     try:
         return CatalogEvidenceDetailRead(
             evidence_id=detail.id,
+            library_id=library.id,
             document_id=detail.document_id,
             document_revision_id=detail.document_revision_id,
             revision_file_id=revision_file_id,

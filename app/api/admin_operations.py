@@ -22,6 +22,8 @@ from app.models.cleanup_outbox import CleanupOutbox
 from app.models.embedding_job import EmbeddingJob
 from app.models.graph_publication import GraphPublication
 from app.models.library import Library
+from app.models.organization_capability_rollout import OrganizationCapabilityRollout
+from app.models.public_api_operations import PublicAPIRequestRecord
 from app.models.rebuild_operation import RebuildOperation
 from app.models.service_heartbeat import ServiceHeartbeat
 from app.models.user import User
@@ -51,6 +53,61 @@ _SERVICE_TYPES = (
 
 # last_error 仅取摘要，截断到 200 字符，绝不含完整堆栈。
 _LAST_ERROR_MAX = 200
+
+
+@router.get("/deployment")
+async def deployment_operations(
+    _: User = Depends(current_superuser),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    """Content-free capacity, failure, cost-proxy, and rollout counters."""
+    now = (await db.execute(select(func.now()))).scalar_one()
+    since = now - timedelta(hours=24)
+    request_row = (
+        await db.execute(
+            select(
+                func.count(PublicAPIRequestRecord.id),
+                func.count(PublicAPIRequestRecord.id).filter(
+                    PublicAPIRequestRecord.outcome != "completed"
+                ),
+                func.coalesce(func.sum(PublicAPIRequestRecord.input_tokens), 0),
+                func.coalesce(func.sum(PublicAPIRequestRecord.output_tokens), 0),
+            ).where(PublicAPIRequestRecord.finished_at >= since)
+        )
+    ).one()
+    queue_row = (
+        await db.execute(
+            select(
+                func.count(EmbeddingJob.id).filter(EmbeddingJob.status == "pending"),
+                func.count(EmbeddingJob.id).filter(EmbeddingJob.status == "failed"),
+            )
+        )
+    ).one()
+    rollouts = dict(
+        (
+            await db.execute(
+                select(
+                    OrganizationCapabilityRollout.capability,
+                    func.count(OrganizationCapabilityRollout.id),
+                )
+                .where(OrganizationCapabilityRollout.enabled.is_(True))
+                .group_by(OrganizationCapabilityRollout.capability)
+            )
+        ).all()
+    )
+    return {
+        "window_hours": 24,
+        "requests": {"total": request_row[0], "failed": request_row[1]},
+        "cost_proxy_tokens": {"input": request_row[2], "output": request_row[3]},
+        "capacity": {
+            "embedding_pending": queue_row[0],
+            "embedding_failed": queue_row[1],
+        },
+        "enabled_rollouts": {
+            capability: rollouts.get(capability, 0)
+            for capability in ("public_api_v1", "mcp_adapter", "external_graph_sync")
+        },
+    }
 
 
 @router.get("/status", response_model=OperationsStatus)

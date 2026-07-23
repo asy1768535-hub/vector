@@ -34,11 +34,21 @@ from app.models.entity_alias import EntityAlias
 from app.models.entity_mention import EntityMention
 from app.models.entity_type import EntityType
 from app.models.evidence_unit import EvidenceUnit
+from app.models.external_graph_sync import (
+    GraphExternalFactMapping,
+    GraphExternalSyncConflict,
+    GraphExternalSyncOperation,
+    GraphSyncSourcePolicy,
+)
 from app.models.extraction_context_snapshot import ExtractionContextSnapshot
 from app.models.extraction_raw_output_attempt import ExtractionRawOutputAttempt
 from app.models.folder import Folder
 from app.models.graph_extraction_job import GraphExtractionJob
 from app.models.graph_extraction_unit import GraphExtractionUnit
+from app.models.graph_governance_action import (
+    GraphGovernanceAction,
+    GraphGovernanceActionItem,
+)
 from app.models.graph_publication import GraphPublication
 from app.models.graph_publication_item import GraphPublicationItem
 from app.models.graph_candidate_evidence import (
@@ -56,13 +66,20 @@ from app.models.library_faq import LibraryFAQQuestion
 from app.models.migration_backfill_state import MigrationBackfillState
 from app.models.ontology_version import OntologyVersion
 from app.models.organization import Organization
+from app.models.organization_capability_rollout import OrganizationCapabilityRollout
 from app.models.organization_membership import OrganizationMembership
+from app.models.public_api_operations import (
+    PublicAPIAnswerLease,
+    PublicAPIRateWindow,
+    PublicAPIRequestRecord,
+)
 from app.models.rebuild_operation import RebuildOperation
 from app.models.revision_retention import RevisionRetentionRecord
 from app.models.revision_purge_operation import RevisionPurgeOperation
 from app.models.relation_evidence import RelationEvidence
 from app.models.relation_type import RelationType
 from app.models.relation_type_constraint import RelationTypeConstraint
+from app.models.schema_lifecycle_action import SchemaLifecycleAction
 from app.models.service_heartbeat import ServiceHeartbeat
 from app.models.sync_source import SyncSource
 from app.models.user import User
@@ -100,11 +117,17 @@ __all__ = [
     "EntityMention",
     "EntityType",
     "EvidenceUnit",
+    "GraphExternalFactMapping",
+    "GraphExternalSyncConflict",
+    "GraphExternalSyncOperation",
+    "GraphSyncSourcePolicy",
     "ExtractionContextSnapshot",
     "ExtractionRawOutputAttempt",
     "Folder",
     "GraphExtractionJob",
     "GraphExtractionUnit",
+    "GraphGovernanceAction",
+    "GraphGovernanceActionItem",
     "GraphPublication",
     "GraphPublicationItem",
     "GraphEntityCandidate",
@@ -124,13 +147,18 @@ __all__ = [
     "MigrationBackfillState",
     "OntologyVersion",
     "Organization",
+    "OrganizationCapabilityRollout",
     "OrganizationMembership",
+    "PublicAPIAnswerLease",
+    "PublicAPIRateWindow",
+    "PublicAPIRequestRecord",
     "RebuildOperation",
     "RevisionRetentionRecord",
     "RevisionPurgeOperation",
     "RelationEvidence",
     "RelationType",
     "RelationTypeConstraint",
+    "SchemaLifecycleAction",
     "ServiceHeartbeat",
     "SyncSource",
     "User",
