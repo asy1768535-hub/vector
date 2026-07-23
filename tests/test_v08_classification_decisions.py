@@ -277,7 +277,7 @@ def test_0035_orm_migration_and_offline_sql_are_reversible():
     indexes = {item.name for item in DocumentClassificationDecisionSet.__table__.indexes}
     assert "uq_document_classification_decision_sets_effective_revision" in indexes
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_heads() == ["0040"]
+    assert script.get_heads() == ["0041"]
     assert script.get_revision("0035").down_revision == "0034"
     upgrade = _offline("upgrade", "0034:0035")
     downgrade = _offline("downgrade", "0035:0034")

@@ -11,6 +11,7 @@ from app.models.entity_alias import EntityAlias
 from app.models.entity_mention import EntityMention
 from app.models.entity_type import EntityType
 from app.models.evidence_unit import EvidenceUnit
+from app.models.external_graph_sync import GraphExternalFactMapping
 from app.models.graph_extraction_job import GraphExtractionJob
 from app.models.graph_publication import GraphPublication
 from app.models.graph_publication_item import GraphPublicationItem
@@ -19,6 +20,7 @@ from app.models.library import Library
 from app.models.relation_evidence import RelationEvidence
 from app.models.relation_type import RelationType
 from app.models.user import User
+from app.models.sync_source import SyncSource
 from app.schemas.graph_catalog import (
     GraphCatalogAliasRead,
     GraphCatalogEntityDetailRead,
@@ -26,6 +28,7 @@ from app.schemas.graph_catalog import (
     GraphCatalogEvidenceCountsRead,
     GraphCatalogEvidenceLocatorRead,
     GraphCatalogExtractionRead,
+    GraphCatalogExternalMappingRead,
     GraphCatalogLibraryRead,
     GraphCatalogPublicationRead,
     GraphCatalogRelatedDocumentRead,
@@ -50,6 +53,50 @@ from app.services.graph_governance_actions import (
 DETAIL_LIMIT = 100
 CURRENT_PUBLICATION_STATUSES = ("active", "degraded")
 CURRENT_ITEM_STATUSES = ("active", "degraded")
+
+
+async def _external_mappings(
+    db,
+    library: Library,
+    fact_id: uuid.UUID,
+    *,
+    fact_kind: str,
+) -> list[GraphCatalogExternalMappingRead]:
+    target = (
+        GraphExternalFactMapping.entity_id == fact_id
+        if fact_kind == "entity"
+        else GraphExternalFactMapping.relation_id == fact_id
+    )
+    rows = (
+        await db.execute(
+            select(GraphExternalFactMapping, SyncSource.source_key)
+            .join(SyncSource, SyncSource.id == GraphExternalFactMapping.sync_source_id)
+            .where(
+                GraphExternalFactMapping.library_id == library.id,
+                GraphExternalFactMapping.fact_kind == fact_kind,
+                target,
+            )
+            .order_by(
+                SyncSource.source_key,
+                GraphExternalFactMapping.external_type,
+                GraphExternalFactMapping.external_id,
+            )
+            .limit(DETAIL_LIMIT)
+        )
+    ).all()
+    return [
+        GraphCatalogExternalMappingRead(
+            id=mapping.id,
+            source_key=source_key,
+            external_type=mapping.external_type,
+            external_id=mapping.external_id,
+            lifecycle=mapping.lifecycle,
+            source_version=mapping.source_version,
+            evidence_id=mapping.evidence_id,
+            source_locator=mapping.source_locator,
+        )
+        for mapping, source_key in rows
+    ]
 
 
 def _publication_projection(item_kind: str, library_id: uuid.UUID):
@@ -719,6 +766,9 @@ async def get_graph_catalog_entity_detail(
                 job_id=core.Entity.created_by_job_id,
             )
         ),
+        external_mappings=await _external_mappings(
+            db, library, entity_id, fact_kind="entity"
+        ),
     )
 
 
@@ -763,5 +813,8 @@ async def get_graph_catalog_relation_detail(
                 ontology_version_id=core.KnowledgeRelation.ontology_version_id,
                 job_id=core.KnowledgeRelation.created_by_job_id,
             )
+        ),
+        external_mappings=await _external_mappings(
+            db, library, relation_id, fact_kind="relation"
         ),
     )

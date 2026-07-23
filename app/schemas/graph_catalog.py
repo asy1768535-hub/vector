@@ -221,6 +221,17 @@ class GraphCatalogAliasRead(StrictBaseModel):
     governance_state_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class GraphCatalogExternalMappingRead(StrictBaseModel):
+    id: uuid.UUID
+    source_key: str = Field(min_length=1, max_length=128)
+    external_type: str = Field(min_length=1, max_length=128)
+    external_id: str = Field(min_length=1, max_length=512)
+    lifecycle: Literal["active", "stale", "tombstoned"]
+    source_version: str | None = Field(default=None, max_length=128)
+    evidence_id: uuid.UUID | None = None
+    source_locator: dict = Field(default_factory=dict)
+
+
 class GraphCatalogEntityDetailRead(StrictBaseModel):
     contract_version: Literal["graph-catalog-entity-detail-v1"] = (
         "graph-catalog-entity-detail-v1"
@@ -240,6 +251,9 @@ class GraphCatalogEntityDetailRead(StrictBaseModel):
     relation_count: int = Field(ge=0)
     relations_truncated: bool
     extraction: GraphCatalogExtractionRead | None = None
+    external_mappings: list[GraphCatalogExternalMappingRead] = Field(
+        default_factory=list, max_length=100
+    )
 
 
 class GraphCatalogRelationDetailRead(StrictBaseModel):
@@ -255,3 +269,6 @@ class GraphCatalogRelationDetailRead(StrictBaseModel):
     document_count: int = Field(ge=0)
     documents_truncated: bool
     extraction: GraphCatalogExtractionRead | None = None
+    external_mappings: list[GraphCatalogExternalMappingRead] = Field(
+        default_factory=list, max_length=100
+    )

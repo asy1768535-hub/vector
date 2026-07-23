@@ -223,8 +223,9 @@ def test_api_key_identity_is_non_secret_and_cookie_scope_remains_compatible():
 
 def test_0040_orm_migration_and_offline_sql_are_exactly_reversible():
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_heads() == ["0040"]
+    assert script.get_heads() == ["0041"]
     assert script.get_revision("0040").down_revision == "0039"
+    assert script.get_revision("0041").down_revision == "0040"
 
     request_columns = set(PublicAPIRequestRecord.__table__.c.keys())
     assert request_columns == {"id", *PUBLIC_OPERATION_RECORD_FIELDS, "created_at"}

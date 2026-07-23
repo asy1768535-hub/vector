@@ -128,6 +128,7 @@ async def test_entity_detail_composes_staged_fact_without_source_text():
                 _result(first=_entity_core(library, entity_id)),
                 _result(scalar=0),
                 _result(rows=[]),
+                _result(rows=[]),
             ]
         )
     )
@@ -165,6 +166,7 @@ async def test_entity_detail_composes_staged_fact_without_source_text():
     assert detail.entity.publication_state == "staged"
     assert detail.properties == {"country": "CN"}
     assert detail.evidence == []
+    assert detail.external_mappings == []
     assert "text_quote" not in detail.model_dump()
 
 

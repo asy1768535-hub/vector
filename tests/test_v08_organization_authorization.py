@@ -162,7 +162,7 @@ def test_0031_api_key_orm_migration_and_offline_sql_match():
     taxonomy_migration = script.get_revision("0034")
     assert taxonomy_migration is not None
     assert taxonomy_migration.down_revision == "0033"
-    assert script.get_heads() == ["0040"]
+    assert script.get_heads() == ["0041"]
     upgrade = _offline("upgrade", "0030:0031")
     downgrade = _offline("downgrade", "0031:0030")
     for fragment in (

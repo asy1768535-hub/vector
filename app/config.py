@@ -412,6 +412,11 @@ class Settings(BaseSettings):
     public_api_cleanup_batch_size: int = 1000
     public_api_cleanup_interval_seconds: int = 3600
 
+    # ---- v0.9 External graph fact synchronization (default fail closed) ----
+    external_graph_sync_enabled: bool = False
+    external_graph_sync_max_batch_items: int = 100
+    external_graph_sync_max_item_bytes: int = 65536
+
     # ---- v0.5 Active Graph Publication (M1 defaults; fail closed) ----
     graph_publication_enabled: bool = False
     graph_publication_require_entity_evidence: bool = True
@@ -716,6 +721,25 @@ def validate_graph_governance_startup(config: Settings) -> None:
         raise RuntimeError(
             "[security] graph governance requires Organization authorization "
             "and graph publication"
+        )
+
+
+def validate_external_graph_sync_startup(config: Settings) -> None:
+    if config.external_graph_sync_enabled and not (
+        config.organization_authorization_enabled
+        and config.graph_governance_enabled
+        and config.graph_publication_enabled
+        and config.enable_sync_source_api
+    ):
+        raise RuntimeError(
+            "[security] external graph sync requires Organization authorization, "
+            "graph governance, graph publication, and SyncSource API"
+        )
+    if not 1 <= config.external_graph_sync_max_batch_items <= 100:
+        raise RuntimeError("[security] external graph sync batch limit must be within 1..100")
+    if not 1024 <= config.external_graph_sync_max_item_bytes <= 65536:
+        raise RuntimeError(
+            "[security] external graph sync item bytes must be within 1024..65536"
         )
 
 

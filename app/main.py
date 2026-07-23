@@ -38,6 +38,7 @@ from app.api.documents import router as documents_router
 from app.api.federated_retrieval import router as federated_retrieval_router
 from app.api.graph_catalog import router as graph_catalog_router
 from app.api.graph_governance import router as graph_governance_router
+from app.api.external_graph_sync import router as external_graph_sync_router
 from app.api.schema_lifecycle import router as schema_lifecycle_router
 from app.api.health import router as health_router
 from app.api.me import router as me_router
@@ -65,6 +66,7 @@ from app.config import (
     validate_graph_extraction_startup,
     validate_graph_catalog_startup,
     validate_graph_governance_startup,
+    validate_external_graph_sync_startup,
     validate_schema_lifecycle_startup,
     validate_public_api_v1_startup,
     validate_public_api_operations_startup,
@@ -209,6 +211,10 @@ def assert_graph_governance_startup_security() -> None:
     validate_graph_governance_startup(settings)
 
 
+def assert_external_graph_sync_startup_security() -> None:
+    validate_external_graph_sync_startup(settings)
+
+
 def assert_schema_lifecycle_startup_security() -> None:
     validate_schema_lifecycle_startup(settings)
 
@@ -252,6 +258,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     assert_knowledge_catalog_startup_security()
     assert_graph_catalog_startup_security()
     assert_graph_governance_startup_security()
+    assert_external_graph_sync_startup_security()
     assert_schema_lifecycle_startup_security()
     assert_public_api_v1_startup_security()
     assert_public_api_operations_startup_security()
@@ -306,6 +313,7 @@ def create_app() -> FastAPI:
     app.include_router(graph_catalog_router)
     app.include_router(public_v1_router)
     app.include_router(graph_governance_router)
+    app.include_router(external_graph_sync_router)
     app.include_router(schema_lifecycle_router)
     app.include_router(classification_decisions_router)
     app.include_router(organizations_router)

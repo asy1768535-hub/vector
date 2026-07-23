@@ -34,6 +34,12 @@ from app.models.entity_alias import EntityAlias
 from app.models.entity_mention import EntityMention
 from app.models.entity_type import EntityType
 from app.models.evidence_unit import EvidenceUnit
+from app.models.external_graph_sync import (
+    GraphExternalFactMapping,
+    GraphExternalSyncConflict,
+    GraphExternalSyncOperation,
+    GraphSyncSourcePolicy,
+)
 from app.models.extraction_context_snapshot import ExtractionContextSnapshot
 from app.models.extraction_raw_output_attempt import ExtractionRawOutputAttempt
 from app.models.folder import Folder
@@ -110,6 +116,10 @@ __all__ = [
     "EntityMention",
     "EntityType",
     "EvidenceUnit",
+    "GraphExternalFactMapping",
+    "GraphExternalSyncConflict",
+    "GraphExternalSyncOperation",
+    "GraphSyncSourcePolicy",
     "ExtractionContextSnapshot",
     "ExtractionRawOutputAttempt",
     "Folder",
