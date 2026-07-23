@@ -10,6 +10,8 @@ from fastapi import Response
 from app.api import health as health_api
 from app.api.health import _payload
 from app.config import Settings, validate_supported_deployment_startup
+from app.services.deployment_bootstrap import DeploymentBootstrapError
+from scripts.bootstrap_admin import _validate_admin_email
 from scripts.deployment_backup_manifest import (
     BackupManifestError,
     create_manifest,
@@ -35,6 +37,12 @@ def _supported_settings(**overrides) -> Settings:
 
 def test_supported_private_profile_accepts_secure_configuration() -> None:
     validate_supported_deployment_startup(_supported_settings())
+
+
+def test_bootstrap_admin_rejects_email_that_user_schema_cannot_serialize() -> None:
+    assert _validate_admin_email("admin@example.com") == "admin@example.com"
+    with pytest.raises(DeploymentBootstrapError, match="administrator email is invalid"):
+        _validate_admin_email("admin@local.invalid")
 
 
 @pytest.mark.parametrize(

@@ -12,6 +12,8 @@ import os
 import sys
 from pathlib import Path
 
+from pydantic import EmailStr, TypeAdapter, ValidationError
+
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
@@ -28,6 +30,15 @@ from app.services.deployment_bootstrap import (  # noqa: E402
     initialize_supported_deployment,
     prepare_document_storage,
 )
+
+_EMAIL_ADAPTER = TypeAdapter(EmailStr)
+
+
+def _validate_admin_email(value: str) -> str:
+    try:
+        return str(_EMAIL_ADAPTER.validate_python(value))
+    except ValidationError as exc:
+        raise DeploymentBootstrapError("administrator email is invalid") from exc
 
 
 async def _run(args: argparse.Namespace, password: str) -> int:
@@ -94,6 +105,7 @@ def main() -> None:
     parser.add_argument("--username", default=None)
     args = parser.parse_args()
     try:
+        args.email = _validate_admin_email(args.email)
         validate_supported_deployment_startup(settings)
         if settings.deployment_profile in {"hosted", "private"} and (
             args.organization_profile != settings.deployment_profile
