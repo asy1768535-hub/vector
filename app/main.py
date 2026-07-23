@@ -67,6 +67,7 @@ from app.config import (
     validate_graph_governance_startup,
     validate_schema_lifecycle_startup,
     validate_public_api_v1_startup,
+    validate_public_api_operations_startup,
     validate_knowledge_artifact_startup,
     validate_library_compatibility_startup,
     validate_personal_library_scopes_startup,
@@ -216,6 +217,10 @@ def assert_public_api_v1_startup_security() -> None:
     validate_public_api_v1_startup(settings)
 
 
+def assert_public_api_operations_startup_security() -> None:
+    validate_public_api_operations_startup(settings)
+
+
 def resolve_console_ui_dir(root: Path) -> Path | None:
     """Resolve the configured console UI directory without implicit frontend fallback."""
     configured = Path(settings.console_ui_dir)
@@ -249,6 +254,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     assert_graph_governance_startup_security()
     assert_schema_lifecycle_startup_security()
     assert_public_api_v1_startup_security()
+    assert_public_api_operations_startup_security()
     # 预热 Casbin enforcer，确保 policy 已加载入内存
     get_enforcer()
     # 启动自检：embedding 服务 / Qdrant 配置错配时大声报（非 fatal，不阻断启动）

@@ -80,6 +80,18 @@ from app.services.personal_library_scopes import (
     PersonalLibraryScopeError,
     resolve_named_scope,
 )
+from app.services.public_api_operations import (
+    PublicAnswerTimedOut,
+    PublicOperationsError,
+    PublicRateLimitExceeded,
+    acquire_public_answer_lease,
+    admit_public_request,
+    run_with_public_answer_timeout,
+)
+from app.services.public_api_operations_contracts import (
+    PublicAdmissionScope,
+    PublicOperationContext,
+)
 from app.services.public_v1_contracts import PublicAPIError
 
 
@@ -130,6 +142,78 @@ class PreparedPublicRetrieval:
             [row.model_copy(update={"rank": rank_map[row.rank]}) for row in sources],
             [row.model_copy(update={"rank": rank_map[row.rank]}) for row in chunks],
         )
+
+
+def _operation_error(exc: PublicOperationsError) -> PublicAPIError:
+    if isinstance(exc, PublicRateLimitExceeded):
+        return PublicAPIError(
+            "rate_limited",
+            status_code=429,
+            retry_after_seconds=exc.retry_after_seconds,
+        )
+    return PublicAPIError("service_unavailable", status_code=503)
+
+
+async def admit_public_scope(
+    scope: ResolvedPublicScope,
+    operation_context: PublicOperationContext | None,
+    *,
+    include_library_ids: bool = True,
+) -> None:
+    if operation_context is None:
+        return
+    library_ids = (
+        tuple(row.id for row in scope.libraries) if include_library_ids else ()
+    )
+    operation_context.bind_scope(
+        organization_ids=(scope.organization_id,),
+        library_ids=library_ids,
+    )
+    try:
+        await admit_public_request(
+            PublicAdmissionScope(
+                organization_ids=(scope.organization_id,),
+                api_key_id=operation_context.api_key_id,
+            )
+        )
+    except PublicOperationsError as exc:
+        raise _operation_error(exc) from exc
+
+
+async def acquire_public_answer_capacity(
+    prepared: PreparedPublicRetrieval,
+    operation_context: PublicOperationContext | None,
+) -> None:
+    if operation_context is None:
+        return
+    try:
+        operation_context.answer_lease = await acquire_public_answer_lease(
+            request_id=operation_context.request_id,
+            endpoint_key=operation_context.endpoint_key,
+            organization_id=prepared.scope.organization_id,
+            api_key_id=operation_context.api_key_id,
+        )
+    except PublicOperationsError as exc:
+        raise _operation_error(exc) from exc
+    operation_context.answer_model = settings.chat_model
+
+
+def project_public_retrieval_metrics(
+    operation_context: PublicOperationContext | None,
+    prepared: PreparedPublicRetrieval,
+    *,
+    used_records: list | tuple | None = None,
+) -> None:
+    if operation_context is None:
+        return
+    if used_records is None:
+        sources, chunks = prepared.sources, prepared.chunks
+    else:
+        sources, chunks = prepared.grounding_for(used_records)
+    operation_context.source_count = len(sources)
+    operation_context.chunk_count = len(chunks)
+    operation_context.graph_entity_count = len(prepared.graph.entities)
+    operation_context.graph_relation_count = len(prepared.graph.relations)
 
 
 def public_library(library: Library) -> PublicLibraryRead:
@@ -289,6 +373,7 @@ async def validate_public_scope(
     user: User,
     selection: PublicScopeSelection,
     channels: tuple[CompatibilityChannel, ...],
+    operation_context: PublicOperationContext | None = None,
 ) -> tuple[ResolvedPublicScope, tuple[PublicChannelCompatibilityRead, ...]]:
     rows: list[PublicChannelCompatibilityRead] = []
     resolved: ResolvedPublicScope | None = None
@@ -302,6 +387,7 @@ async def validate_public_scope(
         candidate = _resolved_scope(assessment, scope_id)
         if resolved is None:
             resolved = candidate
+            await admit_public_scope(resolved, operation_context)
         elif (
             candidate.organization_id != resolved.organization_id
             or tuple(row.id for row in candidate.libraries)
@@ -326,12 +412,36 @@ async def validate_public_scope(
     return resolved, tuple(rows)
 
 
-async def list_public_libraries(db, *, user: User) -> tuple[tuple[Library, ...], bool]:
+async def list_public_libraries(
+    db,
+    *,
+    user: User,
+    operation_context: PublicOperationContext | None = None,
+) -> tuple[tuple[Library, ...], bool]:
     try:
         rows = await list_accessible_libraries(db, user=user, action="read")
     except OrganizationAuthorizationError as exc:
         raise PublicAPIError("scope_forbidden", status_code=403) from exc
-    return tuple(rows[:MAX_PUBLIC_LIBRARIES]), len(rows) > MAX_PUBLIC_LIBRARIES
+    visible = tuple(rows[:MAX_PUBLIC_LIBRARIES])
+    if operation_context is not None and visible:
+        organization_ids = tuple(
+            dict.fromkeys(row.organization_id for row in visible)
+        )
+        operation_context.bind_scope(
+            organization_ids=organization_ids,
+            library_ids=(),
+        )
+        try:
+            await admit_public_request(
+                PublicAdmissionScope(
+                    organization_ids=organization_ids,
+                    api_key_id=operation_context.api_key_id,
+                )
+            )
+        except PublicOperationsError as exc:
+            raise _operation_error(exc) from exc
+        operation_context.source_count = len(visible)
+    return visible, len(rows) > MAX_PUBLIC_LIBRARIES
 
 
 async def authorize_public_library(db, *, user: User, slug: str) -> Library:
@@ -441,8 +551,13 @@ async def get_public_document(
     slug: str,
     document_id: uuid.UUID,
     request_id: str,
+    operation_context: PublicOperationContext | None = None,
 ) -> PublicDocumentResponse:
     library = await authorize_public_library(db, user=user, slug=slug)
+    await admit_public_scope(
+        ResolvedPublicScope(library.organization_id, None, (library,)),
+        operation_context,
+    )
     try:
         document = await get_catalog_document_detail(
             db,
@@ -465,8 +580,13 @@ async def get_public_evidence(
     slug: str,
     evidence_id: uuid.UUID,
     request_id: str,
+    operation_context: PublicOperationContext | None = None,
 ) -> PublicEvidenceResponse:
     library = await authorize_public_library(db, user=user, slug=slug)
+    await admit_public_scope(
+        ResolvedPublicScope(library.organization_id, None, (library,)),
+        operation_context,
+    )
     try:
         evidence = await get_catalog_evidence_detail(
             db,
@@ -489,8 +609,13 @@ async def get_public_entity(
     slug: str,
     entity_id: uuid.UUID,
     request_id: str,
+    operation_context: PublicOperationContext | None = None,
 ) -> PublicEntityResponse:
     library = await authorize_public_library(db, user=user, slug=slug)
+    await admit_public_scope(
+        ResolvedPublicScope(library.organization_id, None, (library,)),
+        operation_context,
+    )
     try:
         entity = await get_graph_catalog_entity_detail(
             db,
@@ -511,8 +636,13 @@ async def get_public_relation(
     slug: str,
     relation_id: uuid.UUID,
     request_id: str,
+    operation_context: PublicOperationContext | None = None,
 ) -> PublicRelationResponse:
     library = await authorize_public_library(db, user=user, slug=slug)
+    await admit_public_scope(
+        ResolvedPublicScope(library.organization_id, None, (library,)),
+        operation_context,
+    )
     try:
         relation = await get_graph_catalog_relation_detail(
             db,
@@ -531,12 +661,14 @@ async def search_public_entities(
     *,
     user: User,
     body: PublicEntitySearchRequest,
+    operation_context: PublicOperationContext | None = None,
 ) -> tuple[ResolvedPublicScope, GraphCatalogEntityPageRead]:
     scope = await resolve_public_graph_scope(
         db,
         user=user,
         selection=body.scope,
     )
+    await admit_public_scope(scope, operation_context)
     try:
         page = await search_graph_catalog_entities(
             db,
@@ -558,6 +690,8 @@ async def search_public_entities(
         )
     except GraphCatalogError as exc:
         raise _map_graph_error(exc) from exc
+    if operation_context is not None:
+        operation_context.graph_entity_count = len(page.items)
     return scope, page
 
 
@@ -566,12 +700,14 @@ async def search_public_relations(
     *,
     user: User,
     body: PublicRelationSearchRequest,
+    operation_context: PublicOperationContext | None = None,
 ) -> tuple[ResolvedPublicScope, GraphCatalogRelationPageRead]:
     scope = await resolve_public_graph_scope(
         db,
         user=user,
         selection=body.scope,
     )
+    await admit_public_scope(scope, operation_context)
     try:
         page = await search_graph_catalog_relations(
             db,
@@ -594,6 +730,8 @@ async def search_public_relations(
         )
     except GraphCatalogError as exc:
         raise _map_graph_error(exc) from exc
+    if operation_context is not None:
+        operation_context.graph_relation_count = len(page.items)
     return scope, page
 
 
@@ -769,6 +907,7 @@ async def prepare_public_retrieval(
     *,
     user: User,
     body: PublicRetrievalRequest | PublicAnswerRequest,
+    operation_context: PublicOperationContext | None = None,
 ) -> PreparedPublicRetrieval:
     scope = await resolve_public_scope(
         db,
@@ -776,6 +915,7 @@ async def prepare_public_retrieval(
         selection=body.scope,
         channels=("text",),
     )
+    await admit_public_scope(scope, operation_context)
     try:
         result = await run_federated_retrieval(
             db,
@@ -796,7 +936,7 @@ async def prepare_public_retrieval(
         raise PublicAPIError("service_unavailable", status_code=503)
     sources, chunks, records = _retrieval_rows(result)
     graph = await _public_graph_context(db, scope=scope, chunks=chunks)
-    return PreparedPublicRetrieval(
+    prepared = PreparedPublicRetrieval(
         selection=body.scope,
         scope=scope,
         sources=sources,
@@ -804,6 +944,8 @@ async def prepare_public_retrieval(
         graph=graph,
         records=records,
     )
+    project_public_retrieval_metrics(operation_context, prepared)
+    return prepared
 
 
 async def recheck_public_scope(
@@ -865,11 +1007,27 @@ async def generate_public_answer(
     user: User,
     body: PublicAnswerRequest,
     request_id: str,
+    operation_context: PublicOperationContext | None = None,
 ) -> PublicAnswerResponse:
-    prepared = await prepare_public_retrieval(db, user=user, body=body)
+    prepare_kwargs = (
+        {"operation_context": operation_context}
+        if operation_context is not None
+        else {}
+    )
+    prepared = await prepare_public_retrieval(
+        db,
+        user=user,
+        body=body,
+        **prepare_kwargs,
+    )
     await recheck_public_scope(db, user=user, prepared=prepared)
     records = public_answer_records(prepared)
     if not records:
+        project_public_retrieval_metrics(
+            operation_context,
+            prepared,
+            used_records=(),
+        )
         return build_public_answer_response(
             request_id,
             NO_EVIDENCE_ANSWER,
@@ -878,19 +1036,39 @@ async def generate_public_answer(
         )
     if not settings.chat_enabled or not settings.chat_base_url or not settings.chat_model:
         raise PublicAPIError("answer_unavailable", status_code=503)
+    if operation_context is not None:
+        await acquire_public_answer_capacity(prepared, operation_context)
+    provider_call = chat_answer.generate_answer(
+        body.query,
+        records,
+        base_url=settings.chat_base_url,
+        model=settings.chat_model,
+        api_key=settings.chat_api_key,
+        timeout=(
+            min(
+                settings.chat_timeout_seconds,
+                settings.public_api_answer_max_seconds,
+            )
+            if operation_context is not None
+            else settings.chat_timeout_seconds
+        ),
+        temperature=settings.chat_temperature,
+        max_context_chars=settings.chat_max_context_chars,
+    )
     try:
-        result = await chat_answer.generate_answer(
-            body.query,
-            records,
-            base_url=settings.chat_base_url,
-            model=settings.chat_model,
-            api_key=settings.chat_api_key,
-            timeout=settings.chat_timeout_seconds,
-            temperature=settings.chat_temperature,
-            max_context_chars=settings.chat_max_context_chars,
-        )
+        if operation_context is None:
+            result = await provider_call
+        else:
+            result = await run_with_public_answer_timeout(provider_call)
     except chat_answer.ChatError as exc:
         raise PublicAPIError("upstream_failed", status_code=502) from exc
+    except PublicAnswerTimedOut as exc:
+        raise PublicAPIError("upstream_failed", status_code=502) from exc
+    project_public_retrieval_metrics(
+        operation_context,
+        prepared,
+        used_records=result.used_records,
+    )
     return build_public_answer_response(
         request_id,
         result.answer,

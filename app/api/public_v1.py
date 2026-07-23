@@ -38,6 +38,7 @@ from app.services.public_v1 import (
     NO_EVIDENCE_ANSWER,
     build_public_answer_response,
     build_public_retrieval_response,
+    acquire_public_answer_capacity,
     generate_public_answer,
     get_public_document,
     get_public_entity,
@@ -45,12 +46,18 @@ from app.services.public_v1 import (
     get_public_relation,
     list_public_libraries,
     prepare_public_retrieval,
+    project_public_retrieval_metrics,
     public_answer_records,
     public_library,
     recheck_public_scope,
     search_public_entities,
     search_public_relations,
     validate_public_scope,
+)
+from app.services.organization_authorization import credential_organization_scope
+from app.services.public_api_operations_contracts import (
+    PublicEndpointKey,
+    PublicOperationContext,
 )
 from app.services.public_v1_contracts import (
     PublicAPIError,
@@ -72,6 +79,7 @@ _ERROR_RESPONSES = {
         404: "The capability or resource was not found.",
         409: "The selected Libraries are incompatible.",
         422: "The request does not match the public v1 contract.",
+        429: "The public API request limit was reached.",
         500: "The request could not be completed.",
         502: "An upstream knowledge service failed.",
         503: "The knowledge service is temporarily unavailable.",
@@ -91,6 +99,47 @@ def require_public_api_v1_enabled() -> None:
         raise PublicAPIError("not_found", status_code=404)
 
 
+def public_operation_dependency(
+    endpoint_key: PublicEndpointKey,
+    *,
+    is_stream: bool = False,
+):
+    async def bind_operation_context(
+        request: Request,
+        user: User = Depends(current_active_user),
+    ) -> PublicOperationContext | None:
+        if not settings.public_api_operations_enabled:
+            return None
+        credential_scope = credential_organization_scope(user)
+        context = PublicOperationContext(
+            request_id=public_request_id(request),
+            endpoint_key=endpoint_key,
+            http_method=request.method,
+            user_id=user.id,
+            api_key_id=(
+                credential_scope.api_key_id
+                if credential_scope is not None
+                else None
+            ),
+            is_stream=is_stream,
+        )
+        request.state.public_operation_context = context
+        return context
+
+    bind_operation_context.public_endpoint_key = endpoint_key
+    return bind_operation_context
+
+
+def _operation_kwargs(
+    operation_context: PublicOperationContext | None,
+) -> dict[str, PublicOperationContext]:
+    return (
+        {"operation_context": operation_context}
+        if operation_context is not None
+        else {}
+    )
+
+
 def _sse(event: str, payload) -> str:
     data = json.dumps(
         payload.model_dump(mode="json"),
@@ -105,6 +154,7 @@ async def _public_answer_events(
     request_id: str,
     query: str,
     prepared,
+    operation_context: PublicOperationContext | None = None,
 ) -> AsyncIterator[str]:
     yield _sse(
         "meta",
@@ -117,6 +167,13 @@ async def _public_answer_events(
                 "delta",
                 PublicStreamDeltaRead(request_id=request_id, text=delta),
             )
+        project_public_retrieval_metrics(
+            operation_context,
+            prepared,
+            used_records=(),
+        )
+        if operation_context is not None:
+            operation_context.stream_outcome = "completed"
         yield _sse(
             "result",
             build_public_answer_response(
@@ -142,7 +199,14 @@ async def _public_answer_events(
             base_url=settings.chat_base_url,
             model=settings.chat_model,
             api_key=settings.chat_api_key,
-            timeout=settings.chat_timeout_seconds,
+            timeout=(
+                min(
+                    settings.chat_timeout_seconds,
+                    settings.public_api_answer_max_seconds,
+                )
+                if operation_context is not None
+                else settings.chat_timeout_seconds
+            ),
             temperature=settings.chat_temperature,
             max_context_chars=settings.chat_max_context_chars,
         )
@@ -158,6 +222,13 @@ async def _public_answer_events(
                 )
         if not answer_parts:
             raise PublicAPIError("upstream_failed", status_code=502)
+        project_public_retrieval_metrics(
+            operation_context,
+            prepared,
+            used_records=used_records,
+        )
+        if operation_context is not None:
+            operation_context.stream_outcome = "completed"
         yield _sse(
             "result",
             build_public_answer_response(
@@ -168,8 +239,13 @@ async def _public_answer_events(
             ),
         )
     except asyncio.CancelledError:
+        if operation_context is not None:
+            operation_context.stream_outcome = "cancelled"
         raise
     except chat_answer.ChatError:
+        if operation_context is not None:
+            operation_context.stream_outcome = "failed"
+            operation_context.stream_error_code = "upstream_failed"
         yield _sse(
             "error",
             public_error_envelope(
@@ -178,8 +254,14 @@ async def _public_answer_events(
             ),
         )
     except PublicAPIError as exc:
+        if operation_context is not None:
+            operation_context.stream_outcome = "failed"
+            operation_context.stream_error_code = exc.code
         yield _sse("error", public_error_envelope(request_id, exc))
     except Exception:  # noqa: BLE001
+        if operation_context is not None:
+            operation_context.stream_outcome = "failed"
+            operation_context.stream_error_code = "internal_error"
         yield _sse(
             "error",
             public_error_envelope(
@@ -200,15 +282,24 @@ async def _checked_public_answer_events(
     request_id: str,
     query: str,
     prepared,
+    operation_context: PublicOperationContext | None = None,
 ) -> AsyncIterator[str]:
     try:
         await recheck_public_scope(db, user=user, prepared=prepared)
     except asyncio.CancelledError:
+        if operation_context is not None:
+            operation_context.stream_outcome = "cancelled"
         raise
     except PublicAPIError as exc:
+        if operation_context is not None:
+            operation_context.stream_outcome = "failed"
+            operation_context.stream_error_code = exc.code
         yield _sse("error", public_error_envelope(request_id, exc))
         return
     except Exception:  # noqa: BLE001
+        if operation_context is not None:
+            operation_context.stream_outcome = "failed"
+            operation_context.stream_error_code = "internal_error"
         yield _sse(
             "error",
             public_error_envelope(
@@ -217,12 +308,33 @@ async def _checked_public_answer_events(
             ),
         )
         return
-    async for event in _public_answer_events(
-        request_id=request_id,
-        query=query,
-        prepared=prepared,
-    ):
-        yield event
+    if operation_context is None:
+        async for event in _public_answer_events(
+            request_id=request_id,
+            query=query,
+            prepared=prepared,
+        ):
+            yield event
+        return
+    try:
+        async with asyncio.timeout(settings.public_api_answer_max_seconds):
+            async for event in _public_answer_events(
+                request_id=request_id,
+                query=query,
+                prepared=prepared,
+                operation_context=operation_context,
+            ):
+                yield event
+    except TimeoutError:
+        operation_context.stream_outcome = "failed"
+        operation_context.stream_error_code = "upstream_failed"
+        yield _sse(
+            "error",
+            public_error_envelope(
+                request_id,
+                PublicAPIError("upstream_failed", status_code=502),
+            ),
+        )
 
 
 @router.get("/libraries", response_model=PublicLibrariesResponse)
@@ -231,8 +343,15 @@ async def public_libraries(
     _: None = Depends(require_public_api_v1_enabled),
     user: User = Depends(current_active_user),
     db: AsyncSession = Depends(get_db),
+    operation_context: PublicOperationContext | None = Depends(
+        public_operation_dependency("libraries.list")
+    ),
 ) -> PublicLibrariesResponse:
-    libraries, truncated = await list_public_libraries(db, user=user)
+    libraries, truncated = await list_public_libraries(
+        db,
+        user=user,
+        **_operation_kwargs(operation_context),
+    )
     return PublicLibrariesResponse(
         request_id=public_request_id(request),
         libraries=[public_library(row) for row in libraries],
@@ -247,12 +366,16 @@ async def public_scope_validation(
     _: None = Depends(require_public_api_v1_enabled),
     user: User = Depends(current_active_user),
     db: AsyncSession = Depends(get_db),
+    operation_context: PublicOperationContext | None = Depends(
+        public_operation_dependency("scopes.validate")
+    ),
 ) -> PublicScopeValidationResponse:
     scope, compatibility = await validate_public_scope(
         db,
         user=user,
         selection=body.scope,
         channels=tuple(body.channels),
+        **_operation_kwargs(operation_context),
     )
     return PublicScopeValidationResponse(
         request_id=public_request_id(request),
@@ -272,6 +395,9 @@ async def public_document(
     _: None = Depends(require_public_api_v1_enabled),
     user: User = Depends(current_active_user),
     db: AsyncSession = Depends(get_db),
+    operation_context: PublicOperationContext | None = Depends(
+        public_operation_dependency("documents.get")
+    ),
 ) -> PublicDocumentResponse:
     return await get_public_document(
         db,
@@ -279,6 +405,7 @@ async def public_document(
         slug=slug,
         document_id=document_id,
         request_id=public_request_id(request),
+        **_operation_kwargs(operation_context),
     )
 
 
@@ -293,6 +420,9 @@ async def public_entity(
     _: None = Depends(require_public_api_v1_enabled),
     user: User = Depends(current_active_user),
     db: AsyncSession = Depends(get_db),
+    operation_context: PublicOperationContext | None = Depends(
+        public_operation_dependency("entities.get")
+    ),
 ) -> PublicEntityResponse:
     return await get_public_entity(
         db,
@@ -300,6 +430,7 @@ async def public_entity(
         slug=slug,
         entity_id=entity_id,
         request_id=public_request_id(request),
+        **_operation_kwargs(operation_context),
     )
 
 
@@ -314,6 +445,9 @@ async def public_relation(
     _: None = Depends(require_public_api_v1_enabled),
     user: User = Depends(current_active_user),
     db: AsyncSession = Depends(get_db),
+    operation_context: PublicOperationContext | None = Depends(
+        public_operation_dependency("relations.get")
+    ),
 ) -> PublicRelationResponse:
     return await get_public_relation(
         db,
@@ -321,6 +455,7 @@ async def public_relation(
         slug=slug,
         relation_id=relation_id,
         request_id=public_request_id(request),
+        **_operation_kwargs(operation_context),
     )
 
 
@@ -335,6 +470,9 @@ async def public_evidence(
     _: None = Depends(require_public_api_v1_enabled),
     user: User = Depends(current_active_user),
     db: AsyncSession = Depends(get_db),
+    operation_context: PublicOperationContext | None = Depends(
+        public_operation_dependency("evidence.get")
+    ),
 ) -> PublicEvidenceResponse:
     return await get_public_evidence(
         db,
@@ -342,6 +480,7 @@ async def public_evidence(
         slug=slug,
         evidence_id=evidence_id,
         request_id=public_request_id(request),
+        **_operation_kwargs(operation_context),
     )
 
 
@@ -352,8 +491,16 @@ async def public_entity_search(
     _: None = Depends(require_public_api_v1_enabled),
     user: User = Depends(current_active_user),
     db: AsyncSession = Depends(get_db),
+    operation_context: PublicOperationContext | None = Depends(
+        public_operation_dependency("entities.search")
+    ),
 ) -> PublicEntitySearchResponse:
-    scope, page = await search_public_entities(db, user=user, body=body)
+    scope, page = await search_public_entities(
+        db,
+        user=user,
+        body=body,
+        **_operation_kwargs(operation_context),
+    )
     return PublicEntitySearchResponse(
         request_id=public_request_id(request),
         scope=scope.as_read(),
@@ -369,8 +516,16 @@ async def public_relation_search(
     _: None = Depends(require_public_api_v1_enabled),
     user: User = Depends(current_active_user),
     db: AsyncSession = Depends(get_db),
+    operation_context: PublicOperationContext | None = Depends(
+        public_operation_dependency("relations.search")
+    ),
 ) -> PublicRelationSearchResponse:
-    scope, page = await search_public_relations(db, user=user, body=body)
+    scope, page = await search_public_relations(
+        db,
+        user=user,
+        body=body,
+        **_operation_kwargs(operation_context),
+    )
     return PublicRelationSearchResponse(
         request_id=public_request_id(request),
         scope=scope.as_read(),
@@ -386,8 +541,16 @@ async def public_retrieval(
     _: None = Depends(require_public_api_v1_enabled),
     user: User = Depends(current_active_user),
     db: AsyncSession = Depends(get_db),
+    operation_context: PublicOperationContext | None = Depends(
+        public_operation_dependency("retrieval.search")
+    ),
 ) -> PublicRetrievalResponse:
-    prepared = await prepare_public_retrieval(db, user=user, body=body)
+    prepared = await prepare_public_retrieval(
+        db,
+        user=user,
+        body=body,
+        **_operation_kwargs(operation_context),
+    )
     return build_public_retrieval_response(public_request_id(request), prepared)
 
 
@@ -398,12 +561,16 @@ async def public_answer(
     _: None = Depends(require_public_api_v1_enabled),
     user: User = Depends(current_active_user),
     db: AsyncSession = Depends(get_db),
+    operation_context: PublicOperationContext | None = Depends(
+        public_operation_dependency("answers.create")
+    ),
 ) -> PublicAnswerResponse:
     return await generate_public_answer(
         db,
         user=user,
         body=body,
         request_id=public_request_id(request),
+        **_operation_kwargs(operation_context),
     )
 
 
@@ -437,9 +604,17 @@ async def public_answer_stream(
     _: None = Depends(require_public_api_v1_enabled),
     user: User = Depends(current_active_user),
     db: AsyncSession = Depends(get_db),
+    operation_context: PublicOperationContext | None = Depends(
+        public_operation_dependency("answers.stream", is_stream=True)
+    ),
 ) -> StreamingResponse:
     request_id = public_request_id(request)
-    prepared = await prepare_public_retrieval(db, user=user, body=body)
+    prepared = await prepare_public_retrieval(
+        db,
+        user=user,
+        body=body,
+        **_operation_kwargs(operation_context),
+    )
     await recheck_public_scope(db, user=user, prepared=prepared)
     if prepared.records and (
         not settings.chat_enabled
@@ -447,6 +622,8 @@ async def public_answer_stream(
         or not settings.chat_model
     ):
         raise PublicAPIError("answer_unavailable", status_code=503)
+    if prepared.records:
+        await acquire_public_answer_capacity(prepared, operation_context)
     return StreamingResponse(
         _checked_public_answer_events(
             db=db,
@@ -454,6 +631,7 @@ async def public_answer_stream(
             request_id=request_id,
             query=body.query,
             prepared=prepared,
+            operation_context=operation_context,
         ),
         media_type="text/event-stream",
         headers={

@@ -106,7 +106,11 @@ class APIKeyStrategy(Strategy[User, uuid.UUID]):
                 user_uuid = candidate.user_id
                 user = await user_manager.get(user_uuid)
                 if settings.organization_authorization_enabled:
-                    bind_credential_organization(user, candidate.organization_id)
+                    bind_credential_organization(
+                        user,
+                        candidate.organization_id,
+                        candidate.id,
+                    )
                 return user
             except Exception:  # noqa: BLE001
                 log.warning("api key matched but user lookup failed")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import uuid
@@ -9,13 +10,18 @@ from fastapi import HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from app.schemas.public_v1 import (
     PublicErrorDetailRead,
     PublicErrorEnvelope,
     PublicErrorRead,
 )
+from app.services.public_api_operations import (
+    record_public_operation,
+    release_public_answer_lease,
+)
+from app.services.public_api_operations_contracts import PublicOperationContext
 
 
 log = logging.getLogger(__name__)
@@ -32,6 +38,7 @@ ERROR_MESSAGES = {
     "service_unavailable": "The knowledge service is temporarily unavailable.",
     "answer_unavailable": "The answer service is temporarily unavailable.",
     "upstream_failed": "An upstream knowledge service failed.",
+    "rate_limited": "The public API request limit was reached.",
     "internal_error": "The request could not be completed.",
 }
 
@@ -43,10 +50,21 @@ class PublicAPIError(RuntimeError):
         *,
         status_code: int,
         details: tuple[tuple[str, tuple[str, ...]], ...] = (),
+        retry_after_seconds: int | None = None,
     ) -> None:
         self.code = code if code in ERROR_MESSAGES else "internal_error"
         self.status_code = status_code
         self.details = _sanitize_details(details)
+        retry_after_valid = (
+            isinstance(retry_after_seconds, int)
+            and not isinstance(retry_after_seconds, bool)
+            and 1 <= retry_after_seconds <= 7_200
+        )
+        self.retry_after_seconds = (
+            retry_after_seconds
+            if retry_after_valid
+            else (1 if self.code == "rate_limited" else None)
+        )
         super().__init__(ERROR_MESSAGES[self.code])
 
 
@@ -91,10 +109,13 @@ def public_error_envelope(request_id: str, error: PublicAPIError) -> PublicError
 
 
 def public_error_response(request_id: str, error: PublicAPIError) -> JSONResponse:
+    headers = {"X-Request-Id": request_id}
+    if error.code == "rate_limited" and error.retry_after_seconds is not None:
+        headers["Retry-After"] = str(error.retry_after_seconds)
     return JSONResponse(
         status_code=error.status_code,
         content=public_error_envelope(request_id, error).model_dump(mode="json"),
-        headers={"X-Request-Id": request_id},
+        headers=headers,
     )
 
 
@@ -105,11 +126,84 @@ def _http_error(error: HTTPException) -> PublicAPIError:
         404: "resource_not_found",
         409: "scope_incompatible",
         422: "request_invalid",
+        429: "rate_limited",
         502: "upstream_failed",
         503: "service_unavailable",
     }.get(error.status_code, "internal_error")
     status_code = error.status_code if code != "internal_error" else 500
     return PublicAPIError(code, status_code=status_code)
+
+
+def public_operation_context(request: Request) -> PublicOperationContext | None:
+    value = getattr(request.state, "public_operation_context", None)
+    return value if isinstance(value, PublicOperationContext) else None
+
+
+async def finalize_public_operation(
+    request: Request,
+    *,
+    http_status: int,
+    outcome: str,
+    error_code: str | None = None,
+) -> None:
+    context = public_operation_context(request)
+    if context is None or context.finalized:
+        return
+    context.finalized = True
+    if context.answer_lease is not None:
+        await release_public_answer_lease(context.request_id)
+    try:
+        record = context.terminal_record(
+            http_status=http_status,
+            outcome=outcome,
+            error_code=error_code,
+        )
+        await record_public_operation(record)
+    except Exception:  # noqa: BLE001
+        log.warning(
+            "public API operation finalization failed: request_id=%s "
+            "failure_code=finalize_failed",
+            context.request_id,
+        )
+
+
+def wrap_public_streaming_response(
+    request: Request,
+    response: StreamingResponse,
+) -> StreamingResponse:
+    context = public_operation_context(request)
+    if context is None:
+        return response
+    body_iterator = response.body_iterator
+
+    async def wrapped_iterator():
+        try:
+            async for chunk in body_iterator:
+                yield chunk
+        except asyncio.CancelledError:
+            context.stream_outcome = "cancelled"
+            raise
+        except Exception:  # noqa: BLE001
+            context.stream_outcome = "failed"
+            context.stream_error_code = "internal_error"
+            raise
+        finally:
+            outcome = context.stream_outcome or "disconnected"
+            finalizer = asyncio.create_task(
+                finalize_public_operation(
+                    request,
+                    http_status=response.status_code,
+                    outcome=outcome,
+                    error_code=context.stream_error_code,
+                )
+            )
+            try:
+                await asyncio.shield(finalizer)
+            except asyncio.CancelledError:
+                await finalizer
+
+    response.body_iterator = wrapped_iterator()
+    return response
 
 
 class PublicV1Route(APIRoute):
@@ -122,25 +216,72 @@ class PublicV1Route(APIRoute):
             try:
                 response = await original(request)
             except PublicAPIError as exc:
-                return public_error_response(request_id, exc)
-            except RequestValidationError:
-                return public_error_response(
-                    request_id,
-                    PublicAPIError("request_invalid", status_code=422),
+                response = public_error_response(request_id, exc)
+                await finalize_public_operation(
+                    request,
+                    http_status=exc.status_code,
+                    outcome="failed",
+                    error_code=exc.code,
                 )
+                return response
+            except RequestValidationError:
+                error = PublicAPIError("request_invalid", status_code=422)
+                response = public_error_response(
+                    request_id,
+                    error,
+                )
+                await finalize_public_operation(
+                    request,
+                    http_status=422,
+                    outcome="failed",
+                    error_code=error.code,
+                )
+                return response
             except HTTPException as exc:
-                return public_error_response(request_id, _http_error(exc))
+                error = _http_error(exc)
+                response = public_error_response(request_id, error)
+                await finalize_public_operation(
+                    request,
+                    http_status=error.status_code,
+                    outcome="failed",
+                    error_code=error.code,
+                )
+                return response
+            except asyncio.CancelledError:
+                await asyncio.shield(
+                    finalize_public_operation(
+                        request,
+                        http_status=499,
+                        outcome="cancelled",
+                    )
+                )
+                raise
             except Exception:  # noqa: BLE001
                 log.error(
                     "public v1 request failed: request_id=%s path=%s",
                     request_id,
                     request.url.path,
                 )
-                return public_error_response(
+                error = PublicAPIError("internal_error", status_code=500)
+                response = public_error_response(
                     request_id,
-                    PublicAPIError("internal_error", status_code=500),
+                    error,
                 )
+                await finalize_public_operation(
+                    request,
+                    http_status=500,
+                    outcome="failed",
+                    error_code=error.code,
+                )
+                return response
             response.headers["X-Request-Id"] = request_id
+            if isinstance(response, StreamingResponse):
+                return wrap_public_streaming_response(request, response)
+            await finalize_public_operation(
+                request,
+                http_status=response.status_code,
+                outcome="completed" if response.status_code < 400 else "failed",
+            )
             return response
 
         return route_handler

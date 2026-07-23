@@ -61,6 +61,11 @@ from app.models.migration_backfill_state import MigrationBackfillState
 from app.models.ontology_version import OntologyVersion
 from app.models.organization import Organization
 from app.models.organization_membership import OrganizationMembership
+from app.models.public_api_operations import (
+    PublicAPIAnswerLease,
+    PublicAPIRateWindow,
+    PublicAPIRequestRecord,
+)
 from app.models.rebuild_operation import RebuildOperation
 from app.models.revision_retention import RevisionRetentionRecord
 from app.models.revision_purge_operation import RevisionPurgeOperation
@@ -132,6 +137,9 @@ __all__ = [
     "OntologyVersion",
     "Organization",
     "OrganizationMembership",
+    "PublicAPIAnswerLease",
+    "PublicAPIRateWindow",
+    "PublicAPIRequestRecord",
     "RebuildOperation",
     "RevisionRetentionRecord",
     "RevisionPurgeOperation",

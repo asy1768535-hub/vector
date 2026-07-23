@@ -398,6 +398,20 @@ class Settings(BaseSettings):
     # ---- v0.9 Public Read API v1 (default fail closed) ----
     public_api_v1_enabled: bool = False
 
+    # ---- v0.9 Public API operational controls (default inert) ----
+    public_api_operations_enabled: bool = False
+    public_api_limits_enabled: bool = False
+    public_api_limit_private_organizations: bool = False
+    public_api_organization_requests_per_minute: int = 600
+    public_api_api_key_requests_per_minute: int = 120
+    public_api_organization_concurrent_answers: int = 20
+    public_api_api_key_concurrent_answers: int = 4
+    public_api_answer_max_seconds: int = 300
+    public_api_answer_lease_seconds: int = 330
+    public_api_request_retention_days: int = 30
+    public_api_cleanup_batch_size: int = 1000
+    public_api_cleanup_interval_seconds: int = 3600
+
     # ---- v0.5 Active Graph Publication (M1 defaults; fail closed) ----
     graph_publication_enabled: bool = False
     graph_publication_require_entity_evidence: bool = True
@@ -728,6 +742,68 @@ def validate_public_api_v1_startup(config: Settings) -> None:
             "[security] Public API v1 requires Organization authorization, "
             "cross-Library compatibility, personal scopes, federated retrieval, "
             "Knowledge Catalog, and Graph Catalog"
+        )
+
+
+def validate_public_api_operations_startup(config: Settings) -> None:
+    rate_limits = (
+        config.public_api_organization_requests_per_minute,
+        config.public_api_api_key_requests_per_minute,
+    )
+    if any(value < 1 or value > 1_000_000 for value in rate_limits):
+        raise RuntimeError(
+            "[security] Public API request limits must be within 1..1000000"
+        )
+    concurrent_limits = (
+        config.public_api_organization_concurrent_answers,
+        config.public_api_api_key_concurrent_answers,
+    )
+    if any(value < 1 or value > 10_000 for value in concurrent_limits):
+        raise RuntimeError(
+            "[security] Public API concurrent answer limits must be within 1..10000"
+        )
+    if not 1 <= config.public_api_answer_max_seconds <= 3_600:
+        raise RuntimeError(
+            "[security] Public API answer timeout must be within 1..3600 seconds"
+        )
+    if not (
+        config.public_api_answer_max_seconds + 30
+        <= config.public_api_answer_lease_seconds
+        <= 7_200
+    ):
+        raise RuntimeError(
+            "[security] Public API answer lease must exceed the timeout by at least 30 "
+            "seconds and be at most 7200 seconds"
+        )
+    if not 1 <= config.public_api_request_retention_days <= 3_650:
+        raise RuntimeError(
+            "[security] Public API request retention must be within 1..3650 days"
+        )
+    if not 1 <= config.public_api_cleanup_batch_size <= 10_000:
+        raise RuntimeError(
+            "[security] Public API cleanup batch size must be within 1..10000"
+        )
+    if not 60 <= config.public_api_cleanup_interval_seconds <= 86_400:
+        raise RuntimeError(
+            "[security] Public API cleanup interval must be within 60..86400 seconds"
+        )
+    if config.public_api_operations_enabled and not (
+        config.public_api_v1_enabled and config.organization_authorization_enabled
+    ):
+        raise RuntimeError(
+            "[security] Public API operations require Public API v1 and Organization "
+            "authorization"
+        )
+    if config.public_api_limits_enabled and not config.public_api_operations_enabled:
+        raise RuntimeError(
+            "[security] Public API limits require Public API operations"
+        )
+    if (
+        config.public_api_limit_private_organizations
+        and not config.public_api_limits_enabled
+    ):
+        raise RuntimeError(
+            "[security] Private Organization limits require Public API limits"
         )
 
 

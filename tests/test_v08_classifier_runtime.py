@@ -232,7 +232,7 @@ def test_0036_orm_migration_and_offline_sql_are_reversible():
         if isinstance(item, CheckConstraint)
     }
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_heads() == ["0039"]
+    assert script.get_heads() == ["0040"]
     assert script.get_revision("0036").down_revision == "0035"
     upgrade = _offline("upgrade", "0035:0036")
     downgrade = _offline("downgrade", "0036:0035")

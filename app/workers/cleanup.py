@@ -15,6 +15,7 @@ import os
 import random
 import socket
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select, text, update
@@ -26,10 +27,12 @@ from app.config import (
     validate_revision_cleanup_startup,
     validate_revision_file_storage_startup,
     validate_revision_retention_startup,
+    validate_public_api_operations_startup,
 )
 from app.db import async_session_factory
 from app.models.cleanup_outbox import CleanupOutbox
 from app.services import cleanup as cleanup_service
+from app.services import public_api_operations as public_api_operations_service
 
 logging.basicConfig(
     level=logging.INFO,
@@ -138,6 +141,42 @@ async def _process(db: AsyncSession, row: CleanupOutbox) -> None:
         await db.commit()
 
 
+async def _run_public_api_operations_maintenance_if_due(
+    *,
+    watch: bool,
+    last_run_monotonic: float | None,
+    current_monotonic: float,
+) -> float | None:
+    if not settings.public_api_operations_enabled:
+        return last_run_monotonic
+    if last_run_monotonic is not None and (
+        not watch
+        or current_monotonic - last_run_monotonic
+        < settings.public_api_cleanup_interval_seconds
+    ):
+        return last_run_monotonic
+    try:
+        async with async_session_factory() as operations_session:
+            async with operations_session.begin():
+                result = await (
+                    public_api_operations_service.run_public_api_operations_maintenance(
+                        operations_session,
+                    )
+                )
+        log.info(
+            "public API operations maintenance: request_records=%s "
+            "rate_windows=%s answer_leases=%s",
+            result.request_records_deleted,
+            result.rate_windows_deleted,
+            result.answer_leases_deleted,
+        )
+    except Exception:  # noqa: BLE001
+        log.warning(
+            "public API operations maintenance failed: failure_code=maintenance_failed"
+        )
+    return current_monotonic
+
+
 async def run(watch: bool) -> None:
     worker_id = _worker_id()
     log.info("starting cleanup worker id=%s watch=%s", worker_id, watch)
@@ -150,6 +189,7 @@ async def run(watch: bool) -> None:
         hostname=heartbeat.HOSTNAME, pid=heartbeat.PID, started_at=heartbeat.STARTED_AT,
         stop_event=hb_stop, metadata_provider=lambda: {"watch": watch},
     ))
+    public_api_maintenance_last_run: float | None = None
 
     async def _stop_heartbeat() -> None:
         hb_stop.set()
@@ -164,6 +204,14 @@ async def run(watch: bool) -> None:
     while True:
         from app.services.graph_extraction_purge import (
             purge_expired_graph_extraction_payloads,
+        )
+
+        public_api_maintenance_last_run = (
+            await _run_public_api_operations_maintenance_if_due(
+                watch=watch,
+                last_run_monotonic=public_api_maintenance_last_run,
+                current_monotonic=time.monotonic(),
+            )
         )
 
         if settings.revision_retention_enabled:
@@ -295,6 +343,7 @@ def main() -> None:
     validate_revision_file_storage_startup(settings)
     validate_revision_cleanup_startup(settings)
     validate_revision_coordinated_purge_startup(settings)
+    validate_public_api_operations_startup(settings)
     try:
         asyncio.run(run(watch=args.watch))
     except KeyboardInterrupt:

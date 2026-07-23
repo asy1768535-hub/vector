@@ -1,5 +1,8 @@
 # Public Read API v1
 
+Operational recording, request limits, answer leases, retention, and rollback are
+documented in [Public API operations](./public-api-operations.md).
+
 `/api/v1` 是面向内部应用和客户集成的只读知识接口。它复用现有知识库权限、
 跨库兼容性、文档目录、知识图谱、联邦检索和问答服务，不建立第二套知识数据。
 
