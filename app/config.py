@@ -395,6 +395,9 @@ class Settings(BaseSettings):
     # ---- v0.9 Schema Lifecycle Console (default fail closed) ----
     schema_lifecycle_enabled: bool = False
 
+    # ---- v0.9 Public Read API v1 (default fail closed) ----
+    public_api_v1_enabled: bool = False
+
     # ---- v0.5 Active Graph Publication (M1 defaults; fail closed) ----
     graph_publication_enabled: bool = False
     graph_publication_require_entity_evidence: bool = True
@@ -706,6 +709,25 @@ def validate_schema_lifecycle_startup(config: Settings) -> None:
     if config.schema_lifecycle_enabled and not config.organization_authorization_enabled:
         raise RuntimeError(
             "[security] Schema lifecycle requires Organization authorization"
+        )
+
+
+def validate_public_api_v1_startup(config: Settings) -> None:
+    if not config.public_api_v1_enabled:
+        return
+    dependencies = (
+        config.organization_authorization_enabled,
+        config.cross_library_compatibility_enabled,
+        config.personal_library_scopes_enabled,
+        config.federated_retrieval_enabled,
+        config.knowledge_catalog_enabled,
+        config.graph_catalog_enabled,
+    )
+    if not all(dependencies):
+        raise RuntimeError(
+            "[security] Public API v1 requires Organization authorization, "
+            "cross-Library compatibility, personal scopes, federated retrieval, "
+            "Knowledge Catalog, and Graph Catalog"
         )
 
 
