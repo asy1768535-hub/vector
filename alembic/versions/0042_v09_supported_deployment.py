@@ -56,4 +56,3 @@ def downgrade() -> None:
         table_name="organization_capability_rollouts",
     )
     op.drop_table("organization_capability_rollouts")
-
