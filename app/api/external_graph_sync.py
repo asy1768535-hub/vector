@@ -37,6 +37,10 @@ from app.services.organization_authorization import (
     resolve_loaded_library_access,
     resolve_loaded_library_management,
 )
+from app.services.organization_rollouts import (
+    OrganizationRolloutError,
+    require_rollout_enabled,
+)
 
 router = APIRouter(
     prefix="/libraries/{slug}/external-graph-sync",
@@ -60,6 +64,14 @@ async def _context(
     library = await deps_module.load_active_library(slug, db)
     if library is None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden")
+    try:
+        await require_rollout_enabled(
+            db,
+            organization_id=library.organization_id,
+            capability="external_graph_sync",
+        )
+    except OrganizationRolloutError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "not found") from exc
     return ExternalGraphSyncContext(user, library)
 
 

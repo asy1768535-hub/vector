@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi_users.exceptions import InvalidPasswordException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.backend import current_cookie_user
+from app.auth.backend import current_cookie_user, current_superuser
 from app.auth.user_manager import UserManager, get_user_manager
 from app.config import settings
 from app.db import get_db
@@ -19,6 +19,8 @@ from app.schemas.organizations import (
     OrganizationPermissionGrant,
     OrganizationPermissionRead,
     OrganizationPermissionRevoke,
+    OrganizationRolloutRead,
+    OrganizationRolloutUpdate,
     UserOrganizationRead,
 )
 from app.schemas.users import UserCreate
@@ -43,6 +45,11 @@ from app.services.organization_permissions import (
     grant_organization_permissions,
     list_organization_user_permissions,
     revoke_organization_permissions,
+)
+from app.services.organization_rollouts import (
+    OrganizationRolloutError,
+    list_rollouts,
+    set_rollout,
 )
 
 
@@ -104,6 +111,14 @@ def _permission_http_error(exc: OrganizationPermissionError) -> HTTPException:
     return HTTPException(status.HTTP_400_BAD_REQUEST, exc.code)
 
 
+def _rollout_http_error(exc: OrganizationRolloutError) -> HTTPException:
+    if exc.code == "organization_not_found":
+        return HTTPException(status.HTTP_404_NOT_FOUND, "not found")
+    if exc.code == "rollout_version_conflict":
+        return HTTPException(status.HTTP_409_CONFLICT, exc.code)
+    return HTTPException(status.HTTP_400_BAD_REQUEST, exc.code)
+
+
 def _member_read(result: OrganizationAccountResult) -> OrganizationMemberRead:
     return OrganizationMemberRead(
         membership_id=result.membership.id,
@@ -137,6 +152,53 @@ async def my_organizations(
         )
         for row in rows
     ]
+
+
+@router.get(
+    "/organizations/{organization_id}/rollouts",
+    response_model=list[OrganizationRolloutRead],
+)
+async def organization_rollouts(
+    organization_id: uuid.UUID,
+    _: OrganizationAdminContext = Depends(require_organization_admin),
+    db: AsyncSession = Depends(get_db),
+) -> list[OrganizationRolloutRead]:
+    try:
+        rows = await list_rollouts(db, organization_id)
+    except OrganizationRolloutError as exc:
+        raise _rollout_http_error(exc) from exc
+    return [OrganizationRolloutRead.model_validate(row, from_attributes=True) for row in rows]
+
+
+@router.put(
+    "/organizations/{organization_id}/rollouts/{capability}",
+    response_model=OrganizationRolloutRead,
+)
+async def update_organization_rollout(
+    organization_id: uuid.UUID,
+    capability: str,
+    body: OrganizationRolloutUpdate,
+    actor: User = Depends(current_superuser),
+    db: AsyncSession = Depends(get_db),
+) -> OrganizationRolloutRead:
+    _require_runtime()
+    try:
+        row = await set_rollout(
+            db,
+            organization_id=organization_id,
+            capability=capability,
+            enabled=body.enabled,
+            expected_version=body.expected_version,
+            actor_user_id=actor.id,
+        )
+        await db.commit()
+    except OrganizationRolloutError as exc:
+        await db.rollback()
+        raise _rollout_http_error(exc) from exc
+    except Exception:
+        await db.rollback()
+        raise
+    return OrganizationRolloutRead.model_validate(row, from_attributes=True)
 
 
 @router.get(

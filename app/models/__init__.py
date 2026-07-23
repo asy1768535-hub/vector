@@ -66,6 +66,7 @@ from app.models.library_faq import LibraryFAQQuestion
 from app.models.migration_backfill_state import MigrationBackfillState
 from app.models.ontology_version import OntologyVersion
 from app.models.organization import Organization
+from app.models.organization_capability_rollout import OrganizationCapabilityRollout
 from app.models.organization_membership import OrganizationMembership
 from app.models.public_api_operations import (
     PublicAPIAnswerLease,
@@ -146,6 +147,7 @@ __all__ = [
     "MigrationBackfillState",
     "OntologyVersion",
     "Organization",
+    "OrganizationCapabilityRollout",
     "OrganizationMembership",
     "PublicAPIAnswerLease",
     "PublicAPIRateWindow",

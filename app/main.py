@@ -70,6 +70,7 @@ from app.config import (
     validate_schema_lifecycle_startup,
     validate_public_api_v1_startup,
     validate_public_api_operations_startup,
+    validate_supported_deployment_startup,
     validate_knowledge_artifact_startup,
     validate_library_compatibility_startup,
     validate_personal_library_scopes_startup,
@@ -239,6 +240,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     """FastAPI lifespan：startup → yield → shutdown。"""
     # ── startup ──────────────────────────────────────────────
     # 安全前置校验：默认密钥等危险配置在启动时就拦下
+    validate_supported_deployment_startup(settings)
     assert_startup_security()
     assert_graph_extraction_startup_security()
     assert_knowledge_artifact_startup_security()

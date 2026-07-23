@@ -41,7 +41,7 @@ def _entity(**overrides):
 
 def test_0041_is_single_head_and_exactly_reversible() -> None:
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_heads() == ["0041"]
+    assert script.get_heads() == ["0042"]
     revision = script.get_revision("0041")
     assert revision is not None
     assert revision.down_revision == "0040"

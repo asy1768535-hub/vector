@@ -160,6 +160,26 @@ async def admit_public_scope(
     *,
     include_library_ids: bool = True,
 ) -> None:
+    from app.db import async_session_factory
+    from app.services.organization_rollouts import (
+        OrganizationRolloutError,
+        require_rollout_enabled,
+    )
+
+    capability = (
+        operation_context.rollout_capability
+        if operation_context is not None
+        else "public_api_v1"
+    )
+    try:
+        async with async_session_factory() as rollout_db:
+            await require_rollout_enabled(
+                rollout_db,
+                organization_id=scope.organization_id,
+                capability=capability,
+            )
+    except OrganizationRolloutError as exc:
+        raise PublicAPIError("not_found", status_code=404) from exc
     if operation_context is None:
         return
     library_ids = (
@@ -423,6 +443,28 @@ async def list_public_libraries(
     except OrganizationAuthorizationError as exc:
         raise PublicAPIError("scope_forbidden", status_code=403) from exc
     visible = tuple(rows[:MAX_PUBLIC_LIBRARIES])
+    if settings.deployment_profile != "development":
+        from app.services.organization_rollouts import (
+            OrganizationRolloutError,
+            require_rollout_enabled,
+        )
+
+        capability = (
+            operation_context.rollout_capability
+            if operation_context is not None
+            else "public_api_v1"
+        )
+        try:
+            for organization_id in dict.fromkeys(
+                row.organization_id for row in visible
+            ):
+                await require_rollout_enabled(
+                    db,
+                    organization_id=organization_id,
+                    capability=capability,
+                )
+        except OrganizationRolloutError as exc:
+            raise PublicAPIError("not_found", status_code=404) from exc
     if operation_context is not None and visible:
         organization_ids = tuple(
             dict.fromkeys(row.organization_id for row in visible)

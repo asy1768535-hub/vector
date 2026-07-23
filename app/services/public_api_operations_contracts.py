@@ -185,6 +185,7 @@ class PublicOperationContext:
     user_id: uuid.UUID
     api_key_id: uuid.UUID | None = None
     is_stream: bool = False
+    rollout_capability: Literal["public_api_v1", "mcp_adapter"] = "public_api_v1"
     started_at: datetime = field(default_factory=utc_now)
     started_monotonic: float = field(default_factory=time.monotonic)
     organization_ids: tuple[uuid.UUID, ...] = ()

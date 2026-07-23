@@ -89,7 +89,10 @@ class PublicV1Client:
             response = await self._http_client.request(
                 method,
                 f"{self._base_url}{path}",
-                headers={"Authorization": self._authorization},
+                headers={
+                    "Authorization": self._authorization,
+                    "X-Vector-KB-Client": "mcp-adapter",
+                },
                 json=json_body,
                 timeout=self._timeout,
                 follow_redirects=False,

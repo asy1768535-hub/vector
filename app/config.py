@@ -161,6 +161,8 @@ class Settings(BaseSettings):
     api_port: int = 8100
     app_debug: bool = False
     console_ui_dir: str = "admin-ui"
+    deployment_profile: str = "development"
+    readiness_dependency_timeout_seconds: float = 3.0
 
     # ---- Auth ----
     jwt_secret: str = Field(default="please-change-me-in-env", min_length=16)
@@ -829,6 +831,43 @@ def validate_public_api_operations_startup(config: Settings) -> None:
         raise RuntimeError(
             "[security] Private Organization limits require Public API limits"
         )
+
+
+def validate_supported_deployment_startup(config: Settings) -> None:
+    """Reject unsafe or ambiguous supported-deployment configuration."""
+    if config.deployment_profile not in {"development", "hosted", "private"}:
+        raise RuntimeError("[deployment] DEPLOYMENT_PROFILE must be development, hosted, or private")
+    if not 0.2 <= config.readiness_dependency_timeout_seconds <= 30:
+        raise RuntimeError("[deployment] readiness dependency timeout must be within 0.2..30 seconds")
+    if config.deployment_profile == "development":
+        return
+    if config.app_debug:
+        raise RuntimeError("[deployment] APP_DEBUG must be false in supported profiles")
+    if config.allow_public_registration:
+        raise RuntimeError("[deployment] public registration is forbidden in supported profiles")
+    if config.jwt_secret == "please-change-me-in-env":
+        raise RuntimeError("[deployment] a non-default JWT_SECRET is required")
+    if not config.db_password:
+        raise RuntimeError("[deployment] DB_PASSWORD is required")
+    if not config.cookie_secure:
+        raise RuntimeError("[deployment] COOKIE_SECURE must be true")
+    if not config.organization_authorization_enabled:
+        raise RuntimeError("[deployment] organization authorization must be enabled")
+    if config.public_api_v1_enabled and not config.public_api_operations_enabled:
+        raise RuntimeError("[deployment] public API operations must be enabled with public API v1")
+    if not config.revision_file_storage_enabled:
+        raise RuntimeError("[deployment] immutable revision file storage must be enabled")
+    if config.deployment_profile == "hosted" and config.document_storage_provider == "local":
+        raise RuntimeError("[deployment] hosted profile requires remote document storage")
+    for name, value in (
+        ("QDRANT_URL", config.qdrant_url),
+        ("EMBEDDING_BASE_URL", config.embedding_base_url),
+    ):
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise RuntimeError(f"[deployment] {name} is invalid")
+        if config.deployment_profile == "hosted" and parsed.scheme != "https":
+            raise RuntimeError(f"[deployment] hosted {name} must use HTTPS")
 
 
 def validate_revision_file_storage_startup(config: Settings) -> None:

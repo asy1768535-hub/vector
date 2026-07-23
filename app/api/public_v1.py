@@ -122,6 +122,11 @@ def public_operation_dependency(
                 else None
             ),
             is_stream=is_stream,
+            rollout_capability=(
+                "mcp_adapter"
+                if request.headers.get("X-Vector-KB-Client") == "mcp-adapter"
+                else "public_api_v1"
+            ),
         )
         request.state.public_operation_context = context
         return context

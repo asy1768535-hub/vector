@@ -85,3 +85,14 @@ class OrganizationPermissionRead(BaseModel):
     user_id: uuid.UUID
     library_slug: str
     actions: list[str]
+
+
+class OrganizationRolloutRead(BaseModel):
+    capability: str
+    enabled: bool
+    version: int
+
+
+class OrganizationRolloutUpdate(StrictBaseModel):
+    enabled: bool
+    expected_version: int = Field(ge=0)
