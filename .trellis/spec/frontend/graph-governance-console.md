@@ -1,21 +1,22 @@
 # Graph Governance Console Contracts
 
-## Scenario: Evidence-Grounded Graph Exploration And Governance
+## Scenario: Evidence-Grounded Graph Directory And Governance
 
 ### 1. Scope / Trigger
 
 Use this contract when changing `/knowledge-graph`, its Graph Catalog reads,
 governance commands, review queues, or Publication controls in `admin-ui/`.
 Documents and Knowledge Catalog remain the primary product entry points. The
-graph console is a secondary directory and governance workspace, not a graph
-canvas and not a second source-file experience.
+graph console is a secondary directory, bounded exploration, and governance
+workspace, not an unbounded graph canvas and not a second source-file
+experience.
 
 ### 2. Signatures
 
 Route and authorization:
 
 ```text
-/knowledge-graph?tab=entities|relations|review|publications
+/knowledge-graph?tab=entities|relations|review|publications|explore
                  &organization=<uuid>&libraries=<slug,slug>
                  &entity=<uuid>|relation=<uuid>
 
@@ -64,9 +65,10 @@ permission, response-identity, error, action-summary, and Publication helpers.
   Publications may start a dry-run/persistent rollback pair with one intent.
 - Every helper called by the view must be explicitly imported. Source-text
   tests must assert the import boundary, not only that a call token exists.
-- At `<=899px` columns stack. At `<=520px` controls wrap, tables scroll only
-  inside their shell, drawers remain within the viewport, and page-level
-  horizontal overflow is forbidden.
+- At `<=899px` columns stack. Existing directory/governance controls may wrap
+  at `<=520px`, but the `explore` tab is desktop-focused and must not add a
+  dedicated mobile layout. Tables scroll only inside their shell and
+  page-level horizontal overflow is forbidden.
 
 ### 4. Validation & Error Matrix
 
@@ -88,6 +90,8 @@ permission, response-identity, error, action-summary, and Publication helpers.
 
 - Good: a reader searches compatible Libraries, opens an Entity, and follows
   an exact Evidence locator back to the Catalog document.
+- Good: a reader selects exact Library-scoped seeds and inspects separate,
+  bounded one-hop or two-hop published graph groups.
 - Good: an administrator reviews staged changes, previews one exact action set,
   persists it with the same intent, then activates the returned Manifest.
 - Base: a Library has no current Publication or no pending actions; directories
@@ -95,8 +99,9 @@ permission, response-identity, error, action-summary, and Publication helpers.
 - Bad: deriving current parent from the first recent history row, retaining an
   Entity drawer after route normalization, or retrying a conflicted command is
   forbidden.
-- Bad: showing a graph canvas first, authoring Schema here, dumping action JSON,
-  or treating `is_superuser` as Organization authority is forbidden.
+- Bad: making a graph canvas the default, merging same-name Entities across
+  Libraries, authoring Schema here, dumping action JSON, or treating
+  `is_superuser` as Organization authority is forbidden.
 
 ### 6. Tests Required
 
@@ -105,7 +110,7 @@ permission, response-identity, error, action-summary, and Publication helpers.
   status labels, and fixed errors.
 - API tests assert exact paths, query/body allowlists, state/Manifest fences,
   and discarded caller extras.
-- View tests assert four tabs, independent sequences, imported helper names,
+- View tests assert five tabs, independent sequences, imported helper names,
   canonical-route invalidation order, no `v-html`/logging/storage fields, and
   no per-row detail fan-out.
 - Browser QA covers Entity, Relation, Review, Publication, preview, and detail

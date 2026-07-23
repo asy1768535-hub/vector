@@ -41,6 +41,7 @@ import {
     retreatGraphCursor,
 } from '../graph_governance_ui.js';
 import { store } from '../store.js';
+import GraphExplorer from '../components/GraphExplorer.js';
 
 const MALFORMED_ERROR = {
     kind: 'malformed',
@@ -85,6 +86,7 @@ function statusTag(value) {
 }
 
 export default {
+    components: { GraphExplorer },
     setup() {
         const route = useRoute();
         const router = useRouter();
@@ -180,6 +182,7 @@ export default {
             mutationKind: '',
         });
         const routeSeq = ref(0);
+        const explorerRefreshKey = ref(0);
         let entityRequestSeq = 0;
         let relationRequestSeq = 0;
         let entityDetailRequestSeq = 0;
@@ -239,6 +242,7 @@ export default {
         const workspaceLoading = computed(() => {
             if (scope.tab === 'review') return reviewQueues.loading;
             if (scope.tab === 'publications') return publications.loading;
+            if (scope.tab === 'explore') return false;
             return pageState.value.loading;
         });
 
@@ -659,6 +663,14 @@ export default {
             else if (scope.tab === 'publications') await loadPublicationWorkspace();
         }
 
+        async function refreshCurrentPage() {
+            if (scope.tab === 'explore') {
+                explorerRefreshKey.value += 1;
+                return;
+            }
+            await loadCurrentPage();
+        }
+
         async function applyRoute() {
             const seq = ++routeSeq.value;
             const next = resolveGraphScope(route.query, store.permissions, store.organizations);
@@ -787,7 +799,7 @@ export default {
                     return;
                 }
                 entityDetail.data = data;
-                if (updateRoute && route.query.entity !== identity.entityId) {
+                if (updateRoute && scope.tab === 'entities' && route.query.entity !== identity.entityId) {
                     navigate({ ...scope, entityId: identity.entityId, relationId: '' });
                 }
             } catch (error) {
@@ -825,7 +837,7 @@ export default {
                     return;
                 }
                 relationDetail.data = data;
-                if (updateRoute && route.query.relation !== identity.relationId) {
+                if (updateRoute && scope.tab === 'relations' && route.query.relation !== identity.relationId) {
                     navigate({ ...scope, relationId: identity.relationId, entityId: '' });
                 }
             } catch (error) {
@@ -1624,6 +1636,7 @@ export default {
             reviewQueues,
             mutation,
             publications,
+            explorerRefreshKey,
             publicationActions,
             activePublication,
             changeTab,
@@ -1634,6 +1647,7 @@ export default {
             nextPage,
             previousPage,
             loadCurrentPage,
+            refreshCurrentPage,
             loadEntityDetail,
             loadRelationDetail,
             closeEntityDetail,
@@ -1703,7 +1717,7 @@ export default {
           <div class="graph-heading-icon"><local-icon icon="carbon:chart-relationship"></local-icon></div>
           <div><h2>知识图谱</h2><p>实体、关系与原文证据</p></div>
         </div>
-        <el-button :loading="workspaceLoading" title="刷新当前页面" @click="loadCurrentPage">
+        <el-button :loading="workspaceLoading" title="刷新当前页面" @click="refreshCurrentPage">
           <local-icon icon="status:retry"></local-icon><span>刷新</span>
         </el-button>
       </header>
@@ -1737,6 +1751,7 @@ export default {
         <el-tab-pane label="关系" name="relations" />
         <el-tab-pane label="待审核" name="review" :disabled="!hasManagement" />
         <el-tab-pane label="发布" name="publications" :disabled="!hasManagement" />
+        <el-tab-pane label="图谱探查" name="explore" />
       </el-tabs>
 
       <el-alert v-if="mutation.error && !mergeDialog.open" class="graph-command-error"
@@ -1890,6 +1905,15 @@ export default {
           </div>
         </section>
       </template>
+
+      <section v-else-if="scope.tab === 'explore'" class="graph-exploration-workspace">
+        <graph-explorer :organization-id="scope.organizationId"
+                        :library-slugs="scope.librarySlugs"
+                        :refresh-key="explorerRefreshKey"
+                        @open-entity="loadEntityDetail"
+                        @open-relation="loadRelationDetail"
+                        @open-evidence="openEvidence" />
+      </section>
 
       <section v-else-if="scope.tab === 'review'" class="graph-review-workspace">
         <el-alert v-if="reviewQueues.error" :title="reviewQueues.error.message"

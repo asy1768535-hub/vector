@@ -4415,10 +4415,145 @@ local-icon { display: inline-block; vertical-align: -0.125em; }
 .graph-command-dialog .el-select { width: 100%; }
 .graph-command-dialog .el-alert { margin-bottom: 12px; }
 
+.graph-exploration-workspace,
+.graph-explorer,
+.graph-explorer-groups,
+.graph-explorer-group,
+.graph-explorer-table-section { min-width: 0; }
+.graph-explorer { display: flex; flex-direction: column; gap: 12px; }
+.graph-explorer-seed-band {
+    min-width: 0;
+    border-top: 1px solid var(--app-border-light);
+    border-bottom: 1px solid var(--app-border-light);
+    background: #fff;
+}
+.graph-explorer-search {
+    display: grid;
+    grid-template-columns: minmax(220px, 1fr) auto;
+    gap: 10px;
+    padding: 12px 14px;
+    background: #f8fafb;
+}
+.graph-explorer-search .el-button { min-width: 100px; margin-left: 0; }
+.graph-explorer-seed-results { max-height: 310px; overflow-y: auto; border-top: 1px solid var(--app-border-light); }
+.graph-explorer-seed-row {
+    display: grid;
+    grid-template-columns: 26px minmax(190px, 1.2fr) minmax(150px, .8fr) minmax(120px, .55fr) auto;
+    gap: 10px;
+    align-items: center;
+    min-width: 0;
+    min-height: 58px;
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--app-border-light);
+}
+.graph-explorer-seed-row:last-child { border-bottom: 0; }
+.graph-explorer-seed-name,
+.graph-explorer-seed-library,
+.graph-explorer-seed-version { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.graph-explorer-seed-name strong,
+.graph-explorer-seed-library strong,
+.graph-explorer-seed-version code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.graph-explorer-seed-name small,
+.graph-explorer-seed-library small,
+.graph-explorer-seed-version small { color: var(--app-text-secondary); font-size: 11px; }
+.graph-explorer-seed-version code { font-size: 11px; }
+
+.graph-explorer-selected { min-width: 0; padding: 10px 14px; border-bottom: 1px solid var(--app-border-light); background: #fff; }
+.graph-explorer-selected .graph-section-heading { margin-bottom: 8px; }
+.graph-explorer-seed-tags { display: flex; flex-wrap: wrap; gap: 7px; }
+.graph-explorer-seed-tags .el-tag { max-width: 100%; }
+.graph-explorer-seed-tags .el-tag__content { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.graph-explorer-controls {
+    display: grid;
+    grid-template-columns: auto auto minmax(190px, 1fr) minmax(112px, .38fr) minmax(112px, .38fr) auto;
+    gap: 10px;
+    align-items: end;
+    min-width: 0;
+    padding: 12px 14px;
+    border-top: 1px solid var(--app-border-light);
+    border-bottom: 1px solid var(--app-border-light);
+    background: #f8fafb;
+}
+.graph-explorer-controls > * { min-width: 0; }
+.graph-explorer-controls .el-radio-group { display: flex; flex-wrap: nowrap; }
+.graph-explorer-controls .el-radio-button { flex: 1; }
+.graph-explorer-controls .el-radio-button__inner { width: 100%; padding-right: 12px; padding-left: 12px; }
+.graph-explorer-controls .el-input-number { width: 100%; }
+.graph-explorer-controls > .el-button { min-width: 104px; margin-left: 0; }
+.graph-explorer-controls > .el-button local-icon { margin-right: 5px; }
+
+.graph-explorer-groups { display: flex; flex-direction: column; gap: 18px; }
+.graph-explorer-group { border-top: 1px solid var(--app-border); border-bottom: 1px solid var(--app-border); background: #fff; }
+.graph-explorer-group-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    min-height: 58px;
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--app-border-light);
+}
+.graph-explorer-group-header > div { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.graph-explorer-group-header strong { overflow-wrap: anywhere; font-size: 15px; }
+.graph-explorer-group-header span { color: var(--app-text-secondary); font-size: 11px; }
+.graph-explorer-group-state { min-height: 240px; }
+.graph-explorer-identity {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 0;
+    margin: 0;
+    border-bottom: 1px solid var(--app-border-light);
+}
+.graph-explorer-identity > div { min-width: 0; padding: 9px 12px; border-right: 1px solid var(--app-border-light); }
+.graph-explorer-identity > div:last-child { border-right: 0; }
+.graph-explorer-identity dt { color: var(--app-text-muted); font-size: 10px; }
+.graph-explorer-identity dd { margin: 4px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.graph-explorer-group > .el-alert { border-radius: 0; }
+
+.graph-explorer-canvas {
+    width: 100%;
+    min-height: 300px;
+    max-height: 520px;
+    aspect-ratio: 16 / 7;
+    overflow: hidden;
+    border-bottom: 1px solid var(--app-border-light);
+    background: #fff;
+}
+.graph-explorer-canvas canvas { display: block; width: 100%; height: 100%; touch-action: manipulation; }
+
+.graph-explorer-table-section { padding: 14px 14px 0; }
+.graph-explorer-table-section:last-child { padding-bottom: 16px; }
+.graph-explorer-table-section .graph-section-heading { margin-bottom: 9px; }
+.graph-explorer-table-shell { min-width: 0; overflow-x: auto; border: 1px solid var(--app-border-light); }
+.graph-explorer-table-shell table { width: 100%; min-width: 780px; border-collapse: collapse; table-layout: fixed; }
+.graph-explorer-table-shell th,
+.graph-explorer-table-shell td { min-width: 0; padding: 9px 10px; border-bottom: 1px solid var(--app-border-light); text-align: left; vertical-align: top; }
+.graph-explorer-table-shell th { background: #f8fafb; color: var(--app-text-secondary); font-size: 11px; font-weight: 600; }
+.graph-explorer-table-shell td { overflow-wrap: anywhere; font-size: 12px; }
+.graph-explorer-table-shell tbody tr:last-child td { border-bottom: 0; }
+.graph-explorer-table-shell td small { display: block; margin-top: 3px; color: var(--app-text-muted); font-size: 10px; }
+.graph-explorer-link,
+.graph-explorer-evidence-actions button {
+    border: 0;
+    background: transparent;
+    color: var(--app-primary);
+    font: inherit;
+    letter-spacing: 0;
+    cursor: pointer;
+}
+.graph-explorer-link { max-width: 100%; padding: 0; overflow-wrap: anywhere; text-align: left; }
+.graph-explorer-relation-link { color: #9a5c18; }
+.graph-explorer-evidence-actions { display: flex; flex-wrap: wrap; gap: 5px; }
+.graph-explorer-evidence-actions button { display: inline-flex; align-items: center; gap: 3px; padding: 2px 4px; border: 1px solid #bad8ce; border-radius: 4px; font-size: 10px; }
+.graph-explorer-evidence-actions span { color: var(--app-text-muted); font-size: 11px; }
+
 @media screen and (max-width: 1199px) {
     .graph-filter-band { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     .graph-filter-actions { justify-content: flex-end; grid-column: 1 / -1; }
     .graph-identity-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .graph-explorer-controls { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .graph-explorer-controls > .el-button { width: 100%; }
 }
 
 @media screen and (max-width: 899px) {
@@ -4444,6 +4579,14 @@ local-icon { display: inline-block; vertical-align: -0.125em; }
     .graph-publication-toolbar { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
     .graph-publication-grid { grid-template-columns: minmax(0, 1fr); }
     .graph-publication-column + .graph-publication-column { border-top: 1px solid var(--app-border-light); border-left: 0; }
+    .graph-explorer-seed-row { grid-template-columns: 26px minmax(0, 1fr) minmax(0, .8fr) auto; }
+    .graph-explorer-seed-version { display: none; }
+    .graph-explorer-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .graph-explorer-relation-filter { grid-column: 1 / -1; }
+    .graph-explorer-identity { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .graph-explorer-identity > div:nth-child(3) { border-right: 0; }
+    .graph-explorer-identity > div:nth-child(-n+3) { border-bottom: 1px solid var(--app-border-light); }
+    .graph-explorer-canvas { aspect-ratio: 4 / 3; }
 }
 
 @media screen and (max-width: 520px) {

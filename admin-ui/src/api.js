@@ -301,6 +301,42 @@ export const getGraphRelation = (organizationId, librarySlug, relationId) => req
     `/organizations/${organizationId}/graph-catalog/libraries/${librarySlug}/relations/${relationId}`,
 );
 
+function boundedInteger(value, minimum, maximum, fallback) {
+    if (!Number.isInteger(value)) return fallback;
+    return Math.min(maximum, Math.max(minimum, value));
+}
+
+function graphTraversalBody(source = {}) {
+    const direction = ['outbound', 'inbound', 'both'].includes(source.direction)
+        ? source.direction
+        : 'both';
+    const relationTypeKeys = [];
+    for (const value of Array.isArray(source.relation_type_keys) ? source.relation_type_keys : []) {
+        if (typeof value !== 'string') continue;
+        const key = value.trim();
+        if (!key || key.length > 128 || relationTypeKeys.includes(key)) continue;
+        relationTypeKeys.push(key);
+        if (relationTypeKeys.length === 8) break;
+    }
+    const seed = Array.isArray(source.seeds) ? source.seeds[0] : null;
+    return {
+        ontology_version_id: source.ontology_version_id,
+        expected_publication_id: source.expected_publication_id,
+        seeds: seed?.entity_id ? [{ entity_id: seed.entity_id }] : [],
+        direction,
+        relation_type_keys: relationTypeKeys,
+        max_hops: boundedInteger(source.max_hops, 1, 2, 1),
+        max_nodes: boundedInteger(source.max_nodes, 1, 100, 60),
+        max_relations: boundedInteger(source.max_relations, 1, 200, 100),
+        include_evidence_locators: true,
+    };
+}
+
+export const queryPublishedGraph = (librarySlug, body = {}) => request(
+    `/libraries/${librarySlug}/v06/graph/query`,
+    jsonBody('POST', graphTraversalBody(body)),
+);
+
 export const getGraphGovernanceContext = (slug) =>
     request(`/libraries/${slug}/graph-governance/context`);
 export const listGraphGovernanceActions = (

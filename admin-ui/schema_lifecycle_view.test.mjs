@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import test from 'node:test';
 
 const view = fs.readFileSync(new URL('./src/views/SchemaLifecycle.js', import.meta.url), 'utf8');
+const normalizedView = view.replaceAll('\r\n', '\n');
 const app = fs.readFileSync(new URL('./src/app.js', import.meta.url), 'utf8');
 const layout = fs.readFileSync(new URL('./src/views/Layout.js', import.meta.url), 'utf8');
 const style = fs.readFileSync(new URL('./style.css', import.meta.url), 'utf8');
@@ -34,8 +35,8 @@ test('Schema lifecycle view owns stale-response fences and avoids unsafe renderi
         'scope.versionId !== identity.versionId',
     ]) assert.ok(view.includes(token), `missing ${token}`);
     assert.ok(
-        view.indexOf('await loadVersions({ chooseVersion: false })')
-            < view.indexOf('await canonicalRoute();\n                return response;'),
+        normalizedView.indexOf('await loadVersions({ chooseVersion: false })')
+            < normalizedView.indexOf('await canonicalRoute();\n                return response;'),
         'mutation refreshes the version list before changing the route',
     );
     assert.match(
