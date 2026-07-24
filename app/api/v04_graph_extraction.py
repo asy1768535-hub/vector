@@ -343,6 +343,7 @@ async def retry_graph_extraction(
             job_id=job_id,
         )
         await db.commit()
+        await db.refresh(job)
         return GraphExtractionJobRead.model_validate(job)
     except GraphExtractionJobError as exc:
         _raise_job_error(exc)
@@ -399,6 +400,7 @@ async def cancel_graph_extraction(
             job_id=job_id,
         )
         await db.commit()
+        await db.refresh(job)
         return GraphExtractionJobRead.model_validate(job)
     except GraphExtractionJobError as exc:
         _raise_job_error(exc)

@@ -107,7 +107,7 @@ class _CandidateEvidenceBase(Base):
     resolved_chunk_id: Mapped[Optional[uuid.UUID]]
     resolved_block_id: Mapped[Optional[uuid.UUID]]
     resolved_source_span: Mapped[Optional[dict[str, Any]]] = mapped_column(
-        JSONB, nullable=True
+        JSONB(none_as_null=True), nullable=True
     )
     candidate_matches: Mapped[list[dict[str, Any]]] = mapped_column(
         JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")

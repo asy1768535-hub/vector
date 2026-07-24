@@ -125,6 +125,8 @@ def test_ingest_text_flagged_new_doc_creates_pending_revision_evidence_chunks_an
             metadata={"department": "legal"},
             splitter="text",
             created_by=None,
+            visibility_scope="internal-users",
+            security_level="internal",
             chunks=[
                 {
                     "text": "alpha",
@@ -154,6 +156,12 @@ def test_ingest_text_flagged_new_doc_creates_pending_revision_evidence_chunks_an
     assert revision.status == "pending"
     assert revision.normalized_text == "alpha"
     assert revision.document_metadata == {"department": "legal"}
+    assert doc.visibility_scope == "internal-users"
+    assert doc.security_level == "internal"
+    assert revision.visibility_scope == "internal-users"
+    assert revision.security_level == "internal"
+    assert evidence.visibility_scope == "internal-users"
+    assert evidence.security_level == "internal"
     assert block.document_revision_id == revision.id
     assert block.block_kind == "paragraph"
     assert evidence.document_revision_id == revision.id

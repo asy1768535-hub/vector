@@ -848,6 +848,41 @@ def test_replace_preserves_metadata_when_file_has_none(mock_re, client):
 
 
 @patch("app.services.ingest.reingest_document", new_callable=AsyncMock)
+def test_replace_applies_management_scope_to_new_revision(mock_re, client):
+    target = _doc()
+    target.visibility_scope = None
+    target.security_level = None
+    app.dependency_overrides[get_db] = lambda: make_db_mock(existing=target)
+    mock_re.return_value = (MagicMock(id="job-scope"), 1, True)
+
+    resp = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("new.txt", b"managed content", "text/plain")},
+        data={
+            "replace_document_id": str(target.id),
+            "visibility_scope": " internal-users ",
+            "security_level": " internal ",
+        },
+    )
+
+    assert resp.status_code == status.HTTP_201_CREATED
+    assert target.visibility_scope == "internal-users"
+    assert target.security_level == "internal"
+    assert mock_re.await_args.kwargs["document"] is target
+
+
+def test_import_rejects_blank_management_scope(client):
+    resp = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("new.txt", b"managed content", "text/plain")},
+        data={"security_level": "   "},
+    )
+
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert resp.json()["detail"] == "security_level must not be blank"
+
+
+@patch("app.services.ingest.reingest_document", new_callable=AsyncMock)
 def test_replace_duplicate_content_returns_409(mock_re, client):
     """替换：新内容与同库另一篇无 external_id 文档相同 → 撞唯一约束 → 回滚并 409（不 500）。"""
     target = _doc()

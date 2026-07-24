@@ -10,7 +10,7 @@ import logging
 import uuid
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Annotated, Optional
 from urllib.parse import quote
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Query, Response, status, File, UploadFile
@@ -431,6 +431,30 @@ def _structured_doc_data(text: str, filename: str, suffix: str, splitter: str, l
     }
 
 
+def _apply_import_management(document: Document, doc_data: dict) -> bool:
+    changed = False
+    for field in ("visibility_scope", "security_level"):
+        if field not in doc_data:
+            continue
+        value = doc_data[field]
+        if getattr(document, field) != value:
+            setattr(document, field, value)
+            changed = True
+    return changed
+
+
+def _normalize_import_scope(value: str | None, field: str) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"{field} must not be blank",
+        )
+    return normalized
+
+
 async def _ingest_or_upsert(
     db: AsyncSession,
     lib: Library,
@@ -454,11 +478,12 @@ async def _ingest_or_upsert(
             ).order_by(Document.created_at.desc()).limit(1).with_for_update()
         )).scalars().first()
         if existing is not None:
+            management_changed = _apply_import_management(existing, doc_data)
             job, chunk_count, changed = await ingest_service.reingest_document(
                 db=db, library=lib, document=existing,
                 new_text=doc_data["text"], title=doc_data["title"],
                 metadata=doc_data["metadata"], splitter=doc_data["splitter"],
-                force=False, chunks=doc_data.get("chunks"),
+                force=management_changed, chunks=doc_data.get("chunks"),
             )
             if changed:
                 await _upsert_document_source(db, existing.id, existing.current_revision, doc_data.get("source"))
@@ -474,7 +499,10 @@ async def _ingest_or_upsert(
     doc, job, chunk_count, was_existing = await ingest_service.ingest_text(
         db=db, library=lib, text=doc_data["text"], title=doc_data["title"],
         external_id=ext, metadata=doc_data["metadata"], splitter=doc_data["splitter"],
-        created_by=created_by, chunks=doc_data.get("chunks"),
+        created_by=created_by,
+        visibility_scope=doc_data.get("visibility_scope"),
+        security_level=doc_data.get("security_level"),
+        chunks=doc_data.get("chunks"),
     )
     if not was_existing:
         await _upsert_document_source(db, doc.id, doc.current_revision, doc_data.get("source"))
@@ -507,6 +535,7 @@ async def _replace_document(db: AsyncSession, lib: Library, target_id: uuid.UUID
     # 避免替换正文却清空作者/分类/过滤字段；文件显式带 metadata（如 json）才覆盖。
     new_meta = doc_data.get("metadata")
     meta = new_meta if new_meta is not None else target.doc_metadata
+    _apply_import_management(target, doc_data)
     try:
         job, chunk_count, _changed = await ingest_service.reingest_document(
             db=db, library=lib, document=target,
@@ -990,6 +1019,8 @@ async def import_file(
     file: UploadFile = File(...),
     external_id: Optional[str] = Form(default=None),
     replace_document_id: Optional[uuid.UUID] = Form(default=None),
+    visibility_scope: Annotated[Optional[str], Form(max_length=64)] = None,
+    security_level: Annotated[Optional[str], Form(max_length=64)] = None,
     lib: Library = Depends(require_lib("insert")),
     user: User = Depends(current_active_user),
     db: AsyncSession = Depends(get_db),
@@ -1209,6 +1240,16 @@ async def import_file(
 
     if not documents_to_ingest:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "No valid content found to ingest")
+
+    management = {}
+    normalized_visibility = _normalize_import_scope(visibility_scope, "visibility_scope")
+    normalized_security = _normalize_import_scope(security_level, "security_level")
+    if normalized_visibility is not None:
+        management["visibility_scope"] = normalized_visibility
+    if normalized_security is not None:
+        management["security_level"] = normalized_security
+    for doc_data in documents_to_ingest:
+        doc_data.update(management)
 
     # 替换模式（新增/替换上传）：按 document ID 覆盖目标文档，不依赖 external_id。
     # 仅允许解析为单篇文档的文件；多篇（json 数组 / csv 多行）明确拒绝，避免一对多歧义。
