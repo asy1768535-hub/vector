@@ -516,6 +516,8 @@ def test_typed_candidate_evidence_tables_are_separate_and_strict():
         "graph_relation_candidate_evidence",
         "graph_relation_candidates.id",
     )
+    assert entity.c.resolved_source_span.type.none_as_null is True
+    assert relation.c.resolved_source_span.type.none_as_null is True
     assert "candidate_type" not in entity.c
     assert "candidate_type" not in relation.c
 

@@ -806,6 +806,7 @@ async def activate_graph_publication(
             config=config,
         )
         await db.commit()
+        await db.refresh(result.publication)
         log.info(
             "graph publication activation completed publication_id=%s previous_publication_id=%s idempotent=%s",
             result.publication.id,
