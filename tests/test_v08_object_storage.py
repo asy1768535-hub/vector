@@ -884,7 +884,18 @@ def test_structured_batch_import_rolls_back_only_the_failed_storage_item(
         chunk_size=1000,
         chunk_overlap=120,
     )
-    user = SimpleNamespace(id=uuid.uuid4())
+    user_id = uuid.uuid4()
+
+    class ExpiringUser:
+        expired = False
+
+        @property
+        def id(self):
+            if self.expired:
+                raise RuntimeError("expired ORM user was accessed after rollback")
+            return user_id
+
+    user = ExpiringUser()
     savepoint_exits = []
 
     class Savepoint:
@@ -895,11 +906,14 @@ def test_structured_batch_import_rolls_back_only_the_failed_storage_item(
             savepoint_exits.append(exc_type)
             return False
 
+    async def rollback():
+        user.expired = True
+
     db = SimpleNamespace(
         add=MagicMock(),
         begin_nested=MagicMock(side_effect=Savepoint),
         commit=AsyncMock(),
-        rollback=AsyncMock(),
+        rollback=AsyncMock(side_effect=rollback),
     )
 
     async def get(model, ident):
@@ -983,6 +997,7 @@ def test_structured_batch_import_rolls_back_only_the_failed_storage_item(
     assert savepoint_exits == [ObjectStorageError, None]
     assert db.begin_nested.call_count == 2
     db.commit.assert_awaited_once()
+    assert all(call.kwargs["created_by"] == user_id for call in ingest.await_args_list)
 
 
 def test_remote_sdk_imports_are_lazy_and_packaged_as_one_optional_extra():
