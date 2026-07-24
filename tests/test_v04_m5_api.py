@@ -207,6 +207,29 @@ def test_retry_returns_exact_no_retryable_units_conflict():
     db.commit.assert_not_awaited()
 
 
+def test_retry_refreshes_server_updated_fields_before_response():
+    db = AsyncMock()
+    job = _job(status="processing")
+    try:
+        with (
+            patch("app.deps.load_active_library", new=AsyncMock(return_value=_library())),
+            patch(
+                "app.api.v04_graph_extraction.graph_extraction_jobs.retry_graph_extraction_job",
+                new=AsyncMock(return_value=job),
+            ),
+        ):
+            response = _client(db).post(
+                f"/libraries/m5-api/v04/graph-extractions/{JOB_ID}/retry"
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "processing"
+    db.commit.assert_awaited_once()
+    db.refresh.assert_awaited_once_with(job)
+
+
 def test_cancel_refreshes_server_updated_fields_before_response():
     db = AsyncMock()
     job = _job(status="cancelled")
