@@ -32,6 +32,7 @@ const api = readFileSync(new URL('./src/api.js', import.meta.url), 'utf8');
 const app = readFileSync(new URL('./src/app.js', import.meta.url), 'utf8');
 const layout = readFileSync(new URL('./src/views/Layout.js', import.meta.url), 'utf8');
 const menu = readFileSync(new URL('./src/menu_access.js', import.meta.url), 'utf8');
+const navigation = readFileSync(new URL('./src/domain_navigation.js', import.meta.url), 'utf8');
 const css = readFileSync(new URL('./style.css', import.meta.url), 'utf8');
 
 test('maps coarse and capability states without treating unknown values as ready', () => {
@@ -260,16 +261,18 @@ test('processing API uses the exact current-document routes and fenced retry bod
     });
 });
 
-test('wires a read-gated Catalog route and sidebar entry', () => {
+test('wires a read-gated Catalog route inside the knowledge asset domain', () => {
     assert.match(app, /path:\s*'catalog'/);
     assert.match(app, /KnowledgeCatalog/);
     assert.match(app, /perm:\s*'read'/);
     assert.match(app, /effectivePerm:\s*'read'/);
     assert.match(menu, /catalog:\s*acts\.has\('read'\)/);
     assert.match(app, /canAccessEffectiveRoute/);
-    assert.match(layout, /v-if="access\.catalog"/);
-    assert.match(layout, /index="\/catalog"/);
-    assert.match(layout, /知识目录/);
+    assert.match(layout, /visibleSidebarDomains/);
+    assert.match(navigation, /knowledgeAssets/);
+    assert.match(navigation, /label:\s*'知识目录'/);
+    assert.match(navigation, /path:\s*APP_PATHS\.catalog/);
+    assert.match(navigation, /access:\s*'catalog'/);
 });
 
 test('uses the strict Catalog read and processing APIs', () => {

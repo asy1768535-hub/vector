@@ -24,7 +24,7 @@ export function menuAccess(user, permissions, organizations = []) {
     const can = (a) => isSuper || acts.has(a);
     const organizationAdmin = hasOrganizationAdmin(organizations);
     const classificationReview = manageableLibraries(permissions, organizations).length > 0;
-    return {
+    const access = {
         // Catalog requires Organization authorization; platform superuser is not a
         // customer-content bypass. Organization admins receive effective read rows.
         catalog: acts.has('read'),
@@ -38,6 +38,21 @@ export function menuAccess(user, permissions, organizations = []) {
         classificationReview,
         schemaLifecycle: classificationReview,
         apiKeys: true,            // 始终显示
+    };
+    return {
+        ...access,
+        knowledgeUse: access.chat || access.search || access.retrievalTest,
+        knowledgeAssets: access.documents || access.catalog || access.import,
+        knowledgeGovernance: (
+            access.knowledgeGraph
+            || access.schemaLifecycle
+            || access.classificationReview
+        ),
+        usersPermissions: isSuper,
+        libraries: isSuper,
+        operationsCenter: isSuper,
+        auditCenter: isSuper,
+        account: !!user,
     };
 }
 

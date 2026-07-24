@@ -357,7 +357,10 @@ export default {
                 return;
             }
             if (requestedSlug !== nextSlug) {
-                await router.replace({ path: '/catalog', query: { library: nextSlug } });
+                await router.replace({
+                    path: '/knowledge-assets/catalog',
+                    query: { library: nextSlug },
+                });
                 return;
             }
             const libraryChanged = selectedSlug.value !== nextSlug;
@@ -377,7 +380,10 @@ export default {
 
         async function selectLibrary(value) {
             if (!value || value === selectedSlug.value) return;
-            await router.push({ path: '/catalog', query: { library: value } });
+            await router.push({
+                path: '/knowledge-assets/catalog',
+                query: { library: value },
+            });
         }
 
         async function applyFilters() {
@@ -411,14 +417,17 @@ export default {
         async function openDocument(row) {
             if (!row?.document_id || !selectedSlug.value) return;
             await router.push({
-                path: '/catalog',
+                path: '/knowledge-assets/catalog',
                 query: { library: selectedSlug.value, document: row.document_id },
             });
         }
 
         async function backToList() {
             if (!selectedSlug.value) return;
-            await router.push({ path: '/catalog', query: { library: selectedSlug.value } });
+            await router.push({
+                path: '/knowledge-assets/catalog',
+                query: { library: selectedSlug.value },
+            });
         }
 
         async function refreshCurrent() {

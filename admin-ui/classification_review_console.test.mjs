@@ -142,16 +142,18 @@ test('route, API, view, menu, and responsive privacy contracts are wired', () =>
     const app = readFileSync(new URL('./src/app.js', import.meta.url), 'utf8');
     const layout = readFileSync(new URL('./src/views/Layout.js', import.meta.url), 'utf8');
     const menu = readFileSync(new URL('./src/menu_access.js', import.meta.url), 'utf8');
+    const navigation = readFileSync(new URL('./src/domain_navigation.js', import.meta.url), 'utf8');
     const css = readFileSync(new URL('./style.css', import.meta.url), 'utf8');
     const viewUrl = new URL('./src/views/ClassificationReview.js', import.meta.url);
     const view = readFileSync(viewUrl, 'utf8');
 
     assert.ok(api.includes('export const listClassificationReviews'));
     assert.ok(api.includes('export const reviewClassificationRun'));
-    assert.match(app, /path:\s*'classification-review'/);
+    assert.match(app, /path:\s*'classification'/);
     assert.match(app, /libraryManagement:\s*true/);
-    assert.match(layout, /access\.classificationReview/);
-    assert.match(layout, /index="\/classification-review"/);
+    assert.match(layout, /visibleSidebarDomains/);
+    assert.match(navigation, /access:\s*'classificationReview'/);
+    assert.match(navigation, /path:\s*APP_PATHS\.classificationReview/);
     assert.match(layout, /class="header-user-label"/);
     assert.match(menu, /manageableLibraries/);
     assert.match(menu, /canAccessLibraryManagementRoute/);
@@ -161,7 +163,7 @@ test('route, API, view, menu, and responsive privacy contracts are wired', () =>
         'expected_run_status',
         'expected_effective_decision_set_id',
         'api.reviewClassificationRun',
-        "path: '/catalog'",
+        "path: '/knowledge-assets/catalog'",
         'ElMessageBox.confirm',
     ]) assert.ok(view.includes(token), `missing view contract ${token}`);
     for (const forbidden of [

@@ -104,7 +104,7 @@ export default {
                 return;
             }
             const href = router.resolve({
-                path: '/documents',
+                path: '/knowledge-assets/documents',
                 query: { slug: slug.value, open: docId },
             }).href;
             window.open(href, '_blank', 'noopener');

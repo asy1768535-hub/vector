@@ -19,6 +19,7 @@ const api = readFileSync(new URL('./src/api.js', import.meta.url), 'utf8');
 const app = readFileSync(new URL('./src/app.js', import.meta.url), 'utf8');
 const layout = readFileSync(new URL('./src/views/Layout.js', import.meta.url), 'utf8');
 const menu = readFileSync(new URL('./src/menu_access.js', import.meta.url), 'utf8');
+const navigation = readFileSync(new URL('./src/domain_navigation.js', import.meta.url), 'utf8');
 const store = readFileSync(new URL('./src/store.js', import.meta.url), 'utf8');
 const css = readFileSync(new URL('./style.css', import.meta.url), 'utf8');
 
@@ -120,8 +121,9 @@ test('wires Organization auth state, route, menu, and strict APIs', () => {
     assert.match(app, /path:\s*'retrieval-test'/);
     assert.match(app, /organizationAdmin:\s*true/);
     assert.match(app, /canAccessOrganizationRoute/);
-    assert.match(layout, /access\.retrievalTest/);
-    assert.match(layout, /index="\/retrieval-test"/);
+    assert.match(layout, /visibleSidebarDomains/);
+    assert.match(navigation, /access:\s*'retrievalTest'/);
+    assert.match(navigation, /path:\s*APP_PATHS\.retrievalTest/);
     for (const token of [
         'listMyOrganizations',
         'checkLibraryCompatibility',

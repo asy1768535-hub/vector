@@ -177,7 +177,7 @@ export default {
                     <div class="dashboard-activity-summary">{{ targetSummary(a.action, a.target) }}</div>
                     <div class="dashboard-activity-time">{{ relAuditTime(a.at) }}</div>
                 </div>
-                <el-button text class="dashboard-card-link" @click="router.push('/audit')">查看更多 →</el-button>
+                <el-button text class="dashboard-card-link" @click="router.push('/audit-center/operations')">查看更多 →</el-button>
             </section>
 
             <!-- Jobs -->
@@ -197,7 +197,7 @@ export default {
                         <div class="dashboard-job-label">失败</div>
                     </div>
                 </div>
-                <el-button text class="dashboard-card-link" @click="router.push('/jobs')">查看任务队列 →</el-button>
+                <el-button text class="dashboard-card-link" @click="router.push('/operations-center/jobs')">查看任务队列 →</el-button>
             </section>
 
             <!-- Libraries -->

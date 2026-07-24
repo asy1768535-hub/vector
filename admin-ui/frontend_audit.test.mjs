@@ -72,6 +72,7 @@ test('csvEscape: newline escaped', () => {
 // ══════════════════════════════════════════════════
 
 const appSrc = readFileSync(new URL('./src/app.js', import.meta.url), 'utf8');
+const navigationSrc = readFileSync(new URL('./src/domain_navigation.js', import.meta.url), 'utf8');
 const apiSrc = readFileSync(new URL('./src/api.js', import.meta.url), 'utf8');
 const apiKeysSrc = readFileSync(new URL('./src/views/ApiKeys.js', import.meta.url), 'utf8');
 const chatSrc = readFileSync(new URL('./src/views/Chat.js', import.meta.url), 'utf8');
@@ -79,18 +80,21 @@ const docsSrc = readFileSync(new URL('./src/views/Documents.js', import.meta.url
 const searchSrc = readFileSync(new URL('./src/views/Search.js', import.meta.url), 'utf8');
 const auditSrc = readFileSync(new URL('./src/views/Audit.js', import.meta.url), 'utf8');
 
-test('/dashboard has admin:true', () => {
-    assert.ok(appSrc.includes('path: \'dashboard\''), 'dashboard route exists');
+test('/operations-center/overview has admin:true', () => {
+    assert.ok(appSrc.includes("path: 'overview'"), 'operations overview route exists');
     assert.ok(appSrc.includes("admin: true"), 'dashboard has admin:true meta');
 });
 
-test('defaultRoute: superuser → /dashboard', () => {
-    assert.ok(appSrc.includes("/dashboard'") || appSrc.includes('/dashboard"'), 'superuser redirect to dashboard');
-    assert.ok(appSrc.includes('is_superuser'), 'checks is_superuser for default route');
+test('defaultRoute: platform admin → operations overview', () => {
+    assert.ok(
+        navigationSrc.includes('if (access?.operationsCenter) return APP_PATHS.dashboard'),
+        'platform admin starts in operations overview',
+    );
+    assert.ok(appSrc.includes('defaultRouteForAccess'), 'app uses shared default projection');
 });
 
-test('defaultRoute: no perm → /api-keys', () => {
-    assert.ok(appSrc.includes('/api-keys'), 'fallback to api-keys');
+test('defaultRoute: no business permission → account profile', () => {
+    assert.ok(navigationSrc.includes('return APP_PATHS.profile'), 'fallback enters account settings');
 });
 
 test('ApiKeys: refresh calls load(true)', () => {

@@ -35,10 +35,32 @@ const cases = [
 
 let passed = 0;
 for (const [name, user, perms, expected] of cases) {
-    assert.deepEqual(menuAccess(user, perms), expected, `[FAIL menuAccess] ${name}`);
+    const actual = menuAccess(user, perms);
+    const legacyProjection = Object.fromEntries(
+        Object.keys(expected).map((key) => [key, actual[key]]),
+    );
+    assert.deepEqual(legacyProjection, expected, `[FAIL menuAccess] ${name}`);
     console.log(`  ok  ${name}`);
     passed++;
 }
+
+const readerDomains = menuAccess(USER, READER);
+assert.equal(readerDomains.knowledgeUse, true);
+assert.equal(readerDomains.knowledgeAssets, true);
+assert.equal(readerDomains.knowledgeGovernance, true);
+assert.equal(readerDomains.usersPermissions, false);
+assert.equal(readerDomains.account, true);
+
+const insertDomains = menuAccess(USER, INSERT_ONLY);
+assert.equal(insertDomains.knowledgeUse, false);
+assert.equal(insertDomains.knowledgeAssets, true);
+assert.equal(insertDomains.knowledgeGovernance, false);
+
+const superDomains = menuAccess(SUPER, NONE);
+assert.equal(superDomains.usersPermissions, true);
+assert.equal(superDomains.libraries, true);
+assert.equal(superDomains.operationsCenter, true);
+assert.equal(superDomains.auditCenter, true);
 
 // canAccessRoute：路由级
 const routeCases = [

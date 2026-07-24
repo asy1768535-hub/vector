@@ -76,7 +76,10 @@ test('edit copy separates metadata from overwrite/reimport semantics', () => {
         '重新导入并覆盖此文档',
         '保存文本覆盖并重新向量化',
     ]) assert.ok(source.includes(token), `missing edit wording: ${token}`);
-    assert.ok(source.includes("path: '/import'"), 'reimport routes to import page');
+    assert.ok(
+        source.includes("path: '/knowledge-assets/import'"),
+        'reimport routes to the knowledge asset import workspace',
+    );
     assert.ok(source.includes("mode: 'replace'"), 'reimport uses replace mode');
     assert.ok(source.includes('replaceDocumentId: row.id'), 'reimport carries target id');
     assert.ok(source.includes('replaceTitle: documentDisplayName(row)'), 'reimport carries target title');
@@ -116,7 +119,7 @@ test('contains only approved low-risk actions and no fake backend additions', ()
 
 test('loads at most 500 records and routes import with current library', () => {
     assert.match(source, /limit:\s*500/);
-    assert.ok(source.includes("path: '/import'"));
+    assert.ok(source.includes("path: '/knowledge-assets/import'"));
     assert.ok(source.includes("mode: 'add'"));
 });
 

@@ -407,7 +407,10 @@ export default {
         }
 
         function backToDocuments() {
-            router.push({ path: '/documents', query: slug.value ? { slug: slug.value } : {} });
+            router.push({
+                path: '/knowledge-assets/documents',
+                query: slug.value ? { slug: slug.value } : {},
+            });
         }
 
         // ── Watchers ─────────────────────────────────────────

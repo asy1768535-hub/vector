@@ -147,7 +147,10 @@ export default {
 
         function openFileImport() {
             if (!slug.value || !canInsert.value) return;
-            router.push({ path: '/import', query: { library: slug.value, mode: 'add' } });
+            router.push({
+                path: '/knowledge-assets/import',
+                query: { library: slug.value, mode: 'add' },
+            });
         }
 
         function openIngest() {
@@ -177,7 +180,7 @@ export default {
         function openReplaceImport(row) {
             if (!slug.value || !canInsert.value) return;
             router.push({
-                path: '/import',
+                path: '/knowledge-assets/import',
                 query: {
                     library: slug.value,
                     mode: 'replace',

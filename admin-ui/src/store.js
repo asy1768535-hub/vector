@@ -9,6 +9,12 @@ export const store = reactive({
     ready: false,          // 首次加载完成？
 });
 
+export function clearAuthState() {
+    store.user = null;
+    store.permissions = [];
+    store.organizations = [];
+}
+
 export async function refreshAuth() {
     // 直接 fetch，避免 401 触发全局 onUnauthorized 跳路由（初次启动时 router 守卫已经在处理导航）
     try {
@@ -24,14 +30,10 @@ export async function refreshAuth() {
                     .catch(() => []),
             ]);
         } else {
-            store.user = null;
-            store.permissions = [];
-            store.organizations = [];
+            clearAuthState();
         }
     } catch (_) {
-        store.user = null;
-        store.permissions = [];
-        store.organizations = [];
+        clearAuthState();
     } finally {
         store.ready = true;
     }

@@ -8,6 +8,7 @@ const view = readFileSync(new URL('./src/views/GraphGovernance.js', import.meta.
 const app = readFileSync(new URL('./src/app.js', import.meta.url), 'utf8');
 const layout = readFileSync(new URL('./src/views/Layout.js', import.meta.url), 'utf8');
 const menu = readFileSync(new URL('./src/menu_access.js', import.meta.url), 'utf8');
+const navigation = readFileSync(new URL('./src/domain_navigation.js', import.meta.url), 'utf8');
 const css = readFileSync(new URL('./style.css', import.meta.url), 'utf8');
 const schema = readFileSync(
     new URL('../app/schemas/knowledge_catalog.py', import.meta.url),
@@ -18,14 +19,14 @@ const service = readFileSync(
     'utf8',
 );
 
-test('wires one effective-read route and secondary sidebar entry', () => {
+test('wires one effective-read route inside the knowledge governance domain', () => {
     assert.match(app, /import GraphGovernance/);
-    assert.match(app, /path:\s*'knowledge-graph'/);
+    assert.match(app, /path:\s*'graph'/);
     assert.match(app, /component:\s*GraphGovernance/);
     assert.match(app, /effectivePerm:\s*'read'/);
-    assert.match(layout, /access\.knowledgeGraph/);
-    assert.match(layout, /index="\/knowledge-graph"/);
-    assert.match(layout, /carbon:chart-relationship/);
+    assert.match(layout, /visibleSidebarDomains/);
+    assert.match(navigation, /icon:\s*'carbon:chart-relationship'/);
+    assert.match(navigation, /access:\s*'knowledgeGraph'/);
     assert.match(menu, /knowledgeGraph:\s*acts\.has\('read'\)/);
 
     assert.equal(menuAccess({ is_superuser: true }, []).knowledgeGraph, false);
@@ -69,7 +70,7 @@ test('uses strict Graph Catalog responses and independent stale-response fences'
     ]) assert.ok(view.includes(token), `missing response fence ${token}`);
     assert.ok(
         view.indexOf('if (previousIdentity !== scopeIdentity())')
-            < view.indexOf("await router.replace({ path: '/knowledge-graph', query: canonical })"),
+            < view.indexOf("path: '/knowledge-governance/graph'"),
         'scope changes invalidate stale drawers before canonical route replacement',
     );
 });
@@ -84,7 +85,7 @@ test('Evidence reuses Catalog and verifies Library, Evidence, Document, Revision
         'revisionId:',
         'chunkId:',
         'factId:',
-        "path: '/catalog'",
+        "path: '/knowledge-assets/catalog'",
     ]) assert.ok(view.includes(token), `missing Evidence contract ${token}`);
     assert.match(schema, /class CatalogEvidenceDetailRead[\s\S]*library_id:\s*uuid\.UUID/);
     assert.match(schema, /class CatalogEvidenceFactRefRead[\s\S]*chunk_id:\s*uuid\.UUID \| None/);

@@ -6,11 +6,12 @@ const view = fs.readFileSync(new URL('./src/views/SchemaLifecycle.js', import.me
 const normalizedView = view.replaceAll('\r\n', '\n');
 const app = fs.readFileSync(new URL('./src/app.js', import.meta.url), 'utf8');
 const layout = fs.readFileSync(new URL('./src/views/Layout.js', import.meta.url), 'utf8');
+const navigation = fs.readFileSync(new URL('./src/domain_navigation.js', import.meta.url), 'utf8');
 const style = fs.readFileSync(new URL('./style.css', import.meta.url), 'utf8');
 
 test('Schema lifecycle view exposes the complete bounded workflow', () => {
     for (const token of [
-        "'/schema-lifecycle'",
+        "'/knowledge-governance/schema'",
         "tab: 'overview'",
         "'entities'", "'relations'", "'attributes'", "'constraints'", "'impact'",
         'cloneSchemaVersion', 'validateSchemaVersion', 'getSchemaImpact',
@@ -20,9 +21,10 @@ test('Schema lifecycle view exposes the complete bounded workflow', () => {
         'expected_version_state_hash', 'expected_active_version_id',
         "confirmation: 'activate_schema_version'",
     ]) assert.ok(view.includes(token), `missing ${token}`);
-    assert.ok(app.includes("path: 'schema-lifecycle'"));
+    assert.ok(app.includes("path: 'schema'"));
     assert.ok(app.includes('libraryManagement: true'));
-    assert.ok(layout.includes('access.schemaLifecycle'));
+    assert.ok(layout.includes('visibleSidebarDomains'));
+    assert.ok(navigation.includes("access: 'schemaLifecycle'"));
 });
 
 test('Schema lifecycle view owns stale-response fences and avoids unsafe rendering', () => {

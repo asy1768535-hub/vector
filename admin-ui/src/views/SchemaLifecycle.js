@@ -141,7 +141,10 @@ export default {
         }
 
         async function canonicalRoute(replace = true) {
-            const target = { path: '/schema-lifecycle', query: schemaRouteQuery(scope) };
+            const target = {
+                path: '/knowledge-governance/schema',
+                query: schemaRouteQuery(scope),
+            };
             if (replace) await router.replace(target);
             else await router.push(target);
         }

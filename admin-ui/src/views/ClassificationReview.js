@@ -170,7 +170,10 @@ export default {
             if (!libraries.value.some((item) => item.slug === next)) return;
             resetScopeState();
             selectedSlug.value = next;
-            await router.replace({ path: '/classification-review', query: { library: next } });
+            await router.replace({
+                path: '/knowledge-governance/classification',
+                query: { library: next },
+            });
             await loadReviews();
         }
 
@@ -269,7 +272,7 @@ export default {
         async function openCatalogDocument() {
             if (!selectedRun.value?.document_id || !selectedSlug.value) return;
             await router.push({
-                path: '/catalog',
+                path: '/knowledge-assets/catalog',
                 query: {
                     library: selectedSlug.value,
                     document: String(selectedRun.value.document_id),

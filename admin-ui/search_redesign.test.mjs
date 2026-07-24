@@ -49,8 +49,12 @@ test('CSV export uses shared logs_ui helpers with formula injection prevention',
 });
 
 // ── Document detail link ──
-test('document detail link routes to /documents with slug and open params', () => {
-    assert.ok(source.includes("'/documents'") || source.includes('"/documents"'), 'routes to /documents');
+test('document detail link routes to the knowledge asset document workspace', () => {
+    assert.ok(
+        source.includes("'/knowledge-assets/documents'")
+            || source.includes('"/knowledge-assets/documents"'),
+        'routes to the canonical document workspace',
+    );
     assert.ok(source.includes('open'), 'includes open query param');
     assert.ok(source.includes('slug'), 'includes slug query param');
     assert.ok(source.includes('window.open'), 'uses window.open');

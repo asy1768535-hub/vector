@@ -684,7 +684,10 @@ export default {
                 invalidateDetails();
             }
             if (!sameValues(normalizedQuery(route.query), normalizedQuery(canonical))) {
-                await router.replace({ path: '/knowledge-graph', query: canonical });
+                await router.replace({
+                    path: '/knowledge-governance/graph',
+                    query: canonical,
+                });
                 return;
             }
             if (seq !== routeSeq.value) return;
@@ -704,7 +707,10 @@ export default {
         });
 
         function navigate(next) {
-            router.push({ path: '/knowledge-graph', query: graphRouteQuery(next) });
+            router.push({
+                path: '/knowledge-governance/graph',
+                query: graphRouteQuery(next),
+            });
         }
 
         function changeTab(tab) {
@@ -908,7 +914,7 @@ export default {
         function openCatalogDocument(document, librarySlug) {
             if (!document?.document_id || !librarySlug) return;
             router.push({
-                path: '/catalog',
+                path: '/knowledge-assets/catalog',
                 query: { library: librarySlug, document: String(document.document_id) },
             });
         }

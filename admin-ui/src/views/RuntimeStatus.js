@@ -218,7 +218,7 @@ export default {
               <div class="runtime-metric"><span class="runtime-metric-label">已完成</span><b class="runtime-metric--done">{{ jobs.done != null ? jobs.done : '—' }}</b></div>
               <div class="runtime-metric"><span class="runtime-metric-label">失败</span><b class="runtime-metric--failed">{{ jobs.failed != null ? jobs.failed : '—' }}</b></div>
             </div>
-            <router-link to="/jobs" class="runtime-card-link">查看任务监控</router-link>
+            <router-link to="/operations-center/jobs" class="runtime-card-link">查看任务监控</router-link>
           </div>
         </div>
 
