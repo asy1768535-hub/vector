@@ -4,7 +4,8 @@
 
 ### 1. Scope / Trigger
 
-Use this contract when changing `/schema-lifecycle`, its menu access, strict API
+Use this contract when changing `/knowledge-governance/schema` (legacy
+`/schema-lifecycle`), its menu access, strict API
 clients, version routing, draft forms, validation, impact, clone, or activation.
 This is a management workspace; Documents and Knowledge Catalog remain primary
 product entry points.
@@ -14,7 +15,7 @@ product entry points.
 Route and permission:
 
 ```text
-/schema-lifecycle?library=<slug>&version=<uuid>&tab=<known-tab>
+/knowledge-governance/schema?library=<slug>&version=<uuid>&tab=<known-tab>
 access: Organization administrator or exact Library admin permission
 ```
 

@@ -4,7 +4,8 @@
 
 ### 1. Scope / Trigger
 
-Use this contract when changing the `explore` tab under `/knowledge-graph`, its
+Use this contract when changing the `explore` tab under
+`/knowledge-governance/graph` (legacy `/knowledge-graph`), its
 seed search, published traversal client, radial canvas, equivalent tables, or
 Entity/Relation/Evidence drill-down. Exploration is a secondary desktop
 workspace. It reuses existing Graph Catalog, v0.6 traversal, and Catalog
@@ -15,7 +16,7 @@ Evidence truth and does not add another backend graph service.
 Route:
 
 ```text
-/knowledge-graph?tab=explore
+/knowledge-governance/graph?tab=explore
                  &organization=<uuid>
                  &libraries=<slug,slug>
 ```

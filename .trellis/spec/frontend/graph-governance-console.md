@@ -4,7 +4,8 @@
 
 ### 1. Scope / Trigger
 
-Use this contract when changing `/knowledge-graph`, its Graph Catalog reads,
+Use this contract when changing `/knowledge-governance/graph` (legacy
+`/knowledge-graph`), its Graph Catalog reads,
 governance commands, review queues, or Publication controls in `admin-ui/`.
 Documents and Knowledge Catalog remain the primary product entry points. The
 graph console is a secondary directory, bounded exploration, and governance
@@ -16,7 +17,7 @@ experience.
 Route and authorization:
 
 ```text
-/knowledge-graph?tab=entities|relations|review|publications|explore
+/knowledge-governance/graph?tab=entities|relations|review|publications|explore
                  &organization=<uuid>&libraries=<slug,slug>
                  &entity=<uuid>|relation=<uuid>
 
