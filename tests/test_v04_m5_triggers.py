@@ -182,14 +182,41 @@ class _ScalarResult:
 def test_publication_commit_survives_auto_trigger_failure(monkeypatch):
     _enable_auto_trigger(monkeypatch)
     monkeypatch.setattr(settings, "enable_revision_id_worker", True)
-    library = Library(
-        id=LIB_ID,
-        slug="trigger-lib",
-        name="Trigger",
-        qdrant_collection="trigger",
-        embedding_model="bge-m3",
-        embedding_dim=1024,
-    )
+    class ExpiringLibrary:
+        expired = False
+        revision_retention_enabled = False
+
+        @property
+        def id(self):
+            if self.expired:
+                raise RuntimeError("expired library accessed after publication commit")
+            return LIB_ID
+
+    class ExpiringJob:
+        expired = False
+
+        def __init__(self):
+            self._id = uuid.uuid4()
+
+        @property
+        def id(self):
+            if self.expired:
+                raise RuntimeError("expired job accessed after publication commit")
+            return self._id
+
+        @property
+        def document_id(self):
+            if self.expired:
+                raise RuntimeError("expired job accessed after publication commit")
+            return DOC_ID
+
+        @property
+        def document_revision_id(self):
+            if self.expired:
+                raise RuntimeError("expired job accessed after publication commit")
+            return REV_ID
+
+    library = ExpiringLibrary()
     document = Document(
         id=DOC_ID,
         library_id=LIB_ID,
@@ -210,11 +237,7 @@ def test_publication_commit_survives_auto_trigger_failure(monkeypatch):
         chunking_strategy_version="v1",
         status="processing",
     )
-    embedding_job = SimpleNamespace(
-        id=uuid.uuid4(),
-        document_id=DOC_ID,
-        document_revision_id=REV_ID,
-    )
+    embedding_job = ExpiringJob()
     order = []
 
     async def execute(statement, *_args, **_kwargs):
@@ -227,6 +250,8 @@ def test_publication_commit_survives_auto_trigger_failure(monkeypatch):
 
     async def commit():
         order.append("publication_commit")
+        library.expired = True
+        embedding_job.expired = True
 
     async def trigger(**_kwargs):
         order.append("trigger_attempt")

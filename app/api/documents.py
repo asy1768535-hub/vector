@@ -222,14 +222,14 @@ async def _ingest_and_store_import_item(
     db: AsyncSession,
     *,
     lib: Library,
-    user: User,
+    created_by: uuid.UUID,
     doc_data: dict,
     filename: str,
     content_type: str | None,
     content: bytes,
     prepared_file: PreparedStoredFile | None,
 ) -> dict:
-    result = await _ingest_or_upsert(db, lib, user, doc_data)
+    result = await _ingest_or_upsert(db, lib, created_by, doc_data)
     await _store_original_file_for_result(
         db,
         lib=lib,
@@ -431,7 +431,12 @@ def _structured_doc_data(text: str, filename: str, suffix: str, splitter: str, l
     }
 
 
-async def _ingest_or_upsert(db: AsyncSession, lib: Library, user: User, doc_data: dict) -> dict:
+async def _ingest_or_upsert(
+    db: AsyncSession,
+    lib: Library,
+    created_by: uuid.UUID,
+    doc_data: dict,
+) -> dict:
     """单条文档摄入：有 external_id 且库内已存在同键未删文档 → reingest 覆盖更新；否则新建。
 
     返回 import 结果 dict（document_id/title/chunk_count/status/job_id/external_id）。
@@ -469,7 +474,7 @@ async def _ingest_or_upsert(db: AsyncSession, lib: Library, user: User, doc_data
     doc, job, chunk_count, was_existing = await ingest_service.ingest_text(
         db=db, library=lib, text=doc_data["text"], title=doc_data["title"],
         external_id=ext, metadata=doc_data["metadata"], splitter=doc_data["splitter"],
-        created_by=user.id, chunks=doc_data.get("chunks"),
+        created_by=created_by, chunks=doc_data.get("chunks"),
     )
     if not was_existing:
         await _upsert_document_source(db, doc.id, doc.current_revision, doc_data.get("source"))
@@ -991,6 +996,7 @@ async def import_file(
 ):
     structured_storage = settings.revision_file_storage_enabled
     library_id = lib.id
+    created_by = user.id
     if not structured_storage:
         await _lock_writable(db, lib)
     filename = file.filename or "imported_file"
@@ -1256,7 +1262,7 @@ async def import_file(
                     result = await _ingest_and_store_import_item(
                         db,
                         lib=lib,
-                        user=user,
+                        created_by=created_by,
                         doc_data=doc_data,
                         filename=filename,
                         content_type=file.content_type,
@@ -1267,7 +1273,7 @@ async def import_file(
                 result = await _ingest_and_store_import_item(
                     db,
                     lib=lib,
-                    user=user,
+                    created_by=created_by,
                     doc_data=doc_data,
                     filename=filename,
                     content_type=file.content_type,

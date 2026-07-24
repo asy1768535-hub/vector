@@ -253,20 +253,24 @@ async def _publish_revision_after_qdrant(
 ) -> bool:
     """Publish a revision only after Qdrant upsert has succeeded."""
     now = now or datetime.now(timezone.utc)
+    library_id = library.id
+    job_id = job.id
+    document_id = job.document_id
+    revision_id = job.document_revision_id
     await db.rollback()
     from app.services import cleanup as cleanup_service
 
     doc = (
         await db.execute(
             select(Document)
-            .where(Document.id == job.document_id)
+            .where(Document.id == document_id)
             .with_for_update()
         )
     ).scalar_one_or_none()
     revision = (
         await db.execute(
             select(DocumentRevision)
-            .where(DocumentRevision.id == job.document_revision_id)
+            .where(DocumentRevision.id == revision_id)
             .with_for_update()
         )
     ).scalar_one_or_none()
@@ -275,21 +279,21 @@ async def _publish_revision_after_qdrant(
         doc is None
         or doc.deleted_at is not None
         or revision is None
-        or doc.latest_revision_id != job.document_revision_id
+        or doc.latest_revision_id != revision_id
     ):
         await db.execute(
             update(EmbeddingJob)
-            .where(EmbeddingJob.id == job.id)
+            .where(EmbeddingJob.id == job_id)
             .values(status="superseded", finished_at=now)
         )
-        if job.document_revision_id is not None:
+        if revision_id is not None:
             await db.execute(
                 update(DocumentRevision)
-                .where(DocumentRevision.id == job.document_revision_id)
+                .where(DocumentRevision.id == revision_id)
                 .values(status="superseded", finished_at=now)
             )
             await cleanup_service.enqueue_delete_unpublished_revision_points(
-                db, library, job.document_id, job.document_revision_id
+                db, library, document_id, revision_id
             )
         await db.commit()
         return False
@@ -297,7 +301,7 @@ async def _publish_revision_after_qdrant(
     old_current_revision_id = doc.current_revision_id
     await db.execute(
         update(DocumentRevision)
-        .where(DocumentRevision.id == job.document_revision_id)
+        .where(DocumentRevision.id == revision_id)
         .values(
             status="ready",
             published_at=now,
@@ -307,32 +311,32 @@ async def _publish_revision_after_qdrant(
     )
     await db.execute(
         update(EmbeddingJob)
-        .where(EmbeddingJob.id == job.id)
+        .where(EmbeddingJob.id == job_id)
         .values(status="done", finished_at=now, last_error=None)
     )
     await db.execute(
         update(Document)
         .where(
-            Document.id == job.document_id,
-            Document.latest_revision_id == job.document_revision_id,
+            Document.id == document_id,
+            Document.latest_revision_id == revision_id,
             Document.deleted_at.is_(None),
         )
         .values(
-            current_revision_id=job.document_revision_id,
+            current_revision_id=revision_id,
             status="ready",
             last_error=None,
             updated_at=now,
         )
     )
-    if old_current_revision_id is not None and old_current_revision_id != job.document_revision_id:
+    if old_current_revision_id is not None and old_current_revision_id != revision_id:
         from app.services.knowledge_artifact_publication import (
             supersede_revision_artifacts,
         )
 
         await supersede_revision_artifacts(
             db,
-            library_id=library.id,
-            document_id=job.document_id,
+            library_id=library_id,
+            document_id=document_id,
             document_revision_id=old_current_revision_id,
             now=now,
         )
@@ -342,8 +346,8 @@ async def _publish_revision_after_qdrant(
 
         await supersede_revision_classification_jobs(
             db,
-            library_id=library.id,
-            document_id=job.document_id,
+            library_id=library_id,
+            document_id=document_id,
             document_revision_id=old_current_revision_id,
             now=now,
         )
@@ -353,15 +357,15 @@ async def _publish_revision_after_qdrant(
             .values(status="superseded", finished_at=now)
         )
         await cleanup_service.enqueue_delete_document_revision(
-            db, library, job.document_id, old_current_revision_id
+            db, library, document_id, old_current_revision_id
         )
     retention_scope = (
-        (library.id, job.document_id, old_current_revision_id, job.document_revision_id)
+        (library_id, document_id, old_current_revision_id, revision_id)
         if (
             settings.revision_retention_enabled
             and getattr(library, "revision_retention_enabled", False)
             and old_current_revision_id is not None
-            and old_current_revision_id != job.document_revision_id
+            and old_current_revision_id != revision_id
         )
         else None
     )
@@ -392,15 +396,15 @@ async def _publish_revision_after_qdrant(
         )
 
         await enqueue_ready_revision_graph_extraction(
-            library_id=library.id,
-            document_id=job.document_id,
-            revision_id=job.document_revision_id,
+            library_id=library_id,
+            document_id=document_id,
+            revision_id=revision_id,
         )
     except Exception:  # noqa: BLE001
         log.exception(
             "graph extraction auto trigger failed after publication: doc=%s revision=%s",
-            job.document_id,
-            job.document_revision_id,
+            document_id,
+            revision_id,
         )
     try:
         from app.services.knowledge_artifact_jobs import (
@@ -408,16 +412,16 @@ async def _publish_revision_after_qdrant(
         )
 
         await enqueue_ready_revision_artifacts(
-            library_id=library.id,
-            document_id=job.document_id,
-            revision_id=job.document_revision_id,
+            library_id=library_id,
+            document_id=document_id,
+            revision_id=revision_id,
         )
     except Exception:  # noqa: BLE001
         log.exception(
             "knowledge artifact auto trigger failed after publication: "
             "doc=%s revision=%s",
-            job.document_id,
-            job.document_revision_id,
+            document_id,
+            revision_id,
         )
     try:
         from app.services.classification_jobs import (
@@ -425,16 +429,16 @@ async def _publish_revision_after_qdrant(
         )
 
         await enqueue_ready_revision_classification(
-            library_id=library.id,
-            document_id=job.document_id,
-            revision_id=job.document_revision_id,
+            library_id=library_id,
+            document_id=document_id,
+            revision_id=revision_id,
         )
     except Exception:  # noqa: BLE001
         log.exception(
             "classification auto trigger failed after publication: "
             "doc=%s revision=%s",
-            job.document_id,
-            job.document_revision_id,
+            document_id,
+            revision_id,
         )
     return True
 
@@ -507,13 +511,16 @@ async def _process_job(db: AsyncSession, job: EmbeddingJob) -> None:
             await qdrant.upsert_points(
                 lib_l.qdrant_collection, points, timeout=settings.qdrant_upsert_timeout_seconds
             )
+            published_slug = lib_l.slug
+            published_document_id = doc_l.id
+            published_revision_id = job.document_revision_id
             published = await _publish_revision_after_qdrant(db, library=lib_l, job=job)
             if published:
                 log.info(
                     "done: lib=%s doc=%s revision_id=%s chunks=%s",
-                    lib_l.slug,
-                    doc_l.id,
-                    job.document_revision_id,
+                    published_slug,
+                    published_document_id,
+                    published_revision_id,
                     len(chunks),
                 )
             return

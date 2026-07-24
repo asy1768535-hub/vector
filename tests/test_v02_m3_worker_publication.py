@@ -322,10 +322,22 @@ def test_revision_worker_upserts_revision_scoped_points_before_publish(monkeypat
     db.execute = AsyncMock()
     db.commit = AsyncMock()
 
+    async def publish_and_expire_orm_fields(*_args, **_kwargs):
+        from sqlalchemy import inspect
+
+        inspect(lib)._expire_attributes(lib.__dict__, ["slug"])
+        inspect(doc)._expire_attributes(doc.__dict__, ["id"])
+        inspect(job)._expire_attributes(job.__dict__, ["document_revision_id"])
+        return True
+
     with patch.object(embedder, "_chunks_for_job", new_callable=AsyncMock, return_value=[chunk]) as chunks_for_job, \
          patch.object(embedder.embedding, "embed_texts", new_callable=AsyncMock, return_value=[[0.1, 0.2, 0.3]]) as embed, \
          patch.object(embedder.qdrant, "upsert_points", new_callable=AsyncMock) as upsert, \
-         patch.object(embedder, "_publish_revision_after_qdrant", new_callable=AsyncMock, return_value=True) as publish:
+         patch.object(
+             embedder,
+             "_publish_revision_after_qdrant",
+             new=AsyncMock(side_effect=publish_and_expire_orm_fields),
+         ) as publish:
         asyncio.run(embedder._process_job(db, job))
 
     chunks_for_job.assert_awaited_once()
