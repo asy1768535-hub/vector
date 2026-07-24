@@ -145,6 +145,8 @@ async def ingest_text(
     metadata: dict[str, Any] | None,
     splitter: str,
     created_by: uuid.UUID | None,
+    visibility_scope: str | None = None,
+    security_level: str | None = None,
     chunks: list[str | dict] | None = None,
 ) -> tuple[Document, EmbeddingJob, int, bool]:
     """返回 (document, job, chunk_count, was_existing)。
@@ -181,6 +183,8 @@ async def ingest_text(
         doc_metadata=metadata,
         content_hash=chash,
         current_revision=1,          # #6：新文档索引版本从 1 起（DB 默认已移除，须显式赋值）
+        visibility_scope=visibility_scope,
+        security_level=security_level,
         status="pending",
         created_by=created_by,
     )

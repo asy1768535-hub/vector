@@ -17,6 +17,7 @@ import socket
 import sys
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from sqlalchemy import select, text, update
@@ -40,6 +41,13 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 REVISION_POINT_NAMESPACE = uuid.UUID("a65d3d18-55c6-4df6-9f42-2f5dfdcf0a76")
+
+
+@dataclass(frozen=True, slots=True)
+class _LibraryPublicationSnapshot:
+    id: uuid.UUID
+    qdrant_collection: str
+    revision_retention_enabled: bool
 
 
 def _worker_id() -> str:
@@ -254,6 +262,13 @@ async def _publish_revision_after_qdrant(
     """Publish a revision only after Qdrant upsert has succeeded."""
     now = now or datetime.now(timezone.utc)
     library_id = library.id
+    library_snapshot = _LibraryPublicationSnapshot(
+        id=library_id,
+        qdrant_collection=library.qdrant_collection,
+        revision_retention_enabled=bool(
+            getattr(library, "revision_retention_enabled", False)
+        ),
+    )
     job_id = job.id
     document_id = job.document_id
     revision_id = job.document_revision_id
@@ -293,7 +308,7 @@ async def _publish_revision_after_qdrant(
                 .values(status="superseded", finished_at=now)
             )
             await cleanup_service.enqueue_delete_unpublished_revision_points(
-                db, library, document_id, revision_id
+                db, library_snapshot, document_id, revision_id
             )
         await db.commit()
         return False
@@ -357,13 +372,13 @@ async def _publish_revision_after_qdrant(
             .values(status="superseded", finished_at=now)
         )
         await cleanup_service.enqueue_delete_document_revision(
-            db, library, document_id, old_current_revision_id
+            db, library_snapshot, document_id, old_current_revision_id
         )
     retention_scope = (
         (library_id, document_id, old_current_revision_id, revision_id)
         if (
             settings.revision_retention_enabled
-            and getattr(library, "revision_retention_enabled", False)
+            and library_snapshot.revision_retention_enabled
             and old_current_revision_id is not None
             and old_current_revision_id != revision_id
         )

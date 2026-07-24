@@ -185,6 +185,7 @@ def test_publication_commit_survives_auto_trigger_failure(monkeypatch):
     class ExpiringLibrary:
         expired = False
         revision_retention_enabled = False
+        qdrant_collection = "trigger"
 
         @property
         def id(self):
@@ -250,8 +251,10 @@ def test_publication_commit_survives_auto_trigger_failure(monkeypatch):
 
     async def commit():
         order.append("publication_commit")
-        library.expired = True
         embedding_job.expired = True
+
+    async def rollback():
+        library.expired = True
 
     async def trigger(**_kwargs):
         order.append("trigger_attempt")
@@ -263,7 +266,7 @@ def test_publication_commit_survives_auto_trigger_failure(monkeypatch):
 
     db = MagicMock()
     db.execute = AsyncMock(side_effect=execute)
-    db.rollback = AsyncMock()
+    db.rollback = AsyncMock(side_effect=rollback)
     db.commit = AsyncMock(side_effect=commit)
     with (
         patch(
