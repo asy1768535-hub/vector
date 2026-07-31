@@ -117,8 +117,8 @@ test('contains only approved low-risk actions and no fake backend additions', ()
     }
 });
 
-test('loads at most 500 records and routes import with current library', () => {
-    assert.match(source, /limit:\s*500/);
+test('loads at most 1000 records and routes import with current library', () => {
+    assert.match(source, /limit:\s*1000/);
     assert.ok(source.includes("path: '/knowledge-assets/import'"));
     assert.ok(source.includes("mode: 'add'"));
 });

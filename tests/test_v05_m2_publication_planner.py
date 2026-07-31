@@ -438,7 +438,24 @@ def test_initial_seed_can_include_draft_facts_and_records_blocked_counts():
     assert result.publication.entity_count == 1
     assert result.publication.relation_count == 0
     assert result.blocked_counts["entity_status_pending_review"] == 1
-    assert result.blocked_counts["relation_review_blocked"] == 1
+    assert result.blocked_counts["relation_endpoint_not_published"] == 1
+
+
+def test_auto_active_relation_does_not_require_review_status():
+    db = FakeDB(
+        objects=_scope_objects(),
+        query_rows=_query_rows(
+            include_lock_query=False,
+            include_idempotency_query=False,
+            relations=_relations(status="draft", review_status=None),
+        ),
+    )
+
+    result = _plan(db, dry_run=True, include_drafts=True)
+
+    assert result.publication.entity_count == 2
+    assert result.publication.relation_count == 1
+    assert "relation_review_blocked" not in result.blocked_counts
 
 
 def test_idempotency_replay_returns_existing_planned_publication():

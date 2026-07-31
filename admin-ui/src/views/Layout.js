@@ -3,7 +3,7 @@ import { useRoute, useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
 
 import * as api from '../api.js';
-import { visibleSidebarDomains } from '../domain_navigation.js';
+import { domainTabTarget, visibleSidebarGroups } from '../domain_navigation.js';
 import { menuAccess } from '../menu_access.js';
 import { clearAuthState, store } from '../store.js';
 
@@ -25,8 +25,27 @@ export default {
             store.permissions,
             store.organizations,
         ));
-        const domainMenus = computed(() => visibleSidebarDomains(access.value));
-        const activeDomain = computed(() => route.meta.domain || '');
+        const sidebarGroups = computed(() => visibleSidebarGroups(access.value));
+        const sidebarEntries = computed(() => sidebarGroups.value.flatMap((group) => (
+            group.items.map((item, index) => ({
+                ...item,
+                type: 'item',
+                key: item.path,
+                section: group.section,
+                sectionStart: Boolean(group.sectionStart && index === 0),
+            }))
+        )));
+        const activePath = computed(() => (
+            sidebarEntries.value.find((entry) => (
+                entry.type === 'item'
+                && Array.isArray(entry.activePaths)
+                && entry.activePaths.includes(route.path)
+            ))?.path || route.path
+        ));
+        const sidebarMenuKey = computed(() => [
+            effectiveCollapsed.value ? 'collapsed' : 'expanded',
+            sidebarEntries.value.map((entry) => entry.key).join('|'),
+        ].join(':'));
         const pageTitle = computed(() => route.meta.domainTitle || route.meta.title || '');
         const pageSection = computed(() => (
             route.meta.domainTitle ? route.meta.title : '向量知识库'
@@ -37,9 +56,12 @@ export default {
         ));
         const avatarText = computed(() => (userLabel.value || '?').charAt(0).toUpperCase());
 
-        function navigateDomain(key) {
-            const target = domainMenus.value.find((item) => item.key === key);
-            if (target && target.path !== route.path) router.push(target.path);
+        function navigatePage(path) {
+            if (!path || path === route.path) return;
+            const item = sidebarEntries.value
+                .filter((entry) => entry.type === 'item')
+                .find((entry) => entry.path === path);
+            if (item) router.push(domainTabTarget(item.path, route.query));
         }
 
         function onUserCommand(command) {
@@ -60,18 +82,20 @@ export default {
         function toggleSidebar() { collapsed.value = !collapsed.value; }
 
         return {
-            activeDomain,
+            activePath,
             avatarText,
             collapsed,
-            domainMenus,
             effectiveCollapsed,
             isChatWorkspace,
             isNarrow,
             isSuper,
-            navigateDomain,
+            navigatePage,
             onUserCommand,
             pageSection,
             pageTitle,
+            sidebarEntries,
+            sidebarGroups,
+            sidebarMenuKey,
             toggleSidebar,
             userLabel,
         };
@@ -79,7 +103,7 @@ export default {
     template: `
     <el-container>
         <el-aside
-            :width="effectiveCollapsed ? '64px' : '224px'"
+            :width="effectiveCollapsed ? '64px' : '220px'"
             class="layout-aside"
             :class="{ 'is-collapsed': effectiveCollapsed }"
         >
@@ -88,19 +112,27 @@ export default {
                 <span v-show="!effectiveCollapsed">向量知识库</span>
             </div>
             <el-menu
-                :default-active="activeDomain"
+                :key="sidebarMenuKey"
+                class="sidebar-page-menu"
+                :default-active="activePath"
                 :collapse="effectiveCollapsed"
                 :collapse-transition="false"
-                @select="navigateDomain"
+                @select="navigatePage"
             >
-                <el-menu-item
-                    v-for="item in domainMenus"
-                    :key="item.key"
-                    :index="item.key"
+                <template
+                    v-for="entry in sidebarEntries"
+                    :key="entry.key"
                 >
-                    <el-icon><local-icon :icon="item.icon"></local-icon></el-icon>
-                    <template #title>{{ item.label }}</template>
-                </el-menu-item>
+                    <el-menu-item
+                        v-if="entry.type === 'item'"
+                        :index="entry.path"
+                        class="sidebar-flat-item"
+                        :class="{ 'is-section-start': entry.sectionStart }"
+                    >
+                        <el-icon><local-icon :icon="entry.icon"></local-icon></el-icon>
+                        <template #title>{{ entry.label }}</template>
+                    </el-menu-item>
+                </template>
             </el-menu>
             <div class="sidebar-collapse-btn">
                 <el-button

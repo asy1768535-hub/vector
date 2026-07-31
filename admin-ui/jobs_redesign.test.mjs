@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
-import { STATUS_LABEL, STATUS_TAG, STATUS_ICON, formatJobTime, jobDuration, shortId, filterJobs, paginateJobs, libraryName } from './src/jobs_ui.js';
+import { STATUS_LABEL, STATUS_TAG, STATUS_ICON, TASK_TYPE_LABEL, STAGE_LABEL, formatJobTime, jobDuration, shortId, filterJobs, paginateJobs, libraryName } from './src/jobs_ui.js';
 
 // ── Unit tests ──
 test('STATUS_LABEL maps all statuses', () => {
@@ -53,10 +53,11 @@ test('shortId: truncates long IDs', () => {
 
 test('filterJobs filters correctly', () => {
     const jobs = [
-        { id: '1', status: 'pending', library_id: 'l1', worker_id: 'w1', document_id: 'd1', created_at: '2026-06-01T00:00:00Z' },
-        { id: '2', status: 'done', library_id: 'l2', worker_id: 'w2', document_id: 'd2', created_at: '2026-07-01T00:00:00Z' },
+        { id: '1', task_type: 'import', status: 'pending', library_id: 'l1', worker_id: 'w1', document_id: 'd1', created_at: '2026-06-01T00:00:00Z' },
+        { id: '2', task_type: 'graph', status: 'done', library_id: 'l2', worker_id: 'w2', document_id: 'd2', created_at: '2026-07-01T00:00:00Z' },
     ];
     assert.equal(filterJobs(jobs, { status: 'pending' }).length, 1);
+    assert.equal(filterJobs(jobs, { task_type: 'graph' }).length, 1);
     assert.equal(filterJobs(jobs, { library_id: 'l2' }).length, 1);
     assert.equal(filterJobs(jobs, { dateFrom: '2026-07-01' }).length, 1);
 });
@@ -73,6 +74,14 @@ test('libraryName maps library_id to name', () => {
     const libs = [{ id: 'l1', name: '法规库', slug: 'law' }];
     assert.ok(libraryName(libs, 'l1').includes('法规库'));
     assert.ok(libraryName(libs, 'unknown').includes('unknown'));
+});
+
+test('任务类型和图谱阶段使用中文展示', () => {
+    assert.equal(TASK_TYPE_LABEL.import, '文件导入');
+    assert.equal(TASK_TYPE_LABEL.embedding, '向量化');
+    assert.equal(TASK_TYPE_LABEL.graph, '知识图谱');
+    assert.equal(STAGE_LABEL.extracting, '抽取实体与关系');
+    assert.equal(STAGE_LABEL.awaiting_graph, '等待创建图谱任务');
 });
 
 // ── Template regression ──
@@ -170,16 +179,16 @@ test('statsFailed 时全局重置仍可用（不依赖不可靠数量）', () =>
     assert.ok(src.includes('!statsFailed'), 'button disabled allows statsFailed case');
     // Confirm branches on statsFailed
     assert.ok(src.includes('statsFailed.value'), 'resetFailed checks statsFailed');
-    assert.ok(src.includes('将重置全部失败任务'), 'confirm text without unreliable count');
+    assert.ok(src.includes('将重置全部失败向量任务'), 'confirm text without unreliable count');
 });
 
 // ── 新回归：task 2 重置范围 ──
-test('重置失败任务：未选知识库使用 stats.failed 精确数量', () => {
-    assert.ok(src.includes('stats.value.failed'), 'global uses stats.failed');
+test('重置失败任务：未选知识库使用 retryable_failed 精确数量', () => {
+    assert.ok(src.includes('stats.value.retryable_failed'), 'global uses retryable_failed');
 });
 
-test('重置失败任务：已选知识库显示范围文案，不依赖前端筛选数', () => {
-    assert.ok(src.includes('重置该知识库中的所有失败任务'), 'scoped confirm text');
+test('重置失败任务：明确仅处理向量任务', () => {
+    assert.ok(src.includes('重置该知识库中的所有失败向量任务'), 'scoped confirm text');
 });
 
 test('模板中无 filtered.filter 调用', () => {
@@ -187,13 +196,23 @@ test('模板中无 filtered.filter 调用', () => {
     assert.ok(!tpl.includes('filtered.filter'), 'no filtered.filter in template');
 });
 
-test('按钮禁用仅依赖 stats.failed/statsFailed，不依赖其他筛选条件', () => {
-    // :disabled="resetting || (!filters.library_id && !statsFailed && !stats.failed)"
-    assert.ok(src.includes('!statsFailed && !stats.failed'), 'disabled only on global + stats available + no failures');
+test('按钮禁用仅依赖 retryable_failed/statsFailed，不依赖其他筛选条件', () => {
+    assert.ok(src.includes('!statsFailed && !stats.retryable_failed'), 'disabled only on global + stats available + no failures');
 });
 
 test('按钮数量标签仅未选知识库且 stats 可用时显示', () => {
-    assert.ok(src.includes('!filters.library_id && !statsFailed && stats.failed'), 'count badge only when global and stats not failed');
+    assert.ok(src.includes('!filters.library_id && !statsFailed && stats.retryable_failed'), 'count badge only when global and stats not failed');
+});
+
+test('监控页使用持久化统一接口并自动刷新', () => {
+    assert.ok(src.includes('listMonitoredTasks'), 'uses persistent monitor endpoint');
+    assert.ok(src.includes('monitoredTaskStats'), 'uses monitor stats endpoint');
+    assert.ok(src.includes('setInterval'), 'auto refreshes');
+    assert.ok(src.includes('clearInterval'), 'cleans up timer');
+});
+
+test('只有后端标记为 retryable 的任务可重试', () => {
+    assert.ok(src.includes(':disabled="!row.retryable"'));
 });
 
 // ── 详情交互回归 ──
@@ -229,6 +248,23 @@ test('详情卡标题含文档短 ID', () => {
 
 test('CSS 穿透 Element Plus td 高亮', () => {
     assert.ok(css.includes('tr.jobs-row-selected > td.el-table__cell'), 'CSS targets td.el-table__cell');
+});
+
+test('graph task details separate extraction progress from automatic publication', () => {
+    for (const token of [
+        '构建模式', '抽取进度', '批次进度', '自动发布',
+        '等待抽取完成', '自动发布中', '已发布可用',
+        '自动发布失败，可重试', '无合格事实，无需发布',
+    ]) assert.ok(src.includes(token), `missing graph state token: ${token}`);
+    assert.ok(!src.includes('图谱完成不代表已发布'));
+});
+
+test('graph task details expose throughput and rate-limit metrics', () => {
+    for (const token of [
+        'configured_concurrency', 'effective_concurrency', 'in_flight',
+        'eta_seconds', 'cache_hits', 'throttled_count', 'retry_count',
+        'completed_batches', 'planned_batches',
+    ]) assert.ok(src.includes(token), `missing graph metric: ${token}`);
 });
 
 console.log('jobs redesign test passed');

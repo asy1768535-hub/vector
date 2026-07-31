@@ -51,6 +51,20 @@ def test_prompt_hash_is_stable_sha256():
     assert all(char in "0123456789abcdef" for char in first)
 
 
+def test_center_only_prompt_is_versioned_and_restricts_neighbor_evidence():
+    messages = build_graph_extraction_messages(
+        context_text='{"p1":{"text":"previous"},"c0":{"text":"center"},"n1":{"text":"next"}}',
+        ontology_snapshot={"entity_types": [], "relation_types": []},
+        center_only=True,
+    )
+
+    system = messages[0]["content"]
+    assert "c0" in system
+    assert "disambiguation" in system
+    assert "primary evidence" in system
+    assert graph_extraction_prompt_hash(center_only=True) != graph_extraction_prompt_hash()
+
+
 @pytest.mark.asyncio
 async def test_deepseek_adapter_uses_exact_openai_compatible_contract():
     captured: dict = {}
@@ -101,6 +115,47 @@ async def test_deepseek_adapter_uses_exact_openai_compatible_contract():
     assert len(result.request_payload_hash) == 64
     assert "TOP-SECRET-KEY" not in repr(result)
     assert "TOP-SECRET-KEY" not in result.raw_response
+
+
+@pytest.mark.asyncio
+async def test_deepseek_adapter_sends_frozen_output_token_budget():
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"content": '{"entities":[],"relations":[]}'},
+                        "finish_reason": "stop",
+                    }
+                ]
+            },
+        )
+
+    extractor = OpenAICompatibleGraphExtractor(
+        base_url="https://api.deepseek.com/v1",
+        model="deepseek-v4-pro",
+        api_key="TOKEN-BUDGET-KEY",
+        max_output_tokens=3500,
+        transport=httpx.MockTransport(handler),
+    )
+    await extractor.extract(_messages())
+
+    assert captured["payload"]["max_tokens"] == 3500
+
+
+@pytest.mark.parametrize("value", [True, 0, -1, 1.5])
+def test_deepseek_adapter_rejects_invalid_output_token_budget(value):
+    with pytest.raises(ValueError, match="max_output_tokens"):
+        OpenAICompatibleGraphExtractor(
+            base_url="https://api.deepseek.com/v1",
+            model="deepseek-v4-pro",
+            api_key="TOKEN-BUDGET-KEY",
+            max_output_tokens=value,
+        )
 
 
 @pytest.mark.asyncio

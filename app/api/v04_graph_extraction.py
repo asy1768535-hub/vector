@@ -27,11 +27,13 @@ from app.schemas.graph_extraction_jobs import (
     GraphExtractionJobList,
     GraphExtractionJobRead,
     GraphExtractionRerun,
+    GraphExtractionUploadConfiguration,
     GraphExtractionUnitList,
     GraphExtractionUnitRead,
 )
 from app.services import graph_extraction_jobs
 from app.services.graph_extraction_jobs import GraphExtractionJobError
+from app.services.graph_extraction_triggers import graph_extraction_upload_configuration
 from app.services.organization_authorization import (
     OrganizationAuthorizationError,
     authorize_library_management,
@@ -84,13 +86,19 @@ async def _document_scope(
     ):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "document_not_found")
     revision = await db.get(DocumentRevision, document.current_revision_id)
-    if (
-        revision is None
-        or revision.library_id != library.id
-        or revision.document_id != document.id
-    ):
+    if revision is None or revision.library_id != library.id or revision.document_id != document.id:
         raise HTTPException(status.HTTP_409_CONFLICT, "current_revision_missing")
     return document, revision
+
+
+@router.get("/upload-configuration", response_model=GraphExtractionUploadConfiguration)
+async def get_upload_graph_extraction_configuration(
+    library: Library = Depends(require_lib("insert")),
+    db: AsyncSession = Depends(get_db),
+) -> GraphExtractionUploadConfiguration:
+    return GraphExtractionUploadConfiguration.model_validate(
+        await graph_extraction_upload_configuration(db, library)
+    )
 
 
 @router.post("/", response_model=GraphExtractionJobRead, status_code=status.HTTP_201_CREATED)
@@ -115,6 +123,7 @@ async def create_graph_extraction(
             execution_mode="production",
             requested_by=user,
             idempotency_key=body.idempotency_key,
+            build_mode=body.build_mode,
         )
         await db.commit()
         return GraphExtractionJobRead.model_validate(job)
@@ -136,13 +145,7 @@ async def list_graph_extractions(
         filters.append(GraphExtractionJob.status == job_status)
     if document_id is not None:
         filters.append(GraphExtractionJob.document_id == document_id)
-    total = int(
-        (
-            await db.execute(
-                select(func.count(GraphExtractionJob.id)).where(*filters)
-            )
-        ).scalar_one()
-    )
+    total = int((await db.execute(select(func.count(GraphExtractionJob.id)).where(*filters))).scalar_one())
     result = await db.execute(
         select(GraphExtractionJob)
         .where(*filters)
@@ -194,9 +197,7 @@ async def list_graph_extraction_units(
     total = int(
         (
             await db.execute(
-                select(func.count(GraphExtractionUnit.id)).where(
-                    GraphExtractionUnit.job_id == job.id
-                )
+                select(func.count(GraphExtractionUnit.id)).where(GraphExtractionUnit.job_id == job.id)
             )
         ).scalar_one()
     )
@@ -247,18 +248,12 @@ def _candidate_read(row, candidate_type: str) -> GraphExtractionCandidateRead:
         candidate_type=candidate_type,
         id=row.id,
         candidate_key=row.candidate_key,
-        ontology_type_key=(
-            row.entity_type_key if is_entity else row.relation_type_key
-        ),
+        ontology_type_key=(row.entity_type_key if is_entity else row.relation_type_key),
         status=row.status,
         final_confidence=row.final_confidence,
         review_reason=row.review_reason,
-        matched_formal_id=(
-            row.matched_entity_id if is_entity else row.matched_relation_id
-        ),
-        materialized_formal_id=(
-            row.materialized_entity_id if is_entity else row.materialized_relation_id
-        ),
+        matched_formal_id=(row.matched_entity_id if is_entity else row.matched_relation_id),
+        materialized_formal_id=(row.materialized_entity_id if is_entity else row.materialized_relation_id),
         created_at=row.created_at,
     )
 
@@ -282,18 +277,14 @@ async def list_graph_extraction_candidates(
     entity_total = int(
         (
             await db.execute(
-                select(func.count(GraphEntityCandidate.id)).where(
-                    GraphEntityCandidate.job_id == job.id
-                )
+                select(func.count(GraphEntityCandidate.id)).where(GraphEntityCandidate.job_id == job.id)
             )
         ).scalar_one()
     )
     relation_total = int(
         (
             await db.execute(
-                select(func.count(GraphRelationCandidate.id)).where(
-                    GraphRelationCandidate.job_id == job.id
-                )
+                select(func.count(GraphRelationCandidate.id)).where(GraphRelationCandidate.job_id == job.id)
             )
         ).scalar_one()
     )

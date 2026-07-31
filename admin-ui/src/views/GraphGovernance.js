@@ -42,6 +42,7 @@ import {
 } from '../graph_governance_ui.js';
 import { store } from '../store.js';
 import GraphExplorer from '../components/GraphExplorer.js';
+import GraphKnowledgeBrowser from '../components/GraphKnowledgeBrowser.js';
 
 const MALFORMED_ERROR = {
     kind: 'malformed',
@@ -86,12 +87,12 @@ function statusTag(value) {
 }
 
 export default {
-    components: { GraphExplorer },
+    components: { GraphExplorer, GraphKnowledgeBrowser },
     setup() {
         const route = useRoute();
         const router = useRouter();
         const scope = reactive({
-            tab: 'entities',
+            tab: 'browse',
             organizationId: '',
             librarySlugs: [],
             entityId: '',
@@ -202,6 +203,7 @@ export default {
         const selectedOrganization = computed(() => organizations.value.find(
             (item) => item.id === scope.organizationId,
         ) || null);
+        const showOrganizationSelector = computed(() => organizations.value.length > 1);
         const availableLibraries = computed(() => selectedOrganization.value?.libraries || []);
         const hasManagement = computed(() => organizations.value.some(
             (item) => item.libraries.some((library) => library.manage),
@@ -242,7 +244,7 @@ export default {
         const workspaceLoading = computed(() => {
             if (scope.tab === 'review') return reviewQueues.loading;
             if (scope.tab === 'publications') return publications.loading;
-            if (scope.tab === 'explore') return false;
+            if (scope.tab === 'browse' || scope.tab === 'explore') return false;
             return pageState.value.loading;
         });
 
@@ -664,7 +666,7 @@ export default {
         }
 
         async function refreshCurrentPage() {
-            if (scope.tab === 'explore') {
+            if (scope.tab === 'browse' || scope.tab === 'explore') {
                 explorerRefreshKey.value += 1;
                 return;
             }
@@ -737,6 +739,18 @@ export default {
                 libraries: (librarySlugs || []).join(','),
             }, store.permissions, store.organizations);
             navigate(next);
+        }
+
+        function selectBrowserEntity(row) {
+            const entityId = String(row?.id || '');
+            if (!entityId || entityId === scope.entityId) return;
+            navigate({ ...scope, entityId, relationId: '' });
+        }
+
+        async function editBrowserEntity(data) {
+            if (!data?.entity) return;
+            Object.assign(entityDetail, { open: false, loading: false, data, error: null });
+            await openEntityCorrection();
         }
 
         async function applyFilters() {
@@ -919,6 +933,14 @@ export default {
             });
         }
 
+        function openGraphImport() {
+            if (!selectedLibrary.value || !canWrite.value) return;
+            router.push({
+                path: '/knowledge-assets/import',
+                query: { library: selectedLibrary.value.slug, mode: 'add' },
+            });
+        }
+
         function openEvidenceDocument() {
             if (!evidence.data) return;
             openCatalogDocument({ document_id: evidence.data.document_id }, evidence.librarySlug);
@@ -937,6 +959,7 @@ export default {
 
         async function refreshGovernanceSurfaces() {
             await loadCurrentPage();
+            if (scope.tab === 'browse') explorerRefreshKey.value += 1;
             if (scope.tab === 'review') return;
             if (entityDetail.open && entityDetail.data?.entity) {
                 await loadEntityDetail(entityDetail.data.entity, false);
@@ -1615,6 +1638,7 @@ export default {
             scope,
             filters,
             organizations,
+            showOrganizationSelector,
             availableLibraries,
             hasManagement,
             selectedLibrary,
@@ -1648,6 +1672,8 @@ export default {
             changeTab,
             changeOrganization,
             changeLibraries,
+            selectBrowserEntity,
+            editBrowserEntity,
             applyFilters,
             clearFilters,
             nextPage,
@@ -1661,6 +1687,7 @@ export default {
             openEvidence,
             closeEvidence,
             openCatalogDocument,
+            openGraphImport,
             openEvidenceDocument,
             openRelatedRelation,
             loadWriteContext,
@@ -1710,11 +1737,11 @@ export default {
     <div class="graph-workspace">
       <header class="graph-header">
         <div class="graph-create-actions">
-          <el-button v-if="canWrite && scope.tab === 'entities'" type="primary"
+          <el-button v-if="canWrite && ['browse', 'entities'].includes(scope.tab)" type="primary"
                      :disabled="mutation.loading" @click="openFactDialog('entity')">
             <local-icon icon="mdi:plus"></local-icon>新增实体
           </el-button>
-          <el-button v-if="canWrite && scope.tab === 'relations'" type="primary"
+          <el-button v-if="canWrite && ['browse', 'relations'].includes(scope.tab)" type="primary"
                      :disabled="mutation.loading" @click="openFactDialog('relation')">
             <local-icon icon="mdi:plus"></local-icon>新增关系
           </el-button>
@@ -1728,8 +1755,8 @@ export default {
         </el-button>
       </header>
 
-      <section class="graph-scope-band">
-        <label class="graph-field">
+      <section class="graph-scope-band" :class="{ 'is-single-organization': !showOrganizationSelector }">
+        <label v-if="showOrganizationSelector" class="graph-field">
           <span>组织</span>
           <el-select :model-value="scope.organizationId" class="graph-organization-select"
                      @change="changeOrganization">
@@ -1753,17 +1780,29 @@ export default {
       </section>
 
       <el-tabs :model-value="scope.tab" class="graph-tabs" @tab-change="changeTab">
-        <el-tab-pane label="实体" name="entities" />
-        <el-tab-pane label="关系" name="relations" />
-        <el-tab-pane label="待审核" name="review" :disabled="!hasManagement" />
-        <el-tab-pane label="发布" name="publications" :disabled="!hasManagement" />
-        <el-tab-pane label="图谱探查" name="explore" />
+        <el-tab-pane label="图谱" name="browse" />
+        <el-tab-pane label="发布记录" name="publications" :disabled="!hasManagement" />
+        <el-tab-pane label="高级探查" name="explore" />
       </el-tabs>
 
       <el-alert v-if="mutation.error && !mergeDialog.open" class="graph-command-error"
                 :title="mutation.error.message" type="warning" :closable="false" show-icon />
 
-      <template v-if="scope.tab === 'entities' || scope.tab === 'relations'">
+      <section v-if="scope.tab === 'browse'" class="graph-browser-workspace">
+        <graph-knowledge-browser :organization-id="scope.organizationId"
+                                 :library-slugs="scope.librarySlugs"
+                                 :selected-entity-id="scope.entityId"
+                                 :refresh-key="explorerRefreshKey"
+                                 :can-write="canWrite"
+                                 @select-entity="selectBrowserEntity"
+                                 @edit-entity="editBrowserEntity"
+                                 @open-relation="loadRelationDetail"
+                                 @open-evidence="openEvidence"
+                                 @open-document="openCatalogDocument"
+                                 @open-import="openGraphImport" />
+      </section>
+
+      <template v-else-if="scope.tab === 'entities' || scope.tab === 'relations'">
         <section class="graph-filter-band">
           <el-input v-model="filters.query" clearable maxlength="160"
                     placeholder="搜索名称或关系" @keyup.enter="applyFilters">

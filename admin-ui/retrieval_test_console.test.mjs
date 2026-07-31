@@ -121,7 +121,7 @@ test('wires Organization auth state, route, menu, and strict APIs', () => {
     assert.match(app, /path:\s*'retrieval-test'/);
     assert.match(app, /organizationAdmin:\s*true/);
     assert.match(app, /canAccessOrganizationRoute/);
-    assert.match(layout, /visibleSidebarDomains/);
+    assert.match(layout, /visibleSidebarGroups/);
     assert.match(navigation, /access:\s*'retrievalTest'/);
     assert.match(navigation, /path:\s*APP_PATHS\.retrievalTest/);
     for (const token of [

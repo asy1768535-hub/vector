@@ -9,11 +9,20 @@ from pydantic import BaseModel, Field
 
 class GraphExtractionCreate(BaseModel):
     document_id: uuid.UUID
+    build_mode: Literal["fast", "standard", "deep"] = "standard"
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class GraphExtractionRerun(BaseModel):
     client_idempotency_key: str = Field(min_length=8, max_length=128)
+
+
+class GraphExtractionUploadConfiguration(BaseModel):
+    available: bool
+    default_requested: bool
+    default_build_mode: Literal["fast", "standard", "deep"]
+    allowed_security_levels: list[str]
+    reasons: list[str]
 
 
 class GraphExtractionJobRead(BaseModel):
@@ -24,6 +33,7 @@ class GraphExtractionJobRead(BaseModel):
     ontology_version_id: uuid.UUID
     trigger_type: str
     execution_mode: str
+    build_mode: Literal["fast", "standard", "deep"]
     status: str
     current_stage: str | None = None
     input_fingerprint: str

@@ -162,7 +162,7 @@ def test_0031_api_key_orm_migration_and_offline_sql_match():
     taxonomy_migration = script.get_revision("0034")
     assert taxonomy_migration is not None
     assert taxonomy_migration.down_revision == "0033"
-    assert script.get_heads() == ["0042"]
+    assert script.get_heads() == ["0043"]
     upgrade = _offline("upgrade", "0030:0031")
     downgrade = _offline("downgrade", "0031:0030")
     for fragment in (
@@ -183,8 +183,10 @@ def test_0031_api_key_orm_migration_and_offline_sql_match():
 
 
 def test_runtime_defaults_off_and_rejects_public_registration_when_enabled():
-    assert settings.organization_authorization_enabled is False
-    validate_organization_authorization_startup(Settings())
+    assert Settings.model_fields["organization_authorization_enabled"].default is False
+    validate_organization_authorization_startup(
+        Settings(organization_authorization_enabled=False)
+    )
     invalid = Settings(
         organization_authorization_enabled=True,
         allow_public_registration=True,
@@ -431,6 +433,75 @@ def test_permission_grant_compensates_when_audit_fails(monkeypatch):
             )
         )
     revoke.assert_called_once_with(str(target.id), library.slug, ("read",))
+
+
+def test_platform_permission_grant_creates_active_membership(monkeypatch):
+    from app.services import organization_permissions as service
+
+    organization = _organization()
+    library = _library(organization)
+    actor = _user(superuser=True)
+    target = _user()
+    db = _DB([organization], [])
+    db.add = MagicMock()
+    grant = MagicMock(
+        return_value=[
+            (str(target.id), f"library:{library.slug}", action)
+            for action in ("read", "insert", "delete", "admin")
+        ]
+    )
+    monkeypatch.setattr(service.casbin_service, "grant", grant)
+    monkeypatch.setattr(service.audit_log, "record", AsyncMock())
+
+    result = asyncio.run(
+        service.grant_platform_library_permissions(
+            db,
+            actor_user_id=actor.id,
+            target_user_id=target.id,
+            library=library,
+            actions=["read", "insert", "delete", "admin"],
+        )
+    )
+
+    membership = db.add.call_args.args[0]
+    assert membership.organization_id == organization.id
+    assert membership.user_id == target.id
+    assert membership.role == "member"
+    assert membership.status == "active"
+    assert result.added == ("read", "insert", "delete", "admin")
+    grant.assert_called_once_with(
+        str(target.id),
+        library.slug,
+        ("read", "insert", "delete", "admin"),
+    )
+
+
+def test_platform_permission_grant_reactivates_disabled_membership(monkeypatch):
+    from app.services import organization_permissions as service
+
+    organization = _organization()
+    library = _library(organization)
+    actor = _user(superuser=True)
+    target = _user()
+    membership = _membership(organization, target, status="disabled")
+    db = _DB([organization], [membership])
+    db.add = MagicMock()
+    monkeypatch.setattr(service.casbin_service, "grant", MagicMock(return_value=[]))
+    monkeypatch.setattr(service.audit_log, "record", AsyncMock())
+
+    asyncio.run(
+        service.grant_platform_library_permissions(
+            db,
+            actor_user_id=actor.id,
+            target_user_id=target.id,
+            library=library,
+            actions=["read"],
+        )
+    )
+
+    assert membership.status == "active"
+    assert membership.disabled_at is None
+    db.add.assert_not_called()
 
 
 def test_organization_admin_and_permission_services_reject_cross_organization_scope(

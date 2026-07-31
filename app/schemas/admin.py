@@ -1,4 +1,5 @@
 """管理员接口 Pydantic schemas。"""
+
 from __future__ import annotations
 
 import re
@@ -69,27 +70,34 @@ class LibraryCreate(BaseModel):
     embedding_model: Optional[str] = Field(default=None, description="Defaults to global EMBEDDING_MODEL.")
     embedding_dim: Optional[int] = Field(default=None, ge=64, le=8192)
     embedding_base_url: Optional[str] = Field(
-        default=None, max_length=512,
+        default=None,
+        max_length=512,
         description="Per-library embedding endpoint URL; null = use global setting.",
     )
     vector_distance: str = Field(default="cosine", pattern="^(cosine|euclid|dot)$")
     chunk_size: Optional[int] = Field(default=None, ge=200, le=8000)
     chunk_overlap: Optional[int] = Field(default=None, ge=0, le=2000)
     embed_batch_size: Optional[int] = Field(
-        default=None, ge=1, le=256,
+        default=None,
+        ge=1,
+        le=256,
         description="Per-library embedding batch size; null = use global EMBED_BATCH_SIZE.",
     )
     rerank_enabled: Optional[bool] = Field(
-        default=None, description="Per-library rerank toggle; null = inherit global RERANK_ENABLED.",
+        default=None,
+        description="Per-library rerank toggle; null = inherit global RERANK_ENABLED.",
     )
     ocr_enabled: Optional[bool] = Field(
-        default=None, description="Per-library image OCR toggle; null = inherit global OCR_ENABLED.",
+        default=True,
+        description="Per-library image OCR toggle; enabled by default for new libraries.",
     )
     docx_table_aware: Optional[bool] = Field(
-        default=None, description="Per-library docx table-aware chunking; null = inherit global DOCX_TABLE_AWARE.",
+        default=True,
+        description="Per-library docx table-aware chunking; enabled by default for new libraries.",
     )
     retrieval_mode: Optional[str] = Field(
-        default=None, pattern="^(dense|hybrid)$",
+        default=None,
+        pattern="^(dense|hybrid)$",
         description="检索模式：dense=纯向量(默认)；hybrid=向量+pg_trgm 关键词 RRF 融合。不传按 dense。",
     )
     # 普通 UI 开关：默认开启时后端按约定生成 PGSQL 全文源；高级用户仍可传 source_config 覆盖。
@@ -106,6 +114,18 @@ class LibraryCreate(BaseModel):
     revision_retention_enabled: bool = False
     revision_retention_days: int = Field(default=60, ge=30, le=60)
     revision_retention_notice_days: int = Field(default=7, ge=1, le=14)
+    graph_extraction_enabled: bool = False
+    graph_extraction_build_mode: str = Field(
+        default="standard", pattern="^(fast|standard|deep)$"
+    )
+    external_llm_enabled: bool = False
+    graph_extraction_allowed_security_levels: list[str] = Field(default_factory=list)
+    schema_template: str = Field(default="none", pattern="^(none|enterprise)$")
+
+    @field_validator("graph_extraction_allowed_security_levels", mode="before")
+    @classmethod
+    def _validate_graph_security_levels(cls, value):
+        return normalize_allowed_security_levels(value)
 
     @field_validator("slug")
     @classmethod
@@ -117,7 +137,15 @@ class LibraryCreate(BaseModel):
     @model_validator(mode="after")
     def _check_chunk_params(self):
         _validate_chunk_overlap(self)
-        return _validate_revision_retention_policy(self)
+        _validate_revision_retention_policy(self)
+        if self.graph_extraction_enabled:
+            if not self.external_llm_enabled:
+                raise ValueError("external_llm_enabled must be true when graph extraction is enabled")
+            if not self.graph_extraction_allowed_security_levels:
+                raise ValueError(
+                    "graph extraction security levels are required when graph extraction is enabled"
+                )
+        return self
 
 
 def _validate_chunk_overlap(model):
@@ -135,11 +163,7 @@ def _validate_chunk_overlap(model):
 def _validate_revision_retention_policy(model):
     retention_days = model.revision_retention_days
     notice_days = model.revision_retention_notice_days
-    if (
-        retention_days is not None
-        and notice_days is not None
-        and notice_days >= retention_days
-    ):
+    if retention_days is not None and notice_days is not None and notice_days >= retention_days:
         raise ValueError("revision_retention_notice_days must be less than retention days")
     return model
 
@@ -147,6 +171,7 @@ def _validate_revision_retention_policy(model):
 class LibraryUpdate(BaseModel):
     """所有字段可改。注意：改 embedding_dim/vector_distance 后 Qdrant 现有 collection 结构对不上，
     需要走 POST /admin/libraries/{slug}/rebuild-collection 重建。"""
+
     name: Optional[str] = Field(default=None, min_length=1, max_length=160)
     description: Optional[str] = None
     chunk_size: Optional[int] = Field(default=None, ge=200, le=8000)
@@ -164,6 +189,9 @@ class LibraryUpdate(BaseModel):
     # source_config 哨兵：不传=不改；传 {} =清空；传非空 dict=自定义。
     source_config: Optional[dict[str, Any]] = Field(default=None)
     graph_extraction_enabled: Optional[bool] = None
+    graph_extraction_build_mode: Optional[str] = Field(
+        default=None, pattern="^(fast|standard|deep)$"
+    )
     external_llm_enabled: Optional[bool] = None
     graph_extraction_allowed_security_levels: Optional[list[str]] = None
     knowledge_artifact_auto_enabled: Optional[bool] = None
@@ -263,6 +291,7 @@ class LibraryRead(BaseModel):
     qdrant_collection: str
     source_config: Optional[dict[str, Any]] = None
     graph_extraction_enabled: bool = False
+    graph_extraction_build_mode: str = "standard"
     external_llm_enabled: bool = False
     graph_extraction_allowed_security_levels: list[str] = Field(default_factory=list)
     knowledge_artifact_auto_enabled: bool = False
@@ -276,11 +305,19 @@ class LibraryRead(BaseModel):
     revision_retention_enabled: bool = False
     revision_retention_days: int = 60
     revision_retention_notice_days: int = 7
-    lifecycle_mode: str = "managed"                 # #6 managed | external
-    index_state: str = "ready"                      # #6 ready | rebuilding | failed
+    lifecycle_mode: str = "managed"  # #6 managed | external
+    index_state: str = "ready"  # #6 ready | rebuilding | failed
     active_rebuild_operation_id: Optional[uuid.UUID] = None
     created_at: datetime
     deleted_at: Optional[datetime] = None
+
+    @field_validator(
+        "graph_extraction_build_mode",
+        mode="before",
+    )
+    @classmethod
+    def _default_graph_extraction_build_mode(cls, value):
+        return value if value in {"fast", "standard", "deep"} else "standard"
 
     @field_validator(
         "classification_auto_enabled",
@@ -405,9 +442,9 @@ class EmbeddingJobRead(BaseModel):
     id: uuid.UUID
     library_id: uuid.UUID
     document_id: uuid.UUID
-    document_revision: int = 1                      # #6 该 job 对应的索引版本
+    document_revision: int = 1  # #6 该 job 对应的索引版本
     rebuild_operation_id: Optional[uuid.UUID] = None
-    status: str                                     # pending|processing|done|failed|superseded
+    status: str  # pending|processing|done|failed|superseded
     worker_id: Optional[str] = None
     attempt_count: int
     last_error: Optional[str] = None
@@ -420,6 +457,7 @@ class EmbeddingJobRead(BaseModel):
 
 class EmbeddingJobStats(BaseModel):
     """按状态聚合的任务计数（任务监控统计条用）。"""
+
     pending: int
     processing: int
     done: int
@@ -427,9 +465,47 @@ class EmbeddingJobStats(BaseModel):
     total: int
 
 
+class TaskMonitorRead(BaseModel):
+    """Normalized persistent task state across import, embedding, and graph jobs."""
+
+    id: uuid.UUID
+    task_type: str
+    title: Optional[str] = None
+    library_id: uuid.UUID
+    document_id: Optional[uuid.UUID] = None
+    document_revision: Optional[int] = None
+    document_revision_id: Optional[uuid.UUID] = None
+    status: str
+    raw_status: str
+    stage: Optional[str] = None
+    worker_id: Optional[str] = None
+    attempt_count: int = 0
+    last_error: Optional[str] = None
+    created_at: datetime
+    claimed_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    retryable: bool = False
+    build_mode: Optional[str] = None
+    publication_status: Optional[str] = None
+    progress: Optional[dict[str, Any]] = None
+    metrics: Optional[dict[str, Any]] = None
+
+
+class TaskMonitorStats(BaseModel):
+    pending: int
+    processing: int
+    done: int
+    failed: int
+    cancelled: int
+    superseded: int
+    retryable_failed: int
+    total: int
+
+
 # ── Operations status（运行状态监控，docs/26 / 批次 C2） ──────────────────
 class ServiceInstanceLatest(BaseModel):
     """某 service_type 最新一个非 stopping 实例（供页面展示 host/pid/最后心跳）。"""
+
     instance_id: str
     hostname: str
     pid: int
@@ -440,8 +516,9 @@ class ServiceInstanceLatest(BaseModel):
 
 class ServiceStatus(BaseModel):
     """单类进程（api / embedding_worker / cleanup_worker）的聚合在线状态。"""
+
     service_type: str
-    status: str                                  # online | degraded | offline
+    status: str  # online | degraded | offline
     online_instances: int
     known_instances: int
     latest: Optional[ServiceInstanceLatest] = None
@@ -449,6 +526,7 @@ class ServiceStatus(BaseModel):
 
 class CleanupOutboxStats(BaseModel):
     """Cleanup Outbox 按状态聚合；dead_letter = 已达 max_attempts 的 failed。"""
+
     pending: int
     processing: int
     done: int
@@ -459,14 +537,16 @@ class CleanupOutboxStats(BaseModel):
 
 class LibraryIndexStats(BaseModel):
     """按 index_state 计活动库数（未删库）。"""
+
     rebuilding: int
     failed: int
 
 
 class RebuildOperationStatus(BaseModel):
     """活动重建 operation 的进度摘要（last_error 截断、不含堆栈）。"""
+
     library_slug: str
-    status: str                                  # preparing | running
+    status: str  # preparing | running
     expected_job_count: int
     done_job_count: int
     progress_pct: float
@@ -480,6 +560,7 @@ class GraphPublicationStats(BaseModel):
 
 class OperationsStatus(BaseModel):
     """GET /admin/operations/status 响应：三类进程在线 + 任务/Outbox/重建聚合。"""
+
     now: datetime
     offline_threshold_seconds: int
     services: list[ServiceStatus]

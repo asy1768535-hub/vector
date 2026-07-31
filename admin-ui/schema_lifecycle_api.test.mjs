@@ -8,7 +8,9 @@ import {
     createSchemaConstraint,
     createSchemaEntityType,
     createSchemaRelationType,
+    deleteSchemaDraft,
     disableSchemaItem,
+    disableSchemaVersion,
     getSchemaImpact,
     getSchemaVersion,
     listSchemaVersions,
@@ -55,6 +57,18 @@ test('Schema lifecycle clients use exact read and command routes', async () => {
             idempotency_key: 'activate-1',
             force: true,
         });
+        await deleteSchemaDraft('enterprise-kb', VERSION, {
+            expected_version_state_hash: HASH,
+            confirmation: 'delete_schema_draft',
+            idempotency_key: 'delete-1',
+            force: true,
+        });
+        await disableSchemaVersion('enterprise-kb', VERSION, {
+            expected_version_state_hash: HASH,
+            confirmation: 'disable_schema_version',
+            idempotency_key: 'disable-version-1',
+            force: true,
+        });
     });
     assert.equal(calls[0].url, '/libraries/enterprise-kb/schema-lifecycle/versions');
     assert.equal(calls[1].url, `/libraries/enterprise-kb/schema-lifecycle/versions/${VERSION}`);
@@ -70,6 +84,18 @@ test('Schema lifecycle clients use exact read and command routes', async () => {
         expected_active_version_id: null,
         confirmation: 'activate_schema_version',
         idempotency_key: 'activate-1',
+    });
+    assert.equal(calls[6].url, `/libraries/enterprise-kb/schema-lifecycle/versions/${VERSION}/delete-draft`);
+    assert.deepEqual(body(calls[6]), {
+        expected_version_state_hash: HASH,
+        confirmation: 'delete_schema_draft',
+        idempotency_key: 'delete-1',
+    });
+    assert.equal(calls[7].url, `/libraries/enterprise-kb/schema-lifecycle/versions/${VERSION}/disable`);
+    assert.deepEqual(body(calls[7]), {
+        expected_version_state_hash: HASH,
+        confirmation: 'disable_schema_version',
+        idempotency_key: 'disable-version-1',
     });
 });
 

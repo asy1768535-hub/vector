@@ -22,6 +22,8 @@ from app.services.graph_candidate_validation import load_ontology_rule_set_v1
 from app.services.graph_extraction_jobs import (
     GraphExtractionJobError,
     GraphExtractionUnitPlan,
+    _model_config_snapshot,
+    _policy_config_snapshot,
     build_full_rerun_idempotency_key,
     build_ontology_rule_snapshot,
     cancel_graph_extraction_job,
@@ -35,6 +37,53 @@ LIB_ID = uuid.UUID("10000000-0000-0000-0000-000000000001")
 DOC_ID = uuid.UUID("20000000-0000-0000-0000-000000000001")
 REV_ID = uuid.UUID("30000000-0000-0000-0000-000000000001")
 ONTOLOGY_ID = uuid.UUID("40000000-0000-0000-0000-000000000001")
+
+
+def test_candidate_review_policy_is_frozen_per_execution_mode():
+    production = _policy_config_snapshot(candidate_review_policy="precision_first_auto")
+    evaluation = _policy_config_snapshot(candidate_review_policy="manual_review")
+
+    assert production["candidate_review_policy"] == "precision_first_auto"
+    assert evaluation["candidate_review_policy"] == "manual_review"
+
+
+def test_optimization_flags_are_inert_by_default_and_frozen_when_enabled(monkeypatch):
+    monkeypatch.setattr(settings, "graph_extraction_center_only_enabled", False)
+    monkeypatch.setattr(settings, "graph_extraction_output_budget_enabled", False)
+    assert "center_only" not in _policy_config_snapshot(candidate_review_policy="manual_review")
+    assert "max_output_tokens" not in _model_config_snapshot()
+
+    monkeypatch.setattr(settings, "graph_extraction_center_only_enabled", True)
+    monkeypatch.setattr(settings, "graph_extraction_output_budget_enabled", True)
+    monkeypatch.setattr(settings, "graph_extraction_max_output_tokens", 3500)
+    assert _policy_config_snapshot(candidate_review_policy="manual_review")["center_only"] is True
+    assert _model_config_snapshot()["max_output_tokens"] == 3500
+
+
+def test_build_modes_are_frozen_with_bounded_batch_and_output_budgets(monkeypatch):
+    monkeypatch.setattr(settings, "graph_extraction_batch_size", 8)
+    monkeypatch.setattr(settings, "graph_extraction_max_output_tokens", 8_000)
+    expected = {
+        "fast": (8, 2_500),
+        "standard": (6, 4_000),
+        "deep": (3, 8_000),
+    }
+    for mode, (batch_size, output_tokens) in expected.items():
+        model = _model_config_snapshot(build_mode=mode)
+        policy = _policy_config_snapshot(
+            candidate_review_policy="precision_first_auto",
+            build_mode=mode,
+        )
+        assert model["build_mode"] == mode
+        assert model["batch_size"] == batch_size
+        assert model["max_output_tokens"] == output_tokens
+        assert policy["build_mode"] == mode
+
+
+def test_invalid_build_mode_is_rejected():
+    with pytest.raises(GraphExtractionJobError) as exc:
+        _model_config_snapshot(build_mode="turbo")
+    assert exc.value.code == "invalid_build_mode"
 
 
 class _Result:
@@ -398,8 +447,16 @@ def test_job_creation_fails_closed_before_database_work(
 
 def test_job_creation_freezes_config_and_adds_deterministic_units(monkeypatch):
     monkeypatch.setattr(settings, "graph_extraction_enabled", True)
-    monkeypatch.setattr(settings, "graph_extraction_base_url", "https://api.deepseek.com/v1")
-    monkeypatch.setattr(settings, "graph_extraction_model", "deepseek-v4-pro")
+    monkeypatch.setattr(
+        settings,
+        "graph_extraction_base_url",
+        "http://10.0.10.2:8113/v1",
+    )
+    monkeypatch.setattr(
+        settings,
+        "graph_extraction_model",
+        "qwen3-30b-a3b-instruct-2507-fp8",
+    )
     ontology = SimpleNamespace(id=ONTOLOGY_ID)
     snapshot = {
         "ontology_version_id": str(ONTOLOGY_ID),
@@ -446,11 +503,12 @@ def test_job_creation_freezes_config_and_adds_deterministic_units(monkeypatch):
 
     provider_call.assert_not_awaited()
     assert isinstance(job, GraphExtractionJob)
-    assert job.model_provider == "deepseek"
-    assert job.model_name == "deepseek-v4-pro"
-    assert job.model_config_snapshot["provider"] == "deepseek"
-    assert job.model_config_snapshot["base_url"] == "https://api.deepseek.com/v1"
-    assert job.model_config_snapshot["model"] == "deepseek-v4-pro"
+    assert job.model_provider == "openai-compatible"
+    assert job.model_name == "qwen3-30b-a3b-instruct-2507-fp8"
+    assert job.model_config_snapshot["provider"] == "openai-compatible"
+    assert job.model_config_snapshot["base_url"] == "http://10.0.10.2:8113/v1"
+    assert job.model_config_snapshot["model"] == "qwen3-30b-a3b-instruct-2507-fp8"
+    assert job.policy_config_snapshot["candidate_review_policy"] == "precision_first_auto"
     assert job.idempotency_key == job.input_fingerprint
     assert job.counts == {
         "total": 2,

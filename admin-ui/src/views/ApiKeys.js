@@ -7,11 +7,16 @@ import {
     formatKeyTime, keyStatus, STATUS_LABEL, STATUS_TAG,
     computeStats, paginateKeys,
 } from '../api_keys_ui.js';
+import { createRequestFence, readProjection } from '../read_state_ui.js';
 
 export default {
     setup() {
         const keys = ref([]);
         const loading = ref(false);
+        const loadStarted = ref(false);
+        const keysResolved = ref(false);
+        const keysError = ref('');
+        const keysRequestFence = createRequestFence();
         const dialog = reactive({ open: false, name: '', expiresAt: '' });
         const submitting = ref(false);
         const result = reactive({ open: false, plaintext: '' });
@@ -27,15 +32,33 @@ export default {
 
         // ── Data loading ─────────────────────────────────────
         async function load(forceRefresh = false) {
+            const requestToken = keysRequestFence.begin();
+            loadStarted.value = true;
             loading.value = true;
+            keysError.value = '';
             try {
-                keys.value = await api.listApiKeys(forceRefresh);
+                const result = await api.listApiKeys(forceRefresh);
+                if (!keysRequestFence.isCurrent(requestToken)) return;
+                keys.value = result;
+                keysResolved.value = true;
                 if (pagination.value.page !== page.value) {
                     page.value = pagination.value.page;
                 }
-            } catch (e) { ElMessage.error(e.message); }
-            finally { loading.value = false; }
+            } catch (e) {
+                if (!keysRequestFence.isCurrent(requestToken)) return;
+                keysError.value = e.message || 'API Key 列表加载失败';
+            } finally {
+                if (keysRequestFence.isCurrent(requestToken)) loading.value = false;
+            }
         }
+
+        const keysReadState = computed(() => readProjection({
+            started: loadStarted.value,
+            loading: loading.value,
+            hasResolved: keysResolved.value,
+            empty: keys.value.length === 0,
+            error: keysError.value,
+        }));
 
         // ── Create ───────────────────────────────────────────
         function openCreate() {
@@ -101,7 +124,7 @@ export default {
         onMounted(load);
 
         return {
-            keys, loading, dialog, submitting, result, docDialog, page, pageSize,
+            keys, loading, keysError, keysReadState, dialog, submitting, result, docDialog, page, pageSize,
             stats, pagination, visibleKeys, showPagination,
             load, openCreate, submit, closeResult, copyPlain, openApiDoc, revoke, dataEmpty, apiKeySecurity,
             formatKeyTime, keyStatus, STATUS_LABEL, STATUS_TAG,
@@ -143,6 +166,22 @@ export default {
             </div>
         </section>
 
+        <section v-if="keysReadState === 'fatal'" class="app-read-state app-read-state--error" role="alert">
+            <div><strong>API Key 列表加载失败</strong><p>{{ keysError }}</p></div>
+            <el-button type="primary" :loading="loading" @click="load(true)">重试</el-button>
+        </section>
+
+        <section v-else-if="keysReadState === 'idle' || keysReadState === 'loading'"
+                 class="app-read-state" v-loading="true">
+            <span>正在加载 API Key</span>
+        </section>
+
+        <template v-else>
+        <el-alert v-if="keysReadState === 'refresh-error'"
+                  type="warning" :closable="false" show-icon
+                  title="API Key 列表刷新失败，当前仍显示上次成功加载的数据"
+                  :description="keysError" />
+
         <!-- Stats cards -->
         <div class="api-keys-stats">
             <div class="api-keys-stat-card">
@@ -167,7 +206,12 @@ export default {
         <section class="api-keys-table-card">
             <div class="api-keys-table-shell">
                 <el-table :data="visibleKeys" v-loading="loading">
-                    <template #empty><div class="illustration-empty-wrapper"><img :src="dataEmpty" class="illustration-data-empty" alt="" aria-hidden="true" /><p>暂无 API Key</p></div></template>
+                    <template #empty>
+                        <div v-if="keysReadState === 'empty'" class="illustration-empty-wrapper">
+                            <img :src="dataEmpty" class="illustration-data-empty" alt="" aria-hidden="true" />
+                            <p>暂无 API Key</p>
+                        </div>
+                    </template>
                     <el-table-column label="Key 名称" min-width="140" prop="name" show-overflow-tooltip />
                     <el-table-column label="Key 前缀" min-width="160">
                         <template #default="{row}">
@@ -202,6 +246,7 @@ export default {
                                :total="pagination.total" layout="total, prev, pager, next" />
             </div>
         </section>
+        </template>
 
 
         <el-dialog v-model="docDialog.open" title="完整接入模板" width="860px" class="api-keys-doc-dialog">

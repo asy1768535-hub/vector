@@ -35,6 +35,7 @@ class ConfidencePolicyError(ValueError):
 class ConfidencePolicyV1:
     entity_materialization_threshold: float = 0.85
     relation_draft_threshold: float = 0.85
+    candidate_review_policy: str = "manual_review"
 
 
 @dataclass(frozen=True)
@@ -108,7 +109,13 @@ def load_confidence_policy_v1(job: Any) -> ConfidencePolicyV1:
         raise ConfidencePolicyError(
             "invalid_confidence_policy", "v1 Evidence Group policy must be all_claims_valid"
         )
-    return ConfidencePolicyV1()
+    candidate_review_policy = snapshot.get("candidate_review_policy", "manual_review")
+    if candidate_review_policy not in {"manual_review", "precision_first_auto"}:
+        raise ConfidencePolicyError(
+            "invalid_confidence_policy",
+            "v1 Candidate review policy is not supported",
+        )
+    return ConfidencePolicyV1(candidate_review_policy=candidate_review_policy)
 
 
 def route_entity_candidate_v1(
@@ -121,21 +128,35 @@ def route_entity_candidate_v1(
     matched_entity_id: Any | None,
     final_confidence: float,
     threshold: float = 0.85,
+    automatic: bool = False,
 ) -> CandidateRoute:
     if schema_invalid:
         return CandidateRoute("rejected", "schema_invalid")
     if evidence_invalid:
         return CandidateRoute("rejected", "evidence_invalid")
     if evidence_ambiguous:
-        return CandidateRoute("pending_review", "evidence_ambiguous")
+        return CandidateRoute(
+            "rejected" if automatic else "pending_review",
+            "evidence_ambiguous",
+        )
     if normalization_method == "ambiguous":
-        return CandidateRoute("pending_review", "entity_match_ambiguous")
+        return CandidateRoute(
+            "rejected" if automatic else "pending_review",
+            "entity_match_ambiguous",
+        )
     if has_open_conflict:
-        return CandidateRoute("pending_review", "conflict_open")
-    if matched_entity_id is not None:
+        return CandidateRoute(
+            "rejected" if automatic else "pending_review",
+            "conflict_open",
+        )
+    if matched_entity_id is not None and not automatic:
         return CandidateRoute("validated", None)
+    _bounded_component(final_confidence, label="final confidence")
     if final_confidence < threshold:
-        return CandidateRoute("pending_review", "low_confidence")
+        return CandidateRoute(
+            "rejected" if automatic else "pending_review",
+            "low_confidence",
+        )
     return CandidateRoute("validated", None)
 
 
@@ -150,6 +171,8 @@ def route_relation_candidate_v1(
     endpoint_pending_review: bool,
     evidence_support_mode: str,
     final_confidence: float,
+    threshold: float = 0.85,
+    automatic: bool = False,
 ) -> CandidateRoute:
     if schema_invalid:
         return CandidateRoute("rejected", "schema_invalid")
@@ -158,16 +181,33 @@ def route_relation_candidate_v1(
     if endpoint_rejected:
         return CandidateRoute("rejected", "endpoint_rejected")
     if evidence_ambiguous:
-        return CandidateRoute("pending_review", "evidence_ambiguous")
+        return CandidateRoute(
+            "rejected" if automatic else "pending_review",
+            "evidence_ambiguous",
+        )
     if schema_boundary_unclear:
-        return CandidateRoute("pending_review", "schema_boundary_unclear")
+        return CandidateRoute(
+            "rejected" if automatic else "pending_review",
+            "schema_boundary_unclear",
+        )
     if has_open_conflict:
-        return CandidateRoute("pending_review", "conflict_open")
+        return CandidateRoute(
+            "rejected" if automatic else "pending_review",
+            "conflict_open",
+        )
     if endpoint_pending_review:
-        return CandidateRoute("pending_review", "endpoint_pending_review")
+        return CandidateRoute(
+            "rejected" if automatic else "pending_review",
+            "endpoint_pending_review",
+        )
     if evidence_support_mode == "evidence_group":
-        return CandidateRoute("pending_review", "evidence_group")
+        return CandidateRoute(
+            "rejected" if automatic else "pending_review",
+            "evidence_group_unsupported" if automatic else "evidence_group",
+        )
     _bounded_component(final_confidence, label="final confidence")
+    if automatic and final_confidence < threshold:
+        return CandidateRoute("rejected", "low_confidence")
     return CandidateRoute("validated", None)
 
 
@@ -267,6 +307,7 @@ async def apply_job_candidate_routes(db, *, job: Any) -> JobCandidateRouteResult
             matched_entity_id=candidate.matched_entity_id,
             final_confidence=candidate.final_confidence,
             threshold=policy.entity_materialization_threshold,
+            automatic=policy.candidate_review_policy == "precision_first_auto",
         )
         candidate.status = route.status
         candidate.review_reason = route.review_reason
@@ -341,6 +382,8 @@ async def apply_job_candidate_routes(db, *, job: Any) -> JobCandidateRouteResult
             endpoint_pending_review=endpoint_pending,
             evidence_support_mode=candidate.evidence_support_mode,
             final_confidence=candidate.final_confidence,
+            threshold=policy.relation_draft_threshold,
+            automatic=policy.candidate_review_policy == "precision_first_auto",
         )
         candidate.status = route.status
         candidate.review_reason = route.review_reason

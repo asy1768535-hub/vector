@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.backend import current_superuser
 from app.casbin import service as casbin_service
+from app.config import settings
 from app.db import get_db
 from app.models.library import Library
 from app.models.user import User
@@ -24,6 +25,10 @@ from app.schemas.admin import (
     PermissionRevoke,
 )
 from app.services import audit_log
+from app.services.organization_permissions import (
+    OrganizationPermissionError,
+    grant_platform_library_permissions,
+)
 
 router = APIRouter(prefix="/admin/permissions", tags=["admin"])
 
@@ -50,15 +55,48 @@ async def grant(
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
     user, lib = await _ensure_user_and_library(db, body.user_id, body.library_slug)
+    mutation = None
     try:
-        added = casbin_service.grant(str(user.id), lib.slug, body.actions)
+        if settings.organization_authorization_enabled:
+            mutation = await grant_platform_library_permissions(
+                db,
+                actor_user_id=actor.id,
+                target_user_id=user.id,
+                library=lib,
+                actions=body.actions,
+            )
+            added = [
+                (str(user.id), f"library:{lib.slug}", action)
+                for action in mutation.added
+            ]
+        else:
+            added = casbin_service.grant(str(user.id), lib.slug, body.actions)
     except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
-    await audit_log.record(
-        db, actor.id, "permission.grant",
-        {"user_id": str(user.id), "library_slug": lib.slug, "actions": body.actions, "added": len(added)},
-    )
-    await db.commit()
+    except OrganizationPermissionError as exc:
+        code = (
+            status.HTTP_404_NOT_FOUND
+            if exc.code == "organization_permission_scope_not_found"
+            else status.HTTP_400_BAD_REQUEST
+        )
+        raise HTTPException(code, exc.code) from exc
+    try:
+        if mutation is None:
+            await audit_log.record(
+                db, actor.id, "permission.grant",
+                {
+                    "user_id": str(user.id),
+                    "library_slug": lib.slug,
+                    "actions": body.actions,
+                    "added": len(added),
+                },
+            )
+        await db.commit()
+    except Exception:
+        if mutation is not None:
+            mutation.compensate()
+        await db.rollback()
+        raise
     return {"added": [list(t) for t in added]}
 
 
@@ -69,6 +107,11 @@ async def revoke(
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, int]:
     user, lib = await _ensure_user_and_library(db, body.user_id, body.library_slug)
+    if lib.created_by == user.id:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "知识库创建者默认拥有全部权限，不能撤销",
+        )
     removed = casbin_service.revoke(str(user.id), lib.slug, body.actions)
     await audit_log.record(
         db, actor.id, "permission.revoke",

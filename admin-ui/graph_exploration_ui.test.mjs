@@ -235,3 +235,25 @@ test('builds deterministic concentric rings and hit-tests nodes before relations
         id: RELATION,
     });
 });
+
+test('lays out multiple seed nodes on a distinct inner ring', () => {
+    const graph = response();
+    graph.nodes = [
+        graph.nodes[0],
+        { ...graph.nodes[0], id: '60000000-0000-0000-0000-000000000011', canonical_name: 'Seed B' },
+        { ...graph.nodes[0], id: '60000000-0000-0000-0000-000000000012', canonical_name: 'Seed C' },
+        { ...graph.nodes[0], id: '60000000-0000-0000-0000-000000000013', canonical_name: 'Seed D' },
+        ...graph.nodes.slice(1),
+    ];
+
+    const layout = layoutGraphRadially(graph, 390, 360);
+    const seeds = layout.nodes.filter((item) => item.depth === 0);
+    const positions = new Set(seeds.map((item) => `${item.x.toFixed(3)}:${item.y.toFixed(3)}`));
+
+    assert.equal(seeds.length, 4);
+    assert.equal(positions.size, 4);
+    assert.ok(seeds.every((item) => Math.hypot(item.x - 195, item.y - 180) > 40));
+    assert.ok(layout.nodes.filter((item) => item.depth === 1).every(
+        (item) => Math.hypot(item.x - 195, item.y - 180) > 100,
+    ));
+});

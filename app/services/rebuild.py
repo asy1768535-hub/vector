@@ -288,12 +288,26 @@ async def try_finalize(db: AsyncSession, op_id) -> bool:
             EmbeddingJob.rebuild_operation_id == op.id, EmbeddingJob.status == "failed"
         )
     )).scalar_one()
-    if failed > 0:
+    superseded = (await db.execute(
+        select(func.count()).select_from(EmbeddingJob).where(
+            EmbeddingJob.rebuild_operation_id == op.id,
+            EmbeddingJob.status == "superseded",
+        )
+    )).scalar_one()
+    if failed > 0 or superseded > 0:
         op.status = "failed"
+        op.last_error = (
+            f"rebuild jobs did not complete: failed={failed}, superseded={superseded}"
+        )
         op.finished_at = _now()
         lib.index_state = "failed"
         await db.commit()
-        log.warning("rebuild op=%s FAILED (%s failed jobs)", op_id, failed)
+        log.warning(
+            "rebuild op=%s FAILED (failed=%s, superseded=%s)",
+            op_id,
+            failed,
+            superseded,
+        )
         return True
 
     done = (await db.execute(

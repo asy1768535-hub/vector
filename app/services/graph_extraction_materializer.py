@@ -103,19 +103,30 @@ async def _load_materialization_scope(db, *, job_id: uuid.UUID):
             "job_not_found",
             "graph extraction Job was not found",
         )
-    if job.status == "succeeded":
+    materialization_statistics = (job.statistics or {}).get("materialization")
+    if job.status == "succeeded" or (
+        job.status == "partially_succeeded"
+        and isinstance(materialization_statistics, dict)
+    ):
         return job, None, None, None, None
     if (
         job.execution_mode != "production"
         or job.trigger_type == "eval"
-        or job.status != "processing"
-        or job.current_stage != "materializing"
+        or (
+            (job.status, job.current_stage)
+            not in {
+                ("processing", "materializing"),
+                ("partially_succeeded", "finalizing"),
+            }
+        )
     ):
         raise GraphExtractionMaterializationError(
             "job_not_materializable",
             "graph extraction Job is not ready for production materialization",
         )
-    library = await db.get(Library, job.library_id)
+    library = await db.get(
+        Library, job.library_id, with_for_update=True
+    )
     document = await db.get(Document, job.document_id)
     revision = await db.get(DocumentRevision, job.document_revision_id)
     ontology = await db.get(OntologyVersion, job.ontology_version_id)
@@ -169,16 +180,27 @@ async def _load_materialization_scope(db, *, job_id: uuid.UUID):
             "active_ontology_changed",
             "frozen ontology is no longer active",
         )
-    incomplete_result = await db.execute(
+    pending_result = await db.execute(
         select(func.count(GraphExtractionUnit.id)).where(
             GraphExtractionUnit.job_id == job.id,
-            GraphExtractionUnit.status != "succeeded",
+            GraphExtractionUnit.status.in_(("queued", "processing")),
         )
     )
-    if int(incomplete_result.scalar_one()) != 0:
+    if int(pending_result.scalar_one()) != 0:
         raise GraphExtractionMaterializationError(
             "units_not_succeeded",
-            "all graph extraction Units must succeed before materialization",
+            "all graph extraction Units must be terminal before materialization",
+        )
+    succeeded_result = await db.execute(
+        select(func.count(GraphExtractionUnit.id)).where(
+            GraphExtractionUnit.job_id == job.id,
+            GraphExtractionUnit.status == "succeeded",
+        )
+    )
+    if int(succeeded_result.scalar_one()) == 0:
+        raise GraphExtractionMaterializationError(
+            "units_not_succeeded",
+            "at least one graph extraction Unit must succeed before materialization",
         )
     return job, library, document, revision, ontology
 
@@ -190,9 +212,20 @@ async def _eligible_matched_entity(
     job: GraphExtractionJob,
     expected_entity_type_id: uuid.UUID,
 ) -> Entity | None:
-    if candidate.matched_entity_id is None:
-        return None
-    entity = await db.get(Entity, candidate.matched_entity_id)
+    if candidate.matched_entity_id is not None:
+        entity = await db.get(Entity, candidate.matched_entity_id)
+    else:
+        existing_result = await db.execute(
+            select(Entity).where(
+                Entity.library_id == job.library_id,
+                Entity.ontology_version_id == job.ontology_version_id,
+                Entity.entity_type_id == expected_entity_type_id,
+                Entity.normalized_name == candidate.normalized_name,
+            )
+        )
+        entity = existing_result.scalars().one_or_none()
+        if entity is None:
+            return None
     if (
         entity is None
         or entity.library_id != job.library_id
@@ -521,9 +554,14 @@ async def _materialize_job_transaction(
         candidate.materialized_relation_id = relation.id
         candidate.status = "materialized"
 
-    job.status = "succeeded"
+    counts = getattr(job, "counts", None)
+    counts = counts if isinstance(counts, dict) else {}
+    partially_succeeded = job.status == "partially_succeeded" or bool(
+        counts.get("failed", 0) or counts.get("cancelled", 0)
+    )
+    job.status = "partially_succeeded" if partially_succeeded else "succeeded"
     job.current_stage = "finalizing"
-    job.error_code = None
+    job.error_code = "unit_failures" if partially_succeeded else None
     job.error_message = None
     job.finished_at = _utcnow()
     statistics = dict(job.statistics or {})

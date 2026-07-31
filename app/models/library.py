@@ -21,6 +21,10 @@ class Library(Base):
         CheckConstraint("index_state IN ('ready','rebuilding','failed')", name="ck_lib_index_state"),
         CheckConstraint("retrieval_mode IN ('dense','hybrid')", name="ck_lib_retrieval_mode"),
         CheckConstraint(
+            "graph_extraction_build_mode IN ('fast','standard','deep')",
+            name="ck_lib_graph_extraction_build_mode",
+        ),
+        CheckConstraint(
             "jsonb_typeof(knowledge_artifact_allowed_security_levels) = 'array'",
             name="ck_lib_knowledge_artifact_security_levels_array",
         ),
@@ -106,6 +110,9 @@ class Library(Base):
 
     graph_extraction_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
+    )
+    graph_extraction_build_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="standard", server_default="standard"
     )
     external_llm_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"

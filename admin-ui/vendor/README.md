@@ -10,6 +10,9 @@
 | `element-plus-locale-zh-cn.mjs` | 同上（中文语言包） | 2.7.6 | MIT |
 | `marked.esm.js` | https://github.com/markedjs/marked | 12.0.2 | MIT |
 | `dompurify.es.mjs` | https://github.com/cure53/DOMPurify | 3.1.6 | Apache-2.0 / MPL-2.0 |
+| `cytoscape.esm.min.mjs` | https://github.com/cytoscape/cytoscape.js | 3.34.0 | MIT |
+
+`cytoscape.LICENSE` contains the upstream Cytoscape.js license text.
 
 ## 更新方式
 

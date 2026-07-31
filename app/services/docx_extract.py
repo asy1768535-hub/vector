@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import io
 import re
+from pathlib import Path
 from typing import Callable, Optional
 
 from docx import Document
@@ -90,10 +91,10 @@ def _heading_info(paragraph: Paragraph) -> Optional[tuple[str, int]]:
 
 
 def extract_docx_segments(
-    data: bytes, ocr: Optional[Callable[[bytes], str]] = None
+    data: bytes | Path, ocr: Optional[Callable[[bytes], str]] = None
 ) -> list[dict]:
     """按文档顺序抽成 prose/table segment 列表，并维护章节路径。"""
-    doc = Document(io.BytesIO(data))
+    doc = Document(data if isinstance(data, Path) else io.BytesIO(data))
     segs: list[dict] = []
     heading_stack: list[str] = []          # heading_stack[i] = 第 i+1 级标题
     prose_buf: list[str] = []
@@ -166,7 +167,9 @@ def extract_docx_segments(
     return segs
 
 
-def extract_docx_text(data: bytes, ocr: Optional[Callable[[bytes], str]] = None) -> str:
+def extract_docx_text(
+    data: bytes | Path, ocr: Optional[Callable[[bytes], str]] = None
+) -> str:
     """从 docx 抽取扁平正文（段落 + 表格 + 可选图片 OCR，按文档顺序）。
 
     供 content_hash / 不需要结构的场景用；表格感知切分请走 extract_docx_segments。

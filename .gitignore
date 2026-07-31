@@ -62,3 +62,4 @@ storage/document_files/
 /scripts/build_eval_test_one.py
 # scripts/build_bge_compare.py：bge/云对比的一次性本地工具
 /scripts/build_bge_compare.py
+.gitnexus

@@ -47,6 +47,12 @@ def test_schema_lifecycle_routes_are_mounted_with_exact_methods():
     assert "post" in paths[
         "/libraries/{slug}/schema-lifecycle/versions/{version_id}/activate"
     ]
+    assert "post" in paths[
+        "/libraries/{slug}/schema-lifecycle/versions/{version_id}/delete-draft"
+    ]
+    assert "post" in paths[
+        "/libraries/{slug}/schema-lifecycle/versions/{version_id}/disable"
+    ]
     for kind in ("entity-types", "relation-types", "attributes", "constraints"):
         assert "post" in paths[
             f"/libraries/{{slug}}/schema-lifecycle/versions/{{version_id}}/{kind}"

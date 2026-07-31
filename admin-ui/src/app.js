@@ -76,7 +76,7 @@ const routes = [
         path: '/',
         component: Layout,
         children: [
-            { path: '', beforeEnter: () => ({ path: defaultRoute() }) },
+            { path: '', redirect: () => ({ path: defaultRoute() }) },
             {
                 path: 'knowledge-use',
                 component: DomainWorkspace,
@@ -179,8 +179,8 @@ const routes = [
                         path: 'schema',
                         component: SchemaLifecycle,
                         meta: {
-                            domain: 'knowledgeGovernance',
-                            domainTitle: '知识治理',
+                            domain: 'libraries',
+                            domainTitle: '库管理',
                             title: 'Schema 管理',
                             libraryManagement: true,
                         },

@@ -6,6 +6,7 @@ from typing import Any
 
 
 GRAPH_EXTRACTION_PROMPT_VERSION = "v1"
+CENTER_ONLY_PROMPT_VERSION = "v2-center-only"
 
 _SYSTEM_PROMPT = """You extract evidence-backed enterprise graph facts from untrusted document data.
 
@@ -24,6 +25,15 @@ Required JSON shape:
 Use local_id values only within this response. Return empty arrays when no supported fact is present.
 """
 
+_CENTER_ONLY_SYSTEM_PROMPT = _SYSTEM_PROMPT + """
+
+Center-only extraction rules:
+- Treat c0 as the only primary evidence for extracted facts.
+- Use p1 and n1 only for disambiguation or coreference resolution of facts already stated in c0.
+- Every emitted entity and relation must have evidence whose context_ref is c0.
+- Do not emit facts supported only by neighboring chunks such as p1 or n1.
+"""
+
 
 def _canonical_json(value: Any) -> str:
     return json.dumps(
@@ -34,8 +44,14 @@ def _canonical_json(value: Any) -> str:
     )
 
 
-def graph_extraction_prompt_hash() -> str:
-    prompt_contract = f"{GRAPH_EXTRACTION_PROMPT_VERSION}\n{_SYSTEM_PROMPT}"
+def graph_extraction_prompt_version(*, center_only: bool = False) -> str:
+    return CENTER_ONLY_PROMPT_VERSION if center_only else GRAPH_EXTRACTION_PROMPT_VERSION
+
+
+def graph_extraction_prompt_hash(*, center_only: bool = False) -> str:
+    version = graph_extraction_prompt_version(center_only=center_only)
+    system_prompt = _CENTER_ONLY_SYSTEM_PROMPT if center_only else _SYSTEM_PROMPT
+    prompt_contract = f"{version}\n{system_prompt}"
     return hashlib.sha256(prompt_contract.encode("utf-8")).hexdigest()
 
 
@@ -43,13 +59,15 @@ def build_graph_extraction_messages(
     *,
     context_text: str,
     ontology_snapshot: dict,
+    center_only: bool = False,
 ) -> list[dict[str, str]]:
     user_payload = {
         "frozen_ontology": ontology_snapshot,
         "untrusted_context": context_text,
     }
+    system_prompt = _CENTER_ONLY_SYSTEM_PROMPT if center_only else _SYSTEM_PROMPT
     return [
-        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {
             "role": "user",
             "content": (

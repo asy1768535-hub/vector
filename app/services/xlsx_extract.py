@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import io
+from pathlib import Path
 
 
 def _rows_to_numbered_lines(rows) -> list[tuple[int, str]]:
@@ -35,10 +36,11 @@ def _seg(name: str, numbered_rows: list[tuple[int, str]]) -> dict:
     }
 
 
-def _read_xlsx(data: bytes) -> list[dict]:
+def _read_xlsx(data: bytes | Path) -> list[dict]:
     import openpyxl
 
-    wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    source = data if isinstance(data, Path) else io.BytesIO(data)
+    wb = openpyxl.load_workbook(source, read_only=True, data_only=True)
     try:
         segs: list[dict] = []
         for ws in wb.worksheets:
@@ -66,6 +68,8 @@ def _read_xls(data: bytes) -> list[dict]:
     return segs
 
 
-def extract_xlsx_segments(data: bytes, *, is_xls: bool = False) -> list[dict]:
+def extract_xlsx_segments(data: bytes | Path, *, is_xls: bool = False) -> list[dict]:
     """读电子表格 → table segment 列表（空表跳过）。"""
-    return _read_xls(data) if is_xls else _read_xlsx(data)
+    if is_xls:
+        return _read_xls(data.read_bytes() if isinstance(data, Path) else data)
+    return _read_xlsx(data)

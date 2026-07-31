@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import hashlib
 import uuid
@@ -21,9 +22,12 @@ from app.models.document import Document
 from app.models.chunk import Chunk
 from app.models.document_file import DocumentFile
 from app.models.document_source import DocumentSource
+from app.models.document_revision import DocumentRevision
 from app.models.embedding_job import EmbeddingJob
+from app.api.documents import _persist_graph_extraction_request
 from app.schemas.documents import QueryRequest
 from app.services import ingest as ingest_service
+
 
 # Mock user and library
 mock_user = User(
@@ -76,6 +80,44 @@ def test_string_chunk_metadata_does_not_fabricate_offsets():
 
     assert text == "legacy chunk"
     assert metadata is None
+
+
+def test_upload_graph_request_is_persisted_on_the_target_revision():
+    job_id = uuid.uuid4()
+    revision_id = uuid.uuid4()
+    job = MagicMock(document_revision_id=revision_id)
+    revision = MagicMock(parser_config={"parser": "plain"})
+    db = AsyncMock()
+
+    async def get_row(model, object_id):
+        return {
+            (EmbeddingJob, job_id): job,
+            (DocumentRevision, revision_id): revision,
+        }.get((model, object_id))
+
+    db.get = AsyncMock(side_effect=get_row)
+    persisted = asyncio.run(_persist_graph_extraction_request(
+        db,
+        {"operation": "created", "job_id": str(job_id)},
+    ))
+
+    assert persisted is True
+    assert revision.parser_config == {
+        "parser": "plain",
+        "graph_extraction_requested": True,
+    }
+
+
+def test_unchanged_upload_does_not_request_graph_extraction():
+    db = AsyncMock()
+
+    persisted = asyncio.run(_persist_graph_extraction_request(
+        db,
+        {"operation": "unchanged", "job_id": str(uuid.uuid4())},
+    ))
+
+    assert persisted is False
+    db.get.assert_not_awaited()
 
 async def override_user():
     return mock_user

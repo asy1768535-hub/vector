@@ -83,6 +83,14 @@ class SchemaActivationRequest(SchemaCommandRequest):
     confirmation: Literal["activate_schema_version"]
 
 
+class SchemaDraftDeleteRequest(SchemaCommandRequest):
+    confirmation: Literal["delete_schema_draft"]
+
+
+class SchemaVersionDisableRequest(SchemaCommandRequest):
+    confirmation: Literal["disable_schema_version"]
+
+
 class SchemaEntityTypeCreateRequest(SchemaCommandRequest):
     key: str = Field(min_length=1, max_length=128)
     label: str = Field(min_length=1, max_length=255)
@@ -403,3 +411,11 @@ class SchemaCommandResultRead(StrictSchemaLifecycleModel):
     action_id: uuid.UUID
     reused: bool
     version: SchemaVersionDetailRead
+
+
+class SchemaVersionDeletionResultRead(StrictSchemaLifecycleModel):
+    action_id: uuid.UUID
+    reused: bool
+    library_id: uuid.UUID
+    ontology_version_id: uuid.UUID
+    status: Literal["deleted"]

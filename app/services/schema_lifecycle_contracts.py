@@ -18,6 +18,8 @@ SchemaLifecycleActionKind = Literal[
     "update_item",
     "disable_item",
     "activate_version",
+    "delete_version",
+    "disable_version",
 ]
 SchemaLifecycleTargetKind = Literal[
     "ontology_version",
@@ -32,6 +34,8 @@ SCHEMA_LIFECYCLE_ACTION_KINDS = (
     "update_item",
     "disable_item",
     "activate_version",
+    "delete_version",
+    "disable_version",
 )
 SCHEMA_LIFECYCLE_TARGET_KINDS = (
     "ontology_version",
@@ -165,7 +169,12 @@ class SchemaLifecycleCommand:
             fail_schema_lifecycle(
                 "schema_lifecycle_request_invalid", "Schema target kind is invalid"
             )
-        if self.action_kind in {"clone_version", "activate_version"} and (
+        if self.action_kind in {
+            "clone_version",
+            "activate_version",
+            "delete_version",
+            "disable_version",
+        } and (
             self.target_kind != "ontology_version"
         ):
             fail_schema_lifecycle(

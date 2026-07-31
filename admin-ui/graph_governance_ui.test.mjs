@@ -108,6 +108,12 @@ test('projects exact Organization and Library capabilities from effective rows',
     ]);
 });
 
+test('defaults graph navigation to the browse workspace', () => {
+    const scope = resolveGraphScope({}, permissions, organizations);
+    assert.equal(scope.tab, 'browse');
+    assert.equal(graphRouteQuery(scope).tab, 'browse');
+});
+
 test('normalizes route scope without crossing Organizations or retaining unsafe details', () => {
     const readScope = resolveGraphScope({
         tab: 'entities',

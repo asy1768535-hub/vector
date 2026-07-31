@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 
-import { visibleSidebarDomains } from './src/domain_navigation.js';
+import { visibleSidebarGroups } from './src/domain_navigation.js';
 import { iconSvg } from './src/icons.js';
 
 const iconsSource = readFileSync(new URL('./src/icons.js', import.meta.url), 'utf8');
@@ -14,29 +14,48 @@ const FULL_ACCESS = {
     knowledgeGovernance: true,
     usersPermissions: true,
     libraries: true,
+    libraryConfiguration: true,
     operationsCenter: true,
     auditCenter: true,
     chat: true,
+    search: true,
+    retrievalTest: true,
     documents: true,
+    catalog: true,
+    import: true,
     knowledgeGraph: true,
+    schemaLifecycle: true,
+    classificationReview: true,
+    account: true,
+    apiKeys: true,
 };
 
-const DOMAIN_MENUS = visibleSidebarDomains(FULL_ACCESS);
-const DOMAIN_ICONS = DOMAIN_MENUS.map((item) => item.icon);
+const SIDEBAR_GROUPS = visibleSidebarGroups(FULL_ACCESS);
+const SIDEBAR_ICONS = SIDEBAR_GROUPS.flatMap((group) => [
+    group.icon,
+    ...group.items.map((item) => item.icon),
+]);
 
-test('seven functional domains provide local SVG sidebar icons', () => {
-    assert.equal(DOMAIN_MENUS.length, 7);
-    assert.deepEqual(DOMAIN_MENUS.map((item) => item.key), [
+test('eight functional groups and their leaf pages provide local SVG sidebar icons', () => {
+    assert.equal(SIDEBAR_GROUPS.length, 8);
+    assert.deepEqual(SIDEBAR_GROUPS.map((item) => item.key), [
         'knowledgeUse',
         'knowledgeAssets',
         'knowledgeGovernance',
+        'account',
         'usersPermissions',
         'libraries',
         'operationsCenter',
         'auditCenter',
     ]);
+    const leafItems = SIDEBAR_GROUPS.flatMap((group) => group.items);
+    assert.equal(leafItems.length, 17);
+    assert.equal(
+        leafItems.filter((item) => item.label === '知识内容').length,
+        1,
+    );
 
-    for (const name of DOMAIN_ICONS) {
+    for (const name of SIDEBAR_ICONS) {
         const svg = iconSvg(name);
         const body = svg.replace(/xmlns="[^"]*"/g, '');
         assert.ok(svg.startsWith('<svg'), `${name} starts with <svg>`);
@@ -47,11 +66,13 @@ test('seven functional domains provide local SVG sidebar icons', () => {
     }
 });
 
-test('Layout renders one permission-aware menu loop instead of historical page entries', () => {
-    assert.match(layoutSource, /v-for="item in domainMenus"/);
-    assert.match(layoutSource, /:index="item\.key"/);
-    assert.match(layoutSource, /:icon="item\.icon"/);
-    assert.match(layoutSource, /visibleSidebarDomains/);
+test('Layout renders permission-aware groups with direct leaf-page entries', () => {
+    assert.match(layoutSource, /sidebarEntries/);
+    assert.match(layoutSource, /v-for="entry in sidebarEntries"/);
+    assert.match(layoutSource, /:index="entry\.path"/);
+    assert.match(layoutSource, /:icon="entry\.icon"/);
+    assert.match(layoutSource, /visibleSidebarGroups/);
+    assert.doesNotMatch(layoutSource, /el-sub-menu/);
     assert.doesNotMatch(layoutSource, /index="\/(?:chat|documents|dashboard|api-keys)"/);
 });
 
@@ -69,7 +90,7 @@ test('collapse and account menu icons remain wired', () => {
 
 test('domain sidebar icon definitions are unique', () => {
     const iconDefinitions = iconsSource.slice(0, iconsSource.indexOf('\n};') + 3);
-    for (const name of new Set(DOMAIN_ICONS)) {
+    for (const name of new Set(SIDEBAR_ICONS)) {
         const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const matches = iconDefinitions.match(new RegExp(`'${escaped}':`, 'g')) || [];
         assert.equal(matches.length, 1, `${name} is defined exactly once`);

@@ -31,6 +31,7 @@ from app.services import (
     classification_jobs,
     classification_runtime_policy,
     graph_extraction_safety,
+    graph_seed,
     knowledge_artifact_jobs,
     knowledge_artifact_policy,
     library_faq,
@@ -40,6 +41,10 @@ from app.services import (
 from app.services.organization_authorization import (
     OrganizationAuthorizationError,
     authorize_library_management,
+)
+from app.services.organization_permissions import (
+    PermissionMutationResult,
+    grant_platform_library_permissions,
 )
 
 log = logging.getLogger(__name__)
@@ -65,12 +70,42 @@ def _validate_source_config_or_400(source_config: dict | None) -> dict | None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"invalid source_config: {exc}") from exc
 
 
+def _recreated_slug(base_slug: str, generation: int) -> str:
+    suffix = f"__r{generation}"
+    trimmed_base = base_slug[: 80 - len(suffix)].rstrip("_")
+    return f"{trimmed_base}{suffix}"
+
+
+async def _allocate_recreated_slug(
+    db: AsyncSession,
+    *,
+    base_slug: str,
+    name: str,
+) -> tuple[str, int] | None:
+    result = await db.execute(
+        select(Library.slug, Library.deleted_at).where(Library.name == name)
+    )
+    history = list(result.all())
+    if not history or any(deleted_at is None for _, deleted_at in history):
+        return None
+
+    generation = max(2, len(history) + 1)
+    for _ in range(8):
+        candidate = _recreated_slug(base_slug, generation)
+        collision = await db.execute(select(Library.id).where(Library.slug == candidate))
+        if collision.scalar_one_or_none() is None:
+            return candidate, generation
+        generation += 1
+    return None
+
+
 @router.post("", response_model=LibraryRead, status_code=status.HTTP_201_CREATED)
 async def create_library(
     body: LibraryCreate,
     actor: User = Depends(current_superuser),
     db: AsyncSession = Depends(get_db),
 ) -> Library:
+    creator_permissions: PermissionMutationResult | None = None
     embedding_model = body.embedding_model or settings.embedding_model
     embedding_dim = body.embedding_dim or settings.embedding_dim
     chunk_size = body.chunk_size or settings.default_chunk_size
@@ -108,18 +143,52 @@ async def create_library(
         chunk_overlap=chunk_overlap,
         qdrant_collection="",  # 写完 ID 后再 set
         source_config=source_config,
+        graph_extraction_enabled=body.graph_extraction_enabled,
+        graph_extraction_build_mode=body.graph_extraction_build_mode,
+        external_llm_enabled=body.external_llm_enabled,
+        graph_extraction_allowed_security_levels=(
+            graph_extraction_safety.normalize_allowed_security_levels(
+                body.graph_extraction_allowed_security_levels
+            )
+        ),
         revision_retention_enabled=body.revision_retention_enabled,
         revision_retention_days=body.revision_retention_days,
         revision_retention_notice_days=body.revision_retention_notice_days,
         created_by=actor.id,
     )
     lib.qdrant_collection = _collection_name(body.slug)
+    creation_generation = 1
     db.add(lib)
     try:
         await db.flush()
     except IntegrityError as exc:
         await db.rollback()
-        raise HTTPException(status.HTTP_409_CONFLICT, "库唯一ID已存在，请更换后重试") from exc
+        recreated = await _allocate_recreated_slug(
+            db,
+            base_slug=body.slug,
+            name=body.name,
+        )
+        if recreated is None:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "已有同名知识库；如需重建，请先删除当前活动库",
+            ) from exc
+        lib.slug, creation_generation = recreated
+        lib.qdrant_collection = _collection_name(lib.slug)
+        if body.source_enrichment_enabled and not _has_non_empty_source_config(body.source_config):
+            lib.source_config = source_enrichment.conventional_config(lib.slug)
+        db.add(lib)
+        try:
+            await db.flush()
+        except IntegrityError as retry_exc:
+            await db.rollback()
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "知识库重建ID分配冲突，请重试",
+            ) from retry_exc
+
+    if body.schema_template == "enterprise":
+        await graph_seed.seed_enterprise_ontology(db, lib)
 
     # 建 Qdrant collection（失败回滚库记录）
     try:
@@ -135,11 +204,33 @@ async def create_library(
             status.HTTP_502_BAD_GATEWAY, f"qdrant collection creation failed: {exc}"
         ) from exc
 
-    await audit_log.record(
-        db, actor.id, "library.create",
-        {"library_id": str(lib.id), "slug": lib.slug, "collection": lib.qdrant_collection},
-    )
-    await db.commit()
+    try:
+        if settings.organization_authorization_enabled:
+            creator_permissions = await grant_platform_library_permissions(
+                db,
+                actor_user_id=actor.id,
+                target_user_id=actor.id,
+                library=lib,
+                actions=("read", "insert", "delete", "admin"),
+            )
+        await audit_log.record(
+            db, actor.id, "library.create",
+            {
+                "library_id": str(lib.id),
+                "slug": lib.slug,
+                "requested_slug": body.slug,
+                "creation_generation": creation_generation,
+                "collection": lib.qdrant_collection,
+                "graph_extraction_enabled": lib.graph_extraction_enabled,
+                "schema_template": body.schema_template,
+            },
+        )
+        await db.commit()
+    except Exception:
+        if creator_permissions is not None:
+            creator_permissions.compensate()
+        await db.rollback()
+        raise
     await db.refresh(lib)
     return lib
 
@@ -257,7 +348,11 @@ async def update_library(
             changes["source_config"] = source_config
 
     safety_change_error = None
-    for field in ("graph_extraction_enabled", "external_llm_enabled"):
+    for field in (
+        "graph_extraction_enabled",
+        "graph_extraction_build_mode",
+        "external_llm_enabled",
+    ):
         if field in body.model_fields_set:
             value = getattr(body, field)
             setattr(lib, field, value)

@@ -59,6 +59,7 @@ assert.equal(insertDomains.knowledgeGovernance, false);
 const superDomains = menuAccess(SUPER, NONE);
 assert.equal(superDomains.usersPermissions, true);
 assert.equal(superDomains.libraries, true);
+assert.equal(superDomains.libraryConfiguration, true);
 assert.equal(superDomains.operationsCenter, true);
 assert.equal(superDomains.auditCenter, true);
 
@@ -110,6 +111,8 @@ assert.equal(canAccessLibraryManagementRoute(managementPermissions, organization
 assert.equal(canAccessLibraryManagementRoute(READER, []), false);
 assert.equal(menuAccess(USER, managementPermissions, organizationRows).classificationReview, true);
 assert.equal(menuAccess(USER, managementPermissions, organizationRows).schemaLifecycle, true);
+assert.equal(menuAccess(USER, managementPermissions, organizationRows).libraries, true);
+assert.equal(menuAccess(USER, managementPermissions, organizationRows).libraryConfiguration, false);
 assert.equal(menuAccess(SUPER, NONE, []).classificationReview, false);
 assert.equal(menuAccess(SUPER, NONE, []).schemaLifecycle, false);
 

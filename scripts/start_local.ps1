@@ -13,6 +13,20 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# Some Windows hosts expose both Path and PATH in the process environment.
+# Start-Process rejects that duplicate when constructing a child environment.
+$processEnvironment = [Environment]::GetEnvironmentVariables("Process")
+$processPathKeys = @(
+    $processEnvironment.Keys |
+        Where-Object { [string]$_ -ieq "path" }
+)
+if ($processPathKeys.Count -gt 1) {
+    $canonicalPath = $env:Path
+    [Environment]::SetEnvironmentVariable("PATH", $null, "Process")
+    [Environment]::SetEnvironmentVariable("Path", $canonicalPath, "Process")
+}
+
 $projectDir = $PSScriptRoot | Split-Path -Parent
 $venvPython = Join-Path $projectDir ".venv\Scripts\python.exe"
 $logDir = Join-Path $projectDir ".run_logs"
@@ -40,7 +54,10 @@ function Stop-ProcessByPidFile($pidFile, $name) {
         $p = Get-Process -Id $procId -ErrorAction Stop
         if (-not $p.HasExited) {
             Write-Warn "Stopping $name (PID $procId)..."
-            $p.Kill()
+            & "$env:SystemRoot\System32\taskkill.exe" /PID $procId /T /F | Out-Null
+            if ($LASTEXITCODE -ne 0 -and -not $p.HasExited) {
+                $p.Kill()
+            }
             $p.WaitForExit(5000)
             Write-OK "$name stopped"
         }
@@ -49,7 +66,7 @@ function Stop-ProcessByPidFile($pidFile, $name) {
 }
 
 # ── Pre-flight ────────────────────────────────────────────
-Write-Step "1/6 Pre-flight checks"
+Write-Step "1/7 Pre-flight checks"
 
 # Check .venv
 if (-not (Test-Path $venvPython)) {
@@ -104,6 +121,7 @@ if ($portCheck) {
 if ($Force) {
     Write-Step "Force mode: stopping existing instances"
     Stop-ProcessByPidFile (Join-Path $pidDir "api.pid") "API"
+    Stop-ProcessByPidFile (Join-Path $pidDir "importer.pid") "Import Worker"
     Stop-ProcessByPidFile (Join-Path $pidDir "embedder.pid") "Embedder Worker"
     Stop-ProcessByPidFile (Join-Path $pidDir "graph_extractor.pid") "Graph Extractor"
     Stop-ProcessByPidFile (Join-Path $pidDir "knowledge_artifacts.pid") "Knowledge Artifact Worker"
@@ -114,7 +132,7 @@ if ($Force) {
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
 # ── Start API ─────────────────────────────────────────────
-Write-Step "2/6 Starting API (python -m app.main)"
+Write-Step "2/7 Starting API (python -m app.main)"
 
 $apiPidFile = Join-Path $pidDir "api.pid"
 if (Test-ProcessAlive $apiPidFile) {
@@ -142,7 +160,23 @@ if (Test-ProcessAlive $apiPidFile) {
 }
 
 # ── Start Embedder Worker ─────────────────────────────────
-Write-Step "3/6 Starting Embedder Worker (python -m app.workers.embedder --watch)"
+Write-Step "3/7 Starting Import Worker (python -m app.workers.importer --watch)"
+
+$importPidFile = Join-Path $pidDir "importer.pid"
+if (Test-ProcessAlive $importPidFile) {
+    Write-Warn "Import Worker already running (PID $(Get-Content $importPidFile)), skipping"
+} else {
+    $proc = Start-Process -FilePath $venvPython `
+        -ArgumentList "-m", "app.workers.importer", "--watch" `
+        -WorkingDirectory $projectDir `
+        -PassThru -NoNewWindow `
+        -RedirectStandardOutput (Join-Path $logDir "importer_stdout.log") `
+        -RedirectStandardError (Join-Path $logDir "importer_stderr.log")
+    $proc.Id | Out-File -FilePath $importPidFile -Encoding utf8 -NoNewline
+    Write-OK "Import Worker started (PID $($proc.Id))"
+}
+
+Write-Step "4/7 Starting Embedder Worker (python -m app.workers.embedder --watch)"
 
 $embedPidFile = Join-Path $pidDir "embedder.pid"
 if (Test-ProcessAlive $embedPidFile) {
@@ -159,7 +193,7 @@ if (Test-ProcessAlive $embedPidFile) {
 }
 
 # ── Start Cleanup Worker ──────────────────────────────────
-Write-Step "4/6 Starting Cleanup Worker (python -m app.workers.cleanup --watch)"
+Write-Step "5/7 Starting Cleanup Worker (python -m app.workers.cleanup --watch)"
 
 $cleanPidFile = Join-Path $pidDir "cleanup.pid"
 if (Test-ProcessAlive $cleanPidFile) {
@@ -176,7 +210,7 @@ if (Test-ProcessAlive $cleanPidFile) {
 }
 
 # ── Start Graph Extraction Worker ─────────────────────────
-Write-Step "5/6 Starting Graph Extraction Worker"
+Write-Step "6/7 Starting Graph Extraction Worker"
 
 $graphPidFile = Join-Path $pidDir "graph_extractor.pid"
 if (-not $graphExtractionEnabled) {
@@ -195,7 +229,7 @@ if (-not $graphExtractionEnabled) {
 }
 
 # Start Knowledge Artifact Worker
-Write-Step "6/6 Starting Knowledge Artifact Worker"
+Write-Step "7/7 Starting Knowledge Artifact Worker"
 
 $artifactPidFile = Join-Path $pidDir "knowledge_artifacts.pid"
 if (-not $knowledgeArtifactEnabled) {

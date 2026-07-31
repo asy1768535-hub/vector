@@ -62,7 +62,7 @@ async def run(*, watch: bool) -> None:
         )
     )
     try:
-        await worker_service.run_graph_extraction_worker(
+        await worker_service.run_graph_extraction_worker_pool(
             watch=True,
             metadata=metadata,
         )

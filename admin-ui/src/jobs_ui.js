@@ -1,8 +1,34 @@
 import { formatTime, paginate } from './common_ui.js';
 
-export const STATUS_LABEL = { pending: '待处理', processing: '处理中', done: '已完成', failed: '已失败', superseded: '已覆盖' };
-export const STATUS_TAG = { pending: 'warning', processing: '', done: 'success', failed: 'danger', superseded: 'info' };
-export const STATUS_ICON = { pending: 'status:pending', processing: 'status:processing', done: 'status:success', failed: 'status:failed', superseded: 'status:skipped' };
+export const STATUS_LABEL = { pending: '待处理', processing: '处理中', done: '已完成', failed: '已失败', cancelled: '已取消', superseded: '已覆盖' };
+export const STATUS_TAG = { pending: 'warning', processing: '', done: 'success', failed: 'danger', cancelled: 'info', superseded: 'info' };
+export const STATUS_ICON = { pending: 'status:pending', processing: 'status:processing', done: 'status:success', failed: 'status:failed', cancelled: 'status:skipped', superseded: 'status:skipped' };
+
+export const TASK_TYPE_LABEL = {
+    import: '文件导入',
+    embedding: '向量化',
+    graph: '知识图谱',
+};
+
+export const STAGE_LABEL = {
+    uploading: '上传文件',
+    queued: '等待处理',
+    validating: '校验文件',
+    parsing: '解析文档',
+    chunking: '生成切片',
+    embedding: '生成向量',
+    graph: '准备图谱',
+    awaiting_graph: '等待创建图谱任务',
+    preparing: '准备抽取',
+    building_context: '构建上下文',
+    extracting: '抽取实体与关系',
+    binding_evidence: '绑定证据',
+    aggregating: '聚合结果',
+    scoring: '置信度评分',
+    materializing: '写入图谱草稿',
+    finalizing: '完成抽取',
+    completed: '任务完成',
+};
 
 export function formatJobTime(iso) {
     return formatTime(iso);
@@ -37,6 +63,7 @@ export function shortId(id) {
 
 export function filterJobs(jobs, filters) {
     let list = jobs;
+    if (filters.task_type) list = list.filter((j) => j.task_type === filters.task_type);
     if (filters.status) list = list.filter((j) => j.status === filters.status);
     if (filters.library_id) list = list.filter((j) => j.library_id === filters.library_id);
     if (filters.worker_id) list = list.filter((j) => (j.worker_id || '').toLowerCase().includes(filters.worker_id.toLowerCase()));

@@ -17,7 +17,7 @@ experience.
 Route and authorization:
 
 ```text
-/knowledge-governance/graph?tab=entities|relations|review|publications|explore
+/knowledge-governance/graph?tab=browse|entities|relations|review|publications|explore
                  &organization=<uuid>&libraries=<slug,slug>
                  &entity=<uuid>|relation=<uuid>
 
@@ -47,6 +47,21 @@ permission, response-identity, error, action-summary, and Publication helpers.
 
 - Build Organization and 1..20 Library scope only from `/me/permissions`.
   Platform superuser alone is not customer-content or management authority.
+- `browse` is the default route and presents one display mode at a time through
+  a stable segmented button group: `directory`, `content`, or `graph`.
+  Directory is the initial mode. Selecting an Entity opens content; graph is
+  loaded only after the user switches to the relationship display.
+- `browse` is the single visible Entity and Relation workspace. When one
+  writable Library is selected, create controls are available there; Entity
+  content emits to the existing correction surface, and Relation selection
+  opens the existing Relation detail/correction surface. Legacy `entities` and
+  `relations` routes remain compatible but are not separate top-level tabs.
+  The legacy manual-review route also remains compatible but is hidden from
+  normal navigation because validated facts publish automatically.
+- The browse directory groups the bounded Graph Catalog Entity result by
+  Library and Entity type. It is not a fabricated document-folder hierarchy.
+  Content reuses the exact Entity detail projection, and its document and
+  Evidence actions reuse the existing Catalog drill-down surfaces.
 - Entity, Relation, detail, Evidence, context, review, and Publication flows
   own independent monotonic request/mutation sequences. Scope changes discard
   stale responses and close stale drawers/dialogs before a canonical route
@@ -91,6 +106,8 @@ permission, response-identity, error, action-summary, and Publication helpers.
 
 - Good: a reader searches compatible Libraries, opens an Entity, and follows
   an exact Evidence locator back to the Catalog document.
+- Good: a reader enters the default browser, switches among directory, content,
+  and relationship graph without rendering the three surfaces simultaneously.
 - Good: a reader selects exact Library-scoped seeds and inspects separate,
   bounded one-hop or two-hop published graph groups.
 - Good: an administrator reviews staged changes, previews one exact action set,
@@ -100,7 +117,8 @@ permission, response-identity, error, action-summary, and Publication helpers.
 - Bad: deriving current parent from the first recent history row, retaining an
   Entity drawer after route normalization, or retrying a conflicted command is
   forbidden.
-- Bad: making a graph canvas the default, merging same-name Entities across
+- Bad: rendering directory, content, and graph side by side, making a graph
+  canvas the initial display, merging same-name Entities across
   Libraries, authoring Schema here, dumping action JSON, or treating
   `is_superuser` as Organization authority is forbidden.
 
@@ -111,7 +129,9 @@ permission, response-identity, error, action-summary, and Publication helpers.
   status labels, and fixed errors.
 - API tests assert exact paths, query/body allowlists, state/Manifest fences,
   and discarded caller extras.
-- View tests assert five tabs, independent sequences, imported helper names,
+- View tests assert the unified visible `browse` tab, in-place Entity and
+  Relation correction entry points, mutually exclusive display modes,
+  preserved advanced tabs, independent sequences, imported helper names,
   canonical-route invalidation order, no `v-html`/logging/storage fields, and
   no per-row detail fan-out.
 - Browser QA covers Entity, Relation, Review, Publication, preview, and detail

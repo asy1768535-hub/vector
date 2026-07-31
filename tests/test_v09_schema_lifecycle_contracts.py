@@ -14,9 +14,11 @@ from app.schemas.schema_lifecycle import (
     SchemaAttributeCreateRequest,
     SchemaCloneRequest,
     SchemaConstraintCreateRequest,
+    SchemaDraftDeleteRequest,
     SchemaEntityTypeCreateRequest,
     SchemaItemDisableRequest,
     SchemaRelationTypeCreateRequest,
+    SchemaVersionDisableRequest,
 )
 from app.services.schema_lifecycle_contracts import (
     SCHEMA_LIFECYCLE_ACTION_KINDS,
@@ -31,6 +33,9 @@ from app.services.schema_lifecycle_contracts import (
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "alembic" / "versions" / "0039_v09_schema_lifecycle_actions.py"
+RETIREMENT_MIGRATION = (
+    ROOT / "alembic" / "versions" / "0043_v09_schema_version_retirement.py"
+)
 
 
 def _command(**overrides) -> SchemaLifecycleCommand:
@@ -72,6 +77,8 @@ def test_action_model_and_migration_are_closed_bounded_and_private():
         "update_item",
         "disable_item",
         "activate_version",
+        "delete_version",
+        "disable_version",
     }
     assert set(SCHEMA_LIFECYCLE_TARGET_KINDS) == {
         "ontology_version",
@@ -126,10 +133,39 @@ def test_action_model_and_migration_are_closed_bounded_and_private():
     assert 'down_revision: Union[str, None] = "0038"' in migration
     assert 'op.create_table(\n        "schema_lifecycle_actions"' in migration
     assert 'op.drop_table("schema_lifecycle_actions")' in migration
-    for value in (*SCHEMA_LIFECYCLE_ACTION_KINDS, *SCHEMA_LIFECYCLE_TARGET_KINDS):
+    for value in (
+        "clone_version",
+        "create_item",
+        "update_item",
+        "disable_item",
+        "activate_version",
+        *SCHEMA_LIFECYCLE_TARGET_KINDS,
+    ):
         assert value in migration
+    retirement_migration = RETIREMENT_MIGRATION.read_text(encoding="utf-8")
+    assert 'revision: str = "0043"' in retirement_migration
+    assert 'down_revision: Union[str, None] = "0042"' in retirement_migration
+    assert "delete_version" in retirement_migration
+    assert "disable_version" in retirement_migration
     for value in forbidden:
         assert value not in migration
+
+
+def test_version_retirement_requests_require_fixed_confirmations():
+    common = {
+        "expected_version_state_hash": "a" * 64,
+        "idempotency_key": "retire-version-1",
+    }
+    assert SchemaDraftDeleteRequest(
+        **common, confirmation="delete_schema_draft"
+    ).confirmation == "delete_schema_draft"
+    assert SchemaVersionDisableRequest(
+        **common, confirmation="disable_schema_version"
+    ).confirmation == "disable_schema_version"
+    with pytest.raises(ValidationError):
+        SchemaDraftDeleteRequest(**common, confirmation="delete")
+    with pytest.raises(ValidationError):
+        SchemaVersionDisableRequest(**common, confirmation="disable")
 
 
 def test_command_hash_and_clone_identity_are_canonical_and_fail_closed():

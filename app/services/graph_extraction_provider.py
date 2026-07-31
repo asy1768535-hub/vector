@@ -14,6 +14,18 @@ ProviderErrorCategory = Literal["timeout", "network_error", "http_error"]
 DEEPSEEK_PROVIDER_NAME = "deepseek"
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 DEEPSEEK_MODEL_NAME = "deepseek-v4-pro"
+LOCAL_PROVIDER_NAME = "openai-compatible"
+LOCAL_BASE_URL = "http://10.0.10.2:8113/v1"
+LOCAL_MODEL_NAME = "qwen3-30b-a3b-instruct-2507-fp8"
+
+
+def graph_extraction_provider_name(*, base_url: str, model: str) -> str:
+    contract = (base_url, model)
+    if contract == (DEEPSEEK_BASE_URL, DEEPSEEK_MODEL_NAME):
+        return DEEPSEEK_PROVIDER_NAME
+    if contract == (LOCAL_BASE_URL, LOCAL_MODEL_NAME):
+        return LOCAL_PROVIDER_NAME
+    raise ValueError("unsupported graph extraction provider contract")
 
 
 def _canonical_json(value: Any) -> str:
@@ -79,12 +91,20 @@ class OpenAICompatibleGraphExtractor:
         model: str,
         api_key: str,
         timeout_seconds: float = 120.0,
+        max_output_tokens: int | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
+        if max_output_tokens is not None and (
+            isinstance(max_output_tokens, bool)
+            or not isinstance(max_output_tokens, int)
+            or max_output_tokens < 1
+        ):
+            raise ValueError("max_output_tokens must be a positive integer or None")
         self._endpoint = _endpoint(base_url)
         self._model = model
         self._api_key = api_key
         self._timeout_seconds = timeout_seconds
+        self._max_output_tokens = max_output_tokens
         self._transport = transport
 
     async def extract(self, messages: list[dict[str, str]]) -> ProviderResponse:
@@ -95,6 +115,8 @@ class OpenAICompatibleGraphExtractor:
             "stream": False,
             "response_format": {"type": "json_object"},
         }
+        if self._max_output_tokens is not None:
+            payload["max_tokens"] = self._max_output_tokens
         request_hash = _payload_hash(payload)
         started = time.perf_counter()
         try:

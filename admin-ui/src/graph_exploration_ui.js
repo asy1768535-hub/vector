@@ -279,14 +279,20 @@ export function layoutGraphRadially(value, width, height) {
     const centerX = safeWidth / 2;
     const centerY = safeHeight / 2;
     const ringBase = Math.max(54, Math.min(safeWidth, safeHeight));
-    const radii = { 0: 0, 1: ringBase * 0.24, 2: ringBase * 0.41 };
     const resultNodes = [];
     const byId = new Map();
     const nodes = sortedNodes(value);
+    const seedCount = nodes.filter((item) => item.depth === 0).length;
+    const multipleSeeds = seedCount > 1;
+    const radii = multipleSeeds
+        ? { 0: ringBase * 0.13, 1: ringBase * 0.30, 2: ringBase * 0.45 }
+        : { 0: 0, 1: ringBase * 0.24, 2: ringBase * 0.41 };
     for (const depth of [0, 1, 2]) {
         const ring = nodes.filter((item) => item.depth === depth);
         ring.forEach((item, index) => {
-            const angle = depth === 0 ? 0 : (-Math.PI / 2) + ((Math.PI * 2 * index) / ring.length);
+            const angle = depth === 0 && !multipleSeeds
+                ? 0
+                : (-Math.PI / 2) + ((Math.PI * 2 * index) / ring.length);
             const layoutNode = {
                 id: item.id,
                 depth,

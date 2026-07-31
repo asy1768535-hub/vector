@@ -24,7 +24,7 @@ test('wires one effective-read route inside the knowledge governance domain', ()
     assert.match(app, /path:\s*'graph'/);
     assert.match(app, /component:\s*GraphGovernance/);
     assert.match(app, /effectivePerm:\s*'read'/);
-    assert.match(layout, /visibleSidebarDomains/);
+    assert.match(layout, /visibleSidebarGroups/);
     assert.match(navigation, /icon:\s*'carbon:chart-relationship'/);
     assert.match(navigation, /access:\s*'knowledgeGraph'/);
     assert.match(menu, /knowledgeGraph:\s*acts\.has\('read'\)/);
@@ -33,11 +33,9 @@ test('wires one effective-read route inside the knowledge governance domain', ()
     assert.equal(menuAccess({}, [{ actions: ['read'] }]).knowledgeGraph, true);
 });
 
-test('keeps four stable tabs and multi-Library route scope', () => {
+test('keeps one unified graph workspace plus history and exploration tabs', () => {
     for (const token of [
-        "name=\"entities\"",
-        "name=\"relations\"",
-        "name=\"review\"",
+        'name="browse"',
         "name=\"publications\"",
         'resolveGraphScope',
         'graphRouteQuery',
@@ -48,7 +46,13 @@ test('keeps four stable tabs and multi-Library route scope', () => {
         'relationCursor',
         'advanceGraphCursor',
         'retreatGraphCursor',
+        'GraphKnowledgeBrowser',
+        '<graph-knowledge-browser',
     ]) assert.ok(view.includes(token), `missing route/directory contract ${token}`);
+    assert.ok(!view.includes('<el-tab-pane label="实体管理" name="entities"'));
+    assert.ok(!view.includes('<el-tab-pane label="关系管理" name="relations"'));
+    assert.ok(!view.includes('<el-tab-pane label="待审核" name="review"'));
+    assert.ok(view.includes('@edit-entity="editBrowserEntity"'));
 });
 
 test('uses strict Graph Catalog responses and independent stale-response fences', () => {
@@ -131,4 +135,11 @@ test('uses a dense internally scrolling responsive work surface', () => {
     assert.match(css, /\.graph-table-shell\s*\{[^}]*overflow-x:\s*auto/s);
     assert.match(css, /\.graph-heading-icon\s*\{[^}]*border-radius:\s*8px/s);
     assert.match(css, /\.graph-detail-drawer\s*\{[^}]*max-width:\s*100vw/s);
+});
+
+test('keeps organization scope internal for single-organization users', () => {
+    assert.ok(view.includes('const showOrganizationSelector = computed(() => organizations.value.length > 1)'));
+    assert.ok(view.includes('v-if="showOrganizationSelector" class="graph-field"'));
+    assert.ok(view.includes("'is-single-organization': !showOrganizationSelector"));
+    assert.ok(view.includes('scope.organizationId'));
 });

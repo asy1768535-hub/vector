@@ -85,12 +85,24 @@ test('/operations-center/overview has admin:true', () => {
     assert.ok(appSrc.includes("admin: true"), 'dashboard has admin:true meta');
 });
 
-test('defaultRoute: platform admin → operations overview', () => {
+test('defaultRoute: platform admin starts in the first accessible business domain', () => {
     assert.ok(
-        navigationSrc.includes('if (access?.operationsCenter) return APP_PATHS.dashboard'),
-        'platform admin starts in operations overview',
+        navigationSrc.indexOf("for (const domain of ['knowledgeUse', 'knowledgeAssets', 'knowledgeGovernance'])")
+            < navigationSrc.indexOf('if (access?.operationsCenter) return APP_PATHS.dashboard'),
+        'business domains take precedence over operations overview',
     );
     assert.ok(appSrc.includes('defaultRouteForAccess'), 'app uses shared default projection');
+});
+
+test('authenticated root uses a real redirect instead of a component-less route guard', () => {
+    assert.ok(
+        appSrc.includes("{ path: '', redirect: () => ({ path: defaultRoute() }) }"),
+        'root child route redirects to the shared authenticated default',
+    );
+    assert.ok(
+        !appSrc.includes("{ path: '', beforeEnter: () => ({ path: defaultRoute() }) }"),
+        'root child route does not rely on a component-less beforeEnter record',
+    );
 });
 
 test('defaultRoute: no business permission → account profile', () => {

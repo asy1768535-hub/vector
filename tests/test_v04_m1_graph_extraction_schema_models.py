@@ -7,6 +7,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 
 
 MIGRATION = Path("alembic/versions/0021_v04_m1_graph_extraction_foundation.py")
+MIGRATION_0045 = Path("alembic/versions/0045_graph_extraction_batch_audit.py")
 
 
 def _constraint_names(table, kind) -> set[str]:
@@ -319,11 +320,17 @@ def test_extraction_raw_output_attempt_contract():
         "fk_extraction_raw_attempts_context",
     )
     assert cols.claim_token.nullable is False
+    for name in ("batch_request_id", "batch_key", "batch_ordinal"):
+        assert cols[name].nullable is True
+    assert cols.batch_request_id.type.as_uuid is True
     assert cols.request_payload_hash.type.length == 64
     assert isinstance(cols.parsed_response.type, JSONB)
     for name in ("raw_response", "parsed_response", "parse_error", "purged_at"):
         assert cols[name].nullable is True
     assert "uq_extraction_raw_attempts_unit_no" in _constraint_names(
+        table, UniqueConstraint
+    )
+    assert "uq_extraction_raw_attempts_batch_key" in _constraint_names(
         table, UniqueConstraint
     )
     assert {
@@ -335,11 +342,14 @@ def test_extraction_raw_output_attempt_contract():
         "ck_extraction_raw_attempts_abandoned_fields",
         "ck_extraction_raw_attempts_abandoned_reason",
         "ck_extraction_raw_attempts_payload_or_purged",
+        "ck_extraction_raw_attempts_batch_membership",
+        "ck_extraction_raw_attempts_batch_ordinal",
     } <= _constraint_names(table, CheckConstraint)
     assert {
         "ix_extraction_raw_attempts_unit_no",
         "ix_extraction_raw_attempts_pending_claim",
         "ix_extraction_raw_attempts_purge",
+        "ix_extraction_raw_attempts_batch_request",
     } <= _index_names(table)
     purge_sql = _check_sql(table, "ck_extraction_raw_attempts_payload_or_purged")
     assert "purged_at is null" in purge_sql
@@ -441,3 +451,23 @@ def test_v04_m1_migration_is_0021_and_contains_only_m1_schema():
     )
     for needle in forbidden:
         assert needle not in text
+
+
+def test_v04_batch_audit_migration_extends_attempts_reversibly():
+    text = MIGRATION_0045.read_text(encoding="utf-8")
+
+    assert "revision: str = \"0045\"" in text
+    assert "down_revision: Union[str, None] = \"0044\"" in text
+    for column_name in ("batch_request_id", "batch_key", "batch_ordinal"):
+        assert f"sa.Column(\"{column_name}\"" in text
+        assert (
+            f"op.drop_column(\"extraction_raw_output_attempts\", \"{column_name}\")"
+            in text
+        )
+    for constraint_name in (
+        "ck_extraction_raw_attempts_batch_membership",
+        "ck_extraction_raw_attempts_batch_ordinal",
+        "uq_extraction_raw_attempts_batch_key",
+    ):
+        assert constraint_name in text
+    assert "ix_extraction_raw_attempts_batch_request" in text

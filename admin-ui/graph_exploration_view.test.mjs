@@ -9,14 +9,17 @@ const helper = fs.readFileSync(new URL('./src/graph_exploration_ui.js', import.m
 const governanceHelper = fs.readFileSync(new URL('./src/graph_governance_ui.js', import.meta.url), 'utf8');
 const css = fs.readFileSync(new URL('./style.css', import.meta.url), 'utf8');
 
-test('integrates exploration as the fifth non-default Knowledge Graph tab', () => {
-    assert.ok(parent.includes("<el-tab-pane label=\"图谱探查\" name=\"explore\""));
+test('keeps advanced exploration available after the default graph browser', () => {
+    assert.ok(parent.includes("<el-tab-pane label=\"高级探查\" name=\"explore\""));
+    assert.ok(parent.includes("<el-tab-pane label=\"图谱\" name=\"browse\""));
     assert.ok(parent.includes('<graph-explorer'));
     assert.ok(parent.includes('@open-entity="loadEntityDetail"'));
     assert.ok(parent.includes('@open-relation="loadRelationDetail"'));
     assert.ok(parent.includes('@open-evidence="openEvidence"'));
+    assert.ok(parent.indexOf('name="browse"') < parent.indexOf('name="publications"'));
     assert.ok(parent.indexOf('name="explore"') > parent.indexOf('name="publications"'));
     assert.ok(governanceHelper.includes("'explore'"));
+    assert.ok(governanceHelper.includes("'browse'"));
     assert.ok(governanceHelper.includes("'entities'"));
 });
 

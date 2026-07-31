@@ -63,8 +63,8 @@ test('manual fact and correction forms use active context and exact state fences
         'api.addGraphEntityAlias',
         'expected_entity_state_hash: aliasDialog.expectedStateHash',
     ]) assert.ok(view.includes(token), `missing submitted-fact contract ${token}`);
-    assert.match(view, /v-if="canWrite && scope\.tab === 'entities'"/);
-    assert.match(view, /v-if="canWrite && scope\.tab === 'relations'"/);
+    assert.match(view, /v-if="canWrite && \['browse', 'entities'\]\.includes\(scope\.tab\)"/);
+    assert.match(view, /v-if="canWrite && \['browse', 'relations'\]\.includes\(scope\.tab\)"/);
 });
 
 test('management commands carry state hashes, fixed reasons, confirmations and no retry loop', () => {

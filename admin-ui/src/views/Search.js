@@ -1,4 +1,4 @@
-import { onMounted, ref, watch } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import * as api from '../api.js';
@@ -6,6 +6,7 @@ import { store } from '../store.js';
 import { documentTypeIcon, documentDisplayName } from '../documents_ui.js';
 import { searchEmpty } from '../illustrations.js';
 import { csvEscape, downloadCSV } from '../logs_ui.js';
+import { createRequestFence, readProjection } from '../read_state_ui.js';
 
 function formatScore(s) {
     return (Number(s || 0) * 100).toFixed(1) + '%';
@@ -39,13 +40,39 @@ export default {
         const faqs = ref([]);
         const hasSearched = ref(false);
         const elapsed = ref(0);
+        const libsLoading = ref(false);
+        const libsStarted = ref(false);
+        const libsResolved = ref(false);
+        const libsError = ref('');
+        const faqLoading = ref(false);
+        const faqError = ref('');
+        const searchStarted = ref(false);
+        const searchResolved = ref(false);
+        const searchError = ref('');
+        const libsRequestFence = createRequestFence();
+        const faqRequestFence = createRequestFence();
+        const searchRequestFence = createRequestFence();
 
         async function loadFaqs() {
+            const requestToken = faqRequestFence.begin();
             faqs.value = [];
-            if (!slug.value) return;
+            faqError.value = '';
+            if (!slug.value) {
+                faqLoading.value = false;
+                return;
+            }
+            const requestedSlug = slug.value;
+            faqLoading.value = true;
             try {
-                faqs.value = await api.listLibraryFaqs(slug.value);
-            } catch (_) { faqs.value = []; }
+                const result = await api.listLibraryFaqs(requestedSlug);
+                if (!faqRequestFence.isCurrent(requestToken)) return;
+                faqs.value = result;
+            } catch (e) {
+                if (!faqRequestFence.isCurrent(requestToken)) return;
+                faqError.value = e.message || '常用问题加载失败';
+            } finally {
+                if (faqRequestFence.isCurrent(requestToken)) faqLoading.value = false;
+            }
         }
 
         function pickFaq(q) {
@@ -53,29 +80,52 @@ export default {
             handleSearch();
         }
 
-        async function loadLibs() {
+        async function loadLibs(forceRefresh = false) {
+            const requestToken = libsRequestFence.begin();
+            libsStarted.value = true;
+            libsLoading.value = true;
+            libsError.value = '';
             try {
+                let nextLibraries;
                 if (store.user?.is_superuser) {
-                    libs.value = (await api.listLibraries()).filter((l) => !l.deleted_at);
+                    const response = forceRefresh
+                        ? await api.listLibraries({}, true)
+                        : await api.listLibraries();
+                    nextLibraries = response.filter((l) => !l.deleted_at);
                 } else {
-                    libs.value = (store.permissions || [])
+                    nextLibraries = (store.permissions || [])
                         .filter((p) => (p.actions || []).includes('read'))
                         .map((p) => ({ slug: p.library_slug, name: p.library_name || p.library_slug }));
                 }
+                if (!libsRequestFence.isCurrent(requestToken)) return;
+                libs.value = nextLibraries;
+                libsResolved.value = true;
                 if (!slug.value && libs.value.length) slug.value = libs.value[0].slug;
-            } catch (e) { ElMessage.error(e.message); }
+            } catch (e) {
+                if (!libsRequestFence.isCurrent(requestToken)) return;
+                libsError.value = e.message || '知识库列表加载失败';
+            } finally {
+                if (libsRequestFence.isCurrent(requestToken)) libsLoading.value = false;
+            }
         }
 
         async function handleSearch() {
+            if (loading.value) return;
             if (!slug.value) { ElMessage.warning('请先选择一个库'); return; }
             const q = (query.value || '').trim();
             if (!q) { ElMessage.warning('请输入搜索关键词'); return; }
+            const requestToken = searchRequestFence.begin();
+            const requestedSlug = slug.value;
+            const requestedLimit = limit.value;
+            searchStarted.value = true;
             loading.value = true;
             hasSearched.value = true;
+            searchError.value = '';
             elapsed.value = 0;
             const t0 = performance.now();
             try {
-                const resp = await api.queryLibrary(slug.value, { query: q, limit: limit.value });
+                const resp = await api.queryLibrary(requestedSlug, { query: q, limit: requestedLimit });
+                if (!searchRequestFence.isCurrent(requestToken)) return;
                 elapsed.value = ((performance.now() - t0) / 1000);
                 results.value = (resp.results || []).map((r) => {
                     const info = resultDocInfo(r);
@@ -84,9 +134,14 @@ export default {
                         _icon: documentTypeIcon(info),
                     });
                 });
+                searchResolved.value = true;
                 if (!results.value.length) ElMessage.info('未找到相似分片');
-            } catch (e) { ElMessage.error(e.message); }
-            finally { loading.value = false; }
+            } catch (e) {
+                if (!searchRequestFence.isCurrent(requestToken)) return;
+                searchError.value = e.message || '搜索请求失败';
+            } finally {
+                if (searchRequestFence.isCurrent(requestToken)) loading.value = false;
+            }
         }
 
         function resetSearch() {
@@ -95,6 +150,10 @@ export default {
             results.value = [];
             hasSearched.value = false;
             elapsed.value = 0;
+            searchRequestFence.begin();
+            searchStarted.value = false;
+            searchResolved.value = false;
+            searchError.value = '';
         }
 
         function openDocDetail(row) {
@@ -123,12 +182,30 @@ export default {
             downloadCSV(`search-${slug.value}-${new Date().toISOString().slice(0, 10)}.csv`, headers, data);
         }
 
-        watch(slug, () => { results.value = []; hasSearched.value = false; elapsed.value = 0; loadFaqs(); });
+        const searchReadState = computed(() => readProjection({
+            started: searchStarted.value,
+            loading: loading.value,
+            hasResolved: searchResolved.value,
+            empty: results.value.length === 0,
+            error: searchError.value,
+        }));
+
+        watch(slug, () => {
+            searchRequestFence.begin();
+            results.value = [];
+            hasSearched.value = false;
+            elapsed.value = 0;
+            searchStarted.value = false;
+            searchResolved.value = false;
+            searchError.value = '';
+            loadFaqs();
+        });
         onMounted(loadLibs);
 
         return {
             libs, slug, query, limit, results, loading, faqs, hasSearched, elapsed,
-            handleSearch, resetSearch, pickFaq, openDocDetail, exportCSV, searchEmpty,
+            libsLoading, libsError, faqLoading, faqError, searchError, searchReadState,
+            loadLibs, handleSearch, resetSearch, pickFaq, openDocDetail, exportCSV, searchEmpty,
             formatScore, scoreType, documentTypeIcon, documentDisplayName, resultDocInfo,
         };
     },
@@ -155,24 +232,50 @@ export default {
                     <el-button @click="resetSearch">重置</el-button>
                 </el-form-item>
             </el-form>
+            <el-alert v-if="libsError" type="error" :closable="false" show-icon
+                      title="知识库列表加载失败" class="search-read-alert">
+                <template #default>
+                    <span>{{ libsError }}</span>
+                    <el-button link type="primary" :loading="libsLoading" @click="loadLibs(true)">重试</el-button>
+                </template>
+            </el-alert>
         </section>
 
         <!-- Card 2: FAQ -->
-        <section v-if="faqs.length" class="search-faq-card">
+        <section v-if="faqs.length || faqError" class="search-faq-card" v-loading="faqLoading">
             <span class="search-faq-label">常用问题：</span>
             <el-tag v-for="f in faqs" :key="f.id" effect="plain"
                     class="search-faq-tag" @click="pickFaq(f.question)">{{ f.question }}</el-tag>
+            <el-alert v-if="faqError" type="warning" :closable="false" show-icon
+                      :title="'常用问题加载失败：' + faqError" />
         </section>
 
         <!-- Card 3: Results -->
         <section v-if="results.length || hasSearched" class="search-results-card">
+            <div v-if="searchReadState === 'fatal'" class="app-read-state app-read-state--error" role="alert">
+                <div><strong>搜索失败</strong><p>{{ searchError }}</p></div>
+                <el-button type="primary" :loading="loading" @click="handleSearch">重试搜索</el-button>
+            </div>
+            <div v-else-if="searchReadState === 'loading'" class="app-read-state" v-loading="true">
+                <span>正在搜索</span>
+            </div>
+            <template v-else>
+            <el-alert v-if="searchReadState === 'refresh-error'"
+                      type="warning" :closable="false" show-icon
+                      title="本次搜索失败，当前仍显示上一次成功结果"
+                      :description="searchError" class="search-read-alert" />
             <div class="search-results-summary">
                 <span class="search-results-count">返回 {{ results.length }} 条结果<span v-if="elapsed">，耗时 {{ elapsed.toFixed(1) }} 秒</span></span>
                 <el-button :disabled="!results.length" @click="exportCSV">导出结果</el-button>
             </div>
             <div class="search-results-table-shell">
                 <el-table :data="results" v-loading="loading">
-                    <template #empty><div class="illustration-empty-wrapper"><img :src="searchEmpty" class="illustration-search-empty" alt="" aria-hidden="true" /><p>未找到匹配结果</p></div></template>
+                    <template #empty>
+                        <div v-if="searchReadState === 'empty'" class="illustration-empty-wrapper">
+                            <img :src="searchEmpty" class="illustration-search-empty" alt="" aria-hidden="true" />
+                            <p>未找到匹配结果</p>
+                        </div>
+                    </template>
                     <el-table-column label="文档名" min-width="180">
                         <template #default="{row}">
                             <div class="search-doc-file">
@@ -217,6 +320,7 @@ export default {
                     </el-table-column>
                 </el-table>
             </div>
+            </template>
         </section>
 
         <!-- Empty state -->

@@ -1,6 +1,6 @@
 import { canManageLibrary } from './menu_access.js';
 
-const GRAPH_TABS = new Set(['entities', 'relations', 'review', 'publications', 'explore']);
+const GRAPH_TABS = new Set(['browse', 'entities', 'relations', 'review', 'publications', 'explore']);
 const MANAGEMENT_TABS = new Set(['review', 'publications']);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HASH_RE = /^[0-9a-f]{64}$/;
@@ -138,7 +138,7 @@ export function graphScopeOptions(permissions, organizations = []) {
 export function resolveGraphScope(query, permissions, organizations = []) {
     const groups = graphScopeOptions(permissions, organizations);
     const requestedTab = text(query?.tab);
-    const tab = GRAPH_TABS.has(requestedTab) ? requestedTab : 'entities';
+    const tab = GRAPH_TABS.has(requestedTab) ? requestedTab : 'browse';
     const requestedOrganizationId = text(query?.organization);
     let organization = groups.find((item) => item.id === requestedOrganizationId) || groups[0] || null;
     if (organization && MANAGEMENT_TABS.has(tab)) {
@@ -166,7 +166,9 @@ export function resolveGraphScope(query, permissions, organizations = []) {
     ));
     if (!librarySlugs.length && eligible.length) librarySlugs = [eligible[0].slug];
     if (MANAGEMENT_TABS.has(tab)) librarySlugs = librarySlugs.slice(0, 1);
-    const entityId = tab === 'entities' && validUuid(query?.entity) ? text(query.entity) : '';
+    const entityId = ['browse', 'entities'].includes(tab) && validUuid(query?.entity)
+        ? text(query.entity)
+        : '';
     const relationId = tab === 'relations' && validUuid(query?.relation) ? text(query.relation) : '';
     return {
         tab,
@@ -179,13 +181,15 @@ export function resolveGraphScope(query, permissions, organizations = []) {
 
 export function graphRouteQuery(scope) {
     const query = {
-        tab: GRAPH_TABS.has(scope?.tab) ? scope.tab : 'entities',
+        tab: GRAPH_TABS.has(scope?.tab) ? scope.tab : 'browse',
     };
     if (scope?.organizationId) query.organization = text(scope.organizationId);
     if (Array.isArray(scope?.librarySlugs) && scope.librarySlugs.length) {
         query.libraries = scope.librarySlugs.slice(0, 20).map(text).join(',');
     }
-    if (query.tab === 'entities' && validUuid(scope?.entityId)) query.entity = text(scope.entityId);
+    if (['browse', 'entities'].includes(query.tab) && validUuid(scope?.entityId)) {
+        query.entity = text(scope.entityId);
+    }
     if (query.tab === 'relations' && validUuid(scope?.relationId)) query.relation = text(scope.relationId);
     return query;
 }

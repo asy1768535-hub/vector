@@ -1,4 +1,4 @@
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import * as api from '../api.js';
@@ -8,8 +8,17 @@ import { humanizeError } from './import_errors.js';
 import {
     ST_LABEL, ST_TAG, OP_LABEL, OP_TAG,
     validateBatch, fileKey, formatSize, fileTypeIcon,
-    MAX_BATCH_SIZE, validateFile,
+    MAX_BATCH_SIZE, validateFile, graphJobProgress, graphProgressDetail,
+    securityLevelLabel,
 } from '../import_ui.js';
+import {
+    createImportBatchId,
+    DEFAULT_IMPORT_CONFIGURATION,
+    IMPORT_STAGE_LABEL,
+    importStageProgress,
+    runConcurrent,
+    uploadFileInChunks,
+} from '../folder_import.js';
 import {
     BATCH_REPLACE_MATCH_LABEL, BATCH_REPLACE_MATCH_TAG,
     BATCH_REPLACE_STATUS_LABEL, BATCH_REPLACE_STATUS_TAG,
@@ -17,6 +26,20 @@ import {
     submittableBatchReplaceItems, submitBatchReplaceItems,
 } from '../batch_replace.js';
 import { uploadEmpty } from '../illustrations.js';
+
+const GRAPH_CONFIG_REASON = {
+    runtime_disabled: '图谱抽取服务未开启',
+    provider_unconfigured: '抽取模型未配置',
+    library_disabled: '当前知识库未开启图谱抽取',
+    external_model_disabled: '当前知识库未允许外部模型',
+    security_levels_missing: '当前知识库未配置允许的安全级别',
+    active_ontology_missing: '当前知识库没有生效中的 Schema',
+};
+const BUILD_MODE_LABEL = { fast: '快速', standard: '标准', deep: '深度' };
+
+function buildModeLabel(value) {
+    return BUILD_MODE_LABEL[value] || BUILD_MODE_LABEL.standard;
+}
 
 export default {
     setup() {
@@ -26,6 +49,7 @@ export default {
         const slug = ref(null);
         const mode = ref('add');
         const fileInput = ref(null);
+        const folderInput = ref(null);
         const batchReplaceFileInput = ref(null);
         const externalId = ref('');
         const replaceDocId = ref(null);
@@ -47,6 +71,17 @@ export default {
         const applyingRouteReplace = ref(false);
         const batchReplaceItems = ref([]);
         const batchReplacing = ref(false);
+        const graphExtractionRequested = ref(false);
+        const graphExtractionConfig = ref(null);
+        const graphExtractionConfigLoading = ref(false);
+        const graphExtractionConfigError = ref('');
+        const graphExtractionSecurityLevel = ref('');
+        const importConfiguration = ref(DEFAULT_IMPORT_CONFIGURATION);
+        const importConfigurationLoading = ref(false);
+        let graphConfigRequestSeq = 0;
+        let graphProgressRequestSeq = 0;
+        let graphProgressTimer = null;
+        let importJobsTimer = null;
 
         // ── Computed ─────────────────────────────────────────
         const displayDocs = computed(() => {
@@ -90,16 +125,37 @@ export default {
             queue.value.filter((it) => it.status === 'invalid').length
         );
         const hasFailed = computed(() => failedCount.value > 0);
+        const graphExtractionReady = computed(() => (
+            !graphExtractionRequested.value || (
+                graphExtractionConfig.value?.available === true &&
+                graphExtractionConfig.value.allowed_security_levels.includes(
+                    graphExtractionSecurityLevel.value,
+                )
+            )
+        ));
+        const graphExtractionStatus = computed(() => {
+            if (!graphExtractionRequested.value) return '';
+            if (graphExtractionConfigLoading.value) return '正在检查当前知识库配置...';
+            if (graphExtractionConfigError.value) return graphExtractionConfigError.value;
+            if (!graphExtractionConfig.value?.available) {
+                return (graphExtractionConfig.value?.reasons || [])
+                    .map((reason) => GRAPH_CONFIG_REASON[reason] || '图谱抽取配置不可用')
+                    .join('；');
+            }
+            return `配置已确认：将按${buildModeLabel(graphExtractionConfig.value.default_build_mode)}模式抽取，系统验证合格后自动发布`;
+        });
 
         const canStart = computed(() =>
             mode.value === 'add' && slug.value && pendingCount.value > 0 &&
-            !uploading.value && !multiBlockedByExtId.value
+            !uploading.value && !multiBlockedByExtId.value && graphExtractionReady.value &&
+            !graphExtractionConfigLoading.value
         );
 
         const canReplace = computed(() =>
             mode.value === 'replace' && slug.value && replaceDocId.value &&
             replaceFile.value && !replaceFileError.value && !loading.value &&
-            !docsLoading.value && !routeReplaceError.value && !batchReplacing.value
+            !docsLoading.value && !routeReplaceError.value && !batchReplacing.value &&
+            graphExtractionReady.value && !graphExtractionConfigLoading.value
         );
 
         const batchReplaceReadyItems = computed(() =>
@@ -107,7 +163,8 @@ export default {
         );
         const canBatchReplace = computed(() =>
             mode.value === 'replace' && slug.value && batchReplaceReadyItems.value.length > 0 &&
-            !batchReplacing.value && !loading.value && !docsLoading.value
+            !batchReplacing.value && !loading.value && !docsLoading.value &&
+            graphExtractionReady.value && !graphExtractionConfigLoading.value
         );
 
         // ── Library loading ──────────────────────────────────
@@ -166,24 +223,214 @@ export default {
             } catch (_) { stats.value = null; }
         }
 
+        async function loadImportConfiguration() {
+            importConfiguration.value = DEFAULT_IMPORT_CONFIGURATION;
+            if (!slug.value) return;
+            importConfigurationLoading.value = true;
+            try {
+                importConfiguration.value = await api.getImportConfiguration(slug.value);
+            } catch (_) {
+                ElMessage.warning('无法读取上传配置，已使用默认限制');
+            } finally {
+                importConfigurationLoading.value = false;
+            }
+        }
+
+        async function loadGraphExtractionConfiguration({ applyLibraryDefault = false } = {}) {
+            const requestSeq = ++graphConfigRequestSeq;
+            graphExtractionConfig.value = null;
+            graphExtractionConfigError.value = '';
+            graphExtractionSecurityLevel.value = '';
+            graphExtractionConfigLoading.value = false;
+            if (applyLibraryDefault) graphExtractionRequested.value = false;
+            if (!slug.value) return;
+            graphExtractionConfigLoading.value = true;
+            try {
+                const config = await api.getUploadGraphExtractionConfiguration(slug.value);
+                if (requestSeq !== graphConfigRequestSeq) return;
+                if (
+                    !config ||
+                    typeof config.default_requested !== 'boolean' ||
+                    !Object.hasOwn(BUILD_MODE_LABEL, config.default_build_mode) ||
+                    !Array.isArray(config.allowed_security_levels) ||
+                    !Array.isArray(config.reasons)
+                ) {
+                    graphExtractionConfigError.value = '图谱抽取配置响应无效';
+                    return;
+                }
+                graphExtractionConfig.value = config;
+                graphExtractionSecurityLevel.value = config.allowed_security_levels[0] || '';
+                if (applyLibraryDefault) {
+                    graphExtractionRequested.value = config.default_requested;
+                }
+            } catch (_) {
+                if (requestSeq === graphConfigRequestSeq) {
+                    graphExtractionConfigError.value = '无法确认图谱抽取配置，请稍后重试';
+                }
+            } finally {
+                if (requestSeq === graphConfigRequestSeq) graphExtractionConfigLoading.value = false;
+            }
+        }
+
+        function graphUploadOptions() {
+            return graphExtractionRequested.value ? {
+                graphExtractionRequested: true,
+                securityLevel: graphExtractionSecurityLevel.value,
+            } : {};
+        }
+
+        function graphConfirmationText() {
+            return graphExtractionRequested.value
+                ? `；安全级别为“${securityLevelLabel(graphExtractionSecurityLevel.value)}”，使用${buildModeLabel(graphExtractionConfig.value?.default_build_mode)}模式，向量化后自动抽取并发布合格事实`
+                : '';
+        }
+
         // ── File handling (add mode) ─────────────────────────
+        function attachGraphTracking(item, response, requested = graphExtractionRequested.value) {
+            if (!requested || !item || !response) return;
+            const document = (response.documents || [])[0] || response;
+            if (!document.document_id) return;
+            item.graphTracking = {
+                documentId: document.document_id,
+                embeddingJobId: document.job_id || null,
+                startedAt: Date.now(),
+                phase: 'embedding',
+                progress: 8,
+                tone: 'primary',
+                label: document.job_id ? '等待向量化' : '等待向量化任务',
+                terminal: document.operation === 'unchanged',
+            };
+            if (document.operation === 'unchanged') {
+                item.graphTracking.progress = 100;
+                item.graphTracking.tone = 'success';
+                item.graphTracking.label = '内容未变化，无需重新构建图谱';
+            }
+            startGraphProgressPolling();
+        }
+
+        function trackedGraphRows() {
+            return [
+                ...queue.value,
+                ...batchReplaceItems.value,
+                ...(importResult.value?.documents || []),
+            ].filter((row) => row.graphTracking && !row.graphTracking.terminal);
+        }
+
+        function stopGraphProgressPolling() {
+            graphProgressRequestSeq += 1;
+            if (graphProgressTimer) clearTimeout(graphProgressTimer);
+            graphProgressTimer = null;
+        }
+
+        function startGraphProgressPolling() {
+            if (graphProgressTimer || !trackedGraphRows().length) return;
+            graphProgressTimer = setTimeout(pollGraphProgress, 200);
+        }
+
+        async function pollGraphRow(row, activeSlug, requestSeq) {
+            const tracking = row.graphTracking;
+            if (!tracking || tracking.terminal) return;
+
+            if (tracking.phase === 'embedding') {
+                const jobs = await api.listDocumentJobs(activeSlug, tracking.documentId, true);
+                if (requestSeq !== graphProgressRequestSeq || slug.value !== activeSlug) return;
+                const job = (jobs || []).find((candidate) =>
+                    tracking.embeddingJobId && String(candidate.id) === String(tracking.embeddingJobId)
+                ) || (jobs || [])[0];
+                if (!job) {
+                    tracking.label = '等待向量化任务';
+                    tracking.progress = 8;
+                    return;
+                }
+                if (job.status === 'failed' || job.status === 'superseded') {
+                    tracking.label = job.status === 'failed'
+                        ? '向量化失败，未构建知识图谱'
+                        : '向量化任务已被替代';
+                    tracking.progress = 100;
+                    tracking.tone = 'exception';
+                    tracking.terminal = true;
+                    return;
+                }
+                if (job.status !== 'done') {
+                    tracking.label = job.status === 'processing' ? '正在向量化' : '等待向量化';
+                    tracking.progress = job.status === 'processing' ? 22 : 12;
+                    return;
+                }
+                tracking.phase = 'graph';
+                tracking.label = '等待图谱抽取任务';
+                tracking.progress = 30;
+            }
+
+            const response = await api.listGraphExtractions(activeSlug, {
+                document_id: tracking.documentId,
+                limit: 5,
+            });
+            if (requestSeq !== graphProgressRequestSeq || slug.value !== activeSlug) return;
+            const earliest = tracking.startedAt - 10000;
+            const job = (response?.items || []).find((candidate) => {
+                const createdAt = Date.parse(candidate.created_at || '');
+                return !Number.isFinite(createdAt) || createdAt >= earliest;
+            });
+            if (!job) {
+                tracking.label = '等待图谱抽取任务';
+                tracking.progress = 30;
+                return;
+            }
+            Object.assign(tracking, graphJobProgress(job), {
+                phase: 'graph',
+                jobId: job.id,
+            });
+        }
+
+        async function pollGraphProgress() {
+            graphProgressTimer = null;
+            const activeSlug = slug.value;
+            const requestSeq = graphProgressRequestSeq;
+            const rows = trackedGraphRows();
+            if (!activeSlug || !rows.length) return;
+            await Promise.all(rows.map(async (row) => {
+                try {
+                    await pollGraphRow(row, activeSlug, requestSeq);
+                    row.graphTracking.pollError = '';
+                } catch (_) {
+                    if (requestSeq === graphProgressRequestSeq && slug.value === activeSlug) {
+                        row.graphTracking.pollError = '进度暂时无法刷新，正在重试';
+                    }
+                }
+            }));
+            if (requestSeq === graphProgressRequestSeq && trackedGraphRows().length) {
+                graphProgressTimer = setTimeout(pollGraphProgress, 2000);
+            }
+        }
+
         function triggerFileSelect() {
             if (fileInput.value) fileInput.value.click();
+        }
+
+        function triggerFolderSelect() {
+            if (folderInput.value) folderInput.value.click();
         }
 
         function addFiles(files) {
             if (!files || !files.length) return;
             const existingKeys = queue.value.map((it) => it._key);
-            const { accepted, duplicates, invalid } = validateBatch(Array.from(files), existingKeys);
+            const { accepted, duplicates, invalid } = validateBatch(
+                Array.from(files),
+                existingKeys,
+                importConfiguration.value,
+            );
 
             for (const { file } of accepted) {
                 queue.value.push({
                     _key: fileKey(file),
                     file,
                     name: file.name,
+                    relativePath: file.webkitRelativePath || '',
                     size: file.size,
                     status: 'pending',
                     error: '',
+                    progress: 0,
+                    stageLabel: '',
                 });
             }
             for (const { file, reason, failType } of invalid) {
@@ -191,6 +438,7 @@ export default {
                     _key: fileKey(file),
                     file: null,
                     name: file.name,
+                    relativePath: file.webkitRelativePath || '',
                     size: file.size,
                     status: 'invalid',
                     error: reason,
@@ -207,6 +455,11 @@ export default {
         function onFileChange(e) {
             addFiles(e.target.files);
             if (fileInput.value) fileInput.value.value = '';
+        }
+
+        function onFolderChange(e) {
+            addFiles(e.target.files);
+            if (folderInput.value) folderInput.value.value = '';
         }
 
         function onDragOver(e) {
@@ -305,9 +558,10 @@ export default {
         async function handleBatchReplace() {
             const ready = batchReplaceReadyItems.value;
             if (!slug.value || !ready.length) return;
+            const graphRequested = graphExtractionRequested.value;
             try {
                 await ElMessageBox.confirm(
-                    `将覆盖 ${ready.length} 个已有文档；覆盖后会重新切分、重新向量化；历史问答引用不会自动更新。`,
+                    `将覆盖 ${ready.length} 个已有文档；覆盖后会重新切分、重新向量化${graphConfirmationText()}；历史问答引用不会自动更新。`,
                     '确认批量替换', { type: 'warning' }
                 );
             } catch (_) { return; }
@@ -318,8 +572,12 @@ export default {
                     batchReplaceItems.value,
                     slug.value,
                     api.importFile,
-                    humanizeError
+                    humanizeError,
+                    graphUploadOptions(),
                 );
+                for (const item of batchReplaceItems.value) {
+                    attachGraphTracking(item, item.importResponse, graphRequested);
+                }
                 ElMessage.success(`批量替换完成：${result.submitted} 已提交，${result.skipped} 跳过${result.failed > 0 ? `，${result.failed} 失败` : ''}`);
                 await loadDocs();
                 await loadStats();
@@ -327,35 +585,139 @@ export default {
         }
 
         // ── Upload ───────────────────────────────────────────
+        function stopImportJobsPolling() {
+            if (importJobsTimer) clearTimeout(importJobsTimer);
+            importJobsTimer = null;
+        }
+
+        async function pollImportJobs() {
+            importJobsTimer = null;
+            const activeRows = queue.value.filter((item) =>
+                item.importJobId && !['submitted', 'skipped', 'failed'].includes(item.status)
+            );
+            if (!slug.value || !activeRows.length) return;
+            try {
+                const jobs = await api.listImportJobs(slug.value, { limit: 1000 });
+                const byId = new Map((jobs || []).map((job) => [String(job.id), job]));
+                for (const item of activeRows) {
+                    const job = byId.get(String(item.importJobId));
+                    if (!job) continue;
+                    item.importJob = job;
+                    item.stageLabel = IMPORT_STAGE_LABEL[job.current_stage] || '处理中';
+                    item.progress = importStageProgress(job, 100);
+                    if (job.status === 'succeeded') {
+                        item.status = job.result_operation === 'unchanged' ? 'skipped' : 'submitted';
+                        item.error = '';
+                    } else if (['failed', 'cancelled', 'superseded'].includes(job.status)) {
+                        item.status = 'failed';
+                        item.error = job.last_error || '导入失败';
+                    } else {
+                        item.status = 'processing';
+                    }
+                }
+            } catch (_) {
+                // Keep the last known stage and retry polling.
+            }
+            if (queue.value.some((item) =>
+                item.importJobId && !['submitted', 'skipped', 'failed'].includes(item.status)
+            )) {
+                importJobsTimer = setTimeout(pollImportJobs, 2000);
+            } else {
+                loadStats();
+            }
+        }
+
+        function startImportJobsPolling() {
+            if (!importJobsTimer) importJobsTimer = setTimeout(pollImportJobs, 300);
+        }
+
         async function runQueue(onlyFailed) {
             if (!slug.value) return;
             if (multiBlockedByExtId.value) {
-                ElMessage.warning('多文件模式下 external_id 只能用于单个文件');
+                ElMessage.warning('多文件模式下，external_id（外部文档标识）只能用于单个文件');
                 return;
             }
             uploading.value = true;
             const filterStatus = onlyFailed ? 'failed' : 'pending';
             const items = queue.value.filter((it) => it.status === filterStatus);
-
-            for (const it of items) {
-                if (!it.file) continue;
-                it.status = 'uploading';
+            if (graphExtractionRequested.value) {
+                if (!graphExtractionReady.value) {
+                    ElMessage.warning('请先完成图谱抽取配置确认');
+                    uploading.value = false;
+                    return;
+                }
                 try {
-                    const extId = (items.length === 1 && extIdSet.value) ? externalId.value.trim() : null;
-                    const resp = await api.importFile(slug.value, it.file, { externalId: extId });
-                    const docs = (resp && resp.documents) ? resp.documents : [];
-                    const allUnchanged = docs.length > 0 && docs.every((d) => d.operation === 'unchanged');
-                    it.status = allUnchanged ? 'skipped' : 'submitted';
-                    it.error = '';
-                } catch (e) {
-                    it.status = 'failed';
-                    it.error = humanizeError(e);
+                    await ElMessageBox.confirm(
+                        `将上传 ${items.length} 个文件${graphConfirmationText()}。使用中发现错误后，可在知识治理中修正并重新发布。`,
+                        '确认上传并抽取图谱',
+                        { type: 'warning' },
+                    );
+                } catch (_) {
+                    uploading.value = false;
+                    return;
                 }
             }
 
-            uploading.value = false;
-            loadStats();
-            const ok = submittedCount.value + skippedCount.value;
+            try {
+                const batchId = createImportBatchId();
+                await runConcurrent(
+                    items,
+                    importConfiguration.value.upload_concurrency,
+                    async (it) => {
+                        if (!it.file) return;
+                        it.status = 'uploading';
+                        it.error = '';
+                        try {
+                            if (onlyFailed && it.importJobId && it.importJob?.status === 'failed') {
+                                const retried = await api.retryImportJob(slug.value, it.importJobId);
+                                it.importJob = retried;
+                                it.status = 'processing';
+                                it.stageLabel = IMPORT_STAGE_LABEL[retried.current_stage] || '等待处理';
+                                return;
+                            }
+                            const extId = (items.length === 1 && extIdSet.value)
+                                ? externalId.value.trim()
+                                : null;
+                            const job = await uploadFileInChunks({
+                                api,
+                                slug: slug.value,
+                                file: it.file,
+                                batchId,
+                                configuration: importConfiguration.value,
+                                options: {
+                                    ...graphUploadOptions(),
+                                    externalId: extId,
+                                },
+                                onProgress(update) {
+                                    it.importJobId = update.job?.id || it.importJobId;
+                                    it.stageLabel = IMPORT_STAGE_LABEL[update.phase] || '上传中';
+                                    const ratio = update.total ? update.offset / update.total : 0;
+                                    it.progress = importStageProgress(
+                                        { current_stage: update.phase },
+                                        ratio * 100,
+                                    );
+                                },
+                            });
+                            it.importJobId = job.id;
+                            it.importJob = job;
+                            it.status = 'processing';
+                            it.stageLabel = IMPORT_STAGE_LABEL[job.current_stage] || '等待处理';
+                            it.progress = importStageProgress(job, 100);
+                        } catch (e) {
+                            it.status = 'failed';
+                            it.error = humanizeError(e);
+                        }
+                    },
+                );
+            } catch (e) {
+                ElMessage.error(`上传未能开始：${humanizeError(e)}`);
+                return;
+            } finally {
+                uploading.value = false;
+            }
+
+            startImportJobsPolling();
+            const ok = items.length - failedCount.value;
             const fail = failedCount.value;
             ElMessage.success(`上传完成：${ok} 成功${fail > 0 ? `，${fail} 失败` : ''}`);
         }
@@ -372,16 +734,23 @@ export default {
                 return;
             }
             const file = replaceFile.value;
+            const graphRequested = graphExtractionRequested.value;
             try {
                 await ElMessageBox.confirm(
-                    `确认用 "${file.name}" 替换当前文档？文档内容将完全覆盖，revision 递增，并重新向量化。`,
+                    `确认用 "${file.name}" 替换当前文档？文档内容将完全覆盖，文档版本号递增，并重新向量化${graphConfirmationText()}。`,
                     '确认替换', { type: 'warning' }
                 );
             } catch (_) { return; }
             loading.value = true;
             try {
-                const resp = await api.importFile(slug.value, file, { replaceDocumentId: replaceDocId.value });
+                const resp = await api.importFile(slug.value, file, {
+                    ...graphUploadOptions(),
+                    replaceDocumentId: replaceDocId.value,
+                });
                 importResult.value = resp;
+                for (const document of (resp?.documents || [])) {
+                    attachGraphTracking(document, document, graphRequested);
+                }
                 const docs = (resp && resp.documents) ? resp.documents : [];
                 const allUnchanged = docs.length > 0 && docs.every((d) => d.operation === 'unchanged');
                 if (allUnchanged) {
@@ -415,6 +784,12 @@ export default {
 
         // ── Watchers ─────────────────────────────────────────
         watch(slug, () => {
+            stopGraphProgressPolling();
+            stopImportJobsPolling();
+            graphConfigRequestSeq += 1;
+            graphExtractionConfig.value = null;
+            graphExtractionConfigError.value = '';
+            graphExtractionSecurityLevel.value = '';
             queue.value = [];
             batchReplaceItems.value = [];
             importResult.value = null;
@@ -425,8 +800,21 @@ export default {
             externalId.value = '';
             loadDocs();
             loadStats();
+            loadImportConfiguration();
+            loadGraphExtractionConfiguration({ applyLibraryDefault: true });
+        });
+        watch(graphExtractionRequested, (requested) => {
+            if (
+                requested &&
+                slug.value &&
+                !graphExtractionConfig.value &&
+                !graphExtractionConfigLoading.value
+            ) {
+                loadGraphExtractionConfiguration();
+            }
         });
         watch(mode, () => {
+            stopGraphProgressPolling();
             importResult.value = null;
             clearQueue();
             batchReplaceItems.value = [];
@@ -445,29 +833,39 @@ export default {
         });
 
         onMounted(loadLibs);
+        onBeforeUnmount(() => {
+            stopGraphProgressPolling();
+            stopImportJobsPolling();
+        });
 
         return {
-            libs, slug, mode, fileInput, batchReplaceFileInput, externalId, showExtId, replaceDocId,
+            libs, slug, mode, fileInput, folderInput, batchReplaceFileInput, externalId, showExtId, replaceDocId,
             replaceFile, replaceFileError, routeReplaceDocumentId, routeReplaceTitle,
             routeReplaceError, routeReplaceActive, replaceTargetTitle, selectedReplaceDoc,
             applyingRouteReplace, batchReplaceItems, batchReplacing, batchReplaceReadyItems,
+            graphExtractionRequested, graphExtractionConfig, graphExtractionConfigLoading,
+            graphExtractionConfigError, graphExtractionSecurityLevel,
+            graphExtractionReady, graphExtractionStatus, buildModeLabel,
             docs, docsLoading, loading, importResult, docQuery,
-            queue, uploading, stats, dragOver,
+            queue, uploading, stats, dragOver, importConfiguration, importConfigurationLoading,
             displayDocs, extIdSet, multiBlockedByExtId,
             pendingCount, submittedCount, skippedCount, failedCount, invalidCount,
             hasFailed, canStart, canReplace, canBatchReplace,
-            loadLibs, loadDocs, triggerFileSelect, triggerBatchReplaceFileSelect, onFileChange,
+            graphProgressDetail,
+            loadLibs, loadDocs, triggerFileSelect, triggerFolderSelect,
+            triggerBatchReplaceFileSelect, onFileChange, onFolderChange,
             onDragOver, onDragLeave, onDrop,
             addFiles, removeItem, clearQueue, runQueue,
             onReplaceFileChange, onReplaceDrop,
             onBatchReplaceFileChange, onBatchReplaceDrop, removeBatchReplaceItem,
             onBatchReplaceTargetChange, targetDocTitle, batchReplaceValidationText, handleBatchReplace,
+            loadGraphExtractionConfiguration,
             handleReplace, clearReplace, backToDocuments,
             ST_LABEL, ST_TAG, OP_LABEL, OP_TAG,
             BATCH_REPLACE_MATCH_LABEL, BATCH_REPLACE_MATCH_TAG,
             BATCH_REPLACE_STATUS_LABEL, BATCH_REPLACE_STATUS_TAG,
             uploadEmpty,
-            formatSize, fileTypeIcon, MAX_BATCH_SIZE,
+            formatSize, fileTypeIcon, securityLevelLabel, MAX_BATCH_SIZE,
         };
     },
     template: `
@@ -536,22 +934,59 @@ export default {
                      :class="{ 'is-dragover': dragOver }"
                      @dragover="onDragOver"
                      @dragleave="onDragLeave"
-                     @drop="onDrop"
-                     @click="triggerFileSelect">
+                     @drop="onDrop">
                     <img :src="uploadEmpty" class="illustration-upload-empty" alt="" aria-hidden="true" />
-                    <div class="import-dropzone-title">点击选择文件或拖拽文件到此处</div>
+                    <div class="import-dropzone-title">拖拽文件到此处</div>
                     <div class="import-dropzone-hint">支持 txt、md、markdown、json、csv、docx、xlsx、pdf</div>
-                    <div class="import-dropzone-hint">单文件最大 50 MB，每批最多 {{ MAX_BATCH_SIZE }} 个</div>
+                    <div class="import-dropzone-hint">
+                        单文件最大 {{ formatSize(importConfiguration.max_file_bytes) }}，
+                        每次最多 {{ importConfiguration.max_files_per_selection }} 个
+                    </div>
+                    <div class="import-source-actions">
+                        <el-button type="primary" :disabled="importConfigurationLoading"
+                                   @click.stop="triggerFileSelect">
+                            <local-icon icon="mdi:file-plus-outline" />选择文件
+                        </el-button>
+                        <el-button :disabled="importConfigurationLoading"
+                                   @click.stop="triggerFolderSelect">
+                            <local-icon icon="mdi:folder-upload-outline" />选择文件夹
+                        </el-button>
+                    </div>
                 </div>
                 <input ref="fileInput" type="file" multiple
                        accept=".txt,.md,.markdown,.json,.csv,.docx,.xlsx,.pdf"
                        class="import-file-input-hidden"
                        @change="onFileChange" />
+                <input ref="folderInput" type="file" multiple webkitdirectory
+                       accept=".txt,.md,.markdown,.json,.csv,.docx,.xlsx,.pdf"
+                       class="import-file-input-hidden"
+                       @change="onFolderChange" />
+                <div class="import-graph-option" :class="{ 'is-enabled': graphExtractionRequested }">
+                    <div class="import-graph-option-head">
+                        <span>
+                            <strong>抽取实体和关系</strong>
+                            <small>文档向量化完成后执行</small>
+                        </span>
+                        <el-switch v-model="graphExtractionRequested"
+                                   :disabled="graphExtractionConfigLoading"
+                                   aria-label="完成上传后抽取实体和关系" />
+                    </div>
+                    <template v-if="graphExtractionRequested">
+                        <el-select v-model="graphExtractionSecurityLevel"
+                                   :disabled="graphExtractionConfigLoading || !graphExtractionConfig?.available"
+                                   placeholder="选择安全级别">
+                            <el-option v-for="level in graphExtractionConfig?.allowed_security_levels || []"
+                                       :key="level" :label="securityLevelLabel(level)" :value="level" />
+                        </el-select>
+                        <p class="import-graph-mode">构建模式：{{ buildModeLabel(graphExtractionConfig?.default_build_mode) }}</p>
+                        <p :class="graphExtractionReady ? 'is-ready' : 'is-blocked'">{{ graphExtractionStatus }}</p>
+                    </template>
+                </div>
                 <div v-if="showExtId" class="import-extid-row">
-                    <el-input v-model="externalId" placeholder="external_id" clearable />
+                    <el-input v-model="externalId" placeholder="external_id（外部文档标识，可选）" clearable />
                 </div>
                 <el-button class="import-extid-toggle" text @click="showExtId = !showExtId; if (!showExtId) externalId = ''">
-                    {{ showExtId ? '移除 external_id' : '设置 external_id' }}
+                    {{ showExtId ? '移除 external_id（外部文档标识）' : '设置 external_id（外部文档标识）' }}
                 </el-button>
             </section>
 
@@ -559,14 +994,16 @@ export default {
             <section class="import-file-card">
                 <div class="import-file-table-shell">
                     <el-table :data="queue" empty-text="暂无文件，请从左侧添加">
-                        <el-table-column label="文件" min-width="180">
+                        <el-table-column label="文件" min-width="230">
                             <template #default="{row}">
                                 <div class="import-file-name-cell">
                                     <img v-if="fileTypeIcon(row)" class="import-file-icon"
                                          :src="fileTypeIcon(row)" alt="" aria-hidden="true" />
                                     <local-icon v-else class="import-file-icon"
                                                 icon="mdi:file-document-outline" />
-                                    <span class="import-file-name" :title="row.name">{{ row.name }}</span>
+                                    <span class="import-file-name" :title="row.relativePath || row.name">
+                                        {{ row.relativePath || row.name }}
+                                    </span>
                                 </div>
                             </template>
                         </el-table-column>
@@ -588,6 +1025,30 @@ export default {
                         <el-table-column label="状态" width="90" align="center">
                             <template #default="{row}">
                                 <el-tag :type="ST_TAG[row.status]" size="small">{{ ST_LABEL[row.status] }}</el-tag>
+                            </template>
+                        </el-table-column>
+                        <el-table-column label="处理进度" min-width="220">
+                            <template #default="{row}">
+                                <div v-if="row.importJobId" class="import-graph-progress">
+                                    <div class="import-graph-progress-head">
+                                        <span>{{ row.stageLabel || '等待处理' }}</span>
+                                        <b>{{ row.progress || 0 }}%</b>
+                                    </div>
+                                    <el-progress :percentage="row.progress || 0"
+                                                 :status="row.status === 'failed' ? 'exception' : (row.status === 'submitted' || row.status === 'skipped') ? 'success' : undefined"
+                                                 :stroke-width="6" :show-text="false" />
+                                </div>
+                                <div v-else-if="row.graphTracking" class="import-graph-progress">
+                                    <div class="import-graph-progress-head">
+                                        <span>{{ graphProgressDetail(row.graphTracking) }}</span>
+                                        <b>{{ row.graphTracking.progress }}%</b>
+                                    </div>
+                                    <el-progress :percentage="row.graphTracking.progress"
+                                                 :status="row.graphTracking.tone === 'primary' ? undefined : row.graphTracking.tone"
+                                                 :stroke-width="6" :show-text="false" />
+                                    <small v-if="row.graphTracking.pollError">{{ row.graphTracking.pollError }}</small>
+                                </div>
+                                <span v-else class="import-graph-progress-empty">上传后开始</span>
                             </template>
                         </el-table-column>
                         <el-table-column label="错误原因" min-width="120">
@@ -643,6 +1104,27 @@ export default {
                        accept=".txt,.md,.markdown,.json,.csv,.docx,.xlsx,.pdf"
                        class="import-file-input-hidden"
                        @change="onReplaceFileChange" />
+                <div class="import-graph-option" :class="{ 'is-enabled': graphExtractionRequested }">
+                    <div class="import-graph-option-head">
+                        <span>
+                            <strong>抽取实体和关系</strong>
+                            <small>替换完成并向量化后执行</small>
+                        </span>
+                        <el-switch v-model="graphExtractionRequested"
+                                   :disabled="graphExtractionConfigLoading"
+                                   aria-label="替换后抽取实体和关系" />
+                    </div>
+                    <template v-if="graphExtractionRequested">
+                        <el-select v-model="graphExtractionSecurityLevel"
+                                   :disabled="graphExtractionConfigLoading || !graphExtractionConfig?.available"
+                                   placeholder="选择安全级别">
+                            <el-option v-for="level in graphExtractionConfig?.allowed_security_levels || []"
+                                       :key="level" :label="securityLevelLabel(level)" :value="level" />
+                        </el-select>
+                        <p class="import-graph-mode">构建模式：{{ buildModeLabel(graphExtractionConfig?.default_build_mode) }}</p>
+                        <p :class="graphExtractionReady ? 'is-ready' : 'is-blocked'">{{ graphExtractionStatus }}</p>
+                    </template>
+                </div>
                 <div v-if="replaceFile" class="import-replace-file-info">
                     <div class="import-replace-file-name">
                         <img v-if="fileTypeIcon(replaceFile)" class="import-file-icon"
@@ -723,6 +1205,20 @@ export default {
                                 <el-tag :type="BATCH_REPLACE_STATUS_TAG[row.status]" size="small">{{ BATCH_REPLACE_STATUS_LABEL[row.status] }}</el-tag>
                             </template>
                         </el-table-column>
+                        <el-table-column label="知识图谱构建" min-width="220">
+                            <template #default="{row}">
+                                <div v-if="row.graphTracking" class="import-graph-progress">
+                                    <div class="import-graph-progress-head">
+                                        <span>{{ graphProgressDetail(row.graphTracking) }}</span>
+                                        <b>{{ row.graphTracking.progress }}%</b>
+                                    </div>
+                                    <el-progress :percentage="row.graphTracking.progress"
+                                                 :status="row.graphTracking.tone === 'primary' ? undefined : row.graphTracking.tone"
+                                                 :stroke-width="6" :show-text="false" />
+                                </div>
+                                <span v-else class="import-graph-progress-empty">{{ graphExtractionRequested ? '上传后开始' : '未开启' }}</span>
+                            </template>
+                        </el-table-column>
                         <el-table-column label="错误原因" min-width="140">
                             <template #default="{row}">
                                 <span class="import-error-text">{{ row.error || '—' }}</span>
@@ -761,6 +1257,20 @@ export default {
                         </el-table-column>
                         <el-table-column label="分片数" width="80" align="center">
                             <template #default="{row}">{{ row.chunk_count ?? '—' }}</template>
+                        </el-table-column>
+                        <el-table-column label="知识图谱构建" min-width="220">
+                            <template #default="{row}">
+                                <div v-if="row.graphTracking" class="import-graph-progress">
+                                    <div class="import-graph-progress-head">
+                                        <span>{{ graphProgressDetail(row.graphTracking) }}</span>
+                                        <b>{{ row.graphTracking.progress }}%</b>
+                                    </div>
+                                    <el-progress :percentage="row.graphTracking.progress"
+                                                 :status="row.graphTracking.tone === 'primary' ? undefined : row.graphTracking.tone"
+                                                 :stroke-width="6" :show-text="false" />
+                                </div>
+                                <span v-else class="import-graph-progress-empty">{{ graphExtractionRequested ? '上传后开始' : '未开启' }}</span>
+                            </template>
                         </el-table-column>
                     </el-table>
                 </div>

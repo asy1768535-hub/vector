@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -11,6 +12,19 @@ from app.services.object_storage_contracts import (
     StorageObjectStat,
     StorageObjectVersion,
 )
+
+
+def _files_equal(left: Path, right: Path) -> bool:
+    if left.stat().st_size != right.stat().st_size:
+        return False
+    with left.open("rb") as left_handle, right.open("rb") as right_handle:
+        while True:
+            left_chunk = left_handle.read(1024 * 1024)
+            right_chunk = right_handle.read(1024 * 1024)
+            if left_chunk != right_chunk:
+                return False
+            if not left_chunk:
+                return True
 
 
 class LocalObjectStorageAdapter:
@@ -57,6 +71,48 @@ class LocalObjectStorageAdapter:
         self, object_key: str, content: bytes, content_type: str | None
     ) -> StorageObjectVersion:
         return await asyncio.to_thread(self._put, object_key, content, content_type)
+
+    async def put_file(
+        self, object_key: str, source_path: Path, content_type: str | None
+    ) -> StorageObjectVersion:
+        return await asyncio.to_thread(
+            self._put_file, object_key, source_path, content_type
+        )
+
+    def _put_file(
+        self, object_key: str, source_path: Path, content_type: str | None
+    ) -> StorageObjectVersion:
+        del content_type
+        if not source_path.is_file() or source_path.is_symlink():
+            raise ObjectStorageError("source_file_invalid", "source file is invalid")
+        path = self._resolve(object_key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._resolve(object_key)
+        if path.exists():
+            if not path.is_file() or path.is_symlink():
+                raise ObjectStorageError(
+                    "unsafe_object_key", "object path is not a regular file"
+                )
+            if not _files_equal(path, source_path):
+                raise ObjectStorageError(
+                    "object_identity_conflict",
+                    "stored object key belongs to different bytes",
+                )
+            return StorageObjectVersion(object_version=None, etag=None)
+        temp_name: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as handle:
+                temp_name = handle.name
+                with source_path.open("rb") as source:
+                    shutil.copyfileobj(source, handle, length=1024 * 1024)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_name, path)
+            temp_name = None
+        finally:
+            if temp_name is not None:
+                Path(temp_name).unlink(missing_ok=True)
+        return StorageObjectVersion(object_version=None, etag=None)
 
     def _put(
         self, object_key: str, content: bytes, content_type: str | None

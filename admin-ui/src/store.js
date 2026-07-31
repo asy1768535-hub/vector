@@ -1,6 +1,11 @@
 // 极简全局状态：当前用户 + 权限缓存。
 import { reactive } from 'vue';
 import * as api from './api.js';
+import {
+    PREVIEW_ORGANIZATIONS,
+    PREVIEW_PERMISSIONS,
+    PREVIEW_USER,
+} from './preview_mode.js';
 
 export const store = reactive({
     user: null,            // { id, email, is_superuser, username, ... } 或 null
@@ -41,16 +46,12 @@ export async function refreshAuth() {
 
 // 开发模式：后端不可用时模拟超管身份，方便本地查看前端
 export function setMockUser() {
-    store.user = {
-        id: 'dev-mock-001',
-        email: 'dev@localhost',
-        username: 'dev',
-        display_name: '开发预览',
-        is_superuser: true,
-        is_active: true,
-    };
-    store.permissions = [];
-    store.organizations = [];
+    store.user = { ...PREVIEW_USER };
+    store.permissions = PREVIEW_PERMISSIONS.map((item) => ({
+        ...item,
+        actions: [...item.actions],
+    }));
+    store.organizations = PREVIEW_ORGANIZATIONS.map((item) => ({ ...item }));
     store.ready = true;
 }
 

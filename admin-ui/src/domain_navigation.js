@@ -50,19 +50,35 @@ export const LEGACY_REDIRECTS = Object.freeze({
 
 export const DOMAIN_TABS = Object.freeze({
     knowledgeUse: Object.freeze([
-        { key: 'chat', label: '智能问答', path: APP_PATHS.chat, access: 'chat' },
-        { key: 'search', label: '单库检索', path: APP_PATHS.search, access: 'search' },
+        {
+            key: 'chat', label: '智能问答', path: APP_PATHS.chat,
+            access: 'chat', icon: 'sidebar:chat',
+        },
+        {
+            key: 'search', label: '单库检索', path: APP_PATHS.search,
+            access: 'search', icon: 'sidebar:search',
+        },
         {
             key: 'retrievalTest',
             label: '联邦检索诊断',
             path: APP_PATHS.retrievalTest,
             access: 'retrievalTest',
+            icon: 'mdi:text-search',
         },
     ]),
     knowledgeAssets: Object.freeze([
-        { key: 'documents', label: '文档', path: APP_PATHS.documents, access: 'documents' },
-        { key: 'catalog', label: '知识目录', path: APP_PATHS.catalog, access: 'catalog' },
-        { key: 'import', label: '导入与替换', path: APP_PATHS.importData, access: 'import' },
+        {
+            key: 'documents', label: '文档', path: APP_PATHS.documents,
+            access: 'documents', icon: 'sidebar:document',
+        },
+        {
+            key: 'catalog', label: '知识目录', path: APP_PATHS.catalog,
+            access: 'catalog', icon: 'mdi:bookshelf',
+        },
+        {
+            key: 'import', label: '导入与替换', path: APP_PATHS.importData,
+            access: 'import', icon: 'sidebar:import',
+        },
     ]),
     knowledgeGovernance: Object.freeze([
         {
@@ -70,27 +86,40 @@ export const DOMAIN_TABS = Object.freeze({
             label: '知识图谱',
             path: APP_PATHS.knowledgeGraph,
             access: 'knowledgeGraph',
-        },
-        {
-            key: 'schemaLifecycle',
-            label: 'Schema 管理',
-            path: APP_PATHS.schemaLifecycle,
-            access: 'schemaLifecycle',
+            icon: 'carbon:chart-relationship',
         },
         {
             key: 'classificationReview',
             label: '分类审核',
             path: APP_PATHS.classificationReview,
             access: 'classificationReview',
+            icon: 'mdi:certificate-outline',
         },
     ]),
     usersPermissions: Object.freeze([
-        { key: 'users', label: '用户管理', path: APP_PATHS.users, access: 'usersPermissions' },
+        {
+            key: 'users', label: '用户管理', path: APP_PATHS.users,
+            access: 'usersPermissions', icon: 'sidebar:user',
+        },
         {
             key: 'permissions',
             label: '权限矩阵',
             path: APP_PATHS.permissions,
             access: 'usersPermissions',
+            icon: 'sidebar:permission',
+        },
+    ]),
+    libraries: Object.freeze([
+        {
+            key: 'libraries', label: '库配置', path: APP_PATHS.libraries,
+            access: 'libraryConfiguration', icon: 'sidebar:library',
+        },
+        {
+            key: 'schemaLifecycle',
+            label: 'Schema 管理',
+            path: APP_PATHS.schemaLifecycle,
+            access: 'schemaLifecycle',
+            icon: 'mdi:shield-key-outline',
         },
     ]),
     operationsCenter: Object.freeze([
@@ -99,82 +128,189 @@ export const DOMAIN_TABS = Object.freeze({
             label: '概览',
             path: APP_PATHS.dashboard,
             access: 'operationsCenter',
+            icon: 'sidebar:overview',
         },
         {
             key: 'operations',
             label: '服务与队列',
             path: APP_PATHS.operations,
             access: 'operationsCenter',
+            icon: 'sidebar:runtime',
         },
-        { key: 'jobs', label: '任务', path: APP_PATHS.jobs, access: 'operationsCenter' },
+        {
+            key: 'jobs', label: '任务', path: APP_PATHS.jobs,
+            access: 'operationsCenter', icon: 'sidebar:task',
+        },
     ]),
     auditCenter: Object.freeze([
-        { key: 'audit', label: '操作审计', path: APP_PATHS.audit, access: 'auditCenter' },
+        {
+            key: 'audit', label: '操作审计', path: APP_PATHS.audit,
+            access: 'auditCenter', icon: 'sidebar:audit',
+        },
         {
             key: 'chatLogs',
             label: '问答审计',
             path: APP_PATHS.chatLogs,
             access: 'auditCenter',
+            icon: 'sidebar:qa-log',
         },
     ]),
     account: Object.freeze([
-        { key: 'profile', label: '个人资料', path: APP_PATHS.profile, access: 'account' },
-        { key: 'apiKeys', label: 'API Key', path: APP_PATHS.apiKeys, access: 'apiKeys' },
+        {
+            key: 'profile', label: '个人资料', path: APP_PATHS.profile,
+            access: 'account', icon: 'sidebar:user',
+        },
+        {
+            key: 'apiKeys', label: 'API Key', path: APP_PATHS.apiKeys,
+            access: 'apiKeys', icon: 'sidebar:api-key',
+        },
     ]),
 });
+
+const SIDEBAR_SECTIONS = Object.freeze([
+    {
+        key: 'member',
+        label: '普通成员',
+        hint: '知识使用与个人设置',
+    },
+    {
+        key: 'admin',
+        label: '管理员',
+        hint: '系统配置与审计运维',
+    },
+]);
 
 const SIDEBAR_DOMAINS = Object.freeze([
     {
         key: 'knowledgeUse',
+        section: 'member',
         label: '知识使用',
         icon: 'sidebar:chat',
         path: APP_PATHS.knowledgeUse,
     },
     {
         key: 'knowledgeAssets',
+        section: 'member',
         label: '知识资产',
         icon: 'sidebar:document',
         path: APP_PATHS.knowledgeAssets,
     },
     {
         key: 'knowledgeGovernance',
+        section: 'member',
         label: '知识治理',
         icon: 'carbon:chart-relationship',
         path: APP_PATHS.knowledgeGovernance,
     },
     {
         key: 'usersPermissions',
+        section: 'admin',
         label: '用户与权限',
         icon: 'sidebar:user',
         path: APP_PATHS.usersPermissions,
     },
     {
         key: 'libraries',
+        section: 'admin',
         label: '库管理',
         icon: 'sidebar:library',
         path: APP_PATHS.libraries,
     },
     {
         key: 'operationsCenter',
+        section: 'admin',
         label: '运维中心',
         icon: 'sidebar:runtime',
         path: APP_PATHS.operationsCenter,
     },
     {
         key: 'auditCenter',
+        section: 'admin',
         label: '审计中心',
         icon: 'sidebar:audit',
         path: APP_PATHS.auditCenter,
     },
 ]);
 
+const SIDEBAR_GROUPS = Object.freeze([
+    ...SIDEBAR_DOMAINS.filter((group) => group.section === 'member'),
+    {
+        key: 'account',
+        section: 'member',
+        label: '账户设置',
+        icon: 'sidebar:user',
+        path: APP_PATHS.account,
+    },
+    ...SIDEBAR_DOMAINS.filter((group) => group.section === 'admin'),
+]);
+
 export function domainTabs(domain, access) {
     return (DOMAIN_TABS[domain] || []).filter((item) => access?.[item.access]);
 }
 
+export function sidebarItems(domain, access) {
+    if (domain === 'knowledgeAssets') {
+        const items = [];
+        const contentPaths = [
+            access?.documents ? APP_PATHS.documents : null,
+            access?.catalog ? APP_PATHS.catalog : null,
+        ].filter(Boolean);
+        if (contentPaths.length) {
+            items.push({
+                key: 'knowledgeContent',
+                label: '知识内容',
+                path: contentPaths.includes(APP_PATHS.documents)
+                    ? APP_PATHS.documents
+                    : APP_PATHS.catalog,
+                activePaths: contentPaths,
+                access: 'knowledgeContent',
+                icon: 'sidebar:document',
+            });
+        }
+        const importItem = DOMAIN_TABS.knowledgeAssets.find((item) => item.key === 'import');
+        if (access?.import && importItem) items.push(importItem);
+        return items;
+    }
+    if (domain !== 'knowledgeUse') return domainTabs(domain, access);
+
+    const items = [];
+    if (access?.chat) {
+        items.push(DOMAIN_TABS.knowledgeUse.find((item) => item.key === 'chat'));
+    }
+    if (access?.search || access?.retrievalTest) {
+        items.push({
+            key: 'searchDiagnostics',
+            label: '检索诊断',
+            path: access?.search ? APP_PATHS.search : APP_PATHS.retrievalTest,
+            activePaths: [APP_PATHS.search, APP_PATHS.retrievalTest],
+            access: 'searchDiagnostics',
+            icon: 'sidebar:search',
+        });
+    }
+    return items.filter(Boolean);
+}
+
 export function firstDomainPath(domain, access) {
-    if (domain === 'libraries') return access?.libraries ? APP_PATHS.libraries : null;
     return domainTabs(domain, access)[0]?.path || null;
+}
+
+export function visibleSidebarGroups(access) {
+    const visible = SIDEBAR_GROUPS
+        .map((group) => ({
+            ...group,
+            items: sidebarItems(group.key, access),
+        }))
+        .filter((group) => group.items.length > 0);
+    return visible.map((group, index) => {
+        const section = SIDEBAR_SECTIONS.find((item) => item.key === group.section);
+        const previous = visible[index - 1];
+        return {
+            ...group,
+            sectionLabel: section?.label || '',
+            sectionHint: section?.hint || '',
+            sectionStart: !previous || previous.section !== group.section,
+        };
+    });
 }
 
 export function visibleSidebarDomains(access) {
@@ -187,11 +323,11 @@ export function visibleSidebarDomains(access) {
 }
 
 export function defaultRouteForAccess(access) {
-    if (access?.operationsCenter) return APP_PATHS.dashboard;
     for (const domain of ['knowledgeUse', 'knowledgeAssets', 'knowledgeGovernance']) {
         const path = firstDomainPath(domain, access);
         if (path) return path;
     }
+    if (access?.operationsCenter) return APP_PATHS.dashboard;
     return APP_PATHS.profile;
 }
 

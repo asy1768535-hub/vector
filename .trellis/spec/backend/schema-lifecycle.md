@@ -5,7 +5,8 @@
 ### 1. Scope / Trigger
 
 Use this contract when reading Ontology versions, cloning an active Schema,
-editing or validating a draft, previewing its impact, or activating it. The
+editing or validating a draft, previewing its impact, activating it, deleting
+an unreferenced draft, or disabling an active version. The
 existing Ontology tables remain authoritative; lifecycle actions coordinate
 permission, state fencing, idempotency, audit, and rollback.
 
@@ -23,6 +24,7 @@ Database revision and rollout:
 
 ```text
 0039: schema_lifecycle_actions
+0043: schema version retirement action kinds
 SCHEMA_LIFECYCLE_ENABLED=false
 ORGANIZATION_AUTHORIZATION_ENABLED=true  # required when enabled
 ```
@@ -43,11 +45,15 @@ apply_schema_item_command(...)
 validate_schema_draft_bundle(...)
 preview_schema_impact(...)
 activate_schema_version(...)
+delete_schema_draft(...)
+disable_schema_version(...)
 ```
 
 Every mutation carries `expected_version_state_hash` and `idempotency_key`.
 Activation also carries `expected_active_version_id` and the fixed
 `activate_schema_version` confirmation.
+Draft deletion and active-version disable carry fixed `delete_schema_draft`
+and `disable_schema_version` confirmations.
 
 ### 3. Contracts
 
@@ -72,6 +78,11 @@ Activation also carries `expected_active_version_id` and the fixed
   the same `version_key`. Other active version families remain active. It
   activates draft children and the draft atomically without rewriting facts,
   Evidence, extraction snapshots, Publications, or Publication items.
+- Draft deletion is a soft delete of the draft and all of its Schema children.
+  It is rejected when facts, extraction jobs, Publications, governance actions,
+  or a child version reference the draft. Lifecycle audit rows remain intact.
+- Version disable applies only to an active version. It changes only the version
+  status, preserving child rows and historical facts for read compatibility.
 - Lifecycle action and audit rows are written in the caller-owned transaction.
   Payloads contain identifiers, hashes, kinds, versions, and counts only. A
   failed mutation rolls back Schema, action, and audit together.
@@ -89,6 +100,7 @@ Activation also carries `expected_active_version_id` and the fixed
 | Version hash or active identity changed | `schema_lifecycle_state_changed` / `409` |
 | Same key, different command hash | `schema_lifecycle_idempotency_conflict` / `409` |
 | Enabled dependency is absent or cross-version | `schema_lifecycle_dependency_conflict` / `409` |
+| Draft has a data-plane or child-version reference | `schema_lifecycle_dependency_conflict` / `409` |
 | Complete draft validation fails | `schema_lifecycle_invalid_draft` / `409` |
 | Stored invariant cannot be trusted | `schema_lifecycle_unavailable` / `503` |
 
@@ -99,6 +111,8 @@ Activation also carries `expected_active_version_id` and the fixed
   unrelated active `compliance` family are unchanged.
 - Good: two identical clone requests race and converge on the same deterministic
   draft and action result.
+- Good: an unreferenced draft is soft-deleted and disappears from version reads;
+  an active version can be disabled without rewriting historical data.
 - Base: a Library has one active version and no draft. Inspection works, active
   children are read-only, and the console offers clone rather than edit.
 - Bad: cloning attributes with source owner IDs, editing an active row, disabling

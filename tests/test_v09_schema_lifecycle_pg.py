@@ -24,6 +24,8 @@ from app.services.schema_lifecycle_actions import (
     activate_schema_version,
     apply_schema_item_command,
     clone_schema_version,
+    delete_schema_draft,
+    disable_schema_version,
 )
 from app.services.schema_lifecycle_contracts import (
     SchemaLifecycleCommand,
@@ -374,5 +376,185 @@ def test_schema_lifecycle_postgres_migration_concurrency_and_activation(monkeypa
         asyncio.run(_exercise(_database_url(name)))
         alembic_command.downgrade(config, "0038")
         alembic_command.upgrade(config, "0039")
+    finally:
+        asyncio.run(_admin(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+
+
+async def _exercise_version_retirement(database_url: URL) -> None:
+    engine = create_async_engine(database_url)
+    try:
+        Session = async_sessionmaker(engine, expire_on_commit=False)
+        actor_id, library_id, source_id, _, entity_id, publication_id = await _seed(
+            Session
+        )
+        async with Session() as db:
+            library = await db.get(Library, library_id)
+            source = await load_schema_version_bundle(db, library, source_id)
+            clone = SchemaLifecycleCommand(
+                library_id=library_id,
+                ontology_version_id=source_id,
+                actor_user_id=actor_id,
+                action_kind="clone_version",
+                target_kind="ontology_version",
+                target_id=source_id,
+                expected_state_hash=schema_version_state_hash(source),
+                idempotency_key="retirement-clone-v2",
+                payload={"description": "Disposable draft"},
+            )
+            draft_id = (await clone_schema_version(db, library, clone)).bundle.version.id
+            await db.commit()
+
+        async with Session() as db:
+            library = await db.get(Library, library_id)
+            draft = await load_schema_version_bundle(db, library, draft_id)
+            delete = SchemaLifecycleCommand(
+                library_id=library_id,
+                ontology_version_id=draft_id,
+                actor_user_id=actor_id,
+                action_kind="delete_version",
+                target_kind="ontology_version",
+                target_id=draft_id,
+                expected_state_hash=schema_version_state_hash(draft),
+                idempotency_key="delete-retirement-draft-v2",
+                payload={"confirmation": "delete_schema_draft"},
+            )
+            deleted = await delete_schema_draft(db, library, delete)
+            await db.commit()
+            assert deleted.reused is False
+
+        async with Session() as db:
+            library = await db.get(Library, library_id)
+            replay = await delete_schema_draft(db, library, delete)
+            await db.commit()
+            assert replay.reused is True
+
+        async with Session() as db:
+            library = await db.get(Library, library_id)
+            source = await load_schema_version_bundle(db, library, source_id)
+            referenced_clone = SchemaLifecycleCommand(
+                library_id=library_id,
+                ontology_version_id=source_id,
+                actor_user_id=actor_id,
+                action_kind="clone_version",
+                target_kind="ontology_version",
+                target_id=source_id,
+                expected_state_hash=schema_version_state_hash(source),
+                idempotency_key="retirement-clone-v3",
+                payload={"description": "Referenced draft"},
+            )
+            referenced_draft = (
+                await clone_schema_version(db, library, referenced_clone)
+            ).bundle
+            referenced_draft_id = referenced_draft.version.id
+            referenced_type_id = referenced_draft.entity_types[0].id
+            await db.commit()
+
+        async with Session() as db:
+            db.add(
+                Entity(
+                    library_id=library_id,
+                    ontology_version_id=referenced_draft_id,
+                    entity_type_id=referenced_type_id,
+                    canonical_name="Referenced draft entity",
+                    normalized_name="referenced draft entity",
+                    status="draft",
+                    source_type="manual",
+                )
+            )
+            await db.commit()
+
+        async with Session() as db:
+            library = await db.get(Library, library_id)
+            referenced_draft = await load_schema_version_bundle(
+                db, library, referenced_draft_id
+            )
+            referenced_delete = SchemaLifecycleCommand(
+                library_id=library_id,
+                ontology_version_id=referenced_draft_id,
+                actor_user_id=actor_id,
+                action_kind="delete_version",
+                target_kind="ontology_version",
+                target_id=referenced_draft_id,
+                expected_state_hash=schema_version_state_hash(referenced_draft),
+                idempotency_key="delete-referenced-draft-v3",
+                payload={"confirmation": "delete_schema_draft"},
+            )
+            with pytest.raises(SchemaLifecycleError) as referenced_error:
+                await delete_schema_draft(db, library, referenced_delete)
+            await db.rollback()
+            assert referenced_error.value.code == "schema_lifecycle_dependency_conflict"
+
+        async with Session() as db:
+            library = await db.get(Library, library_id)
+            source = await load_schema_version_bundle(db, library, source_id)
+            disable = SchemaLifecycleCommand(
+                library_id=library_id,
+                ontology_version_id=source_id,
+                actor_user_id=actor_id,
+                action_kind="disable_version",
+                target_kind="ontology_version",
+                target_id=source_id,
+                expected_state_hash=schema_version_state_hash(source),
+                idempotency_key="disable-retirement-source-v1",
+                payload={"confirmation": "disable_schema_version"},
+            )
+            disabled = await disable_schema_version(db, library, disable)
+            await db.commit()
+            assert disabled.bundle.version.status == "disabled"
+
+        async with Session() as db:
+            source = await db.get(OntologyVersion, source_id)
+            draft = await db.get(OntologyVersion, draft_id)
+            referenced_draft = await db.get(OntologyVersion, referenced_draft_id)
+            entity = await db.get(Entity, entity_id)
+            publication = await db.get(GraphPublication, publication_id)
+            source_type_statuses = (
+                await db.execute(
+                    select(EntityType.status).where(
+                        EntityType.ontology_version_id == source_id
+                    )
+                )
+            ).scalars().all()
+            draft_type_statuses = (
+                await db.execute(
+                    select(EntityType.status).where(
+                        EntityType.ontology_version_id == draft_id
+                    )
+                )
+            ).scalars().all()
+            actions = set(
+                (
+                    await db.execute(
+                        select(SchemaLifecycleAction.action_kind).where(
+                            SchemaLifecycleAction.library_id == library_id
+                        )
+                    )
+                ).scalars().all()
+            )
+        assert source.status == "disabled"
+        assert draft.status == "deleted"
+        assert referenced_draft.status == "draft"
+        assert source_type_statuses == ["active"]
+        assert draft_type_statuses == ["deleted"]
+        assert entity.status == "active"
+        assert publication.status == "active"
+        assert {"clone_version", "delete_version", "disable_version"} <= actions
+    finally:
+        await engine.dispose()
+
+
+def test_schema_version_retirement_postgres_state_and_audit(monkeypatch):
+    name = f"vkt_v09_schema_retire_{uuid.uuid4().hex[:8]}"
+    _configure_alembic(monkeypatch, name)
+    asyncio.run(_admin(f'DROP DATABASE IF EXISTS "{name}"'))
+    asyncio.run(_admin(f'CREATE DATABASE "{name}"'))
+    try:
+        config = Config("alembic.ini")
+        alembic_command.upgrade(config, "0043")
+        alembic_command.downgrade(config, "0042")
+        alembic_command.upgrade(config, "0043")
+        asyncio.run(_exercise_version_retirement(_database_url(name)))
+        with pytest.raises(Exception, match="Cannot downgrade"):  # noqa: B017
+            alembic_command.downgrade(config, "0042")
     finally:
         asyncio.run(_admin(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))

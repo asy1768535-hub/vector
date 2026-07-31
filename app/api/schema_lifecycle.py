@@ -20,6 +20,7 @@ from app.schemas.schema_lifecycle import (
     SchemaCommandResultRead,
     SchemaConstraintCreateRequest,
     SchemaConstraintUpdateRequest,
+    SchemaDraftDeleteRequest,
     SchemaEntityTypeCreateRequest,
     SchemaEntityTypeUpdateRequest,
     SchemaImpactRead,
@@ -27,7 +28,9 @@ from app.schemas.schema_lifecycle import (
     SchemaRelationTypeCreateRequest,
     SchemaRelationTypeUpdateRequest,
     SchemaValidationRead,
+    SchemaVersionDeletionResultRead,
     SchemaVersionDetailRead,
+    SchemaVersionDisableRequest,
     SchemaVersionListRead,
 )
 from app.services.organization_authorization import (
@@ -37,9 +40,12 @@ from app.services.organization_authorization import (
 )
 from app.services.schema_lifecycle_actions import (
     SchemaLifecycleActionResult,
+    SchemaVersionDeletionResult,
     activate_schema_version,
     apply_schema_item_command,
     clone_schema_version,
+    delete_schema_draft,
+    disable_schema_version,
 )
 from app.services.schema_lifecycle_contracts import (
     SchemaLifecycleCommand,
@@ -159,6 +165,33 @@ async def _mutate(
     try:
         result = await operation()
         response = _command_response(context, result)
+        await db.commit()
+        return response
+    except SchemaLifecycleError as exc:
+        await db.rollback()
+        raise _http_error(exc) from exc
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "schema_lifecycle_unavailable",
+        ) from exc
+
+
+async def _mutate_deletion(
+    db: AsyncSession,
+    context: SchemaLifecycleContext,
+    operation: Callable[[], Awaitable[SchemaVersionDeletionResult]],
+) -> SchemaVersionDeletionResultRead:
+    try:
+        result = await operation()
+        response = SchemaVersionDeletionResultRead(
+            action_id=result.action.id,
+            reused=result.reused,
+            library_id=context.library.id,
+            ontology_version_id=result.version_id,
+            status="deleted",
+        )
         await db.commit()
         return response
     except SchemaLifecycleError as exc:
@@ -308,6 +341,66 @@ async def activate_version(
         db,
         context,
         lambda: activate_schema_version(db, context.library, command),
+    )
+
+
+@router.post(
+    "/versions/{version_id}/delete-draft",
+    response_model=SchemaVersionDeletionResultRead,
+)
+async def delete_draft_version(
+    version_id: uuid.UUID,
+    body: SchemaDraftDeleteRequest,
+    context: SchemaLifecycleContext = Depends(require_schema_lifecycle_context),
+    db: AsyncSession = Depends(get_db),
+) -> SchemaVersionDeletionResultRead:
+    command = _command(
+        context,
+        version_id,
+        action_kind="delete_version",
+        target_kind="ontology_version",
+        target_id=version_id,
+        expected_state_hash=body.expected_version_state_hash,
+        idempotency_key=body.idempotency_key,
+        payload=_payload(
+            body,
+            exclude={"expected_version_state_hash", "idempotency_key"},
+        ),
+    )
+    return await _mutate_deletion(
+        db,
+        context,
+        lambda: delete_schema_draft(db, context.library, command),
+    )
+
+
+@router.post(
+    "/versions/{version_id}/disable",
+    response_model=SchemaCommandResultRead,
+)
+async def disable_version(
+    version_id: uuid.UUID,
+    body: SchemaVersionDisableRequest,
+    context: SchemaLifecycleContext = Depends(require_schema_lifecycle_context),
+    db: AsyncSession = Depends(get_db),
+) -> SchemaCommandResultRead:
+    command = _command(
+        context,
+        version_id,
+        action_kind="disable_version",
+        target_kind="ontology_version",
+        target_id=version_id,
+        expected_state_hash=body.expected_version_state_hash,
+        idempotency_key=body.idempotency_key,
+        payload=_payload(
+            body,
+            exclude={"expected_version_state_hash", "idempotency_key"},
+        ),
+    )
+    return await _mutate(
+        db,
+        context,
+        lambda: disable_schema_version(db, context.library, command),
     )
 
 

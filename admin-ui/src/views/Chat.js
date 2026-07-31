@@ -7,6 +7,18 @@ import { createStreamQueue } from '../stream_queue.js';
 import { copyTextToClipboard } from '../copy_text.js';
 import { chatWelcome } from '../illustrations.js';
 import { extractCitationIndex, highlightSourceWindow, renderAssistantMarkdown } from '../chat_citations.js';
+import {
+    chatGraphExpansionRequest,
+    chatGraphRelationLabel,
+    mergeChatGraph,
+    prepareChatGraph,
+} from '../chat_graph_exploration.js';
+import {
+    graphExplorationErrorProjection,
+    graphTraversalResponseMatches,
+    malformedGraphExplorationError,
+} from '../graph_exploration_ui.js';
+import GraphCanvas from '../components/GraphCanvas.js';
 
 // ── Markdown → safe HTML ──
 function renderMarkdown(text, sources = []) {
@@ -39,6 +51,7 @@ function scoreClass(s) {
 function nowISO() { return new Date().toISOString(); }
 
 export default {
+    components: { GraphCanvas },
     setup() {
         const libs = ref([]);
         const currentSlug = ref(null);
@@ -53,7 +66,21 @@ export default {
         const topK = ref(5);
         const recalledChunkDialog = ref({ open: false, source: null });
         const sourceLocationDialog = ref({ open: false, loading: false, source: null, data: null, error: '' });
+        const citationGraphDialog = ref({
+            open: false,
+            loading: false,
+            source: null,
+            data: null,
+            error: '',
+            selected: null,
+        });
+        const expandingGraphEntityId = ref('');
+        const expandedGraphEntityIds = ref(new Set());
+        const graphExpansionIssue = ref(null);
+        const graphExpansionLimitReached = ref(false);
+        const expandedGraphEntityIdList = computed(() => [...expandedGraphEntityIds.value]);
         let sourceLocationRequestSeq = 0;
+        let citationGraphRequestSeq = 0;
         let _abortController = null;
 
         const _queue = createStreamQueue();
@@ -106,9 +133,26 @@ export default {
             sourceLocationDialog.value = { open: false, loading: false, source: null, data: null, error: '' };
         }
 
+        function closeAndInvalidateCitationGraph() {
+            ++citationGraphRequestSeq;
+            expandingGraphEntityId.value = '';
+            expandedGraphEntityIds.value = new Set();
+            graphExpansionIssue.value = null;
+            graphExpansionLimitReached.value = false;
+            citationGraphDialog.value = {
+                open: false,
+                loading: false,
+                source: null,
+                data: null,
+                error: '',
+                selected: null,
+            };
+        }
+
         function onLibChange() {
             _cleanupStream();
             closeAndInvalidateSourceDialog();
+            closeAndInvalidateCitationGraph();
             currentConvId.value = null;
             messages.value = [];
         }
@@ -116,6 +160,7 @@ export default {
         function newChat() {
             _cleanupStream();
             closeAndInvalidateSourceDialog();
+            closeAndInvalidateCitationGraph();
             currentConvId.value = null;
             messages.value = [];
         }
@@ -130,6 +175,7 @@ export default {
             if (conv.id === currentConvId.value) return;
             _cleanupStream();
             closeAndInvalidateSourceDialog();
+            closeAndInvalidateCitationGraph();
             currentSlug.value = conv.library_slug;
             currentConvId.value = conv.id;
             messages.value = [];
@@ -186,6 +232,189 @@ export default {
         function openCitationChunk(source) {
             if (!source) return;
             recalledChunkDialog.value = { open: true, source };
+        }
+
+        function messageGraphSource(message) {
+            return (message?.sources || []).find((source) => source?.chunk_id) || null;
+        }
+
+        function citationGraphError(error) {
+            if (error?.status === 403) return '你没有该知识库的图谱读取权限';
+            if (error?.status === 404) return '该引用分片已不可用';
+            if (error?.status === 409) return '图谱发布版本已变化，请重新打开';
+            if (error?.status === 503 || error?.status === 504) {
+                return '已发布知识图谱暂不可用，请稍后重试';
+            }
+            return '知识图谱加载失败';
+        }
+
+        async function openCitationGraph(source) {
+            const slug = currentSlug.value;
+            const chunkId = source?.chunk_id;
+            if (!slug || !chunkId) {
+                ElMessage.warning('该引用缺少可用的分片标识');
+                return;
+            }
+            const requestSeq = ++citationGraphRequestSeq;
+            expandingGraphEntityId.value = '';
+            expandedGraphEntityIds.value = new Set();
+            graphExpansionIssue.value = null;
+            graphExpansionLimitReached.value = false;
+            recalledChunkDialog.value = { open: false, source: null };
+            citationGraphDialog.value = {
+                open: true,
+                loading: true,
+                source,
+                data: null,
+                error: '',
+                selected: null,
+            };
+            try {
+                const data = await api.getChatGraphContext(slug, chunkId);
+                if (requestSeq !== citationGraphRequestSeq) return;
+                citationGraphDialog.value = {
+                    open: true,
+                    loading: false,
+                    source,
+                    data: data?.graph ? { ...data, graph: prepareChatGraph(data.graph) } : data,
+                    error: '',
+                    selected: null,
+                };
+                expandedGraphEntityIds.value = new Set(
+                    (data?.graph?.seed_matches || []).map((item) => item.entity_id),
+                );
+            } catch (error) {
+                if (requestSeq !== citationGraphRequestSeq) return;
+                citationGraphDialog.value = {
+                    open: true,
+                    loading: false,
+                    source,
+                    data: null,
+                    error: citationGraphError(error),
+                    selected: null,
+                };
+            }
+        }
+
+        async function expandCitationGraphNode(node) {
+            const graph = citationGraphDialog.value.data?.graph;
+            if (!citationGraphDialog.value.open || !graph || !node?.id
+                || expandingGraphEntityId.value
+                || expandedGraphEntityIds.value.has(node.id)
+                || graphExpansionLimitReached.value) return;
+            const expansion = chatGraphExpansionRequest(graph, node.id);
+            if (!expansion) return;
+            const requestSeq = citationGraphRequestSeq;
+            expandingGraphEntityId.value = node.id;
+            graphExpansionIssue.value = null;
+            try {
+                const response = await api.queryPublishedGraph(currentSlug.value, expansion.request);
+                if (requestSeq !== citationGraphRequestSeq || !citationGraphDialog.value.open) return;
+                if (!graphTraversalResponseMatches(response, expansion.identity)) {
+                    graphExpansionIssue.value = {
+                        nodeId: node.id,
+                        message: malformedGraphExplorationError().message,
+                    };
+                    return;
+                }
+                const merged = mergeChatGraph(citationGraphDialog.value.data.graph, response, node.id);
+                expandedGraphEntityIds.value = new Set([...expandedGraphEntityIds.value, node.id]);
+                graphExpansionLimitReached.value = merged.limitReached;
+                const currentSelection = citationGraphDialog.value.selected;
+                const mergedPivot = merged.graph.nodes.find((item) => item.id === node.id) || node;
+                citationGraphDialog.value = {
+                    ...citationGraphDialog.value,
+                    data: { ...citationGraphDialog.value.data, graph: merged.graph },
+                    selected: currentSelection?.kind === 'entity'
+                        && currentSelection.item?.id === node.id
+                        ? { kind: 'entity', item: mergedPivot }
+                        : currentSelection,
+                };
+            } catch (error) {
+                if (requestSeq !== citationGraphRequestSeq || !citationGraphDialog.value.open) return;
+                graphExpansionIssue.value = {
+                    nodeId: node.id,
+                    message: graphExplorationErrorProjection(error).message,
+                };
+            } finally {
+                if (requestSeq === citationGraphRequestSeq) expandingGraphEntityId.value = '';
+            }
+        }
+
+        function selectCitationGraphNode(node) {
+            citationGraphDialog.value.selected = { kind: 'entity', item: node };
+        }
+
+        function focusCitationGraphNode(node) {
+            citationGraphDialog.value.selected = { kind: 'entity', item: node };
+            void expandCitationGraphNode(node);
+        }
+
+        function selectCitationGraphRelation(relation) {
+            citationGraphDialog.value.selected = { kind: 'relation', item: relation };
+        }
+
+        function clearCitationGraphSelection() {
+            citationGraphDialog.value.selected = null;
+            graphExpansionIssue.value = null;
+        }
+
+        function citationGraphExpansionStatus(nodeId) {
+            if (expandingGraphEntityId.value === nodeId) return '正在加载关联实体';
+            if (graphExpansionIssue.value?.nodeId === nodeId) return graphExpansionIssue.value.message;
+            if (graphExpansionLimitReached.value) return '已达到当前图谱展示上限';
+            if (expandedGraphEntityIds.value.has(nodeId)) return '一跳关系已加载';
+            return '';
+        }
+
+        function citationGraphSelection() {
+            const selected = citationGraphDialog.value.selected;
+            const graph = citationGraphDialog.value.data?.graph;
+            if (!selected || !graph) return null;
+            if (selected.kind === 'entity') {
+                const relationCount = graph.relations.filter((relation) => (
+                    relation.source_entity_id === selected.item.id
+                    || relation.target_entity_id === selected.item.id
+                )).length;
+                return Object.freeze({
+                    kind: selected.item.depth === 0 ? '引用相关实体' : '一跳关联实体',
+                    title: selected.item.canonical_name,
+                    detail: selected.item.entity_type?.label || selected.item.entity_type?.key || '实体',
+                    meta: `${relationCount} 条直接关系`,
+                });
+            }
+            const source = graph.nodes.find((node) => node.id === selected.item.source_entity_id);
+            const target = graph.nodes.find((node) => node.id === selected.item.target_entity_id);
+            return Object.freeze({
+                kind: '已发布关系',
+                title: chatGraphRelationLabel(selected.item),
+                detail: `${source?.canonical_name || '未知实体'} → ${target?.canonical_name || '未知实体'}`,
+                meta: selected.item.relation_type?.direction === 'directed' ? '有向关系' : '无向关系',
+            });
+        }
+
+        function citationGraphNodes() {
+            return [...(citationGraphDialog.value.data?.graph?.nodes || [])].sort((left, right) => (
+                left.depth - right.depth
+                || String(left.entity_type?.label || '').localeCompare(String(right.entity_type?.label || ''), 'zh-CN')
+                || String(left.canonical_name || '').localeCompare(String(right.canonical_name || ''), 'zh-CN')
+            ));
+        }
+
+        function citationGraphRelations() {
+            return [...(citationGraphDialog.value.data?.graph?.relations || [])].sort((left, right) => (
+                citationGraphRelationLine(left).localeCompare(citationGraphRelationLine(right), 'zh-CN')
+            ));
+        }
+
+        function citationGraphNodeName(id) {
+            return citationGraphDialog.value.data?.graph?.nodes
+                ?.find((node) => node.id === id)?.canonical_name || '未知实体';
+        }
+
+        function citationGraphRelationLine(relation) {
+            const label = chatGraphRelationLabel(relation);
+            return `${citationGraphNodeName(relation?.source_entity_id)} ${label} ${citationGraphNodeName(relation?.target_entity_id)}`;
         }
 
         function handleCitationClick(message, event) {
@@ -323,7 +552,11 @@ export default {
         }
 
         onMounted(() => { Promise.all([loadLibs(), loadConversations()]); });
-        onBeforeUnmount(() => { _cleanupStream(); });
+        onBeforeUnmount(() => {
+            _cleanupStream();
+            closeAndInvalidateSourceDialog();
+            closeAndInvalidateCitationGraph();
+        });
 
         return {
             libs, currentSlug, conversations, convsForLib, currentConvId, messages, input,
@@ -331,6 +564,12 @@ export default {
             onLibChange, newChat, selectConversation, archiveConv, deleteConv, send, copyAnswer,
             copySourceText, openCitationChunk, handleCitationClick, handleCitationKeydown,
             openDocDetail, loadLibs, chatWelcome, recalledChunkDialog, sourceLocationDialog,
+            citationGraphDialog, openCitationGraph, closeAndInvalidateCitationGraph,
+            selectCitationGraphNode, selectCitationGraphRelation, clearCitationGraphSelection,
+            citationGraphSelection, citationGraphExpansionStatus, messageGraphSource,
+            expandingGraphEntityId, expandedGraphEntityIdList,
+            citationGraphNodes, citationGraphRelations, citationGraphNodeName, citationGraphRelationLine,
+            focusCitationGraphNode, chatGraphRelationLabel,
             closeAndInvalidateSourceDialog,
             sourceWindowParts, formatLocation,
             fmtScore, scoreClass, fmtTime, renderMarkdown,
@@ -416,6 +655,12 @@ export default {
                                  v-html="renderMarkdown(m.text, m.sources) + (m.cursor ? '<span class=\\'chat-cursor\\'>|</span>' : '')"></div>
                             <div v-if="m.role === 'ai' && m.time" class="chat-msg-time">{{ fmtTime(m.time) }}</div>
                             <div v-if="m.role === 'ai' && m.text" class="chat-answer-actions">
+                                <el-button v-if="m.time && messageGraphSource(m)" class="chat-answer-graph"
+                                           plain size="small" type="primary" title="查看回答引用在知识图谱中的位置"
+                                           @click="openCitationGraph(messageGraphSource(m))">
+                                    <local-icon icon="carbon:chart-relationship"></local-icon>
+                                    <span>查看知识图谱</span>
+                                </el-button>
                                 <el-button class="chat-copy-answer" text aria-label="复制回答" title="复制回答" @click="copyAnswer(m.text)">
                                     <local-icon icon="mdi:content-copy"></local-icon>
                                 </el-button>
@@ -460,6 +705,85 @@ export default {
                     <pre class="chat-recalled-text">{{ recalledChunkDialog.source.content || '暂无引用内容' }}</pre>
                     <div class="chat-dialog-actions">
                         <el-button type="primary" plain @click="copySourceText(recalledChunkDialog.source.content)">复制片段</el-button>
+                        <el-button v-if="recalledChunkDialog.source.chunk_id" type="primary"
+                                   @click="openCitationGraph(recalledChunkDialog.source)">
+                            <local-icon icon="carbon:chart-relationship"></local-icon>
+                            知识图谱
+                        </el-button>
+                    </div>
+                </template>
+            </el-dialog>
+
+            <el-dialog v-model="citationGraphDialog.open" title="知识点图谱" width="1180px"
+                       class="chat-citation-graph-dialog" @closed="closeAndInvalidateCitationGraph">
+                <div v-if="citationGraphDialog.loading" class="chat-citation-graph-state">
+                    <local-icon class="is-loading" icon="status:processing"></local-icon>
+                    <span>正在加载已发布图谱...</span>
+                </div>
+                <el-alert v-else-if="citationGraphDialog.error" type="warning" :closable="false"
+                          :title="citationGraphDialog.error" />
+                <el-empty v-else-if="!citationGraphDialog.data?.graph"
+                          description="该引用暂未关联已发布图谱" :image-size="64" />
+                <template v-else>
+                    <div class="chat-citation-graph-meta">
+                        <div class="chat-citation-graph-origin">
+                            <small>引用来源</small>
+                            <strong :title="citationGraphDialog.source?.title || '(无标题)'">
+                                {{ citationGraphDialog.source?.title || '(无标题)' }}
+                            </strong>
+                        </div>
+                        <div class="chat-citation-graph-counts">
+                            <span><strong>{{ citationGraphDialog.data.graph.counts.nodes }}</strong> 实体</span>
+                            <span><strong>{{ citationGraphDialog.data.graph.counts.relations }}</strong> 关系</span>
+                        </div>
+                        <el-tag v-if="citationGraphDialog.data.exact_seeds_truncated" size="small" type="warning">
+                            相关实体已按上限展示
+                        </el-tag>
+                    </div>
+                    <div class="chat-citation-graph-workbench">
+                        <section class="chat-citation-graph-stage">
+                            <graph-canvas variant="citation"
+                                          :graph="citationGraphDialog.data.graph"
+                                          :selected-id="citationGraphDialog.selected?.item?.id || ''"
+                                          :expanding-id="expandingGraphEntityId"
+                                          :expanded-ids="expandedGraphEntityIdList"
+                                          @open-entity="selectCitationGraphNode"
+                                          @focus-entity="focusCitationGraphNode"
+                                          @open-relation="selectCitationGraphRelation"
+                                          @clear-selection="clearCitationGraphSelection" />
+                        </section>
+                        <aside class="chat-citation-graph-inspector">
+                            <div v-if="citationGraphSelection()" class="chat-citation-graph-selection">
+                                <small>{{ citationGraphSelection().kind }}</small>
+                                <strong>{{ citationGraphSelection().title }}</strong>
+                                <span>{{ citationGraphSelection().detail }}</span>
+                                    <em>{{ citationGraphSelection().meta }}</em>
+                                    <span v-if="citationGraphDialog.selected?.kind === 'entity' && citationGraphExpansionStatus(citationGraphDialog.selected.item.id)"
+                                          class="chat-citation-graph-expansion-status">
+                                        {{ citationGraphExpansionStatus(citationGraphDialog.selected.item.id) }}
+                                    </span>
+                            </div>
+                            <section class="chat-citation-graph-facts">
+                                <header><strong>关联事实</strong><span>{{ citationGraphRelations().length }}</span></header>
+                                <button v-for="relation in citationGraphRelations()" :key="relation.id" type="button"
+                                        :class="{ 'is-active': citationGraphDialog.selected?.item?.id === relation.id }"
+                                        :title="citationGraphRelationLine(relation)"
+                                        @click="selectCitationGraphRelation(relation)">
+                                    <strong>{{ citationGraphNodeName(relation.source_entity_id) }}</strong>
+                                    <span>{{ chatGraphRelationLabel(relation) }} →</span>
+                                    <strong>{{ citationGraphNodeName(relation.target_entity_id) }}</strong>
+                                </button>
+                            </section>
+                            <section class="chat-citation-graph-entities">
+                                <header><strong>图中实体</strong><span>{{ citationGraphNodes().length }}</span></header>
+                                <button v-for="node in citationGraphNodes()" :key="node.id" type="button"
+                                        :class="{ 'is-active': citationGraphDialog.selected?.item?.id === node.id }"
+                                        @click="selectCitationGraphNode(node)">
+                                    <i :class="node.depth === 0 ? 'is-seed' : 'is-neighbor'"></i>
+                                    <span><strong>{{ node.canonical_name }}</strong><small>{{ node.entity_type?.label || node.entity_type?.key || '实体' }}</small></span>
+                                </button>
+                            </section>
+                        </aside>
                     </div>
                 </template>
             </el-dialog>

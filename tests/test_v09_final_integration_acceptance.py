@@ -89,11 +89,13 @@ def test_manifest_freezes_dependencies_and_unchanged_accepted_frontend() -> None
     assert _git("rev-parse", "e6b98ce:admin-ui") == FRONTEND_TREE
 
 
-def test_final_candidate_has_one_reversible_0042_head() -> None:
+def test_post_candidate_patch_has_one_0043_head() -> None:
     scripts = ScriptDirectory.from_config(Config(str(ROOT / "alembic.ini")))
-    assert scripts.get_heads() == ["0042"]
+    assert scripts.get_heads() == ["0043"]
+    assert scripts.get_revision("0043").down_revision == "0042"
     assert scripts.get_revision("0042").down_revision == "0041"
     assert scripts.get_revision("0041").down_revision == "0040"
+    # The signed final-candidate manifest remains an immutable pre-patch record.
     assert _manifest()["alembic_head"] == "0042"
 
 

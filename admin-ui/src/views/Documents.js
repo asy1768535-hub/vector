@@ -6,6 +6,8 @@ import { store, hasPermission } from '../store.js';
 import { dataEmpty } from '../illustrations.js';
 import { readableLibraries, resolveSelectedSlug } from '../menu_access.js';
 import { copyTextToClipboard } from '../copy_text.js';
+import KnowledgeAssetViewSwitch from '../components/KnowledgeAssetViewSwitch.js';
+import { buildFolderTree, documentsInFolder } from '../folder_tree.js';
 import {
     documentDisplayName,
     documentStatusLabel,
@@ -19,12 +21,15 @@ import {
 } from '../documents_ui.js';
 
 export default {
+    components: { KnowledgeAssetViewSwitch },
     setup() {
         const router = useRouter();
         const route = useRoute();
         const libs = ref([]);
         const slug = ref(null);
         const docs = ref([]);
+        const folders = ref([]);
+        const selectedFolderId = ref('all');
         const stats = ref(null);
         const loading = ref(false);
         const filters = reactive({ keyword: '', status: '', type: '', dateRange: [] });
@@ -64,7 +69,11 @@ export default {
         const processingCount = computed(() =>
             Number(stats.value?.pending_jobs || 0) + Number(stats.value?.processing_jobs || 0)
         );
-        const filteredDocs = computed(() => filterDocuments(docs.value, filters));
+        const folderTree = computed(() => buildFolderTree(folders.value, docs.value));
+        const folderScopedDocs = computed(() =>
+            documentsInFolder(docs.value, selectedFolderId.value)
+        );
+        const filteredDocs = computed(() => filterDocuments(folderScopedDocs.value, filters));
         const pagination = computed(() => paginateDocuments(filteredDocs.value, page.value, pageSize.value));
         const visibleDocs = computed(() => pagination.value.items);
         const partialList = computed(() =>
@@ -126,12 +135,14 @@ export default {
             if (!slug.value) { docs.value = []; stats.value = null; return; }
             loading.value = true;
             try {
-                const [d, s] = await Promise.all([
-                    api.listDocuments(slug.value, { limit: 500 }, forceRefresh),
+                const [d, s, f] = await Promise.all([
+                    api.listDocuments(slug.value, { limit: 1000 }, forceRefresh),
                     api.libraryStats(slug.value, forceRefresh),
+                    api.listFolders(slug.value, forceRefresh),
                 ]);
                 docs.value = d;
                 stats.value = s;
+                folders.value = f;
             } catch (e) { ElMessage.error(e.message); }
             finally { loading.value = false; }
         }
@@ -143,6 +154,11 @@ export default {
             filters.dateRange = [];
             page.value = 1;
             pageSize.value = 5;
+        }
+
+        function selectFolder(folderId) {
+            selectedFolderId.value = String(folderId);
+            page.value = 1;
         }
 
         function openFileImport() {
@@ -373,6 +389,7 @@ export default {
             detail.open = false;
             detail.row = null;
             resetFilters();
+            selectedFolderId.value = 'all';
             await loadDocs();
         });
         watch(() => pagination.value.page, (validPage) => {
@@ -390,10 +407,11 @@ export default {
         });
 
         return {
-            myLibs, slug, docs, stats, loading, canInsert, canDelete, isSuperuser,
+            myLibs, slug, docs, folders, folderTree, selectedFolderId,
+            stats, loading, canInsert, canDelete, isSuperuser,
             processingCount, filters, page, pageSize, pagination, visibleDocs, partialList,
             detail, detailLatestJob, sourceReader, sourceText, sourceMatchCount, highlightedSourceParts,
-            dialog, loadDocs, resetFilters, openFileImport, openIngest, openEdit,
+            dialog, loadDocs, resetFilters, selectFolder, openFileImport, openIngest, openEdit,
             openReplaceImport, openDetail, openFullSource, downloadOriginalFile, closeFullSource, retryJob, retryDocument, submitIngest, del, metadataText,
             copyDocValue, deleteTitle, shortText,
             documentDisplayName, documentStatusLabel, documentStatusTag, documentTypeIcon, documentTypeLabel,
@@ -402,6 +420,7 @@ export default {
     },
     template: `
     <div class="documents-workspace">
+      <knowledge-asset-view-switch :library="slug || ''" />
       <section class="documents-overview">
         <div class="documents-heading">
           <h2>文档管理</h2>
@@ -451,6 +470,35 @@ export default {
         </div>
       </section>
 
+      <div class="documents-browser-layout">
+        <aside class="documents-folder-pane" aria-label="文档目录">
+          <div class="documents-folder-head">
+            <local-icon icon="mdi:folder-outline"></local-icon>
+            <strong>目录</strong>
+          </div>
+          <button type="button" class="documents-folder-root"
+                  :class="{ 'is-active': selectedFolderId === 'all' }"
+                  @click="selectFolder('all')">
+            <span>全部文档</span><b>{{ docs.length }}</b>
+          </button>
+          <button type="button" class="documents-folder-root"
+                  :class="{ 'is-active': selectedFolderId === 'root' }"
+                  @click="selectFolder('root')">
+            <span>根目录</span><b>{{ docs.filter((doc) => !doc.folder_id).length }}</b>
+          </button>
+          <el-tree :data="folderTree" node-key="id" default-expand-all
+                   :expand-on-click-node="false" class="documents-folder-tree"
+                   @node-click="(node) => selectFolder(node.id)">
+            <template #default="{ data }">
+              <span class="documents-folder-node"
+                    :class="{ 'is-active': selectedFolderId === data.id }">
+                <span><local-icon icon="mdi:folder-outline"></local-icon>{{ data.label }}</span>
+                <b>{{ data.count }}</b>
+              </span>
+            </template>
+          </el-tree>
+        </aside>
+
       <section class="documents-table-panel">
         <div v-if="partialList" class="documents-load-note">
           当前加载 {{ docs.length }} / 总计 {{ stats.document_count }}，筛选与分页仅作用于已加载文档
@@ -465,7 +513,10 @@ export default {
                     <img v-if="documentTypeIcon(row)" class="documents-file-icon"
                          :src="documentTypeIcon(row)" alt="" aria-hidden="true" />
                     <local-icon v-else class="documents-file-icon" icon="mdi:file-document-outline"></local-icon>
-                    <span class="documents-file-name" :title="documentDisplayName(row)">{{ documentDisplayName(row) }}</span>
+                    <span class="documents-file-copy">
+                      <span class="documents-file-name" :title="documentDisplayName(row)">{{ documentDisplayName(row) }}</span>
+                      <small v-if="row.source_path" :title="row.source_path">{{ row.source_path }}</small>
+                    </span>
                   </div>
                 </div>
               </template>
@@ -500,6 +551,7 @@ export default {
                          layout="total, sizes, prev, pager, next" />
         </div>
       </section>
+      </div>
 
       <el-drawer v-model="detail.open" class="documents-detail" title="文档详情" size="780px">
         <template v-if="detail.row">
@@ -515,6 +567,7 @@ export default {
               <span>版本</span><span>v{{ detail.row.current_revision || 0 }}</span>
               <span>文档 ID</span><span class="documents-copy-line"><code>{{ detail.row.id }}</code><el-button text class="documents-copy-btn" title="复制文档 ID" @click="copyDocValue(detail.row.id, '文档 ID')"><local-icon icon="mdi:content-copy"></local-icon></el-button></span>
               <span>external_id</span><span>{{ detail.row.external_id || '—' }}</span>
+              <span>来源路径</span><span>{{ detail.row.source_path || '—' }}</span>
               <span>更新时间</span><span>{{ formatDocumentTime(detail.row.updated_at) }}</span>
               <span>content_hash</span><span class="documents-copy-line"><code :title="detail.row.content_hash || ''">{{ shortText(detail.row.content_hash, 28) }}</code><el-button v-if="detail.row.content_hash" text class="documents-copy-btn" title="复制 content_hash" @click="copyDocValue(detail.row.content_hash, 'content_hash')"><local-icon icon="mdi:content-copy"></local-icon></el-button></span>
             </div>

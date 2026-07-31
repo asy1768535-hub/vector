@@ -79,6 +79,7 @@ def test_hosted_profile_requires_remote_https_dependencies() -> None:
 
 
 def test_readiness_payload_contains_only_stable_content_free_codes() -> None:
+    assert health_api._MIGRATION_HEAD == "0045"
     payload = _payload({"database": True, "embedding": False})
     assert payload == {
         "status": "not_ready",

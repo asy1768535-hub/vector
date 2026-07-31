@@ -3,7 +3,7 @@
   Stop project processes started by start_local.ps1
 .DESCRIPTION
   Only stops processes recorded in PID files. Does not stop unrelated services.
-  Order: Knowledge Artifacts -> Graph Extractor -> Cleanup -> Embedder -> API
+  Order: Knowledge Artifacts -> Graph Extractor -> Cleanup -> Importer -> Embedder -> API
 #>
 $ErrorActionPreference = "Continue"
 $projectDir = $PSScriptRoot | Split-Path -Parent
@@ -19,7 +19,10 @@ function Stop-ByPidFile($pidFile, $label) {
         $proc = Get-Process -Id $procId -ErrorAction Stop
         if (-not $proc.HasExited) {
             Write-Host "  Stopping $label (PID $procId)..." -ForegroundColor Yellow
-            $proc.Kill()
+            & "$env:SystemRoot\System32\taskkill.exe" /PID $procId /T /F | Out-Null
+            if ($LASTEXITCODE -ne 0 -and -not $proc.HasExited) {
+                $proc.Kill()
+            }
             $proc.WaitForExit(5000)
             Write-Host "  $label : stopped" -ForegroundColor Green
         } else {
@@ -37,6 +40,7 @@ Write-Host "=== Stop local project processes ===" -ForegroundColor Cyan
 Stop-ByPidFile (Join-Path $pidDir "knowledge_artifacts.pid") "Knowledge Artifact Worker"
 Stop-ByPidFile (Join-Path $pidDir "graph_extractor.pid") "Graph Extractor"
 Stop-ByPidFile (Join-Path $pidDir "cleanup.pid") "Cleanup Worker"
+Stop-ByPidFile (Join-Path $pidDir "importer.pid") "Import Worker"
 Stop-ByPidFile (Join-Path $pidDir "embedder.pid") "Embedder Worker"
 Stop-ByPidFile (Join-Path $pidDir "api.pid") "API"
 

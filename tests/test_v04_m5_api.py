@@ -56,6 +56,7 @@ def _job(**changes):
         "ontology_version_id": ONTOLOGY_ID,
         "trigger_type": "manual",
         "execution_mode": "production",
+        "build_mode": "standard",
         "status": "queued",
         "current_stage": "preparing",
         "input_fingerprint": "a" * 64,
@@ -128,6 +129,7 @@ def _client(db, *, admin=True):
 def test_v04_graph_extraction_routes_are_mounted():
     paths = set(app.openapi()["paths"])
     prefix = "/libraries/{slug}/v04/graph-extractions"
+    assert f"{prefix}/upload-configuration" in paths
     assert f"{prefix}/" in paths
     assert f"{prefix}/{{job_id}}" in paths
     assert f"{prefix}/{{job_id}}/units" in paths
@@ -167,6 +169,8 @@ def test_create_returns_sanitized_job_without_frozen_or_raw_payloads():
     assert response.status_code == 201
     payload = response.json()
     assert payload["id"] == str(JOB_ID)
+    assert payload["build_mode"] == "standard"
+    assert create.await_args.kwargs["build_mode"] == "standard"
     for forbidden in (
         "idempotency_key",
         "model_config_snapshot",
@@ -196,9 +200,7 @@ def test_retry_returns_exact_no_retryable_units_conflict():
                 ),
             ),
         ):
-            response = _client(db).post(
-                f"/libraries/m5-api/v04/graph-extractions/{JOB_ID}/retry"
-            )
+            response = _client(db).post(f"/libraries/m5-api/v04/graph-extractions/{JOB_ID}/retry")
     finally:
         app.dependency_overrides.clear()
 
@@ -218,9 +220,7 @@ def test_retry_refreshes_server_updated_fields_before_response():
                 new=AsyncMock(return_value=job),
             ),
         ):
-            response = _client(db).post(
-                f"/libraries/m5-api/v04/graph-extractions/{JOB_ID}/retry"
-            )
+            response = _client(db).post(f"/libraries/m5-api/v04/graph-extractions/{JOB_ID}/retry")
     finally:
         app.dependency_overrides.clear()
 
@@ -241,9 +241,7 @@ def test_cancel_refreshes_server_updated_fields_before_response():
                 new=AsyncMock(return_value=job),
             ),
         ):
-            response = _client(db).post(
-                f"/libraries/m5-api/v04/graph-extractions/{JOB_ID}/cancel"
-            )
+            response = _client(db).post(f"/libraries/m5-api/v04/graph-extractions/{JOB_ID}/cancel")
     finally:
         app.dependency_overrides.clear()
 

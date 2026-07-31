@@ -151,7 +151,7 @@ test('route, API, view, menu, and responsive privacy contracts are wired', () =>
     assert.ok(api.includes('export const reviewClassificationRun'));
     assert.match(app, /path:\s*'classification'/);
     assert.match(app, /libraryManagement:\s*true/);
-    assert.match(layout, /visibleSidebarDomains/);
+    assert.match(layout, /visibleSidebarGroups/);
     assert.match(navigation, /access:\s*'classificationReview'/);
     assert.match(navigation, /path:\s*APP_PATHS\.classificationReview/);
     assert.match(layout, /class="header-user-label"/);

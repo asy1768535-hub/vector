@@ -86,17 +86,28 @@ test('Dashboard: core data in allSettled, health loads in background', () => {
     // health is called outside allSettled, in background
     assert.ok(dashSource.includes('api.health'), 'calls health');
     assert.ok(dashSource.includes('healthLoading'), 'has healthLoading ref');
-    // Verify health is NOT inside the allSettled array
+    // Verify health starts after core allSettled results pass the stale-response fence.
     const allSettledIdx = dashSource.indexOf('Promise.allSettled');
-    const afterAllSettled = dashSource.slice(allSettledIdx);
-    const healthInAllSettled = afterAllSettled.slice(0, afterAllSettled.indexOf(']);')).includes('api.health');
-    assert.ok(!healthInAllSettled, 'health must be outside core allSettled');
+    const staleFenceIdx = dashSource.indexOf('if (!requestFence.isCurrent(requestToken)) return;', allSettledIdx);
+    const healthIdx = dashSource.indexOf('await api.health', allSettledIdx);
+    assert.ok(staleFenceIdx > allSettledIdx, 'core results pass stale-response fence');
+    assert.ok(healthIdx > staleFenceIdx, 'health must start after core allSettled');
+});
+
+test('Dashboard projects fatal and partial failures with real retry wiring', () => {
+    assert.ok(dashSource.includes("dashboardReadState === 'fatal'"), 'fatal state is durable');
+    assert.ok(dashSource.includes('retryFailedReads'), 'failed reads have a retry path');
+    assert.ok(dashSource.includes('failedReads.value'), 'failed resources are tracked');
+    assert.ok(dashSource.includes('requestFence.isCurrent(requestToken)'), 'stale responses are fenced');
+    assert.ok(dashSource.includes("operationsResolved ? jobStats.pending : '—'"), 'unresolved metrics are not shown as zero');
 });
 
 test('Dashboard: forceRefresh param flows to all cached calls', () => {
     assert.ok(dashSource.includes('load(forceRefresh'), 'load accepts forceRefresh');
     assert.ok(dashSource.includes('load(false)'), 'onMounted calls load(false)');
-    assert.ok(dashSource.includes('load(true)'), 'refresh button calls load(true)');
+    assert.ok(dashSource.includes('function refreshDashboard()'), 'refresh command is explicit');
+    assert.ok(dashSource.includes('return load(true)'), 'refresh command calls the real read path');
+    assert.ok(dashSource.includes('@click="refreshDashboard"'), 'refresh button uses the exposed command');
 });
 
 test('Dashboard handles 500+ library truncation', () => {

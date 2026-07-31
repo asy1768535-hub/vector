@@ -14,10 +14,12 @@ from __future__ import annotations
 import io
 import logging
 from collections.abc import Callable
+from pathlib import Path
 
 import pypdf
 
 log = logging.getLogger(__name__)
+PdfSource = bytes | Path
 
 
 class PdfExtractError(ValueError):
@@ -33,12 +35,12 @@ def _meaningful_char_count(text: str) -> int:
     return len("".join(text.split()))
 
 
-def _open_reader(data: bytes):
+def _open_reader(data: PdfSource):
     """打开 PDF（独立函数便于测试 monkeypatch）。"""
-    return pypdf.PdfReader(io.BytesIO(data))
+    return pypdf.PdfReader(data if isinstance(data, Path) else io.BytesIO(data))
 
 
-def _render_page_png(data: bytes, page_index: int, dpi: int) -> bytes:
+def _render_page_png(data: PdfSource, page_index: int, dpi: int) -> bytes:
     """用 pypdfium2 把单页渲染成 PNG 字节（懒加载，只渲染该页）。
 
     缺依赖（pypdfium2/Pillow 未装）→ PdfOcrUnavailableError；
@@ -52,7 +54,7 @@ def _render_page_png(data: bytes, page_index: int, dpi: int) -> bytes:
         ) from None
 
     try:
-        pdf = pdfium.PdfDocument(data)
+        pdf = pdfium.PdfDocument(str(data) if isinstance(data, Path) else data)
         try:
             page = pdf[page_index]
             bitmap = page.render(scale=dpi / 72.0)
@@ -72,7 +74,7 @@ def _render_page_png(data: bytes, page_index: int, dpi: int) -> bytes:
 
 
 def _extract_pdf_parts(
-    data: bytes,
+    data: PdfSource,
     *,
     ocr_enabled: bool,
     ocr: Callable[[bytes], str] | None,
@@ -133,7 +135,7 @@ def _extract_pdf_parts(
 
 
 def extract_pdf_text(
-    data: bytes,
+    data: PdfSource,
     *,
     ocr_enabled: bool,
     ocr: Callable[[bytes], str] | None,
@@ -158,7 +160,7 @@ def extract_pdf_text(
 
 
 def build_pdf_source(
-    data: bytes,
+    data: PdfSource,
     *,
     chunk_size: int,
     chunk_overlap: int,

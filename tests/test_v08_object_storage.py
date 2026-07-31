@@ -984,6 +984,7 @@ def test_structured_batch_import_rolls_back_only_the_failed_storage_item(
                 file=upload,
                 external_id=None,
                 replace_document_id=None,
+                graph_extraction_requested=False,
                 lib=library,
                 user=user,
                 db=db,

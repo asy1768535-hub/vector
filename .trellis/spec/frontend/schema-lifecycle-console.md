@@ -6,7 +6,8 @@
 
 Use this contract when changing `/knowledge-governance/schema` (legacy
 `/schema-lifecycle`), its menu access, strict API
-clients, version routing, draft forms, validation, impact, clone, or activation.
+clients, version routing, draft forms, validation, impact, clone, activation,
+draft deletion, or active-version disable.
 This is a management workspace; Documents and Knowledge Catalog remain primary
 product entry points.
 
@@ -53,6 +54,10 @@ live in `schema_lifecycle_ui.js`.
   retrieval scope.
 - Activation requires a confirmation naming the exact version and stating that
   historical graph knowledge and Publications remain on their old versions.
+- Draft versions expose a delete command with exact-version confirmation. After
+  success the hidden version is removed from the list and the next version is
+  selected. Active versions expose a disable command that states historical
+  graph knowledge and Publications remain bound to that version.
 - Do not render arbitrary metadata, raw errors, Schema provider payloads,
   prompts, source content, credentials, storage locators, or `v-html`.
 - At `<=899px` the workspace stacks. At `<=520px` controls wrap, tables scroll
@@ -69,7 +74,8 @@ live in `schema_lifecycle_ui.js`.
 | `409` | Close unsafe UI, clear previews, reload server truth, never resubmit |
 | `422` | Fixed invalid-command state |
 | Malformed or mismatched response identity | Discard payload and show fixed malformed state |
-| Active or disabled version selected | Inspection only; no edit/validate/impact activation controls |
+| Active version selected | Inspection plus clone and disable; no draft edit controls |
+| Disabled version selected | Inspection only; no mutation controls |
 | Request completes after scope change | Ignore response without changing current UI |
 
 ### 5. Good / Base / Bad Cases
@@ -79,6 +85,8 @@ live in `schema_lifecycle_ui.js`.
   impact, confirms activation, and sees the old version disabled.
 - Good: after clone, the URL and detail both point to the returned draft even
   when the prior active version was selected.
+- Good: deleting a draft selects the next visible version; disabling an active
+  version leaves it visible with the disabled status.
 - Base: an active version is readable and offers clone; impact explains that a
   draft is required.
 - Bad: changing the URL before refreshing versions, accepting children from

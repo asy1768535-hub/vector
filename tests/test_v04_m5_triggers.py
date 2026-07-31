@@ -14,6 +14,7 @@ from app.models.library import Library
 from app.services.graph_extraction_triggers import (
     compensate_ready_graph_extractions,
     enqueue_ready_revision_graph_extraction,
+    graph_extraction_upload_configuration,
 )
 from app.workers import embedder
 
@@ -37,6 +38,14 @@ class _Rows:
 
     def all(self):
         return list(self.rows)
+
+
+class _Scalar:
+    def __init__(self, value):
+        self.value = value
+
+    def scalar_one_or_none(self):
+        return self.value
 
 
 class TriggerSession:
@@ -142,7 +151,89 @@ def test_ready_revision_trigger_uses_production_creator_without_provider_call(mo
     assert result is expected_job
     assert create.await_args.kwargs["trigger_type"] == "revision_published"
     assert create.await_args.kwargs["execution_mode"] == "production"
+    assert create.await_args.kwargs["build_mode"] == "standard"
     provider.assert_not_awaited()
+
+
+def test_upload_requested_trigger_bypasses_only_the_global_auto_switch(monkeypatch):
+    monkeypatch.setattr(settings, "graph_extraction_enabled", True)
+    monkeypatch.setattr(settings, "graph_extraction_auto_trigger_enabled", False)
+    monkeypatch.setattr(settings, "graph_extraction_api_key", SecretStr("test-key"))
+    library, document, revision = _scope()
+    session = TriggerSession(
+        objects={
+            (Library, LIB_ID): library,
+            (Document, DOC_ID): document,
+            (DocumentRevision, REV_ID): revision,
+        }
+    )
+    expected_job = SimpleNamespace(id=uuid.uuid4())
+    with patch(
+        "app.services.graph_extraction_triggers.create_graph_extraction_job",
+        new=AsyncMock(return_value=expected_job),
+    ) as create:
+        result = asyncio.run(
+            enqueue_ready_revision_graph_extraction(
+                library_id=LIB_ID,
+                document_id=DOC_ID,
+                revision_id=REV_ID,
+                force=True,
+                session_factory=TriggerFactory(session),
+            )
+        )
+
+    assert result is expected_job
+    create.assert_awaited_once()
+
+
+def test_upload_configuration_requires_runtime_library_security_and_ontology(monkeypatch):
+    monkeypatch.setattr(settings, "graph_extraction_enabled", True)
+    monkeypatch.setattr(settings, "graph_extraction_api_key", SecretStr("test-key"))
+    library = SimpleNamespace(
+        id=LIB_ID,
+        graph_extraction_enabled=True,
+        external_llm_enabled=True,
+        graph_extraction_allowed_security_levels=["internal"],
+    )
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_Scalar(uuid.uuid4()))
+
+    result = asyncio.run(graph_extraction_upload_configuration(db, library))
+
+    assert result == {
+        "available": True,
+        "default_requested": True,
+        "default_build_mode": "standard",
+        "allowed_security_levels": ["internal"],
+        "reasons": [],
+    }
+
+
+def test_upload_configuration_reports_all_blocking_reasons(monkeypatch):
+    monkeypatch.setattr(settings, "graph_extraction_enabled", False)
+    monkeypatch.setattr(settings, "graph_extraction_api_key", SecretStr(""))
+    library = SimpleNamespace(
+        id=LIB_ID,
+        graph_extraction_enabled=False,
+        external_llm_enabled=False,
+        graph_extraction_allowed_security_levels=[],
+    )
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_Scalar(None))
+
+    result = asyncio.run(graph_extraction_upload_configuration(db, library))
+
+    assert result["available"] is False
+    assert result["default_requested"] is False
+    assert result["allowed_security_levels"] == []
+    assert result["reasons"] == [
+        "runtime_disabled",
+        "provider_unconfigured",
+        "library_disabled",
+        "external_model_disabled",
+        "security_levels_missing",
+        "active_ontology_missing",
+    ]
 
 
 def test_compensation_is_bounded_to_current_ready_revision_candidates(monkeypatch):
@@ -237,6 +328,7 @@ def test_publication_commit_survives_auto_trigger_failure(monkeypatch):
         chunking_strategy="fixed",
         chunking_strategy_version="v1",
         status="processing",
+        parser_config={"graph_extraction_requested": True},
     )
     embedding_job = ExpiringJob()
     order = []
@@ -272,7 +364,7 @@ def test_publication_commit_survives_auto_trigger_failure(monkeypatch):
         patch(
             "app.services.graph_extraction_triggers.enqueue_ready_revision_graph_extraction",
             new=AsyncMock(side_effect=trigger),
-        ),
+        ) as graph_trigger,
         patch(
             "app.services.knowledge_artifact_jobs.enqueue_ready_revision_artifacts",
             new=AsyncMock(side_effect=artifact_trigger),
@@ -293,3 +385,4 @@ def test_publication_commit_survives_auto_trigger_failure(monkeypatch):
         "artifact_trigger_attempt",
     ]
     db.commit.assert_awaited_once()
+    assert graph_trigger.await_args.kwargs["force"] is True

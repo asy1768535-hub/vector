@@ -99,11 +99,25 @@ async def create_pending_attempt(
     claim_token: uuid.UUID,
     request_payload_hash: str,
     max_attempts: int,
+    batch_request_id: uuid.UUID | None = None,
+    batch_key: str | None = None,
+    batch_ordinal: int | None = None,
 ) -> ExtractionRawOutputAttempt:
     if not _SHA256.fullmatch(request_payload_hash):
         raise ValueError("request_payload_hash must be a lowercase SHA-256 hex digest")
     if isinstance(max_attempts, bool) or not isinstance(max_attempts, int) or max_attempts < 1:
         raise ValueError("max_attempts must be a positive integer")
+    batch_values = (batch_request_id, batch_key, batch_ordinal)
+    if any(value is not None for value in batch_values) != all(
+        value is not None for value in batch_values
+    ):
+        raise ValueError("batch membership fields must be provided together")
+    if batch_key is not None and not re.fullmatch(r"u[0-7]", batch_key):
+        raise ValueError("batch_key must be u0 through u7")
+    if batch_ordinal is not None and (
+        isinstance(batch_ordinal, bool) or not 0 <= batch_ordinal <= 7
+    ):
+        raise ValueError("batch_ordinal must be within 0..7")
 
     async with db.begin():
         unit_result = await db.execute(
@@ -147,6 +161,9 @@ async def create_pending_attempt(
             request_status="pending",
             parse_status=None,
             request_payload_hash=request_payload_hash,
+            batch_request_id=batch_request_id,
+            batch_key=batch_key,
+            batch_ordinal=batch_ordinal,
         )
         db.add(attempt)
         unit.model_attempt_count += 1

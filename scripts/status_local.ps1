@@ -64,6 +64,7 @@ Write-Host ""
 
 Write-Host "--- Project processes ---" -ForegroundColor White
 $apiAlive = Test-PidAlive (Join-Path $pidDir "api.pid") "API"
+$importAlive = Test-PidAlive (Join-Path $pidDir "importer.pid") "Import Worker"
 $embedAlive = Test-PidAlive (Join-Path $pidDir "embedder.pid") "Embedder Worker"
 $cleanAlive = Test-PidAlive (Join-Path $pidDir "cleanup.pid") "Cleanup Worker"
 if ($graphExtractionEnabled) {

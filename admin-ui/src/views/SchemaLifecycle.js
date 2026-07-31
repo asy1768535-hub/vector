@@ -18,6 +18,7 @@ import {
     schemaStatusLabel,
     schemaStatusTag,
     schemaValidationMatches,
+    schemaVersionDeletionMatches,
     schemaVersionDetailMatches,
     schemaVersionListMatches,
 } from '../schema_lifecycle_ui.js';
@@ -385,6 +386,77 @@ export default {
             ), 'Schema 版本已激活');
         }
 
+        async function deleteDraft() {
+            const version = detail.data;
+            if (!version || version.status !== 'draft' || mutation.loading) return;
+            try {
+                await ElMessageBox.confirm(
+                    `确认删除草稿 ${version.version_key} v${version.version_no}？删除后无法恢复。`,
+                    '删除 Schema 草稿',
+                    { confirmButtonText: '确认删除', cancelButtonText: '取消', type: 'warning' },
+                );
+            } catch { return; }
+
+            const identity = {
+                libraryId: versions.libraryId,
+                slug: scope.librarySlug,
+                versionId: scope.versionId,
+            };
+            const token = ++mutationRequestSeq;
+            Object.assign(mutation, { loading: true, kind: 'delete', error: '' });
+            try {
+                const response = await api.deleteSchemaDraft(identity.slug, identity.versionId, {
+                    expected_version_state_hash: version.state_hash,
+                    confirmation: 'delete_schema_draft',
+                    idempotency_key: schemaIntentKey('schema-delete-draft'),
+                });
+                if (token !== mutationRequestSeq
+                    || scope.librarySlug !== identity.slug
+                    || scope.versionId !== identity.versionId) return;
+                if (!schemaVersionDeletionMatches(response, identity)) {
+                    mutation.error = schemaErrorMessage('malformed');
+                    return;
+                }
+                detailRequestSeq += 1;
+                validationRequestSeq += 1;
+                impactRequestSeq += 1;
+                scope.versionId = '';
+                detail.data = null;
+                validation.data = null;
+                impact.data = null;
+                ElMessage.success('Schema 草稿已删除');
+                await loadVersions();
+            } catch (error) {
+                if (token !== mutationRequestSeq) return;
+                const errorKind = schemaErrorKind(error);
+                mutation.error = schemaErrorMessage(errorKind);
+                if (errorKind === 'conflict') await loadVersions();
+            } finally {
+                if (token === mutationRequestSeq) Object.assign(mutation, { loading: false, kind: '' });
+            }
+        }
+
+        async function disableActiveSchema() {
+            const version = detail.data;
+            if (!version || version.status !== 'active') return;
+            try {
+                await ElMessageBox.confirm(
+                    `确认停用 ${version.version_key} v${version.version_no}？历史图谱和 Publication 会保留，但该版本不再作为当前可用 Schema。`,
+                    '停用 Schema',
+                    { confirmButtonText: '确认停用', cancelButtonText: '取消', type: 'warning' },
+                );
+            } catch { return; }
+            await runMutation('disable-version', () => api.disableSchemaVersion(
+                scope.librarySlug,
+                scope.versionId,
+                {
+                    expected_version_state_hash: version.state_hash,
+                    confirmation: 'disable_schema_version',
+                    idempotency_key: schemaIntentKey('schema-disable-version'),
+                },
+            ), 'Schema 已停用');
+        }
+
         function resetDialog(kind, mode, item = null) {
             Object.assign(dialog, {
                 open: true,
@@ -583,6 +655,8 @@ export default {
             loadImpact,
             cloneActive,
             activateDraft,
+            deleteDraft,
+            disableActiveSchema,
             resetDialog,
             submitDialog,
             disableItem,
@@ -655,12 +729,20 @@ export default {
                            :disabled="mutation.loading" @click="cloneActive">
                   <local-icon icon="mdi:content-copy"></local-icon>克隆草稿
                 </el-button>
+                <el-button v-if="detail.data.status === 'active'" type="danger" plain
+                           :loading="mutation.kind === 'disable-version'" @click="disableActiveSchema">
+                  <local-icon icon="mdi:archive-arrow-down-outline"></local-icon>停用 Schema
+                </el-button>
                 <el-button v-if="canEdit" :loading="validation.loading" @click="runValidation">
                   <local-icon icon="mdi:certificate-outline"></local-icon>校验
                 </el-button>
                 <el-button v-if="canEdit" type="primary"
                            :loading="mutation.kind === 'activate'" @click="activateDraft">
                   <local-icon icon="mdi:publish"></local-icon>激活
+                </el-button>
+                <el-button v-if="canEdit" type="danger" plain
+                           :loading="mutation.kind === 'delete'" @click="deleteDraft">
+                  <local-icon icon="mdi:trash-can-outline"></local-icon>删除草稿
                 </el-button>
               </div>
             </div>

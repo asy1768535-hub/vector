@@ -268,7 +268,7 @@ test('wires a read-gated Catalog route inside the knowledge asset domain', () =>
     assert.match(app, /effectivePerm:\s*'read'/);
     assert.match(menu, /catalog:\s*acts\.has\('read'\)/);
     assert.match(app, /canAccessEffectiveRoute/);
-    assert.match(layout, /visibleSidebarDomains/);
+    assert.match(layout, /visibleSidebarGroups/);
     assert.match(navigation, /knowledgeAssets/);
     assert.match(navigation, /label:\s*'知识目录'/);
     assert.match(navigation, /path:\s*APP_PATHS\.catalog/);

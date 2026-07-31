@@ -37,6 +37,7 @@ export function menuAccess(user, permissions, organizations = []) {
         retrievalTest: organizationAdmin,
         classificationReview,
         schemaLifecycle: classificationReview,
+        libraryConfiguration: isSuper,
         apiKeys: true,            // 始终显示
     };
     return {
@@ -49,7 +50,7 @@ export function menuAccess(user, permissions, organizations = []) {
             || access.classificationReview
         ),
         usersPermissions: isSuper,
-        libraries: isSuper,
+        libraries: isSuper || access.schemaLifecycle,
         operationsCenter: isSuper,
         auditCenter: isSuper,
         account: !!user,

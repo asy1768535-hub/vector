@@ -14,6 +14,7 @@ from app.services.graph_extraction_materializer import (
     GraphExtractionMaterializationError,
     GraphExtractionMaterializationResult,
     _entity_candidate_eligible,
+    _eligible_matched_entity,
     _materialize_job_transaction,
     _relation_candidate_eligible,
     materialize_graph_extraction_job,
@@ -40,6 +41,9 @@ class _Result:
 
     def all(self):
         return list(self.rows)
+
+    def one_or_none(self):
+        return self.rows[0] if self.rows else None
 
 
 class FakeDB:
@@ -128,7 +132,46 @@ def test_materialization_filters_are_fail_closed():
     assert not _relation_candidate_eligible(relation, 0.85)
 
 
-def test_materializer_creates_only_draft_facts_and_active_support_rows():
+def test_materializer_reuses_entity_created_after_candidate_matching():
+    candidate = _entity_candidate(key="person")
+    existing = Entity(
+        id=uuid.uuid4(),
+        library_id=LIB_ID,
+        ontology_version_id=ONTOLOGY_ID,
+        entity_type_id=PERSON_TYPE_ID,
+        canonical_name=candidate.canonical_name,
+        normalized_name=candidate.normalized_name,
+        status="draft",
+        source_type="extracted",
+    )
+    db = FakeDB(results=[_Result([existing])])
+    job = SimpleNamespace(
+        library_id=LIB_ID,
+        ontology_version_id=ONTOLOGY_ID,
+    )
+
+    matched = asyncio.run(
+        _eligible_matched_entity(
+            db,
+            candidate=candidate,
+            job=job,
+            expected_entity_type_id=PERSON_TYPE_ID,
+        )
+    )
+
+    assert matched is existing
+
+
+@pytest.mark.parametrize(
+    ("initial_status", "counts", "expected_status", "expected_error"),
+    [
+        ("processing", {}, "succeeded", None),
+        ("partially_succeeded", {"failed": 1}, "partially_succeeded", "unit_failures"),
+    ],
+)
+def test_materializer_creates_only_draft_facts_and_active_support_rows(
+    initial_status, counts, expected_status, expected_error
+):
     matched_id = uuid.uuid4()
     person = _entity_candidate(key="person")
     team = _entity_candidate(key="team", matched_entity_id=matched_id)
@@ -146,8 +189,9 @@ def test_materializer_creates_only_draft_facts_and_active_support_rows():
         id=JOB_ID,
         library_id=LIB_ID,
         ontology_version_id=ONTOLOGY_ID,
-        status="processing",
+        status=initial_status,
         current_stage="materializing",
+        counts=counts,
         statistics={},
         error_code=None,
         error_message=None,
@@ -195,6 +239,7 @@ def test_materializer_creates_only_draft_facts_and_active_support_rows():
             _Result([relation, evidence_group]),
             _Result([person_evidence, team_evidence]),
             _Result([relation_evidence]),
+            _Result(),
             _Result(),
             _Result(),
             _Result(),
@@ -261,7 +306,8 @@ def test_materializer_creates_only_draft_facts_and_active_support_rows():
     assert team.status == "materialized"
     assert relation.status == "materialized"
     assert evidence_group.status == "validated"
-    assert job.status == "succeeded"
+    assert job.status == expected_status
+    assert job.error_code == expected_error
 
 
 class _Transaction:

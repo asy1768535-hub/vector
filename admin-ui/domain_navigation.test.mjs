@@ -11,7 +11,9 @@ import {
     domainTabs,
     firstDomainPath,
     legacyRedirectTarget,
+    sidebarItems,
     visibleSidebarDomains,
+    visibleSidebarGroups,
 } from './src/domain_navigation.js';
 
 const READER_ACCESS = {
@@ -27,10 +29,23 @@ const READER_ACCESS = {
     apiKeys: true,
 };
 
-test('domain tabs and sidebar follow fine-grained access', () => {
+const SCHEMA_ADMIN_ACCESS = {
+    libraries: true,
+    libraryConfiguration: false,
+    schemaLifecycle: true,
+};
+
+test('sidebar leaf pages follow fine-grained access', () => {
     assert.deepEqual(domainTabs('knowledgeUse', READER_ACCESS).map((item) => item.key), [
         'chat',
         'search',
+    ]);
+    assert.deepEqual(sidebarItems('knowledgeUse', {
+        ...READER_ACCESS,
+        retrievalTest: true,
+    }).map((item) => item.label), [
+        '智能问答',
+        '检索诊断',
     ]);
     assert.deepEqual(domainTabs('knowledgeAssets', READER_ACCESS).map((item) => item.key), [
         'documents',
@@ -44,10 +59,69 @@ test('domain tabs and sidebar follow fine-grained access', () => {
         'knowledgeAssets',
         'knowledgeGovernance',
     ]);
+    assert.deepEqual(visibleSidebarGroups(READER_ACCESS).map((item) => item.key), [
+        'knowledgeUse',
+        'knowledgeAssets',
+        'knowledgeGovernance',
+        'account',
+    ]);
+    assert.deepEqual(
+        visibleSidebarGroups(READER_ACCESS).flatMap((group) => group.items.map((item) => item.path)),
+        [
+            APP_PATHS.chat,
+            APP_PATHS.search,
+            APP_PATHS.documents,
+            APP_PATHS.knowledgeGraph,
+            APP_PATHS.profile,
+            APP_PATHS.apiKeys,
+        ],
+    );
+});
+
+test('documents and catalog share one knowledge content sidebar entry', () => {
+    const items = sidebarItems('knowledgeAssets', READER_ACCESS);
+    assert.deepEqual(items.map((item) => item.label), ['知识内容']);
+    assert.equal(items[0].path, APP_PATHS.documents);
+    assert.deepEqual(items[0].activePaths, [APP_PATHS.documents, APP_PATHS.catalog]);
+
+    const documentsOnly = sidebarItems('knowledgeAssets', {
+        documents: true,
+        catalog: false,
+    });
+    assert.equal(documentsOnly[0].path, APP_PATHS.documents);
+    assert.deepEqual(documentsOnly[0].activePaths, [APP_PATHS.documents]);
+});
+
+test('Schema management is shown in the administrator Library section', () => {
+    assert.deepEqual(domainTabs('knowledgeGovernance', {
+        knowledgeGraph: true,
+        schemaLifecycle: true,
+        classificationReview: true,
+    }).map((item) => item.key), [
+        'knowledgeGraph',
+        'classificationReview',
+    ]);
+    assert.deepEqual(domainTabs('libraries', SCHEMA_ADMIN_ACCESS).map((item) => item.key), [
+        'schemaLifecycle',
+    ]);
+    const groups = visibleSidebarGroups(SCHEMA_ADMIN_ACCESS);
+    assert.deepEqual(groups.map((item) => item.key), ['libraries']);
+    assert.equal(groups[0].section, 'admin');
+    assert.equal(groups[0].items[0].path, APP_PATHS.schemaLifecycle);
+
+    const app = readFileSync(new URL('./src/app.js', import.meta.url), 'utf8');
+    assert.match(
+        app,
+        /path: 'schema',[\s\S]*?domain: 'libraries',[\s\S]*?domainTitle: '库管理'/,
+    );
 });
 
 test('default routes and domain roots choose the first accessible leaf', () => {
     assert.equal(defaultRouteForAccess(READER_ACCESS), APP_PATHS.chat);
+    assert.equal(defaultRouteForAccess({
+        ...READER_ACCESS,
+        operationsCenter: true,
+    }), APP_PATHS.chat);
     assert.equal(firstDomainPath('knowledgeAssets', {
         knowledgeAssets: true,
         import: true,
@@ -61,6 +135,17 @@ test('default routes and domain roots choose the first accessible leaf', () => {
         retrievalTest: true,
         account: true,
     }), APP_PATHS.retrievalTest);
+    assert.deepEqual(sidebarItems('knowledgeUse', {
+        knowledgeUse: true,
+        retrievalTest: true,
+    }), [{
+        key: 'searchDiagnostics',
+        label: '检索诊断',
+        path: APP_PATHS.retrievalTest,
+        activePaths: [APP_PATHS.search, APP_PATHS.retrievalTest],
+        access: 'searchDiagnostics',
+        icon: 'sidebar:search',
+    }]);
     assert.equal(defaultRouteForAccess({ account: true, apiKeys: true }), APP_PATHS.profile);
 });
 
@@ -101,6 +186,7 @@ test('nine page domains and account contracts remain represented', () => {
         'knowledgeAssets',
         'knowledgeGovernance',
         'usersPermissions',
+        'libraries',
         'operationsCenter',
         'auditCenter',
         'account',
@@ -114,9 +200,15 @@ test('nine page domains and account contracts remain represented', () => {
 
     const profile = readFileSync(new URL('./src/views/AccountProfile.js', import.meta.url), 'utf8');
     const layout = readFileSync(new URL('./src/views/Layout.js', import.meta.url), 'utf8');
+    const workspace = readFileSync(new URL('./src/views/DomainWorkspace.js', import.meta.url), 'utf8');
     assert.match(profile, /api\.updateMe/);
     assert.match(profile, /api\.updateMe\(\{\s*password:/);
     assert.match(profile, /clearAuthState/);
     assert.match(layout, /command="account"/);
     assert.match(layout, /router\.push\('\/account\/profile'\)/);
+    assert.match(layout, /visibleSidebarGroups/);
+    assert.match(layout, /sidebarEntries/);
+    assert.match(layout, /v-for="entry in sidebarEntries"/);
+    assert.doesNotMatch(layout, /el-sub-menu/);
+    assert.doesNotMatch(workspace, /el-tabs|domainTabs|domain-workspace-tabs/);
 });

@@ -115,6 +115,14 @@ test('uses illustration-empty-wrapper for empty table', () => {
     assert.ok(source.includes('illustration-empty-wrapper'), 'empty wrapper used');
 });
 
+test('read failures do not fall through to the successful empty state', () => {
+    assert.ok(source.includes("usersReadState === 'fatal'"), 'fatal state is durable');
+    assert.ok(source.includes("usersReadState === 'empty'"), 'successful empty state is explicit');
+    assert.ok(source.includes("usersReadState === 'refresh-error'"), 'refresh failure preserves prior data');
+    assert.ok(source.includes('usersRequestFence.isCurrent(requestToken)'), 'stale responses are fenced');
+    assert.ok(source.includes('@click="loadUsers(true)">重试'), 'retry invokes the real read path');
+});
+
 test('CSS defines users-* classes', () => {
     for (const c of ['users-workspace', 'users-header', 'users-toolbar', 'users-table-card', 'users-avatar', 'users-status-dot']) {
         const e = c.replace(/-/g, '\\-');

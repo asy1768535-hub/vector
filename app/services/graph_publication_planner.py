@@ -555,9 +555,6 @@ async def _eligible_relation_item(
     if relation.status not in PUBLISHABLE_FACT_STATUSES:
         _blocking_add(blocked, f"relation_status_{relation.status}")
         return None
-    if relation.review_status not in {"not_required", "approved"}:
-        _blocking_add(blocked, "relation_review_blocked")
-        return None
     source_entity = published_entities.get(relation.source_entity_id)
     target_entity = published_entities.get(relation.target_entity_id)
     if source_entity is None or target_entity is None:
@@ -588,7 +585,10 @@ async def _eligible_relation_item(
     if not shape.valid or not shape.schema_boundary_clear:
         _blocking_add(blocked, "relation_schema_invalid")
         return None
-    if shape.requires_review and relation.review_status != "approved":
+    allowed_review_statuses = (
+        {"approved"} if shape.requires_review else {None, "not_required", "approved"}
+    )
+    if relation.review_status not in allowed_review_statuses:
         _blocking_add(blocked, "relation_review_blocked")
         return None
     supports = []

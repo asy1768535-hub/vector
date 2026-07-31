@@ -313,6 +313,10 @@ async def _publish_revision_after_qdrant(
         await db.commit()
         return False
 
+    graph_extraction_requested = bool(
+        (revision.parser_config or {}).get("graph_extraction_requested")
+    )
+
     old_current_revision_id = doc.current_revision_id
     await db.execute(
         update(DocumentRevision)
@@ -414,6 +418,7 @@ async def _publish_revision_after_qdrant(
             library_id=library_id,
             document_id=document_id,
             revision_id=revision_id,
+            force=graph_extraction_requested,
         )
     except Exception:  # noqa: BLE001
         log.exception(

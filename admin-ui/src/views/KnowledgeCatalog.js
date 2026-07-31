@@ -37,6 +37,7 @@ import {
 import { dataEmpty, serviceError } from '../illustrations.js';
 import { canManageLibrary, readableLibraries, resolveSelectedSlug } from '../menu_access.js';
 import { store } from '../store.js';
+import KnowledgeAssetViewSwitch from '../components/KnowledgeAssetViewSwitch.js';
 
 const EMPTY_FILTERS = {
     title: '',
@@ -66,6 +67,7 @@ function fixedProcessingErrorMessage(kind) {
 }
 
 export default {
+    components: { KnowledgeAssetViewSwitch },
     setup() {
         const route = useRoute();
         const router = useRouter();
@@ -552,6 +554,7 @@ export default {
     },
     template: `
     <div class="catalog-workspace">
+      <knowledge-asset-view-switch :library="selectedSlug || ''" />
       <header class="catalog-page-header">
         <div class="catalog-page-title">
           <el-button v-if="showingDetail" class="catalog-back-button" text title="返回目录"

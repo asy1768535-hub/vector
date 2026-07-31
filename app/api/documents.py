@@ -26,6 +26,7 @@ from app.models.chunk import Chunk
 from app.models.document import Document
 from app.models.document_file import DocumentFile
 from app.models.document_source import DocumentSource
+from app.models.document_revision import DocumentRevision
 from app.models.embedding_job import EmbeddingJob
 from app.models.library import Library
 from app.models.user import User
@@ -277,6 +278,27 @@ def _uuid_or_none(value) -> uuid.UUID | None:
         except ValueError:
             return None
     return None
+
+
+async def _persist_graph_extraction_request(db: AsyncSession, result: dict) -> bool:
+    """Bind a per-upload extraction request to the revision the embed job will publish."""
+    if result.get("operation") == "unchanged":
+        return False
+    job_id = _uuid_or_none(result.get("job_id"))
+    if job_id is None:
+        return False
+    job = await db.get(EmbeddingJob, job_id)
+    revision_id = _uuid_or_none(getattr(job, "document_revision_id", None))
+    if revision_id is None:
+        return False
+    revision = await db.get(DocumentRevision, revision_id)
+    if revision is None:
+        return False
+    revision.parser_config = {
+        **(revision.parser_config or {}),
+        "graph_extraction_requested": True,
+    }
+    return True
 
 
 def _str_or_none(value) -> str | None:
@@ -645,7 +667,8 @@ async def list_documents(
     status_filter: Optional[str] = Query(default=None, alias="status",
                                          pattern="^(pending|processing|ready|failed|deleted)$"),
     external_id: Optional[str] = Query(default=None),
-    limit: int = Query(default=50, ge=1, le=500),
+    folder_id: uuid.UUID | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
     lib: Library = Depends(require_lib("read")),
     db: AsyncSession = Depends(get_db),
@@ -661,6 +684,8 @@ async def list_documents(
         stmt = stmt.where(Document.status == status_filter)
     if external_id:
         stmt = stmt.where(Document.external_id == external_id)
+    if folder_id is not None:
+        stmt = stmt.where(Document.folder_id == folder_id)
     rows = await db.execute(stmt)
     return list(rows.scalars().all())
 
@@ -1021,6 +1046,7 @@ async def import_file(
     replace_document_id: Optional[uuid.UUID] = Form(default=None),
     visibility_scope: Annotated[Optional[str], Form(max_length=64)] = None,
     security_level: Annotated[Optional[str], Form(max_length=64)] = None,
+    graph_extraction_requested: bool = Form(default=False),
     lib: Library = Depends(require_lib("insert")),
     user: User = Depends(current_active_user),
     db: AsyncSession = Depends(get_db),
@@ -1244,6 +1270,20 @@ async def import_file(
     management = {}
     normalized_visibility = _normalize_import_scope(visibility_scope, "visibility_scope")
     normalized_security = _normalize_import_scope(security_level, "security_level")
+    if graph_extraction_requested:
+        from app.services.graph_extraction_triggers import graph_extraction_upload_configuration
+
+        graph_config = await graph_extraction_upload_configuration(db, lib)
+        if not graph_config["available"]:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                {"code": "graph_extraction_unavailable", "reasons": graph_config["reasons"]},
+            )
+        if normalized_security not in graph_config["allowed_security_levels"]:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                {"code": "graph_extraction_security_level_not_allowed"},
+            )
     if normalized_visibility is not None:
         management["visibility_scope"] = normalized_visibility
     if normalized_security is not None:
@@ -1283,6 +1323,8 @@ async def import_file(
             raise HTTPException(http_status, "document file storage failed") from None
         except ValueError as exc:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+        if graph_extraction_requested:
+            await _persist_graph_extraction_request(db, result)
         await db.commit()
         return {
             "status": "success", "imported_count": 1, "failed_count": 0,
@@ -1346,6 +1388,10 @@ async def import_file(
             status.HTTP_400_BAD_REQUEST,
             {"message": "所有文档摄入均失败", "errors": errors},
         )
+
+    if graph_extraction_requested:
+        for result in ingested:
+            await _persist_graph_extraction_request(db, result)
 
     await db.commit()
     return {
