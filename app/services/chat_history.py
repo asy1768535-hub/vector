@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import func
 
 from app.models.chat_history import ChatConversation, ChatMessage, ChatMessageSource
-from app.schemas.chat import ChatLogRow, ChatSource
+from app.schemas.chat import ChatGraphEvidence, ChatLogRow, ChatSource
 
 _TITLE_MAX = 28
 
@@ -113,11 +113,15 @@ async def save_assistant_message(
     error_message: str | None,
     parent_message_id: uuid.UUID | None,
     sources: list[ChatSource],
+    graph_augmented: bool = False,
+    graph_evidence: list[ChatGraphEvidence] | None = None,
 ) -> ChatMessage:
     msg = ChatMessage(
         conversation_id=conversation_id, role="assistant", content=content,
         rewritten_query=rewritten_query, latency_ms=latency_ms, status=status,
         error_message=error_message, parent_message_id=parent_message_id,
+        graph_augmented=graph_augmented,
+        graph_evidence=[row.model_dump(mode="json") for row in graph_evidence or []],
     )
     db.add(msg)
     await db.flush()
@@ -163,6 +167,10 @@ def src_to_schema(s: ChatMessageSource) -> ChatSource:
         title=s.title or "", document_id=s.document_id, chunk_id=s.chunk_id,
         score=float(s.score or 0.0), content=s.content or "",
     )
+
+
+def graph_evidence_to_schema(rows: list[dict] | None) -> list[ChatGraphEvidence]:
+    return [ChatGraphEvidence.model_validate(row) for row in rows] if isinstance(rows, list) else []
 
 
 async def list_logs(
@@ -214,5 +222,7 @@ async def list_logs(
             answer=m.content, rewritten_query=m.rewritten_query, status=m.status,
             error_message=m.error_message, latency_ms=m.latency_ms, created_at=m.created_at,
             sources=[src_to_schema(s) for s in src_map.get(m.id, [])],
+            graph_augmented=m.graph_augmented is True,
+            graph_evidence=graph_evidence_to_schema(m.graph_evidence),
         ))
     return rows

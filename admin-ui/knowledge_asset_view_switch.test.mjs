@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
@@ -8,56 +8,59 @@ import {
     sidebarItems,
 } from './src/domain_navigation.js';
 
-const switchSource = readFileSync(
-    new URL('./src/components/KnowledgeAssetViewSwitch.js', import.meta.url),
+const catalogSource = readFileSync(
+    new URL('./src/views/KnowledgeCatalog.js', import.meta.url),
     'utf8',
 );
 const documentsSource = readFileSync(
     new URL('./src/views/Documents.js', import.meta.url),
     'utf8',
 );
-const catalogSource = readFileSync(
-    new URL('./src/views/KnowledgeCatalog.js', import.meta.url),
-    'utf8',
-);
+const appSource = readFileSync(new URL('./src/app.js', import.meta.url), 'utf8');
 const css = readFileSync(new URL('./style.css', import.meta.url), 'utf8');
 
-test('knowledge asset pages share one permission-aware segmented switch', () => {
-    for (const token of [
-        'menuAccess(',
-        "label: '文档'",
-        "label: '知识目录'",
-        'domainTabTarget',
-        'aria-label="知识内容视图"',
-    ]) {
-        assert.ok(switchSource.includes(token), `missing switch token: ${token}`);
-    }
-    assert.match(documentsSource, /import KnowledgeAssetViewSwitch from/);
-    assert.match(catalogSource, /import KnowledgeAssetViewSwitch from/);
-    assert.match(documentsSource, /<knowledge-asset-view-switch :library="slug \|\| ''" \/>/);
-    assert.match(catalogSource, /<knowledge-asset-view-switch :library="selectedSlug \|\| ''" \/>/);
-    assert.match(css, /\.knowledge-asset-view-switch\s*\{/);
+test('knowledge assets no longer render a document/catalog segmented switch', () => {
+    assert.equal(
+        existsSync(new URL('./src/components/KnowledgeAssetViewSwitch.js', import.meta.url)),
+        false,
+    );
+    assert.doesNotMatch(catalogSource, /knowledge-asset-view-switch|KnowledgeAssetViewSwitch/);
+    assert.doesNotMatch(documentsSource, /knowledge-asset-view-switch|KnowledgeAssetViewSwitch/);
+    assert.doesNotMatch(css, /knowledge-asset-view-switch/);
 });
 
-test('merged sidebar entry retains both guarded routes and library context', () => {
+test('single knowledge asset entry points to Catalog and old document path redirects', () => {
     const items = sidebarItems('knowledgeAssets', {
         documents: true,
         catalog: true,
         import: true,
     });
-    assert.deepEqual(items.map((item) => item.label), ['知识内容', '导入与替换']);
-    assert.deepEqual(items[0].activePaths, [APP_PATHS.documents, APP_PATHS.catalog]);
+    assert.deepEqual(items.map((item) => item.label), ['知识资产', '导入与替换']);
+    assert.equal(items[0].path, APP_PATHS.catalog);
+    assert.deepEqual(items[0].activePaths, [APP_PATHS.catalog, APP_PATHS.documents]);
     assert.deepEqual(domainTabTarget(APP_PATHS.documents, { library: 'legal' }), {
         path: APP_PATHS.documents,
-        query: { slug: 'legal' },
-    });
-    assert.deepEqual(domainTabTarget(APP_PATHS.catalog, { slug: 'legal' }), {
-        path: APP_PATHS.catalog,
         query: { library: 'legal' },
     });
+    assert.match(appSource, /path:\s*'documents'[\s\S]*?redirect:\s*\(to\) =>/);
+    assert.match(appSource, /to\.query\.slug[\s\S]*?\{\s*library:\s*to\.query\.slug\s*\}/);
+    assert.match(appSource, /to\.query\.open[\s\S]*?\{\s*document:\s*to\.query\.open\s*\}/);
 });
 
-test('existing document and catalog paths remain stable', () => {
-    assert.equal(APP_PATHS.documents, '/knowledge-assets/documents');
-    assert.equal(APP_PATHS.catalog, '/knowledge-assets/catalog');
+test('catalog list owns document operations without a second document list request', () => {
+    for (const token of [
+        'api.listCatalogDocuments',
+        'api.libraryStats',
+        'openFileImport',
+        'openIngest',
+        'openEdit',
+        'openReplaceImport',
+        'api.ingestDocument',
+        'api.updateDocument',
+        'api.deleteDocument',
+        'filterDraft.dateRange',
+        'visibleItems',
+        'handleRowCommand',
+    ]) assert.ok(catalogSource.includes(token), `missing unified asset token ${token}`);
+    assert.doesNotMatch(catalogSource, /api\.listDocuments/);
 });

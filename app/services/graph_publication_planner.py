@@ -51,6 +51,7 @@ PUBLICATION_REUSABLE_STATUSES = ("planned", "activating", "active", "degraded")
 PUBLISHABLE_FACT_STATUSES = {GRAPH_FACT_STATUS_ACTIVE, GRAPH_FACT_STATUS_DRAFT}
 SUPPORT_TYPE_SUPPORTS = "supports"
 SUPPORT_TYPE_CONTRADICTS = "contradicts"
+_STANDALONE_ASSET_ENTITY_TYPE_KEYS: frozenset[str] = frozenset()
 
 
 class GraphPublicationPlanError(RuntimeError):
@@ -265,6 +266,17 @@ def build_publication_policy_snapshot(config: Settings = settings) -> dict[str, 
 
 def _blocking_add(blocked: dict[str, int], reason: str) -> None:
     blocked[reason] = blocked.get(reason, 0) + 1
+
+
+def _is_standalone_asset_entity(
+    entity: Entity,
+    entity_types: dict[uuid.UUID, EntityType],
+) -> bool:
+    entity_type = entity_types.get(entity.entity_type_id)
+    return (
+        entity_type is not None
+        and entity_type.key.strip().casefold() in _STANDALONE_ASSET_ENTITY_TYPE_KEYS
+    )
 
 
 async def _active_ontology(
@@ -769,7 +781,7 @@ async def build_graph_publication_snapshot(
         evidence_by_relation.setdefault(row.relation_id, []).append(row)
 
     blocked: dict[str, int] = {}
-    items: list[GraphPublicationItem] = []
+    entity_items_by_id: dict[uuid.UUID, GraphPublicationItem] = {}
     for entity in sorted(entities, key=lambda row: str(row.id)):
         if entity.status == GRAPH_FACT_STATUS_DRAFT and not include_drafts:
             _blocking_add(blocked, "entity_draft_not_included")
@@ -784,12 +796,14 @@ async def build_graph_publication_snapshot(
             blocked=blocked,
         )
         if item is not None:
-            items.append(item)
+            entity_items_by_id[entity.id] = item
     published_entities = {
         entity.id: entity
         for entity in entities
-        if any(item.entity_id == entity.id for item in items if item.item_kind == "entity")
+        if entity.id in entity_items_by_id
     }
+    relation_items: list[GraphPublicationItem] = []
+    relations_by_id = {relation.id: relation for relation in relations}
     for relation in sorted(relations, key=lambda row: str(row.id)):
         if relation.status == GRAPH_FACT_STATUS_DRAFT and not include_drafts:
             _blocking_add(blocked, "relation_draft_not_included")
@@ -806,7 +820,28 @@ async def build_graph_publication_snapshot(
             blocked=blocked,
         )
         if item is not None:
-            items.append(item)
+            relation_items.append(item)
+    relation_endpoint_entity_ids = {
+        endpoint_id
+        for item in relation_items
+        for endpoint_id in (
+            relations_by_id[item.relation_id].source_entity_id,
+            relations_by_id[item.relation_id].target_entity_id,
+        )
+    }
+    items: list[GraphPublicationItem] = []
+    for entity in sorted(entities, key=lambda row: str(row.id)):
+        item = entity_items_by_id.get(entity.id)
+        if item is None:
+            continue
+        if (
+            entity.id not in relation_endpoint_entity_ids
+            and not _is_standalone_asset_entity(entity, entity_types)
+        ):
+            _blocking_add(blocked, "orphan_entity")
+            continue
+        items.append(item)
+    items.extend(relation_items)
     if enforce_item_limit and len(items) > config.graph_publication_max_items_per_run:
         raise GraphPublicationPlanError("publication_item_limit_exceeded", "publication item limit exceeded")
 

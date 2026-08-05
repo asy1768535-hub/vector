@@ -179,7 +179,7 @@ test('statsFailed 时全局重置仍可用（不依赖不可靠数量）', () =>
     assert.ok(src.includes('!statsFailed'), 'button disabled allows statsFailed case');
     // Confirm branches on statsFailed
     assert.ok(src.includes('statsFailed.value'), 'resetFailed checks statsFailed');
-    assert.ok(src.includes('将重置全部失败向量任务'), 'confirm text without unreliable count');
+    assert.ok(src.includes('将重试系统中的全部失败向量任务'), 'confirm text without unreliable count');
 });
 
 // ── 新回归：task 2 重置范围 ──
@@ -188,7 +188,7 @@ test('重置失败任务：未选知识库使用 retryable_failed 精确数量',
 });
 
 test('重置失败任务：明确仅处理向量任务', () => {
-    assert.ok(src.includes('重置该知识库中的所有失败向量任务'), 'scoped confirm text');
+    assert.ok(src.includes('当前筛选知识库中的全部失败向量任务'), 'scoped confirm text');
 });
 
 test('模板中无 filtered.filter 调用', () => {
@@ -200,8 +200,24 @@ test('按钮禁用仅依赖 retryable_failed/statsFailed，不依赖其他筛选
     assert.ok(src.includes('!statsFailed && !stats.retryable_failed'), 'disabled only on global + stats available + no failures');
 });
 
-test('按钮数量标签仅未选知识库且 stats 可用时显示', () => {
-    assert.ok(src.includes('!filters.library_id && !statsFailed && stats.retryable_failed'), 'count badge only when global and stats not failed');
+test('批量重置移入更多操作并明确作用范围', () => {
+    assert.ok(src.includes('更多操作'));
+    assert.ok(src.includes('重试全部失败的向量任务'));
+    assert.ok(src.includes("command=\"reset-failed\""));
+});
+
+test('默认筛选和高级筛选分离，高级值不会因折叠清空', () => {
+    assert.ok(src.includes('advancedOpen'));
+    assert.ok(src.includes('v-show="advancedOpen"'));
+    assert.ok(src.includes('jobs-advanced-filters'));
+    assert.ok(src.includes('处理服务（Worker）ID'));
+});
+
+test('失败任务支持勾选并重试所选', () => {
+    assert.ok(src.includes('type="selection"'));
+    assert.ok(src.includes(':selectable="isRetrySelectable"'));
+    assert.ok(src.includes('retrySelected'));
+    assert.ok(src.includes('Promise.allSettled(rows.map((row) => api.retryJob(row.id)))'));
 });
 
 test('监控页使用持久化统一接口并自动刷新', () => {
@@ -265,6 +281,21 @@ test('graph task details expose throughput and rate-limit metrics', () => {
         'eta_seconds', 'cache_hits', 'throttled_count', 'retry_count',
         'completed_batches', 'planned_batches',
     ]) assert.ok(src.includes(token), `missing graph metric: ${token}`);
+});
+
+test('图谱任务展示版本差异和未切换提示', () => {
+    assert.ok(src.includes('publicationDiffLabel'));
+    assert.ok(src.includes('图谱变化'));
+    assert.ok(src.includes('current_graph_unchanged'));
+    assert.ok(src.includes('未验证结果不会混入问答'));
+});
+
+test('graph task details explain entity-only publication blocks and stage counts', () => {
+    for (const token of [
+        '仅有实体、暂无有效关系', 'stage_counts', 'failure_reasons',
+        '抽取数量', '校验通过', '物化数量', '发布数量',
+        'publicationFailureReasonLabel',
+    ]) assert.ok(src.includes(token), `missing graph quality token: ${token}`);
 });
 
 console.log('jobs redesign test passed');

@@ -30,6 +30,9 @@ from app.services.graph_candidate_routing import load_confidence_policy_v1
 from app.services.graph_candidate_validation import load_ontology_rule_set_v1
 
 
+_STANDALONE_ASSET_ENTITY_TYPE_KEYS: frozenset[str] = frozenset()
+
+
 class GraphExtractionMaterializationError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         self.code = code
@@ -94,6 +97,58 @@ def _valid_evidence(rows: list[Any]) -> list[Any]:
         and row.resolved_chunk_id is not None
         and row.resolved_source_span is not None
     ]
+
+
+def _append_candidate_error(candidate: Any, code: str) -> None:
+    errors = list(candidate.validation_errors or [])
+    if not any(isinstance(item, dict) and item.get("code") == code for item in errors):
+        errors.append({"code": code})
+    candidate.validation_errors = errors
+
+
+def _publishable_relation_candidates(
+    *,
+    entity_candidates: list[Any],
+    relation_candidates: list[Any],
+    entity_evidence_by_candidate: dict[uuid.UUID, list[Any]],
+    relation_evidence_by_candidate: dict[uuid.UUID, list[Any]],
+    entity_threshold: float,
+    relation_threshold: float,
+    relation_types_by_key: dict[str, Any],
+) -> list[Any]:
+    eligible_entity_ids = {
+        candidate.id
+        for candidate in entity_candidates
+        if (
+            candidate.status == "materialized"
+            and candidate.materialized_entity_id is not None
+        )
+        or (
+            _entity_candidate_eligible(candidate, entity_threshold)
+            and bool(_valid_evidence(entity_evidence_by_candidate.get(candidate.id, [])))
+        )
+    }
+    return [
+        candidate
+        for candidate in relation_candidates
+        if (
+            candidate.status == "materialized"
+            and candidate.materialized_relation_id is not None
+        )
+        or (
+            _relation_candidate_eligible(candidate, relation_threshold)
+            and bool(_valid_evidence(relation_evidence_by_candidate.get(candidate.id, [])))
+            and candidate.source_candidate_id in eligible_entity_ids
+            and candidate.target_candidate_id in eligible_entity_ids
+            and candidate.relation_type_key in relation_types_by_key
+        )
+    ]
+
+
+def _is_standalone_asset_candidate(candidate: Any) -> bool:
+    return str(candidate.entity_type_key).strip().casefold() in {
+        key.casefold() for key in _STANDALONE_ASSET_ENTITY_TYPE_KEYS
+    }
 
 
 async def _load_materialization_scope(db, *, job_id: uuid.UUID):
@@ -331,7 +386,9 @@ async def _draft_relation(
                 "relation_replay_mismatch",
                 "existing Knowledge Relation does not match its extraction key",
             )
-        if existing.status not in {"draft", "pending_review"}:
+        if existing.status == "stale":
+            existing.status = "draft"
+        elif existing.status not in {"draft", "pending_review", "active"}:
             return None, False
         return existing, False
     relation = await graph_relations.create_relation(
@@ -442,10 +499,70 @@ async def _materialize_job_transaction(
     for row in relation_evidence_result.scalars().all():
         relation_evidence_by_candidate.setdefault(row.candidate_id, []).append(row)
 
+    publishable_relations = _publishable_relation_candidates(
+        entity_candidates=entity_candidates,
+        relation_candidates=relation_candidates,
+        entity_evidence_by_candidate=entity_evidence_by_candidate,
+        relation_evidence_by_candidate=relation_evidence_by_candidate,
+        entity_threshold=policy.entity_materialization_threshold,
+        relation_threshold=policy.relation_draft_threshold,
+        relation_types_by_key=rules.relation_types_by_key,
+    )
+    entity_candidate_ids = {candidate.id for candidate in entity_candidates}
+    publishable_relations = [
+        candidate
+        for candidate in publishable_relations
+        if candidate.source_candidate_id in entity_candidate_ids
+        and candidate.target_candidate_id in entity_candidate_ids
+    ]
+    if not publishable_relations:
+        pending_entity_count = 0
+        for candidate in entity_candidates:
+            if candidate.status == "validated":
+                candidate.status = "pending_review"
+                candidate.review_reason = "entities_without_valid_relation"
+                _append_candidate_error(candidate, candidate.review_reason)
+                pending_entity_count += 1
+        counts = getattr(job, "counts", None)
+        counts = counts if isinstance(counts, dict) else {}
+        partially_succeeded = job.status == "partially_succeeded" or bool(
+            counts.get("failed", 0) or counts.get("cancelled", 0)
+        )
+        job.status = "partially_succeeded" if partially_succeeded else "succeeded"
+        job.current_stage = "finalizing"
+        job.error_code = "unit_failures" if partially_succeeded else None
+        job.error_message = None
+        job.finished_at = _utcnow()
+        statistics = dict(job.statistics or {})
+        statistics["materialization"] = {
+            "outcome": "entities_only",
+            "entity_count": 0,
+            "entity_mention_count": 0,
+            "relation_count": 0,
+            "relation_evidence_count": 0,
+            "publishable_entity_candidate_count": 0,
+            "publishable_relation_count": 0,
+            "publishable_relation_evidence_count": 0,
+            "pending_entity_candidate_count": pending_entity_count,
+            "failure_reasons": {"no_valid_relation": 1},
+        }
+        job.statistics = statistics
+        await db.flush()
+        return GraphExtractionMaterializationResult(0, 0, 0, 0)
+
     entity_count = 0
     mention_count = 0
     relation_count = 0
     relation_evidence_count = 0
+    materialized_entity_candidate_count = 0
+    publishable_relation_count = 0
+    publishable_relation_evidence_count = 0
+    relation_endpoint_candidate_ids = {
+        endpoint_id
+        for candidate in publishable_relations
+        for endpoint_id in (candidate.source_candidate_id, candidate.target_candidate_id)
+    }
+    orphan_entity_count = 0
     entity_by_candidate_id: dict[uuid.UUID, Entity] = {}
     for candidate in entity_candidates:
         type_rule = rules.entity_types_by_key.get(candidate.entity_type_key)
@@ -454,6 +571,16 @@ async def _materialize_job_transaction(
                 "entity_type_missing",
                 "validated Entity Candidate references an unknown frozen Entity Type",
             )
+        if (
+            candidate.id not in relation_endpoint_candidate_ids
+            and not _is_standalone_asset_candidate(candidate)
+        ):
+            if candidate.status == "validated":
+                candidate.status = "pending_review"
+                candidate.review_reason = "orphan_entity"
+                _append_candidate_error(candidate, candidate.review_reason)
+                orphan_entity_count += 1
+            continue
         matched = await _eligible_matched_entity(
             db,
             candidate=candidate,
@@ -505,6 +632,7 @@ async def _materialize_job_transaction(
             mention_count += int(created)
         candidate.materialized_entity_id = entity.id
         candidate.status = "materialized"
+        materialized_entity_candidate_count += 1
 
     for candidate in relation_candidates:
         if candidate.status == "materialized":
@@ -540,6 +668,7 @@ async def _materialize_job_transaction(
         )
         if relation is None:
             continue
+        relation.review_status = "not_required"
         relation_count += int(created)
         for evidence in relation_evidence_rows:
             _row, evidence_created = await _relation_evidence_for_candidate(
@@ -551,8 +680,10 @@ async def _materialize_job_transaction(
                 evidence=evidence,
             )
             relation_evidence_count += int(evidence_created)
+        publishable_relation_evidence_count += len(relation_evidence_rows)
         candidate.materialized_relation_id = relation.id
         candidate.status = "materialized"
+        publishable_relation_count += 1
 
     counts = getattr(job, "counts", None)
     counts = counts if isinstance(counts, dict) else {}
@@ -566,10 +697,20 @@ async def _materialize_job_transaction(
     job.finished_at = _utcnow()
     statistics = dict(job.statistics or {})
     statistics["materialization"] = {
+        "outcome": "materialized",
         "entity_count": entity_count,
         "entity_mention_count": mention_count,
         "relation_count": relation_count,
         "relation_evidence_count": relation_evidence_count,
+        "publishable_entity_candidate_count": materialized_entity_candidate_count,
+        "publishable_relation_count": publishable_relation_count,
+        "publishable_relation_evidence_count": publishable_relation_evidence_count,
+        "pending_entity_candidate_count": orphan_entity_count,
+        "failure_reasons": (
+            {"orphan_entity": orphan_entity_count}
+            if orphan_entity_count
+            else {}
+        ),
     }
     job.statistics = statistics
     await db.flush()
@@ -604,8 +745,9 @@ async def materialize_graph_extraction_job(
         async with session_factory() as db:
             async with db.begin():
                 return await _materialize_job_transaction(db, job_id=job_id)
-    except GraphExtractionMaterializationError:
-        await _mark_materialization_failed(session_factory, job_id=job_id)
+    except GraphExtractionMaterializationError as exc:
+        if exc.code != "job_not_materializable":
+            await _mark_materialization_failed(session_factory, job_id=job_id)
         raise
     except Exception as exc:
         await _mark_materialization_failed(session_factory, job_id=job_id)

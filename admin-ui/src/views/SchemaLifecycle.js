@@ -89,6 +89,12 @@ export default {
             cardinality: '',
             requiresReview: false,
         });
+        const importDialog = reactive({
+            open: false,
+            fileName: '',
+            content: '',
+            error: '',
+        });
 
         let listRequestSeq = 0;
         let detailRequestSeq = 0;
@@ -296,7 +302,7 @@ export default {
         }
 
         async function runMutation(kind, operation, successMessage) {
-            if (mutation.loading || !detail.data) return null;
+            if (mutation.loading || (!detail.data && !['clone', 'import'].includes(kind))) return null;
             const identity = { slug: scope.librarySlug, versionId: scope.versionId };
             const token = ++mutationRequestSeq;
             Object.assign(mutation, { loading: true, kind, error: '' });
@@ -309,7 +315,7 @@ export default {
                 if (!schemaVersionDetailMatches(version, {
                     libraryId: versions.libraryId,
                     librarySlug: identity.slug,
-                    versionId: kind === 'clone' ? version?.id : identity.versionId,
+                    versionId: ['clone', 'import'].includes(kind) ? version?.id : identity.versionId,
                 }) || typeof response?.reused !== 'boolean'
                     || !response?.action_id
                     || (kind === 'clone'
@@ -343,7 +349,7 @@ export default {
         }
 
         async function cloneActive() {
-            const version = detail.data;
+            const version = detail.data?.status === 'active' ? detail.data : selectedVersion.value;
             if (!version || version.status !== 'active') return;
             let description;
             try {
@@ -362,15 +368,63 @@ export default {
                     idempotency_key: schemaIntentKey('schema-clone'),
                     description,
                 },
-            ), 'Schema 草稿已创建');
+            ), '知识结构草稿已创建');
+        }
+
+        function openImportDialog() {
+            Object.assign(importDialog, {
+                open: true,
+                fileName: '',
+                content: '',
+                error: '',
+            });
+        }
+
+        async function selectImportFile(event) {
+            const file = event.target.files?.[0];
+            importDialog.fileName = file?.name || '';
+            importDialog.content = '';
+            importDialog.error = '';
+            if (!file) return;
+            if (file.size > 65_536) {
+                importDialog.error = '知识结构文件不能超过 64 KB';
+                return;
+            }
+            const extension = file.name.toLowerCase().split('.').pop();
+            if (!['json', 'yaml', 'yml'].includes(extension)) {
+                importDialog.error = '知识结构文件必须是 .json、.yaml 或 .yml';
+                return;
+            }
+            try {
+                const content = await file.text();
+                if (!content.trim()) throw new Error('知识结构文件不能为空');
+                importDialog.content = content;
+            } catch (error) {
+                importDialog.error = error.message || '知识结构文件读取失败';
+            }
+        }
+
+        async function submitImport() {
+            if (!importDialog.content || mutation.loading) return;
+            const payload = {
+                file_name: importDialog.fileName,
+                content: importDialog.content,
+                idempotency_key: schemaIntentKey('schema-import'),
+            };
+            await runMutation(
+                'import',
+                () => api.importSchemaFile(scope.librarySlug, payload),
+                '全新知识结构草稿已导入',
+            );
+            if (!mutation.error) importDialog.open = false;
         }
 
         async function activateDraft() {
             if (!canEdit.value) return;
             try {
                 await ElMessageBox.confirm(
-                    `确认激活 ${detail.data.version_key} v${detail.data.version_no}？历史图谱和 Publication 会保留在原版本。`,
-                    '激活 Schema 版本',
+                    `确认激活 ${detail.data.version_key} v${detail.data.version_no}？历史图谱和发布版本会保留在原版本。`,
+                    '激活知识结构版本',
                     { confirmButtonText: '确认激活', cancelButtonText: '取消', type: 'warning' },
                 );
             } catch { return; }
@@ -383,7 +437,7 @@ export default {
                     confirmation: 'activate_schema_version',
                     idempotency_key: schemaIntentKey('schema-activate'),
                 },
-            ), 'Schema 版本已激活');
+            ), '知识结构版本已激活');
         }
 
         async function deleteDraft() {
@@ -392,7 +446,7 @@ export default {
             try {
                 await ElMessageBox.confirm(
                     `确认删除草稿 ${version.version_key} v${version.version_no}？删除后无法恢复。`,
-                    '删除 Schema 草稿',
+                    '删除知识结构草稿',
                     { confirmButtonText: '确认删除', cancelButtonText: '取消', type: 'warning' },
                 );
             } catch { return; }
@@ -424,7 +478,7 @@ export default {
                 detail.data = null;
                 validation.data = null;
                 impact.data = null;
-                ElMessage.success('Schema 草稿已删除');
+                ElMessage.success('知识结构草稿已删除');
                 await loadVersions();
             } catch (error) {
                 if (token !== mutationRequestSeq) return;
@@ -441,8 +495,8 @@ export default {
             if (!version || version.status !== 'active') return;
             try {
                 await ElMessageBox.confirm(
-                    `确认停用 ${version.version_key} v${version.version_no}？历史图谱和 Publication 会保留，但该版本不再作为当前可用 Schema。`,
-                    '停用 Schema',
+                    `确认停用 ${version.version_key} v${version.version_no}？历史图谱和发布版本会保留，但该版本不再作为当前可用知识结构。`,
+                    '停用知识结构',
                     { confirmButtonText: '确认停用', cancelButtonText: '取消', type: 'warning' },
                 );
             } catch { return; }
@@ -454,7 +508,7 @@ export default {
                     confirmation: 'disable_schema_version',
                     idempotency_key: schemaIntentKey('schema-disable-version'),
                 },
-            ), 'Schema 已停用');
+            ), '知识结构已停用');
         }
 
         function resetDialog(kind, mode, item = null) {
@@ -561,7 +615,7 @@ export default {
             await runMutation(
                 'item',
                 operation,
-                dialog.mode === 'create' ? 'Schema 项已创建' : 'Schema 项已更新',
+                dialog.mode === 'create' ? '知识结构项已创建' : '知识结构项已更新',
             );
         }
 
@@ -570,7 +624,7 @@ export default {
             try {
                 await ElMessageBox.confirm(
                     `确认停用“${item.label || item.key || item.id}”？`,
-                    '停用 Schema 项',
+                    '停用知识结构项',
                     { confirmButtonText: '停用', cancelButtonText: '取消', type: 'warning' },
                 );
             } catch { return; }
@@ -583,7 +637,7 @@ export default {
                     expected_version_state_hash: detail.data.state_hash,
                     idempotency_key: schemaIntentKey('schema-disable'),
                 },
-            ), 'Schema 项已停用');
+            ), '知识结构项已停用');
         }
 
         function setOwner(ownerId) {
@@ -636,6 +690,7 @@ export default {
             impact,
             mutation,
             dialog,
+            importDialog,
             selectedLibrary,
             selectedVersion,
             activeVersion,
@@ -654,6 +709,9 @@ export default {
             runValidation,
             loadImpact,
             cloneActive,
+            openImportDialog,
+            selectImportFile,
+            submitImport,
             activateDraft,
             deleteDraft,
             disableActiveSchema,
@@ -668,15 +726,16 @@ export default {
       <header class="schema-lifecycle-header">
         <div class="schema-lifecycle-heading">
           <span class="schema-lifecycle-heading-icon"><local-icon icon="mdi:cog-sync-outline"></local-icon></span>
-          <div><h2>Schema 管理</h2><p>Ontology 版本、类型、约束与激活</p></div>
+          <div><h2>知识结构（Schema）管理</h2><p>结构版本（Ontology）、类型、约束与激活</p></div>
         </div>
         <div class="schema-lifecycle-header-actions">
           <el-select class="schema-lifecycle-library" :model-value="scope.librarySlug"
                      placeholder="选择知识库" @change="selectLibrary">
             <el-option v-for="item in libraries" :key="item.slug" :label="item.name" :value="item.slug" />
           </el-select>
-          <el-button title="刷新 Schema" :loading="versions.loading" @click="loadVersions()">
-            <local-icon icon="mdi:refresh"></local-icon><span>刷新</span>
+          <el-button class="app-refresh-button" title="刷新知识结构"
+                     :loading="versions.loading" @click="loadVersions()">
+            <span class="app-refresh-icon" aria-hidden="true"></span><span>刷新</span>
           </el-button>
         </div>
       </header>
@@ -689,12 +748,22 @@ export default {
                 type="error" :closable="false" show-icon />
 
       <div v-if="libraries.length" class="schema-lifecycle-grid">
-        <aside class="schema-lifecycle-versions" aria-label="Schema 版本">
+        <aside class="schema-lifecycle-versions" aria-label="知识结构版本">
           <div class="schema-lifecycle-section-heading">
             <div><h3>版本</h3><span>{{ versions.items.length }}</span></div>
+            <el-button class="schema-lifecycle-new-version" size="small"
+                       :disabled="mutation.loading" @click="openImportDialog">
+              <local-icon icon="mdi:upload-outline"></local-icon>导入文件
+            </el-button>
+            <el-button v-if="selectedVersion && selectedVersion.status === 'active'"
+                       class="schema-lifecycle-new-version" size="small" type="primary"
+                       :loading="mutation.kind === 'clone'" :disabled="mutation.loading"
+                       @click="cloneActive">
+              <local-icon icon="mdi:content-copy"></local-icon>新建草稿
+            </el-button>
           </div>
           <div v-if="versions.loading" class="schema-lifecycle-state">正在加载版本...</div>
-          <div v-else-if="!versions.items.length" class="schema-lifecycle-state">暂无 Schema 版本</div>
+          <div v-else-if="!versions.items.length" class="schema-lifecycle-state">暂无知识结构版本</div>
           <button v-for="version in versions.items" :key="version.id" type="button"
                   class="schema-version-row"
                   :class="{ 'is-selected': String(version.id) === scope.versionId }"
@@ -709,7 +778,7 @@ export default {
 
         <main class="schema-lifecycle-main">
           <div v-if="detail.loading" class="schema-lifecycle-state schema-lifecycle-detail-state">
-            正在加载 Schema...
+            正在加载知识结构...
           </div>
           <div v-else-if="detail.error" class="schema-lifecycle-state schema-lifecycle-detail-state">
             {{ detail.error }}
@@ -719,7 +788,7 @@ export default {
           </div>
           <template v-else>
             <div class="schema-lifecycle-version-head">
-              <div><span>Ontology</span><h3>{{ detail.data.version_key }} v{{ detail.data.version_no }}</h3>
+              <div><span>结构版本（Ontology）</span><h3>{{ detail.data.version_key }} v{{ detail.data.version_no }}</h3>
                 <p>{{ detail.data.description || '未填写版本说明' }}</p></div>
               <div class="schema-lifecycle-version-actions">
                 <el-tag :type="schemaStatusTag(detail.data.status)">
@@ -731,7 +800,7 @@ export default {
                 </el-button>
                 <el-button v-if="detail.data.status === 'active'" type="danger" plain
                            :loading="mutation.kind === 'disable-version'" @click="disableActiveSchema">
-                  <local-icon icon="mdi:archive-arrow-down-outline"></local-icon>停用 Schema
+                  <local-icon icon="mdi:archive-arrow-down-outline"></local-icon>停用知识结构
                 </el-button>
                 <el-button v-if="canEdit" :loading="validation.loading" @click="runValidation">
                   <local-icon icon="mdi:certificate-outline"></local-icon>校验
@@ -747,7 +816,7 @@ export default {
               </div>
             </div>
 
-            <nav class="schema-lifecycle-tabs" aria-label="Schema 视图">
+            <nav class="schema-lifecycle-tabs" aria-label="知识结构视图">
               <button v-for="(label, key) in TAB_NAMES" :key="key" type="button"
                       :class="{ 'is-active': scope.tab === key }"
                       @click="selectTab(key)">{{ label }}</button>
@@ -887,8 +956,9 @@ export default {
             <section v-if="scope.tab === 'impact'" class="schema-lifecycle-panel">
               <div class="schema-lifecycle-section-heading">
                 <div><h3>影响预览</h3><span>历史知识不会自动迁移</span></div>
-                <el-button :disabled="!canEdit" :loading="impact.loading" @click="loadImpact">
-                  <local-icon icon="mdi:refresh"></local-icon>刷新
+                <el-button class="app-refresh-button" :disabled="!canEdit"
+                           :loading="impact.loading" @click="loadImpact">
+                  <span class="app-refresh-icon" aria-hidden="true"></span>刷新
                 </el-button>
               </div>
               <el-alert v-if="!canEdit" title="克隆为草稿后才能预览变更影响"
@@ -899,9 +969,9 @@ export default {
               <template v-else-if="impact.data">
                 <dl class="schema-lifecycle-metrics">
                   <div><dt>旧版抽取任务</dt><dd>{{ impact.data.extraction_jobs.source_version_count }}</dd></div>
-                  <div><dt>旧版 Publication</dt><dd>{{ impact.data.publications.source_version_count }}</dd></div>
-                  <div><dt>Schema 匹配知识库</dt><dd>{{ impact.data.compatibility.filter(item => item.result === 'match').length }}</dd></div>
-                  <div><dt>Schema 不匹配</dt><dd>{{ impact.data.compatibility.filter(item => item.result === 'mismatch').length }}</dd></div>
+                  <div><dt>旧发布版本</dt><dd>{{ impact.data.publications.source_version_count }}</dd></div>
+                  <div><dt>知识结构匹配知识库</dt><dd>{{ impact.data.compatibility.filter(item => item.result === 'match').length }}</dd></div>
+                  <div><dt>知识结构不匹配</dt><dd>{{ impact.data.compatibility.filter(item => item.result === 'mismatch').length }}</dd></div>
                 </dl>
                 <div class="schema-impact-grid">
                   <div><h4>实体类型</h4><p>新增 {{ impact.data.entity_types.added.length }} · 删除 {{ impact.data.entity_types.removed.length }} · 变更 {{ impact.data.entity_types.changed.length }}</p></div>
@@ -923,8 +993,25 @@ export default {
         </main>
       </div>
 
+      <el-dialog v-model="importDialog.open" width="560px"
+                 title="导入全新知识结构文件" :close-on-click-modal="false">
+        <input class="schema-import-file-input" type="file"
+               accept=".json,.yaml,.yml,application/json,text/yaml" @change="selectImportFile" />
+        <p v-if="importDialog.fileName" class="schema-import-file-name">{{ importDialog.fileName }}</p>
+        <el-alert v-if="importDialog.error" :title="importDialog.error"
+                  type="error" :closable="false" show-icon />
+        <p v-if="importDialog.content && !importDialog.error" class="schema-import-file-name">
+          文件已读取，导入时由服务端校验知识结构格式
+        </p>
+        <template #footer>
+          <el-button @click="importDialog.open = false">取消</el-button>
+          <el-button type="primary" :loading="mutation.kind === 'import'"
+                     :disabled="!importDialog.content" @click="submitImport">导入草稿</el-button>
+        </template>
+      </el-dialog>
+
       <el-dialog v-model="dialog.open" class="schema-lifecycle-dialog" width="620px"
-                 :title="dialog.mode === 'create' ? '新增 Schema 项' : '编辑 Schema 项'"
+                 :title="dialog.mode === 'create' ? '新增知识结构项' : '编辑知识结构项'"
                  :close-on-click-modal="false">
         <el-form label-position="top" :disabled="mutation.loading">
           <template v-if="dialog.kind === 'entity_type' || dialog.kind === 'relation_type'">

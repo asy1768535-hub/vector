@@ -15,7 +15,7 @@ from app.services import selfcheck
 
 log = logging.getLogger(__name__)
 router = APIRouter()
-_MIGRATION_HEAD = "0045"
+_MIGRATION_HEAD = "0050"
 
 
 async def _check_db() -> bool:

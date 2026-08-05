@@ -104,6 +104,14 @@ $artifactEnabledText = if ($env:KNOWLEDGE_ARTIFACT_RUNTIME_ENABLED) {
 }
 $knowledgeArtifactEnabled = $artifactEnabledText -match '(?i)^(true|1|yes|on)$'
 Write-OK "KNOWLEDGE_ARTIFACT_RUNTIME_ENABLED = $knowledgeArtifactEnabled"
+$classificationEnabledText = if ($env:CLASSIFICATION_RUNTIME_ENABLED) {
+    $env:CLASSIFICATION_RUNTIME_ENABLED
+} else {
+    $envHash['CLASSIFICATION_RUNTIME_ENABLED']
+}
+$classificationEnabled = $classificationEnabledText -match '(?i)^(true|1|yes|on)$'
+Write-OK "CLASSIFICATION_RUNTIME_ENABLED = $classificationEnabled"
+
 
 # Check port
 $portCheck = netstat -ano | Select-String "LISTENING" | Select-String ":$apiPort\s"
@@ -125,6 +133,7 @@ if ($Force) {
     Stop-ProcessByPidFile (Join-Path $pidDir "embedder.pid") "Embedder Worker"
     Stop-ProcessByPidFile (Join-Path $pidDir "graph_extractor.pid") "Graph Extractor"
     Stop-ProcessByPidFile (Join-Path $pidDir "knowledge_artifacts.pid") "Knowledge Artifact Worker"
+    Stop-ProcessByPidFile (Join-Path $pidDir "classifications.pid") "Classification Worker"
     Stop-ProcessByPidFile (Join-Path $pidDir "cleanup.pid") "Cleanup Worker"
 }
 
@@ -249,6 +258,25 @@ if (-not $knowledgeArtifactEnabled) {
 
 # ── Summary ───────────────────────────────────────────────
 Write-Host ""
+# Start Classification Worker
+Write-Step "Starting Classification Worker"
+
+$classificationPidFile = Join-Path $pidDir "classifications.pid"
+if (-not $classificationEnabled) {
+    Write-OK "Classification Worker disabled; not started"
+} elseif (Test-ProcessAlive $classificationPidFile) {
+    Write-Warn "Classification Worker already running (PID $(Get-Content $classificationPidFile)), skipping"
+} else {
+    $proc = Start-Process -FilePath $venvPython `
+        -ArgumentList "-m", "app.workers.classifications", "--watch" `
+        -WorkingDirectory $projectDir `
+        -PassThru -WindowStyle Hidden `
+        -RedirectStandardOutput (Join-Path $logDir "classifications_stdout.log") `
+        -RedirectStandardError (Join-Path $logDir "classifications_stderr.log")
+    $proc.Id | Out-File -FilePath $classificationPidFile -Encoding utf8 -NoNewline
+    Write-OK "Classification Worker started (PID $($proc.Id))"
+}
+
 Write-Host "=== Startup complete ===" -ForegroundColor Green
 Write-Host "  API:       http://127.0.0.1:${apiPort}/console/"
 Write-Host "  Health:    http://127.0.0.1:${apiPort}/health"

@@ -32,6 +32,16 @@ test('allows top_k selector and refresh; rejects forbidden features', () => {
     }
 });
 
+test('remembers a valid library and keeps common chat actions available', () => {
+    assert.ok(chat.includes('LAST_CHAT_LIBRARY_KEY'));
+    assert.ok(chat.includes('savedChatLibrary()'));
+    assert.ok(chat.includes('libs.value[0]?.slug'));
+    assert.ok(chat.includes("messages.length ? '继续提问……' : '输入问题……'"));
+    assert.ok(chat.includes('检索数量（Top K）'));
+    assert.ok(chat.includes('结果不足时可适当提高，数值越大检索范围越广。'));
+    assert.ok(!chat.includes('chat-new-button" circle :disabled="!currentSlug"'));
+});
+
 // ── Refresh button moved to toolbar ──
 test('refresh button is in toolbar, not using mdi:history', () => {
     assert.ok(chat.includes('chat-toolbar-right'), 'toolbar right section exists');

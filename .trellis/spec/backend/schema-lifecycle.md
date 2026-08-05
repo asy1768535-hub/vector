@@ -4,7 +4,8 @@
 
 ### 1. Scope / Trigger
 
-Use this contract when reading Ontology versions, cloning an active Schema,
+Use this contract when reading Ontology versions, importing a new Schema file,
+cloning an active Schema,
 editing or validating a draft, previewing its impact, activating it, deleting
 an unreferenced draft, or disabling an active version. The
 existing Ontology tables remain authoritative; lifecycle actions coordinate
@@ -41,6 +42,7 @@ Service boundaries:
 list_schema_versions(...)
 load_schema_version_bundle(...)
 clone_schema_version(...)
+import_schema_version(...)
 apply_schema_item_command(...)
 validate_schema_draft_bundle(...)
 preview_schema_impact(...)
@@ -50,6 +52,12 @@ disable_schema_version(...)
 ```
 
 Every mutation carries `expected_version_state_hash` and `idempotency_key`.
+Schema file import accepts JSON, YAML, and YML documents. It also accepts the
+extraction-oriented document shape with `schema_id`, entity `id`, and relation
+`source`/`target`, converting its entity properties into Schema attributes.
+Unsupported extraction metadata is ignored by the lifecycle database. Import
+creates a new independent draft, generates all database IDs server-side, and
+never activates automatically.
 Activation also carries `expected_active_version_id` and the fixed
 `activate_schema_version` confirmation.
 Draft deletion and active-version disable carry fixed `delete_schema_draft`

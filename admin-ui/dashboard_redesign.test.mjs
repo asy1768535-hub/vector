@@ -17,9 +17,9 @@ const css = readFileSync(new URL('./style.css', import.meta.url), 'utf8');
 // ════════════════════════════════════════════════════════════
 //  admin_activity_ui.js tests
 // ════════════════════════════════════════════════════════════
-test('actionLabel returns Chinese label or falls back to code', () => {
+test('actionLabel returns Chinese label and hides unknown action codes', () => {
     assert.equal(actionLabel('library.create'), '创建知识库');
-    assert.equal(actionLabel('unknown.action'), 'unknown.action');
+    assert.equal(actionLabel('unknown.action'), '系统操作');
 });
 
 test('targetSummary formats known actions', () => {
@@ -44,10 +44,19 @@ test('relAuditTime returns relative or date', () => {
 // ════════════════════════════════════════════════════════════
 //  operations_ui.js tests
 // ════════════════════════════════════════════════════════════
-test('SERVICE_LABELS has three worker types', () => {
+test('SERVICE_LABELS uses readable service names', () => {
     assert.equal(SERVICE_LABELS.api, 'API');
-    assert.equal(SERVICE_LABELS.embedding_worker, 'Embedding Worker');
-    assert.equal(SERVICE_LABELS.cleanup_worker, 'Cleanup Worker');
+    assert.equal(SERVICE_LABELS.embedding_worker, '向量化处理服务（Worker）');
+    assert.equal(SERVICE_LABELS.cleanup_worker, '清理服务（Worker）');
+});
+
+test('known graph publication activity has a human-readable sentence', () => {
+    assert.equal(actionLabel('graph_publication.active'), '激活图谱发布版本');
+    assert.equal(
+        targetSummary('graph_publication.active', { entity_count: 223, relation_count: 35 }),
+        '激活了图谱发布版本，包含 223 个实体、35 条关系',
+    );
+    assert.equal(targetSummary('unknown.action', { raw: { nested: true } }), '记录了一次系统操作');
 });
 
 test('relTime formats seconds correctly', () => {

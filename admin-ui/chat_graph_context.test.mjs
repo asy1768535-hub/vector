@@ -74,7 +74,8 @@ test('citation graph delegates rendering and interaction to local Cytoscape', ()
     assert.match(graphCanvas, /graphView\.on\('grab', 'node\.citation-focus'/);
     assert.match(graphCanvas, /graphView\.on\('drag', 'node\.citation-focus'/);
     assert.match(graphCanvas, /userPanningEnabled:\s*true/);
-    assert.match(graphCanvas, /userZoomingEnabled:\s*true/);
+    assert.match(graphCanvas, /userZoomingEnabled:\s*\{ type: Boolean, default: true \}/);
+    assert.match(graphCanvas, /userZoomingEnabled:\s*props\.userZoomingEnabled/);
     assert.match(index, /"cytoscape": "\.\/vendor\/cytoscape\.esm\.min\.mjs"/);
 });
 

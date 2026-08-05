@@ -11,8 +11,10 @@
 | `marked.esm.js` | https://github.com/markedjs/marked | 12.0.2 | MIT |
 | `dompurify.es.mjs` | https://github.com/cure53/DOMPurify | 3.1.6 | Apache-2.0 / MPL-2.0 |
 | `cytoscape.esm.min.mjs` | https://github.com/cytoscape/cytoscape.js | 3.34.0 | MIT |
+| `d3-force.bundle.mjs` | https://github.com/d3/d3-force | 3.0.0 | ISC |
 
 `cytoscape.LICENSE` contains the upstream Cytoscape.js license text.
+`d3-force.LICENSE` covers d3-force and its bundled d3-dispatch, d3-quadtree, and d3-timer dependencies.
 
 ## 更新方式
 

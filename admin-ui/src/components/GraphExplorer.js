@@ -1,36 +1,106 @@
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue';
 
 import * as api from '../api.js';
-import { formatCatalogConfidence, shortCatalogId } from '../catalog_ui.js';
-import {
-    graphEntityPageMatches,
-    graphErrorProjection,
-} from '../graph_governance_ui.js';
+import { graphErrorProjection } from '../graph_governance_ui.js';
 import {
     explorationSeedEligible,
-    explorationSeedKey,
-    explorationSeedSearchRowValid,
     graphExplorationErrorProjection,
     graphTraversalResponseMatches,
     graphTraversalSummary,
     malformedGraphExplorationError,
-    selectExplorationSeed,
+    graphPublicationItemPageMatches,
+    graphPublicationReadMatches,
+    staticPublicationPanorama,
 } from '../graph_exploration_ui.js';
 import GraphCanvas from './GraphCanvas.js';
 
-const RELATION_KEY_RE = /^[^\s,]{1,128}$/;
+const PANORAMA_ENTITY_LIMIT = 300;
+const PANORAMA_RELATION_LIMIT = 600;
+const PANORAMA_TOTAL_ENTITY_LIMIT = 600;
+const PANORAMA_TOTAL_RELATION_LIMIT = 1200;
+const ITEM_PAGE_SIZE = 500;
+const TRAVERSAL_CACHE_LIMIT = 50;
+const EMPTY_GRAPH = Object.freeze({ nodes: [], relations: [] });
+const MALFORMED_MESSAGE = '服务返回了无法识别的图谱数据，请刷新重试。';
+const traversalCache = new Map();
 
-function sourceTypeLabel(value) {
-    return { manual: '人工', imported: '导入', extracted: '模型抽取' }[value] || '未知来源';
+function text(value) {
+    return typeof value === 'string' ? value : '';
 }
 
-function evidenceLabel(locator, index) {
-    if (Number.isInteger(locator?.page_start)) {
-        return locator.page_end && locator.page_end !== locator.page_start
-            ? `第 ${locator.page_start}-${locator.page_end} 页`
-            : `第 ${locator.page_start} 页`;
+function scopeKey(organizationId, librarySlugs) {
+    return JSON.stringify({ organizationId, librarySlugs: [...librarySlugs] });
+}
+
+function traversalIdentityKey(organizationId, seed, refreshKey) {
+    return JSON.stringify({
+        organizationId: text(organizationId),
+        libraryId: text(seed?.library?.id),
+        librarySlug: text(seed?.library?.slug),
+        publicationId: text(seed?.publication?.id),
+        ontologyVersionId: text(seed?.ontology_version_id),
+        entityId: text(seed?.id),
+        refreshKey,
+    });
+}
+
+function cacheTraversal(key, data) {
+    traversalCache.delete(key);
+    traversalCache.set(key, data);
+    if (traversalCache.size > TRAVERSAL_CACHE_LIMIT) {
+        traversalCache.delete(traversalCache.keys().next().value);
     }
-    return `证据 ${index + 1}`;
+}
+
+function panoramaFailure(kind) {
+    return Object.assign(new Error(kind), { panoramaKind: kind });
+}
+
+function projectPanoramaError(error) {
+    if (error?.panoramaKind === 'malformed') {
+        return { kind: 'malformed', message: MALFORMED_MESSAGE };
+    }
+    if (error?.panoramaKind === 'too_large') {
+        return {
+            kind: 'too_large',
+            message: '当前图谱规模较大，请从左侧实体目录选择实体查看关联网络。',
+        };
+    }
+    if (error?.panoramaKind === 'publication_unavailable') {
+        return graphErrorProjection({ status: 503 });
+    }
+    if (error?.panoramaKind === 'publication_changed') {
+        return graphErrorProjection({ status: 409 });
+    }
+    if (error?.panoramaKind === 'disabled') {
+        return graphErrorProjection({ status: 503 });
+    }
+    return graphErrorProjection(error);
+}
+
+function combinePanoramas(panoramas) {
+    const first = panoramas[0];
+    const nodes = panoramas.flatMap((item) => item.nodes);
+    const relations = panoramas.flatMap((item) => item.relations);
+    const connectedIds = new Set(relations.flatMap((relation) => [
+        relation.source_entity_id,
+        relation.target_entity_id,
+    ]));
+    return {
+        ...first,
+        publication: panoramas.length === 1 ? first.publication : null,
+        publications: panoramas.map((item) => item.publication),
+        nodes,
+        relations,
+        entity_count: nodes.length,
+        relation_count: relations.length,
+        isolated_count: nodes.filter((node) => !connectedIds.has(node.id)).length,
+        evidence_count: [...nodes, ...relations].reduce(
+            (total, item) => total + item.evidence.length,
+            0,
+        ),
+        library_count: panoramas.length,
+    };
 }
 
 export default {
@@ -38,390 +108,383 @@ export default {
     props: {
         organizationId: { type: String, default: '' },
         librarySlugs: { type: Array, default: () => [] },
+        selectedEntityId: { type: String, default: '' },
+        selectedSeed: { type: Object, default: null },
+        entityPreview: { type: Boolean, default: false },
         refreshKey: { type: Number, default: 0 },
     },
-    emits: ['open-entity', 'open-relation', 'open-evidence'],
+    emits: ['open-entity', 'open-relation'],
     setup(props, { emit }) {
-        const search = reactive({ query: '', loading: false, items: [], error: null });
-        const selectedSeeds = ref([]);
-        const controls = reactive({
-            maxHops: 1,
-            direction: 'both',
-            relationTypeKeys: '',
-            maxNodes: 60,
-            maxRelations: 100,
+        const range = ref(props.entityPreview ? 'related' : 'panorama');
+        const showIsolated = ref(false);
+        const panoramaData = ref(null);
+        const graph = reactive({ loading: false, data: null, error: null, partialError: null });
+        let requestSeq = 0;
+        let loadedScopeKey = '';
+
+        const visibleGraph = computed(() => {
+            if (!graph.data || showIsolated.value) return graph.data;
+            const connectedIds = new Set(graph.data.relations.flatMap((relation) => [
+                relation.source_entity_id,
+                relation.target_entity_id,
+            ]));
+            return {
+                ...graph.data,
+                nodes: graph.data.nodes.filter((node) => connectedIds.has(node.id)),
+            };
         });
-        const groups = ref([]);
-        const controlError = ref('');
-        let searchRequestSeq = 0;
-        let traversalRequestSeq = 0;
+        const canvasGraph = computed(() => visibleGraph.value || EMPTY_GRAPH);
+        const summary = computed(() => graphTraversalSummary(graph.data));
 
-        const selectedKeys = computed(() => new Set(
-            selectedSeeds.value.map(explorationSeedKey),
-        ));
-        const hasRunningGroup = computed(() => groups.value.some((group) => group.loading));
+        async function listAllItems(slug, publication, kind) {
+            const identity = {
+                publicationId: publication.id,
+                libraryId: publication.library_id,
+                ontologyVersionId: publication.ontology_version_id,
+                entityCount: publication.entity_count,
+                relationCount: publication.relation_count,
+            };
+            const expectedCount = kind === 'entity'
+                ? publication.entity_count
+                : publication.relation_count;
+            const items = [];
+            let page = 1;
+            do {
+                const response = await api.listGraphPublicationItems(slug, publication.id, {
+                    item_kind: kind,
+                    status: 'active',
+                    page,
+                    page_size: ITEM_PAGE_SIZE,
+                });
+                if (!graphPublicationItemPageMatches(response, {
+                    ...identity,
+                    page,
+                    pageSize: ITEM_PAGE_SIZE,
+                }, kind)) throw panoramaFailure('malformed');
+                items.push(...response.items);
+                if (!response.items.length && items.length < response.total) {
+                    throw panoramaFailure('malformed');
+                }
+                page += 1;
+            } while (items.length < expectedCount);
+            return items;
+        }
 
-        function scopeIdentity() {
-            return JSON.stringify({
-                organizationId: props.organizationId,
-                librarySlugs: [...props.librarySlugs],
+        async function loadPublicationPanorama(slug, knownPublication = null) {
+            const publication = knownPublication || await api.getActiveGraphPublication(slug);
+            const identity = {
+                publicationId: publication?.id,
+                libraryId: publication?.library_id,
+                ontologyVersionId: publication?.ontology_version_id,
+            };
+            if (publication?.publication_enabled === false) throw panoramaFailure('disabled');
+            if (publication?.status === 'degraded') throw panoramaFailure('publication_unavailable');
+            if (!graphPublicationReadMatches(publication, identity)) {
+                throw panoramaFailure('malformed');
+            }
+            if (publication.entity_count > PANORAMA_ENTITY_LIMIT
+                || publication.relation_count > PANORAMA_RELATION_LIMIT) {
+                throw panoramaFailure('too_large');
+            }
+            const [entityItems, relationItems] = await Promise.all([
+                listAllItems(slug, publication, 'entity'),
+                listAllItems(slug, publication, 'relation'),
+            ]);
+            const currentPublication = await api.getActiveGraphPublication(slug);
+            if (!graphPublicationReadMatches(currentPublication, identity)
+                || currentPublication.manifest_hash !== publication.manifest_hash) {
+                throw panoramaFailure('publication_changed');
+            }
+            const panorama = staticPublicationPanorama(
+                publication,
+                entityItems,
+                relationItems,
+                { id: publication.library_id, slug, name: slug },
+            );
+            if (!panorama) throw panoramaFailure('malformed');
+            return panorama;
+        }
+
+        async function loadPanorama(identity, seq) {
+            const metadata = await Promise.allSettled(identity.librarySlugs.map(
+                (slug) => api.getActiveGraphPublication(slug),
+            ));
+            const publications = metadata
+                .filter((result) => result.status === 'fulfilled')
+                .map((result) => result.value)
+                .filter((publication) => publication && Number.isInteger(publication.entity_count)
+                    && Number.isInteger(publication.relation_count));
+            const totalEntities = publications.reduce(
+                (total, publication) => total + publication.entity_count,
+                0,
+            );
+            const totalRelations = publications.reduce(
+                (total, publication) => total + publication.relation_count,
+                0,
+            );
+            if (publications.some((publication) => (
+                publication.entity_count > PANORAMA_ENTITY_LIMIT
+                || publication.relation_count > PANORAMA_RELATION_LIMIT
+            )) || totalEntities > PANORAMA_TOTAL_ENTITY_LIMIT
+                || totalRelations > PANORAMA_TOTAL_RELATION_LIMIT) {
+                if (seq === requestSeq) {
+                    graph.error = projectPanoramaError(Object.assign(new Error('too_large'), {
+                        panoramaKind: 'too_large',
+                    }));
+                    graph.data = null;
+                }
+                return;
+            }
+            const results = await Promise.allSettled(identity.librarySlugs.map((slug, index) => {
+                const result = metadata[index];
+                return result?.status === 'fulfilled'
+                    ? loadPublicationPanorama(slug, result.value)
+                    : Promise.reject(result?.reason || panoramaFailure('malformed'));
+            }));
+            if (seq !== requestSeq || identity.scopeKey !== scopeKey(
+                text(props.organizationId),
+                props.librarySlugs.map(text).filter(Boolean),
+            )) return;
+            const panoramas = results
+                .filter((result) => result.status === 'fulfilled')
+                .map((result) => result.value);
+            const failures = results.filter((result) => result.status === 'rejected');
+            if (!panoramas.length) {
+                graph.error = failures[0]
+                    ? projectPanoramaError(failures[0].reason)
+                    : { kind: 'malformed', message: MALFORMED_MESSAGE };
+                return;
+            }
+            graph.partialError = failures.length
+                ? projectPanoramaError(failures[0].reason)
+                : null;
+            panoramaData.value = combinePanoramas(panoramas);
+            graph.data = panoramaData.value;
+            loadedScopeKey = identity.scopeKey;
+        }
+
+        async function loadTraversal(seed) {
+            const seq = ++requestSeq;
+            graph.loading = false;
+            graph.data = null;
+            graph.error = null;
+            graph.partialError = null;
+            range.value = 'related';
+            if (!explorationSeedEligible(seed)) {
+                graph.error = {
+                    kind: 'unpublished',
+                    message: '当前实体还没有可用的已发布关联网络。',
+                };
+                return;
+            }
+            const identity = {
+                ontologyVersionId: seed.ontology_version_id,
+                publicationId: seed.publication.id,
+                seedEntityId: seed.id,
+                maxHops: 2,
+                maxNodes: 80,
+                maxRelations: 120,
+                scopeKey: scopeKey(text(props.organizationId), props.librarySlugs),
+            };
+            const cacheKey = traversalIdentityKey(
+                props.organizationId,
+                seed,
+                props.refreshKey,
+            );
+            if (traversalCache.has(cacheKey)) {
+                const data = traversalCache.get(cacheKey);
+                traversalCache.delete(cacheKey);
+                traversalCache.set(cacheKey, data);
+                graph.data = data;
+                return;
+            }
+            graph.loading = true;
+            try {
+                const data = await api.queryPublishedGraph(seed.library.slug, {
+                    ontology_version_id: identity.ontologyVersionId,
+                    expected_publication_id: identity.publicationId,
+                    seeds: [{ entity_id: identity.seedEntityId }],
+                    direction: 'both',
+                    relation_type_keys: [],
+                    max_hops: identity.maxHops,
+                    max_nodes: identity.maxNodes,
+                    max_relations: identity.maxRelations,
+                    include_evidence_locators: true,
+                });
+                if (seq !== requestSeq || identity.scopeKey !== scopeKey(
+                    text(props.organizationId),
+                    props.librarySlugs.map(text).filter(Boolean),
+                )) return;
+                if (!graphTraversalResponseMatches(data, identity)) {
+                    graph.error = malformedGraphExplorationError();
+                    return;
+                }
+                cacheTraversal(cacheKey, data);
+                graph.data = data;
+            } catch (error) {
+                if (seq !== requestSeq || identity.scopeKey !== scopeKey(
+                    text(props.organizationId),
+                    props.librarySlugs.map(text).filter(Boolean),
+                )) return;
+                graph.error = graphExplorationErrorProjection(error);
+            } finally {
+                if (seq === requestSeq) graph.loading = false;
+            }
+        }
+
+        async function loadOverview() {
+            const seq = ++requestSeq;
+            const organizationId = text(props.organizationId);
+            const librarySlugs = props.librarySlugs.map(text).filter(Boolean);
+            const identity = {
+                organizationId,
+                librarySlugs,
+                scopeKey: scopeKey(organizationId, librarySlugs),
+            };
+            panoramaData.value = null;
+            graph.data = null;
+            graph.error = null;
+            graph.partialError = null;
+            range.value = 'panorama';
+            if (!organizationId || !librarySlugs.length) {
+                graph.loading = false;
+                return;
+            }
+            graph.loading = true;
+            try {
+                await loadPanorama(identity, seq);
+            } catch (error) {
+                if (seq === requestSeq) graph.error = projectPanoramaError(error);
+            } finally {
+                if (seq === requestSeq) graph.loading = false;
+            }
+        }
+
+        async function loadScope() {
+            if (!props.entityPreview) {
+                await loadOverview();
+                return;
+            }
+            if (!props.organizationId || !props.librarySlugs.length || !props.selectedSeed) {
+                requestSeq += 1;
+                graph.loading = false;
+                graph.data = null;
+                graph.error = null;
+                graph.partialError = null;
+                range.value = 'related';
+                return;
+            }
+            await loadTraversal(props.selectedSeed);
+        }
+
+        async function changeRange(next) {
+            if (next === 'related') {
+                if (!props.selectedSeed) {
+                    range.value = 'panorama';
+                    return;
+                }
+                await loadTraversal(props.selectedSeed);
+                return;
+            }
+            range.value = 'panorama';
+            if (panoramaData.value) {
+                graph.error = null;
+                graph.partialError = null;
+                graph.data = panoramaData.value;
+                return;
+            }
+            await loadOverview();
+        }
+
+        function openEntity(node) {
+            emit('open-entity', {
+                ...node,
+                library: node?.library || props.selectedSeed?.library,
+                ontology_version_id: node?.ontology_version_id
+                    || props.selectedSeed?.ontology_version_id,
             });
         }
 
-        function resetExplorer() {
-            searchRequestSeq += 1;
-            traversalRequestSeq += 1;
-            search.query = '';
-            search.loading = false;
-            search.items = [];
-            search.error = null;
-            selectedSeeds.value = [];
-            groups.value = [];
-            controlError.value = '';
-        }
-
-        async function searchSeeds() {
-            if (!props.organizationId || !props.librarySlugs.length) return;
-            const seq = ++searchRequestSeq;
-            const identity = {
-                organizationId: props.organizationId,
-                librarySlugs: [...props.librarySlugs],
-                scopeKey: scopeIdentity(),
-            };
-            search.loading = true;
-            search.error = null;
-            try {
-                const data = await api.searchGraphEntities(identity.organizationId, {
-                    library_slugs: identity.librarySlugs,
-                    query: search.query.trim() || undefined,
-                    ontology_version_ids: [],
-                    type_keys: [],
-                    statuses: ['active'],
-                    source_types: [],
-                    publication_state: 'all',
-                    limit: 50,
-                });
-                if (seq !== searchRequestSeq || identity.scopeKey !== scopeIdentity()) return;
-                if (!graphEntityPageMatches(data, identity)
-                    || !data.items.every(explorationSeedSearchRowValid)) {
-                    search.items = [];
-                    search.error = malformedGraphExplorationError();
-                    return;
-                }
-                search.items = data.items;
-            } catch (error) {
-                if (seq !== searchRequestSeq || identity.scopeKey !== scopeIdentity()) return;
-                search.items = [];
-                search.error = graphErrorProjection(error);
-            } finally {
-                if (seq === searchRequestSeq) search.loading = false;
-            }
-        }
-
-        function seedSelected(seed) {
-            return selectedKeys.value.has(explorationSeedKey(seed));
-        }
-
-        function toggleSeed(seed) {
-            const key = explorationSeedKey(seed);
-            if (selectedKeys.value.has(key)) {
-                selectedSeeds.value = selectedSeeds.value.filter(
-                    (item) => explorationSeedKey(item) !== key,
-                );
-            } else {
-                selectedSeeds.value = selectExplorationSeed(selectedSeeds.value, seed);
-            }
-            traversalRequestSeq += 1;
-            groups.value = [];
-            controlError.value = '';
-        }
-
-        function removeSeed(seed) {
-            if (seedSelected(seed)) toggleSeed(seed);
-        }
-
-        function relationKeys() {
-            const result = [];
-            for (const item of controls.relationTypeKeys.split(/[\n,]/)) {
-                const value = item.trim();
-                if (!value || result.includes(value)) continue;
-                if (!RELATION_KEY_RE.test(value) || result.length >= 8) return null;
-                result.push(value);
-            }
-            return result;
-        }
-
-        async function runExploration() {
-            if (!selectedSeeds.value.length || hasRunningGroup.value) return;
-            const keys = relationKeys();
-            if (!keys) {
-                controlError.value = '关系类型 Key 最多 8 个，使用逗号分隔且不能包含空格。';
-                return;
-            }
-            controlError.value = '';
-            const seq = ++traversalRequestSeq;
-            const scopeKey = scopeIdentity();
-            const selected = [...selectedSeeds.value];
-            groups.value = selected.map((seed) => ({
-                key: explorationSeedKey(seed),
-                seed,
-                loading: true,
-                data: null,
-                error: null,
-            }));
-
-            await Promise.allSettled(groups.value.map(async (group) => {
-                const identity = {
-                    ontologyVersionId: group.seed.ontology_version_id,
-                    publicationId: group.seed.publication.id,
-                    seedEntityId: group.seed.id,
-                    maxHops: controls.maxHops,
-                    maxNodes: controls.maxNodes,
-                    maxRelations: controls.maxRelations,
-                };
-                try {
-                    const data = await api.queryPublishedGraph(group.seed.library.slug, {
-                        ontology_version_id: identity.ontologyVersionId,
-                        expected_publication_id: identity.publicationId,
-                        seeds: [{ entity_id: identity.seedEntityId }],
-                        direction: controls.direction,
-                        relation_type_keys: keys,
-                        max_hops: identity.maxHops,
-                        max_nodes: identity.maxNodes,
-                        max_relations: identity.maxRelations,
-                        include_evidence_locators: true,
-                    });
-                    if (seq !== traversalRequestSeq || scopeKey !== scopeIdentity()) return;
-                    if (!graphTraversalResponseMatches(data, identity)) {
-                        group.error = malformedGraphExplorationError();
-                        return;
-                    }
-                    group.data = data;
-                } catch (error) {
-                    if (seq !== traversalRequestSeq || scopeKey !== scopeIdentity()) return;
-                    group.error = graphExplorationErrorProjection(error);
-                } finally {
-                    if (seq === traversalRequestSeq && scopeKey === scopeIdentity()) {
-                        group.loading = false;
-                    }
-                }
-            }));
-        }
-
-        function entityIdentity(group, node) {
-            return {
-                ...node,
-                ontology_version_id: group.seed.ontology_version_id,
-                library: group.seed.library,
-            };
-        }
-
-        function relationIdentity(group, relation) {
-            return {
+        function openRelation(relation) {
+            emit('open-relation', {
                 ...relation,
-                ontology_version_id: group.seed.ontology_version_id,
-                library: group.seed.library,
-            };
+                library: relation?.library || props.selectedSeed?.library,
+                ontology_version_id: relation?.ontology_version_id
+                    || props.selectedSeed?.ontology_version_id,
+            });
         }
 
-        function openEntity(group, node) {
-            emit('open-entity', entityIdentity(group, node));
-        }
-
-        function openRelation(group, relation) {
-            emit('open-relation', relationIdentity(group, relation));
-        }
-
-        function openEvidence(group, locator, kind, fact) {
-            const identity = kind === 'entity'
-                ? entityIdentity(group, fact)
-                : relationIdentity(group, fact);
-            emit('open-evidence', locator, kind, identity);
-        }
-
-        function nodeFor(group, entityId) {
-            return group.data?.nodes.find((item) => item.id === entityId) || null;
-        }
-
-        function refreshExplorer() {
-            if (selectedSeeds.value.length) runExploration();
-            else if (search.items.length || search.query.trim()) searchSeeds();
-        }
-
-        watch(
-            () => [props.organizationId, JSON.stringify(props.librarySlugs)],
-            resetExplorer,
+        const stopScopeWatch = watch(
+            () => [
+                props.entityPreview,
+                props.organizationId,
+                JSON.stringify(props.librarySlugs),
+                props.refreshKey,
+                props.entityPreview
+                    ? traversalIdentityKey(props.organizationId, props.selectedSeed, props.refreshKey)
+                    : '',
+            ],
+            loadScope,
+            { immediate: true },
         );
-        watch(() => props.refreshKey, refreshExplorer);
-        onBeforeUnmount(resetExplorer);
+        onBeforeUnmount(() => {
+            requestSeq += 1;
+            stopScopeWatch();
+        });
 
         return {
-            search,
-            selectedSeeds,
-            selectedKeys,
-            controls,
-            groups,
-            controlError,
-            hasRunningGroup,
-            searchSeeds,
-            seedSelected,
-            toggleSeed,
-            removeSeed,
-            runExploration,
+            range,
+            showIsolated,
+            graph,
+            canvasGraph,
+            summary,
+            changeRange,
             openEntity,
             openRelation,
-            openEvidence,
-            nodeFor,
-            explorationSeedEligible,
-            graphTraversalSummary,
-            formatCatalogConfidence,
-            shortCatalogId,
-            sourceTypeLabel,
-            evidenceLabel,
-            explorationSeedKey,
+            panoramaEntityLimit: PANORAMA_ENTITY_LIMIT,
         };
     },
     template: `
-      <section class="graph-explorer">
-        <div class="graph-explorer-seed-band">
-          <div class="graph-explorer-search">
-            <el-input v-model="search.query" clearable maxlength="160"
-                      placeholder="搜索实体名称" @keyup.enter="searchSeeds">
-              <template #prefix><local-icon icon="mdi:text-search"></local-icon></template>
-            </el-input>
-            <el-button type="primary" :loading="search.loading" @click="searchSeeds">查找实体</el-button>
+      <section class="graph-explorer"
+               :class="{ 'is-loading': graph.loading, 'is-entity-preview': entityPreview }"
+               :aria-busy="graph.loading">
+        <header class="graph-explorer-toolbar">
+          <div class="graph-explorer-range">
+            <span>{{ entityPreview ? '局部关系' : (range === 'panorama' ? '全景' : '关联') }}</span>
+            <el-button v-if="!entityPreview && range === 'related'" text
+                       @click="changeRange('panorama')">返回全景</el-button>
           </div>
-          <el-alert v-if="search.error" :title="search.error.message"
-                    type="warning" :closable="false" show-icon />
-          <div v-if="search.items.length" class="graph-explorer-seed-results">
-            <label v-for="item in search.items" :key="explorationSeedKey(item)"
-                   class="graph-explorer-seed-row">
-              <el-checkbox :model-value="seedSelected(item)"
-                           :disabled="(!seedSelected(item) && selectedSeeds.length >= 4) || !explorationSeedEligible(item)"
-                           @change="toggleSeed(item)" />
-              <span class="graph-explorer-seed-name"><strong>{{ item.canonical_name }}</strong><small>{{ item.entity_type.label }} · {{ item.entity_type.key }}</small></span>
-              <span class="graph-explorer-seed-library"><strong>{{ item.library.name }}</strong><small>{{ item.library.slug }}</small></span>
-              <span class="graph-explorer-seed-version"><small>Ontology</small><code :title="item.ontology_version_id">{{ shortCatalogId(item.ontology_version_id) }}</code></span>
-              <el-tag v-if="explorationSeedEligible(item)" type="success" size="small" effect="plain">可探查</el-tag>
-              <el-tag v-else type="warning" size="small" effect="plain">发布不可用</el-tag>
-            </label>
+          <div class="graph-explorer-summary" v-if="graph.data">
+            <strong>{{ summary.nodes }} 个实体 · {{ summary.relations }} 条关系</strong>
+            <span v-if="summary.truncationLabels.length" class="graph-explorer-truncated">
+              已截断：{{ summary.truncationLabels.join('、') }}
+            </span>
           </div>
-          <div v-else-if="!search.loading && search.query && !search.error" class="graph-inline-empty">没有找到匹配实体</div>
+          <el-checkbox v-if="!entityPreview && graph.data?.isolated_count" v-model="showIsolated"
+                       class="graph-isolated-toggle">
+            显示无关系实体（{{ graph.data.isolated_count }}）
+          </el-checkbox>
+        </header>
+        <el-alert v-if="graph.error" :title="graph.error.message" type="warning"
+                  :closable="false" show-icon />
+        <el-alert v-if="graph.partialError" :title="'部分知识库未加载：' + graph.partialError.message"
+                  type="warning" :closable="false" show-icon />
+        <div v-if="graph.loading && !graph.data" class="graph-state graph-explorer-state">
+          <strong>正在读取图谱…</strong>
         </div>
-
-        <div class="graph-explorer-selected">
-          <div class="graph-section-heading"><h4>探查起点</h4><span>{{ selectedSeeds.length }} / 4</span></div>
-          <div v-if="selectedSeeds.length" class="graph-explorer-seed-tags">
-            <el-tag v-for="seed in selectedSeeds" :key="explorationSeedKey(seed)" closable
-                    effect="plain" @close="removeSeed(seed)">
-              {{ seed.canonical_name }} · {{ seed.library.name }}
-            </el-tag>
-          </div>
-          <div v-else class="graph-inline-empty">尚未选择实体</div>
+        <div v-else-if="!graph.data || !graph.data.nodes.length" class="graph-state graph-explorer-state">
+          <strong>{{ graph.error ? '当前画布不可用' : (entityPreview ? '该实体暂无可显示的关联网络' : '当前范围暂无可显示的实体和关系') }}</strong>
         </div>
-
-        <div class="graph-explorer-controls">
-          <label class="graph-field"><span>探查跳数</span>
-            <el-radio-group v-model="controls.maxHops">
-              <el-radio-button :value="1">一跳</el-radio-button>
-              <el-radio-button :value="2">两跳</el-radio-button>
-            </el-radio-group>
-          </label>
-          <label class="graph-field"><span>关系方向</span>
-            <el-radio-group v-model="controls.direction">
-              <el-radio-button value="both">双向</el-radio-button>
-              <el-radio-button value="outbound">向外</el-radio-button>
-              <el-radio-button value="inbound">向内</el-radio-button>
-            </el-radio-group>
-          </label>
-          <label class="graph-field graph-explorer-relation-filter"><span>关系类型 Key</span>
-            <el-input v-model="controls.relationTypeKeys" clearable maxlength="1031" placeholder="invests,controls" />
-          </label>
-          <label class="graph-field"><span>实体上限</span>
-            <el-input-number v-model="controls.maxNodes" :min="1" :max="100" :step="10" controls-position="right" />
-          </label>
-          <label class="graph-field"><span>关系上限</span>
-            <el-input-number v-model="controls.maxRelations" :min="1" :max="200" :step="10" controls-position="right" />
-          </label>
-          <el-button type="primary" :loading="hasRunningGroup" :disabled="!selectedSeeds.length"
-                     @click="runExploration">
-            <local-icon icon="carbon:chart-relationship"></local-icon>开始探查
-          </el-button>
-        </div>
-        <el-alert v-if="controlError" :title="controlError" type="warning" :closable="false" show-icon />
-
-        <div v-if="groups.length" class="graph-explorer-groups">
-          <article v-for="group in groups" :key="group.key" class="graph-explorer-group">
-            <header class="graph-explorer-group-header">
-              <div><strong>{{ group.seed.canonical_name }}</strong><span>{{ group.seed.library.name }} · {{ group.seed.library.slug }}</span></div>
-              <el-tag v-if="group.loading" type="info" effect="plain">查询中</el-tag>
-              <el-tag v-else-if="group.error" type="warning" effect="plain">未完成</el-tag>
-              <el-tag v-else type="success" effect="plain">已完成</el-tag>
-            </header>
-            <div v-if="group.loading" class="graph-state graph-explorer-group-state"><strong>正在读取已发布图谱...</strong></div>
-            <div v-else-if="group.error" class="graph-state graph-explorer-group-state">
-              <strong>{{ group.error.message }}</strong>
-            </div>
-            <template v-else-if="group.data">
-              <dl class="graph-explorer-identity">
-                <div><dt>Publication</dt><dd :title="group.data.publication.id">{{ shortCatalogId(group.data.publication.id) }}</dd></div>
-                <div><dt>Ontology</dt><dd :title="group.data.publication.ontology_version_id">{{ shortCatalogId(group.data.publication.ontology_version_id) }}</dd></div>
-                <div><dt>Manifest</dt><dd :title="group.data.publication.manifest_hash">{{ shortCatalogId(group.data.publication.manifest_hash) }}</dd></div>
-                <div><dt>实体</dt><dd>{{ graphTraversalSummary(group.data).nodes }}</dd></div>
-                <div><dt>关系</dt><dd>{{ graphTraversalSummary(group.data).relations }}</dd></div>
-                <div><dt>证据</dt><dd>{{ graphTraversalSummary(group.data).evidence }}</dd></div>
-              </dl>
-              <el-alert v-if="graphTraversalSummary(group.data).truncationLabels.length"
-                        :title="'结果已截断：' + graphTraversalSummary(group.data).truncationLabels.join('、')"
-                        type="warning" :closable="false" show-icon />
-              <graph-canvas :graph="group.data"
-                            @open-entity="openEntity(group, $event)"
-                            @open-relation="openRelation(group, $event)" />
-
-              <section class="graph-explorer-table-section">
-                <div class="graph-section-heading"><h4>实体</h4><span>{{ group.data.nodes.length }} 项</span></div>
-                <div class="graph-explorer-table-shell">
-                  <table>
-                    <thead><tr><th scope="col">实体</th><th scope="col">类型</th><th scope="col">跳数</th><th scope="col">来源</th><th scope="col">可信度</th><th scope="col">Evidence</th></tr></thead>
-                    <tbody><tr v-for="node in group.data.nodes" :key="node.id">
-                      <td><button class="graph-explorer-link" @click="openEntity(group, node)">{{ node.canonical_name }}</button></td>
-                      <td>{{ node.entity_type.label }}<small>{{ node.entity_type.key }}</small></td>
-                      <td>{{ node.depth }}</td><td>{{ sourceTypeLabel(node.source_type) }}</td>
-                      <td>{{ formatCatalogConfidence(node.confidence) }}</td>
-                      <td><div class="graph-explorer-evidence-actions">
-                        <button v-for="(locator, index) in node.evidence" :key="locator.evidence_id"
-                                @click="openEvidence(group, locator, 'entity', node)">
-                          <local-icon icon="mdi:text-search"></local-icon>{{ evidenceLabel(locator, index) }}
-                        </button><span v-if="!node.evidence.length">无</span>
-                      </div></td>
-                    </tr></tbody>
-                  </table>
-                </div>
-              </section>
-
-              <section class="graph-explorer-table-section">
-                <div class="graph-section-heading"><h4>关系</h4><span>{{ group.data.relations.length }} 项</span></div>
-                <div class="graph-explorer-table-shell">
-                  <table>
-                    <thead><tr><th scope="col">源实体</th><th scope="col">关系</th><th scope="col">目标实体</th><th scope="col">跳数</th><th scope="col">可信度</th><th scope="col">Evidence</th></tr></thead>
-                    <tbody><tr v-for="relation in group.data.relations" :key="relation.id">
-                      <td><button class="graph-explorer-link" @click="openEntity(group, nodeFor(group, relation.source_entity_id))">{{ nodeFor(group, relation.source_entity_id)?.canonical_name }}</button></td>
-                      <td><button class="graph-explorer-link graph-explorer-relation-link" @click="openRelation(group, relation)">{{ relation.relation_type.label }}<small>{{ relation.relation_type.key }}</small></button></td>
-                      <td><button class="graph-explorer-link" @click="openEntity(group, nodeFor(group, relation.target_entity_id))">{{ nodeFor(group, relation.target_entity_id)?.canonical_name }}</button></td>
-                      <td>{{ relation.depth }}</td><td>{{ formatCatalogConfidence(relation.confidence) }}</td>
-                      <td><div class="graph-explorer-evidence-actions">
-                        <button v-for="(locator, index) in relation.evidence" :key="locator.evidence_id"
-                                @click="openEvidence(group, locator, 'relation', relation)">
-                          <local-icon icon="mdi:text-search"></local-icon>{{ evidenceLabel(locator, index) }}
-                        </button><span v-if="!relation.evidence.length">无</span>
-                      </div></td>
-                    </tr></tbody>
-                  </table>
-                </div>
-              </section>
-            </template>
-          </article>
-        </div>
+        <graph-canvas v-show="graph.data && graph.data.nodes.length"
+                      :graph="canvasGraph"
+                      :selected-id="selectedEntityId"
+                      :center-selected="false"
+                      :user-zooming-enabled="!entityPreview"
+                      :constrain-to-viewport="entityPreview"
+                      @open-entity="openEntity"
+                      @open-relation="openRelation" />
+        <div v-if="graph.loading && graph.data" class="graph-explorer-loading-overlay"
+             aria-hidden="true"><span>正在刷新图谱…</span></div>
       </section>
     `,
 };

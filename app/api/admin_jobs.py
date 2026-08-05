@@ -109,6 +109,18 @@ def _graph_monitor_row(
     provider_gate = statistics.get("provider_gate")
     if not isinstance(provider_gate, dict):
         provider_gate = {}
+    candidate_pipeline = statistics.get("candidate_pipeline")
+    candidate_pipeline = candidate_pipeline if isinstance(candidate_pipeline, dict) else {}
+    routing = candidate_pipeline.get("routing")
+    routing = routing if isinstance(routing, dict) else {}
+    entity_routing = routing.get("entities")
+    entity_routing = entity_routing if isinstance(entity_routing, dict) else {}
+    relation_routing = routing.get("relations")
+    relation_routing = relation_routing if isinstance(relation_routing, dict) else {}
+    materialization = statistics.get("materialization")
+    materialization = materialization if isinstance(materialization, dict) else {}
+    publication = statistics.get("publication")
+    publication = publication if isinstance(publication, dict) else {}
     return TaskMonitorRead(
         id=job.id,
         task_type="graph",
@@ -145,6 +157,35 @@ def _graph_monitor_row(
             "in_flight": provider_gate.get("in_flight"),
             "throttled_count": int(provider_gate.get("throttled_count") or 0),
             "retry_count": int(provider_gate.get("retry_count") or 0),
+            "stage_counts": {
+                "extraction": {
+                    "entities": int(candidate_pipeline.get("entity_candidate_count") or 0),
+                    "relations": int(candidate_pipeline.get("relation_candidate_count") or 0),
+                },
+                "validation": {
+                    "entities": int(entity_routing.get("validated") or 0),
+                    "relations": int(relation_routing.get("validated") or 0),
+                },
+                "materialization": {
+                    "entities": int(
+                        materialization.get("publishable_entity_candidate_count") or 0
+                    ),
+                    "relations": int(materialization.get("publishable_relation_count") or 0),
+                },
+                "publication": {
+                    "entities": int(publication.get("entity_count") or 0),
+                    "relations": int(publication.get("relation_count") or 0),
+                },
+            },
+            "failure_reasons": {
+                "candidates": candidate_pipeline.get("failure_reasons") or {},
+                "materialization": materialization.get("failure_reasons") or {},
+                "publication": publication.get("failure_reason"),
+            },
+            "publication_diff": publication.get("diff"),
+            "current_graph_unchanged": bool(
+                publication.get("current_graph_unchanged")
+            ),
         },
     )
 
@@ -247,6 +288,11 @@ def _graph_publication_status(
     if job.status in {"queued", "processing"}:
         return "pending"
     materialization = (job.statistics or {}).get("materialization")
+    if (
+        isinstance(materialization, dict)
+        and materialization.get("outcome") == "entities_only"
+    ):
+        return "entities_only"
     if isinstance(materialization, dict) and any(
         isinstance(value, int) and value > 0 for value in materialization.values()
     ):

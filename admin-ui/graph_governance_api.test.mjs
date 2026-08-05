@@ -19,6 +19,7 @@ import {
     getGraphPublication,
     getGraphRelation,
     listGraphGovernanceActions,
+    listGraphPublicationItems,
     listGraphPublications,
     mergeGraphEntities,
     planGraphGovernancePublication,
@@ -309,4 +310,23 @@ test('Publication clients use current v0.5 routes and strict bodies', async () =
         reason_code: 'operator_cancelled',
     });
     assert.deepEqual(body(calls[5]), { idempotency_key: 'rollback-1', dry_run: true });
+});
+
+test('Publication item client keeps the frozen snapshot query scoped', async () => {
+    const calls = await captureRequests(async () => {
+        await listGraphPublicationItems('legal-a', PUBLICATION, {
+            item_kind: 'entity',
+            status: 'active',
+            page: 2,
+            page_size: 500,
+            fact_snapshot: 'must-not-leak',
+        });
+    });
+
+    assert.equal(
+        calls[0].url,
+        `/libraries/legal-a/v05/graph-publications/${PUBLICATION}/items?item_kind=entity&status=active&page=2&page_size=500`,
+    );
+    assert.equal(calls[0].options.credentials, 'include');
+    assert.equal(calls[0].options.body, undefined);
 });

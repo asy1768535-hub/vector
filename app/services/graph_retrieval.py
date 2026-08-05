@@ -775,7 +775,7 @@ def _traversal_statement(
     source_type = aliased(EntityType, name="traversal_source_type")
     target_type = aliased(EntityType, name="traversal_target_type")
 
-    statement = (
+    relation_candidates = (
         select(
             KnowledgeRelation.id.label("relation_id"),
             relation_item.item_hash.label("relation_item_hash"),
@@ -787,22 +787,6 @@ def _traversal_statement(
             KnowledgeRelation.target_entity_id.label("target_entity_id"),
             KnowledgeRelation.source_type.label("relation_source_type"),
             KnowledgeRelation.confidence.label("relation_confidence"),
-            source_item.item_hash.label("source_item_hash"),
-            source_type.id.label("source_entity_type_id"),
-            source_type.key.label("source_entity_type_key"),
-            source_type.label.label("source_entity_type_label"),
-            source_entity.canonical_name.label("source_canonical_name"),
-            source_entity.normalized_name.label("source_normalized_name"),
-            source_entity.source_type.label("source_source_type"),
-            source_entity.confidence.label("source_confidence"),
-            target_item.item_hash.label("target_item_hash"),
-            target_type.id.label("target_entity_type_id"),
-            target_type.key.label("target_entity_type_key"),
-            target_type.label.label("target_entity_type_label"),
-            target_entity.canonical_name.label("target_canonical_name"),
-            target_entity.normalized_name.label("target_normalized_name"),
-            target_entity.source_type.label("target_source_type"),
-            target_entity.confidence.label("target_confidence"),
         )
         .select_from(relation_item)
         .join(
@@ -824,6 +808,57 @@ def _traversal_statement(
                 RelationType.status == "active",
             ),
         )
+        .where(
+            relation_item.publication_id == snapshot.publication_id,
+            relation_item.library_id == snapshot.library_id,
+            relation_item.ontology_version_id == snapshot.ontology_version_id,
+            relation_item.item_kind == "relation",
+            relation_item.status == "active",
+            _traversal_direction_predicate(direction, frontier_ids),
+        )
+    )
+    if seen_relation_ids:
+        relation_candidates = relation_candidates.where(
+            KnowledgeRelation.id.notin_(seen_relation_ids)
+        )
+    if relation_types:
+        relation_candidates = relation_candidates.where(
+            RelationType.id.in_(tuple(row.relation_type_id for row in relation_types))
+        )
+    candidate = relation_candidates.cte("traversal_relation_candidates").prefix_with(
+        "MATERIALIZED"
+    )
+
+    return (
+        select(
+            candidate.c.relation_id,
+            candidate.c.relation_item_hash,
+            candidate.c.relation_type_id,
+            candidate.c.relation_type_key,
+            candidate.c.relation_type_label,
+            candidate.c.relation_type_direction,
+            candidate.c.source_entity_id,
+            candidate.c.target_entity_id,
+            candidate.c.relation_source_type,
+            candidate.c.relation_confidence,
+            source_item.item_hash.label("source_item_hash"),
+            source_type.id.label("source_entity_type_id"),
+            source_type.key.label("source_entity_type_key"),
+            source_type.label.label("source_entity_type_label"),
+            source_entity.canonical_name.label("source_canonical_name"),
+            source_entity.normalized_name.label("source_normalized_name"),
+            source_entity.source_type.label("source_source_type"),
+            source_entity.confidence.label("source_confidence"),
+            target_item.item_hash.label("target_item_hash"),
+            target_type.id.label("target_entity_type_id"),
+            target_type.key.label("target_entity_type_key"),
+            target_type.label.label("target_entity_type_label"),
+            target_entity.canonical_name.label("target_canonical_name"),
+            target_entity.normalized_name.label("target_normalized_name"),
+            target_entity.source_type.label("target_source_type"),
+            target_entity.confidence.label("target_confidence"),
+        )
+        .select_from(candidate)
         .join(
             source_item,
             and_(
@@ -832,13 +867,13 @@ def _traversal_statement(
                 source_item.ontology_version_id == snapshot.ontology_version_id,
                 source_item.item_kind == "entity",
                 source_item.status == "active",
-                source_item.entity_id == KnowledgeRelation.source_entity_id,
+                source_item.entity_id == candidate.c.source_entity_id,
             ),
         )
         .join(
             source_entity,
             and_(
-                source_entity.id == KnowledgeRelation.source_entity_id,
+                source_entity.id == candidate.c.source_entity_id,
                 source_entity.library_id == snapshot.library_id,
                 source_entity.ontology_version_id == snapshot.ontology_version_id,
                 source_entity.status == "active",
@@ -861,13 +896,13 @@ def _traversal_statement(
                 target_item.ontology_version_id == snapshot.ontology_version_id,
                 target_item.item_kind == "entity",
                 target_item.status == "active",
-                target_item.entity_id == KnowledgeRelation.target_entity_id,
+                target_item.entity_id == candidate.c.target_entity_id,
             ),
         )
         .join(
             target_entity,
             and_(
-                target_entity.id == KnowledgeRelation.target_entity_id,
+                target_entity.id == candidate.c.target_entity_id,
                 target_entity.library_id == snapshot.library_id,
                 target_entity.ontology_version_id == snapshot.ontology_version_id,
                 target_entity.status == "active",
@@ -882,29 +917,14 @@ def _traversal_statement(
                 target_type.status == "active",
             ),
         )
-        .where(
-            relation_item.publication_id == snapshot.publication_id,
-            relation_item.library_id == snapshot.library_id,
-            relation_item.ontology_version_id == snapshot.ontology_version_id,
-            relation_item.item_kind == "relation",
-            relation_item.status == "active",
-            _traversal_direction_predicate(direction, frontier_ids),
-        )
         .order_by(
-            RelationType.key,
-            KnowledgeRelation.source_entity_id,
-            KnowledgeRelation.target_entity_id,
-            KnowledgeRelation.id,
+            candidate.c.relation_type_key,
+            candidate.c.source_entity_id,
+            candidate.c.target_entity_id,
+            candidate.c.relation_id,
         )
         .limit(max(1, relation_slots + 1))
     )
-    if seen_relation_ids:
-        statement = statement.where(KnowledgeRelation.id.notin_(seen_relation_ids))
-    if relation_types:
-        statement = statement.where(
-            RelationType.id.in_(tuple(row.relation_type_id for row in relation_types))
-        )
-    return statement
 
 
 async def traverse_published_graph(

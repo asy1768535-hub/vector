@@ -33,6 +33,7 @@ from app.models.library import Library
 from app.models.user import User
 from app.schemas.chat import (
     ChatConversationRead,
+    ChatGraphEvidence,
     ChatHistoryMessage,
     ChatLibraryRead,
     ChatMessageRequest,
@@ -40,7 +41,7 @@ from app.schemas.chat import (
     ChatSource,
 )
 from app.schemas.dify import DifyRetrievalRequest, RetrievalSetting
-from app.services import chat_answer, chat_history
+from app.services import chat_answer, chat_graph_augmentation, chat_history
 from app.services.retrieval import run_retrieval
 from app.services.organization_authorization import (
     OrganizationAuthorizationError,
@@ -187,7 +188,12 @@ async def chat_messages(
 ) -> ChatMessageResponse:
     """非流式问答 + 落库。无 conversation_id 自动建会话，有则校验后续聊。"""
     conv = await _resolve_conversation(db, user, body) if body.conversation_id is not None else None
-    _lib, records = await _retrieve_for_chat(body, user, db)
+    lib, records = await _retrieve_for_chat(body, user, db)
+    augmentation = await chat_graph_augmentation.prepare_chat_graph_augmentation(
+        db, lib, body.query, records, config=settings,
+    )
+    answer_records = [*records, *augmentation.records]
+    context_chars = settings.chat_max_context_chars + augmentation.context_chars
     if conv is None:
         conv = await _resolve_conversation(db, user, body)
     history = await chat_history.recent_turns(db, conv.id, settings.chat_history_max_turns)
@@ -197,45 +203,68 @@ async def chat_messages(
     rewritten = _rewritten_query(records, body.query)
     t0 = time.monotonic()
     status_val, err, used = "success", None, []
-    if not records:
+    if not answer_records:
         answer_text = "资料中未找到明确依据。"
     else:
         try:
             result = await chat_answer.generate_answer(
-                body.query, records,
+                body.query, answer_records,
                 base_url=settings.chat_base_url, model=settings.chat_model,
                 api_key=settings.chat_api_key, timeout=settings.chat_timeout_seconds,
-                temperature=settings.chat_temperature, max_context_chars=settings.chat_max_context_chars,
+                temperature=settings.chat_temperature, max_context_chars=context_chars,
                 history=history,
             )
             answer_text, used = result.answer, result.used_records
         except chat_answer.ChatError as exc:
             status_val, err, answer_text = "failed", str(exc), ""
     latency_ms = int((time.monotonic() - t0) * 1000)
-    sources = [_to_source(r) for r in used]
+    sources, graph_evidence = _split_used_records(used)
+    graph_augmented = bool(graph_evidence)
 
     await chat_history.save_assistant_message(
         db, conv.id, content=answer_text, rewritten_query=rewritten, latency_ms=latency_ms,
         status=status_val, error_message=err, parent_message_id=user_msg.id, sources=sources,
+        graph_augmented=graph_augmented, graph_evidence=graph_evidence,
     )
     await chat_history.touch_conversation(db, conv.id)
     await db.commit()
 
     if status_val == "failed":
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"answer generation failed: {err}")
-    return ChatMessageResponse(answer=answer_text, sources=sources, conversation_id=conv.id, debug=debug)
+    return ChatMessageResponse(
+        answer=answer_text, sources=sources, graph_augmented=graph_augmented,
+        graph_evidence=graph_evidence, conversation_id=conv.id, debug=debug,
+    )
 
 
 def _sse(obj: dict) -> str:
     return "data: " + json.dumps(obj, ensure_ascii=False) + "\n\n"
 
 
-async def _persist_assistant(conv_id, *, parent_id, content, rewritten, latency_ms, status_val, error, sources):
+def _split_used_records(records) -> tuple[list[ChatSource], list[ChatGraphEvidence]]:
+    sources: list[ChatSource] = []
+    graph_evidence: list[ChatGraphEvidence] = []
+    for citation_index, record in enumerate(records, 1):
+        payload = (record.metadata or {}).get("chat_graph_evidence")
+        if payload:
+            graph_evidence.append(
+                ChatGraphEvidence.model_validate({**payload, "citation_index": citation_index})
+            )
+        else:
+            sources.append(_to_source(record))
+    return sources, graph_evidence
+
+
+async def _persist_assistant(
+    conv_id, *, parent_id, content, rewritten, latency_ms, status_val, error, sources,
+    graph_augmented=False, graph_evidence=None,
+):
     """流式结束后用独立 session 落 assistant 消息（请求 session 此时已关闭）。"""
     async with async_session_factory() as db2:
         await chat_history.save_assistant_message(
             db2, conv_id, content=content, rewritten_query=rewritten, latency_ms=latency_ms,
             status=status_val, error_message=error, parent_message_id=parent_id, sources=sources,
+            graph_augmented=graph_augmented, graph_evidence=graph_evidence or [],
         )
         await chat_history.touch_conversation(db2, conv_id)
         await db2.commit()
@@ -252,7 +281,12 @@ async def chat_stream(
     会话/用户消息在开流前用请求 session 落库并提交；assistant 消息在流结束后用独立 session 落库。
     """
     conv = await _resolve_conversation(db, user, body) if body.conversation_id is not None else None
-    _lib, records = await _retrieve_for_chat(body, user, db)
+    lib, records = await _retrieve_for_chat(body, user, db)
+    augmentation = await chat_graph_augmentation.prepare_chat_graph_augmentation(
+        db, lib, body.query, records, config=settings,
+    )
+    answer_records = [*records, *augmentation.records]
+    context_chars = settings.chat_max_context_chars + augmentation.context_chars
     if conv is None:
         conv = await _resolve_conversation(db, user, body)
     history = await chat_history.recent_turns(db, conv.id, settings.chat_history_max_turns)
@@ -262,29 +296,35 @@ async def chat_stream(
     conv_id, user_msg_id = conv.id, user_msg.id
     debug = _build_debug(records, body.top_k) if body.show_debug else None
     rewritten = _rewritten_query(records, body.query)
-    _ctx, used = chat_answer.build_context(records, settings.chat_max_context_chars) if records else ("", [])
-    sources = [_to_source(r) for r in used]
+    _ctx, used = chat_answer.build_context(answer_records, context_chars) if answer_records else ("", [])
+    sources, graph_evidence = _split_used_records(used)
+    graph_augmented = bool(graph_evidence)
     sources_dump = [s.model_dump() for s in sources]
     query = body.query
 
     async def _gen():
-        yield _sse({"type": "sources", "conversation_id": str(conv_id), "sources": sources_dump, "debug": debug})
+        yield _sse({
+            "type": "sources", "conversation_id": str(conv_id), "sources": sources_dump,
+            "graph_augmented": graph_augmented,
+            "graph_evidence": [row.model_dump(mode="json") for row in graph_evidence],
+            "debug": debug,
+        })
         t0 = time.monotonic()
-        if not records:
+        if not answer_records:
             text = "资料中未找到明确依据。"
             yield _sse({"type": "delta", "text": text})
             await _persist_assistant(conv_id, parent_id=user_msg_id, content=text, rewritten=rewritten,
                                      latency_ms=int((time.monotonic() - t0) * 1000), status_val="success",
-                                     error=None, sources=[])
+                                     error=None, sources=[], graph_augmented=False, graph_evidence=[])
             yield _sse({"type": "done"})
             return
         acc = []
         try:
             async for delta in chat_answer.stream_answer(
-                query, records,
+                query, answer_records,
                 base_url=settings.chat_base_url, model=settings.chat_model,
                 api_key=settings.chat_api_key, timeout=settings.chat_timeout_seconds,
-                temperature=settings.chat_temperature, max_context_chars=settings.chat_max_context_chars,
+                temperature=settings.chat_temperature, max_context_chars=context_chars,
                 history=history,
             ):
                 acc.append(delta)
@@ -292,12 +332,14 @@ async def chat_stream(
         except chat_answer.ChatError as exc:
             await _persist_assistant(conv_id, parent_id=user_msg_id, content="".join(acc), rewritten=rewritten,
                                      latency_ms=int((time.monotonic() - t0) * 1000), status_val="failed",
-                                     error=str(exc), sources=sources)
+                                     error=str(exc), sources=sources,
+                                     graph_augmented=graph_augmented, graph_evidence=graph_evidence)
             yield _sse({"type": "error", "message": f"answer generation failed: {exc}"})
             return
         await _persist_assistant(conv_id, parent_id=user_msg_id, content="".join(acc), rewritten=rewritten,
                                  latency_ms=int((time.monotonic() - t0) * 1000), status_val="success",
-                                 error=None, sources=sources)
+                                 error=None, sources=sources,
+                                 graph_augmented=graph_augmented, graph_evidence=graph_evidence)
         yield _sse({"type": "done"})
 
     return StreamingResponse(
@@ -338,6 +380,8 @@ async def conversation_messages(
             id=m.id, role=m.role, content=m.content, status=m.status,
             error_message=m.error_message, created_at=m.created_at,
             sources=[chat_history.src_to_schema(s) for s in srcs],
+            graph_augmented=m.graph_augmented is True,
+            graph_evidence=chat_history.graph_evidence_to_schema(m.graph_evidence),
         ))
     return out
 

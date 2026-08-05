@@ -943,6 +943,20 @@ async def _persist_candidate_result(
                 "validated_count": routes.validated_count,
                 "pending_review_count": routes.pending_review_count,
                 "rejected_count": routes.rejected_count,
+                "extraction": {
+                    "entity_count": aggregate.entity_candidate_count,
+                    "relation_count": aggregate.relation_candidate_count,
+                },
+                "validation": {
+                    "rejected_count": validation.rejected_count,
+                    "pending_review_count": validation.pending_review_count,
+                    "conflict_count": validation.conflict_count,
+                },
+                "routing": {
+                    "entities": routes.entity_status_counts,
+                    "relations": routes.relation_status_counts,
+                },
+                "failure_reasons": routes.failure_reasons,
             }
             job.statistics = statistics
             _set_unit_terminal(

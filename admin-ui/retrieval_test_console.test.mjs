@@ -70,7 +70,7 @@ test('validates strict retrieval bounds and candidate relationship', () => {
 });
 
 test('maps known compatibility reasons and bounds structured conflicts', () => {
-    assert.equal(compatibilityReasonLabel('embedding_profile_mismatch'), 'Embedding 配置不一致');
+    assert.equal(compatibilityReasonLabel('embedding_profile_mismatch'), '向量化配置不一致');
     assert.equal(compatibilityReasonLabel('library_index_unready'), '知识库索引未就绪');
     assert.equal(compatibilityReasonLabel('future_reason'), 'future_reason');
     const projected = compatibilityConflicts({
@@ -88,6 +88,12 @@ test('maps known compatibility reasons and bounds structured conflicts', () => {
     assert.deepEqual(projected, [
         { librarySlug: 'legal', reasons: ['检索策略不一致'] },
     ]);
+});
+
+test('diagnostics links back to single-library search and restores route scope', () => {
+    assert.ok(view.includes('RetrievalModeSwitch'));
+    assert.ok(view.includes("route.query.libraries"));
+    assert.ok(view.includes(':library-slugs="librarySlugs"'));
 });
 
 test('projects per-Library text readiness without graph inference', () => {

@@ -9,8 +9,13 @@ const PUBLICATION_STATUS_LABEL = {
     pending: '等待抽取完成',
     publishing: '自动发布中',
     available: '已发布可用',
-    retryable: '自动发布失败，可重试',
+    retryable: '自动发布失败，可重试；当前正式图谱未切换',
+    entities_only: '仅有实体、暂无有效关系，未发布',
     not_required: '无合格事实，无需发布',
+};
+const PUBLICATION_FAILURE_REASON_LABEL = {
+    no_valid_relation: '仅有实体、暂无有效关系',
+    job_not_publishable: '任务未满足自动发布条件',
 };
 
 function buildModeLabel(value) {
@@ -19,6 +24,18 @@ function buildModeLabel(value) {
 
 function publicationStatusLabel(value) {
     return PUBLICATION_STATUS_LABEL[value] || '等待抽取完成';
+}
+
+function publicationFailureReasonLabel(value) {
+    return PUBLICATION_FAILURE_REASON_LABEL[value] || value || '—';
+}
+
+function publicationDiffLabel(value) {
+    if (!value?.entity || !value?.relation) return '—';
+    const summary = (label, item) => (
+        `${label}：新增 ${item.added || 0}，保留 ${item.retained || 0}，变化 ${item.changed || 0}，移除 ${item.removed || 0}`
+    );
+    return `${summary('实体', value.entity)}；${summary('关系', value.relation)}`;
 }
 
 function formatEta(seconds) {
@@ -34,6 +51,9 @@ export default {
         const loading = ref(false);
         const resetting = ref(false);
         const retryingId = ref(null);
+        const retryingSelected = ref(false);
+        const selectedFailedJobs = ref([]);
+        const advancedOpen = ref(false);
         const emptyStats = () => ({
             pending: 0, processing: 0, done: 0, failed: 0,
             cancelled: 0, superseded: 0, retryable_failed: 0, total: 0,
@@ -126,33 +146,66 @@ export default {
         async function retry(row) {
             if (retryingId.value) return;
             retryingId.value = row.id;
-            try { await api.retryJob(row.id); ElMessage.success('已重置为 pending'); await refreshAll(); }
+            try { await api.retryJob(row.id); ElMessage.success('已提交重试'); await refreshAll(); }
             catch (e) { ElMessage.error(e.message); }
             finally { retryingId.value = null; }
+        }
+
+        function isRetrySelectable(row) {
+            return row.status === 'failed' && row.retryable;
+        }
+
+        function onFailedSelectionChange(rows) {
+            selectedFailedJobs.value = (rows || []).filter(isRetrySelectable);
+        }
+
+        async function retrySelected() {
+            const rows = [...selectedFailedJobs.value];
+            if (!rows.length || retryingSelected.value) return;
+            try {
+                await ElMessageBox.confirm(
+                    `将重试所选的 ${rows.length} 条失败任务，确定继续？`,
+                    '重试所选任务',
+                    { type: 'warning', confirmButtonText: '重试', cancelButtonText: '取消' },
+                );
+            } catch (_) { return; }
+            retryingSelected.value = true;
+            try {
+                const results = await Promise.allSettled(rows.map((row) => api.retryJob(row.id)));
+                const succeeded = results.filter((result) => result.status === 'fulfilled').length;
+                const failed = results.length - succeeded;
+                if (succeeded) ElMessage.success(`已重试 ${succeeded} 条任务`);
+                if (failed) ElMessage.warning(`${failed} 条任务重试失败，请查看任务状态`);
+                await refreshAll();
+            } finally { retryingSelected.value = false; }
+        }
+
+        function handleMoreAction(command) {
+            if (command === 'reset-failed') resetFailed();
         }
 
         async function resetFailed() {
             if (filters.library_id) {
                 try {
                     await ElMessageBox.confirm(
-                        '将重置该知识库中的所有失败向量任务，worker 会自动重跑。确定？',
-                        '重置失败向量任务', { type: 'warning', confirmButtonText: '重置', cancelButtonText: '取消' }
+                        '将重试当前筛选知识库中的全部失败向量任务，处理服务会自动重新执行。确定？',
+                        '重试当前知识库的全部失败向量任务', { type: 'warning', confirmButtonText: '重试全部', cancelButtonText: '取消' }
                     );
                 } catch (_) { return; }
             } else {
                 if (statsFailed.value) {
                     try {
                         await ElMessageBox.confirm(
-                            '将重置全部失败向量任务为待处理，worker 会自动重跑。确定？',
-                            '重置失败向量任务', { type: 'warning', confirmButtonText: '重置', cancelButtonText: '取消' }
+                            '将重试系统中的全部失败向量任务，处理服务会自动重新执行。确定？',
+                            '重试全部失败的向量任务', { type: 'warning', confirmButtonText: '重试全部', cancelButtonText: '取消' }
                         );
                     } catch (_) { return; }
                 } else {
                     if (!stats.value.retryable_failed) { ElMessage.info('当前没有可重试的失败向量任务'); return; }
                     try {
                         await ElMessageBox.confirm(
-                            `将把全部 ${stats.value.retryable_failed} 条失败向量任务重置为待处理，worker 会自动重跑。确定？`,
-                            '重置失败向量任务', { type: 'warning', confirmButtonText: '重置', cancelButtonText: '取消' }
+                            `将重试系统中的全部 ${stats.value.retryable_failed} 条失败向量任务，处理服务会自动重新执行。确定？`,
+                            '重试全部失败的向量任务', { type: 'warning', confirmButtonText: '重试全部', cancelButtonText: '取消' }
                         );
                     } catch (_) { return; }
                 }
@@ -167,13 +220,14 @@ export default {
         }
 
         return {
-            jobs, libs, loading, resetting, retryingId, stats, statsFailed,
+            jobs, libs, loading, resetting, retryingId, retryingSelected, selectedFailedJobs, advancedOpen, stats, statsFailed,
             filters, page, pageSize, selectedJob, detailCardRef, truncated, libsFailed,
-            filtered, paged, load, refreshAll, resetFilters, openDetail, closeDetail, retry, resetFailed,
-            isSelected,
+            filtered, paged, load, refreshAll, resetFilters, openDetail, closeDetail, retry, retrySelected, resetFailed,
+            isSelected, isRetrySelectable, onFailedSelectionChange, handleMoreAction,
             STATUS_LABEL, STATUS_TAG, STATUS_ICON, TASK_TYPE_LABEL, STAGE_LABEL,
             formatJobTime, jobDuration, shortId, libraryName, taskEmpty,
-            buildModeLabel, publicationStatusLabel, formatEta,
+            buildModeLabel, publicationStatusLabel, publicationFailureReasonLabel,
+            publicationDiffLabel, formatEta,
         };
     },
     template: `
@@ -184,7 +238,19 @@ export default {
           <p class="jobs-desc">持续监控文件导入、向量化、知识图谱抽取与自动发布</p>
         </div>
         <div class="jobs-header-actions">
-          <el-button @click="refreshAll" :loading="loading">刷新</el-button>
+          <el-dropdown trigger="click" @command="handleMoreAction">
+            <el-button>更多操作</el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="reset-failed" :disabled="resetting || (!filters.library_id && !statsFailed && !stats.retryable_failed)">
+                  {{ filters.library_id ? '重试当前知识库的全部失败向量任务' : '重试全部失败的向量任务' }}
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+          <el-button class="app-refresh-button" @click="refreshAll" :loading="loading">
+            <span class="app-refresh-icon" aria-hidden="true"></span>刷新
+          </el-button>
         </div>
       </header>
 
@@ -225,20 +291,18 @@ export default {
             <el-option label="已完成" value="done" /><el-option label="已失败" value="failed" />
             <el-option label="已取消" value="cancelled" /><el-option label="已覆盖" value="superseded" />
           </el-select>
-          <span class="jobs-toolbar-label">Worker ID</span>
-          <el-input v-model="filters.worker_id" class="jobs-filter-text" placeholder="Worker ID" clearable @input="page=1" />
+          <el-button @click="resetFilters">重置筛选</el-button>
+          <el-button text @click="advancedOpen = !advancedOpen">{{ advancedOpen ? '收起高级筛选' : '高级筛选' }}</el-button>
+        </div>
+        <div v-show="advancedOpen" class="jobs-toolbar-row jobs-advanced-filters">
+          <span class="jobs-toolbar-label">处理服务（Worker）ID</span>
+          <el-input v-model="filters.worker_id" class="jobs-filter-text" placeholder="处理服务 ID" clearable @input="page=1" />
           <span class="jobs-toolbar-label">文档 ID</span>
           <el-input v-model="filters.document_id" class="jobs-filter-text" placeholder="文档 ID" clearable @input="page=1" />
-        </div>
-        <div class="jobs-toolbar-row">
           <span class="jobs-toolbar-label">起始</span>
           <el-date-picker v-model="filters.dateFrom" class="jobs-filter-date" type="date" placeholder="创建开始" value-format="YYYY-MM-DD" @change="page=1" />
           <span class="jobs-toolbar-label">截止</span>
           <el-date-picker v-model="filters.dateTo" class="jobs-filter-date" type="date" placeholder="创建结束" value-format="YYYY-MM-DD" @change="page=1" />
-          <el-button @click="resetFilters">重置筛选</el-button>
-          <el-button type="danger" plain :disabled="resetting || (!filters.library_id && !statsFailed && !stats.retryable_failed)" :loading="resetting" @click="resetFailed">
-            重置失败向量任务<span v-if="!filters.library_id && !statsFailed && stats.retryable_failed"> ({{ stats.retryable_failed }})</span>
-          </el-button>
         </div>
       </section>
 
@@ -246,9 +310,16 @@ export default {
       <el-alert v-if="libsFailed" type="warning" :closable="false" show-icon title="知识库列表加载失败，不影响任务查看" />
 
       <section class="jobs-table-card">
+        <div class="jobs-table-actions">
+          <span>仅失败且可重试的任务可以勾选</span>
+          <el-button type="primary" plain :disabled="!selectedFailedJobs.length" :loading="retryingSelected" @click="retrySelected">
+            重试所选<span v-if="selectedFailedJobs.length">（{{ selectedFailedJobs.length }}）</span>
+          </el-button>
+        </div>
         <div class="jobs-table-shell">
           <el-table :data="paged.items" v-loading="loading"
                     @row-click="openDetail"
+                    @selection-change="onFailedSelectionChange"
                     :row-class-name="function({row}){return isSelected(row) ? 'jobs-row-selected' : ''}">
             <template #empty>
               <div class="illustration-empty-wrapper">
@@ -256,6 +327,7 @@ export default {
                 <p>暂无任务</p>
               </div>
             </template>
+            <el-table-column type="selection" width="46" :selectable="isRetrySelectable" />
             <el-table-column label="任务 / 文档" min-width="200">
               <template #default="{row}">
                 <div class="jobs-doc-id">{{ row.title || shortId(row.document_id) }}</div>
@@ -277,7 +349,7 @@ export default {
             <el-table-column label="当前阶段" min-width="140">
               <template #default="{row}">{{ STAGE_LABEL[row.stage] || row.stage || '—' }}</template>
             </el-table-column>
-            <el-table-column label="Worker" width="120" show-overflow-tooltip prop="worker_id" />
+            <el-table-column label="处理服务" width="120" show-overflow-tooltip prop="worker_id" />
             <el-table-column label="尝试" width="60" align="center" prop="attempt_count" />
             <el-table-column label="耗时" width="80" align="center">
               <template #default="{row}">{{ jobDuration(row) }}</template>
@@ -311,6 +383,12 @@ export default {
             <span class="jobs-detail-title">任务详情 · {{ shortId(selectedJob.document_id) }}</span>
             <el-button size="small" @click="closeDetail">收起</el-button>
           </div>
+          <el-alert v-if="selectedJob.task_type === 'graph' && selectedJob.publication_status === 'entities_only'"
+                    type="warning" :closable="false" show-icon
+                    title="仅有实体、暂无有效关系，已保留实体候选供审核，未发布为可用图谱。" />
+          <el-alert v-if="selectedJob.task_type === 'graph' && selectedJob.metrics?.current_graph_unchanged"
+                    type="info" :closable="false" show-icon
+                    title="本次更新没有切换正式图谱；如果此前已有发布版本，该版本仍被保留，未验证结果不会混入问答。" />
           <dl class="jobs-detail-meta">
             <dt>任务 ID</dt><dd class="mono">{{ selectedJob.id }}</dd>
             <dt>文档 ID</dt><dd class="mono">{{ selectedJob.document_id }}</dd>
@@ -324,12 +402,20 @@ export default {
               <dt>抽取进度</dt><dd>{{ selectedJob.progress?.completed || 0 }} / {{ selectedJob.progress?.total || 0 }} Unit（{{ selectedJob.progress?.percent || 0 }}%）</dd>
               <dt>批次进度</dt><dd>{{ selectedJob.progress?.completed_batches || 0 }} / {{ selectedJob.progress?.planned_batches || 0 }} Batch（估算）</dd>
               <dt>自动发布</dt><dd>{{ publicationStatusLabel(selectedJob.publication_status) }}</dd>
+              <dt>抽取数量</dt><dd>实体 {{ selectedJob.metrics?.stage_counts?.extraction?.entities ?? 0 }} / 关系 {{ selectedJob.metrics?.stage_counts?.extraction?.relations ?? 0 }}</dd>
+              <dt>校验通过</dt><dd>实体 {{ selectedJob.metrics?.stage_counts?.validation?.entities ?? 0 }} / 关系 {{ selectedJob.metrics?.stage_counts?.validation?.relations ?? 0 }}</dd>
+              <dt>物化数量</dt><dd>实体 {{ selectedJob.metrics?.stage_counts?.materialization?.entities ?? 0 }} / 关系 {{ selectedJob.metrics?.stage_counts?.materialization?.relations ?? 0 }}</dd>
+              <dt>发布数量</dt><dd>实体 {{ selectedJob.metrics?.stage_counts?.publication?.entities ?? 0 }} / 关系 {{ selectedJob.metrics?.stage_counts?.publication?.relations ?? 0 }}</dd>
+              <template v-if="selectedJob.metrics?.publication_diff">
+                <dt>图谱变化</dt><dd>{{ publicationDiffLabel(selectedJob.metrics.publication_diff) }}</dd>
+              </template>
+              <dt>未发布原因</dt><dd>{{ publicationFailureReasonLabel(selectedJob.metrics?.failure_reasons?.publication) }}</dd>
               <dt>实时并发</dt><dd>配置 {{ selectedJob.metrics?.configured_concurrency ?? '—' }} / 生效 {{ selectedJob.metrics?.effective_concurrency ?? '—' }} / 处理中 {{ selectedJob.metrics?.in_flight ?? 0 }}</dd>
               <dt>预计剩余</dt><dd>{{ formatEta(selectedJob.metrics?.eta_seconds) }}</dd>
               <dt>缓存命中</dt><dd>{{ selectedJob.metrics?.cache_hits || 0 }}</dd>
               <dt>限流 / 重试</dt><dd>{{ selectedJob.metrics?.throttled_count || 0 }} / {{ selectedJob.metrics?.retry_count || 0 }}</dd>
             </template>
-            <dt>Worker</dt><dd>{{ selectedJob.worker_id || '—' }}</dd>
+            <dt>处理服务（Worker）</dt><dd>{{ selectedJob.worker_id || '—' }}</dd>
             <dt>尝试次数</dt><dd>{{ selectedJob.attempt_count || 0 }}</dd>
             <dt>耗时</dt><dd>{{ jobDuration(selectedJob) }}</dd>
             <dt>创建时间</dt><dd>{{ formatJobTime(selectedJob.created_at) }}</dd>

@@ -67,6 +67,10 @@ class Settings(BaseSettings):
     db_user: str = "postgres"
     db_password: str = ""
     db_name: str = "vector_kb"
+    db_pool_size: int = Field(default=2, ge=1, le=20)
+    db_max_overflow: int = Field(default=8, ge=0, le=40)
+    db_pool_timeout_seconds: int = Field(default=30, ge=1, le=300)
+    db_pool_recycle_seconds: int = Field(default=900, ge=60, le=86_400)
 
     @property
     def db_dsn_async(self) -> str:
@@ -136,6 +140,7 @@ class Settings(BaseSettings):
     chat_temperature: float = 0.2
     # 多轮上下文：带入最近 N 轮历史帮助理解追问（仅理解，不作事实依据）。0=不带历史。
     chat_history_max_turns: int = 5
+    chat_graph_answer_enabled: bool = False
 
     # ---- OCR（图片/扫描件抽文字；默认关，按库 ocr_enabled 覆盖；需装 rapidocr_onnxruntime）----
     ocr_enabled: bool = False
@@ -373,7 +378,7 @@ class Settings(BaseSettings):
     knowledge_artifact_model_max_source_chars: int = 24_000
     knowledge_artifact_summary_extractor_version: str = "summary-extractor-v1"
     knowledge_artifact_outline_extractor_version: str = "outline-extractor-v1"
-    knowledge_artifact_prompt_version: str = "summary-prompt-v1"
+    knowledge_artifact_prompt_version: str = "summary-prompt-v2"
     knowledge_artifact_worker_poll_seconds: float = 3.0
     knowledge_artifact_worker_lease_seconds: int = 180
     knowledge_artifact_worker_renew_seconds: int = 30
@@ -387,9 +392,9 @@ class Settings(BaseSettings):
     classification_model: str = "deepseek-v4-pro"
     classification_api_key: SecretStr = SecretStr("")
     classification_provider_timeout_seconds: float = 120.0
-    classification_model_max_source_chars: int = 24_000
+    classification_model_max_source_chars: int = 8_000
     classification_classifier_version: str = "document-classifier-v1"
-    classification_prompt_version: str = "classification-prompt-v1"
+    classification_prompt_version: str = "classification-prompt-v3"
     classification_worker_poll_seconds: float = 3.0
     classification_worker_lease_seconds: int = 180
     classification_worker_renew_seconds: int = 30
@@ -576,13 +581,10 @@ def validate_knowledge_artifact_startup(config: Settings) -> None:
         raise RuntimeError("[security] knowledge artifact versions must be nonblank and bounded")
     if not config.knowledge_artifact_external_model_enabled:
         return
-    if (
-        config.knowledge_artifact_base_url != "https://api.deepseek.com/v1"
-        or config.knowledge_artifact_model != "deepseek-v4-pro"
-    ):
-        raise RuntimeError("[security] knowledge artifact model requires the approved DeepSeek identity")
-    if not config.knowledge_artifact_api_key.get_secret_value().strip():
-        raise RuntimeError("[security] KNOWLEDGE_ARTIFACT_API_KEY is required for model generation")
+    if not config.graph_extraction_base_url.strip() or not config.graph_extraction_model.strip():
+        raise RuntimeError("[security] knowledge artifact model endpoint and model are required")
+    if not config.graph_extraction_api_key.get_secret_value().strip():
+        raise RuntimeError("[security] GRAPH_EXTRACTION_API_KEY is required for Summary generation")
 
 
 def validate_classification_runtime_startup(config: Settings) -> None:
@@ -629,11 +631,14 @@ def validate_classification_runtime_startup(config: Settings) -> None:
         raise RuntimeError("[security] classification versions must be nonblank and bounded")
     if not config.classification_external_model_enabled:
         return
-    if (
-        config.classification_base_url != "https://api.deepseek.com/v1"
-        or config.classification_model != "deepseek-v4-pro"
-    ):
-        raise RuntimeError("[security] classification requires the approved DeepSeek identity")
+    provider_contract = (config.classification_base_url, config.classification_model)
+    if provider_contract not in {
+        ("https://api.deepseek.com/v1", "deepseek-v4-pro"),
+        ("http://10.0.10.2:8113/v1", "qwen3.5-9b"),
+    }:
+        raise RuntimeError(
+            "[security] classification requires an approved provider identity"
+        )
     if not config.classification_api_key.get_secret_value().strip():
         raise RuntimeError("[security] CLASSIFICATION_API_KEY is required for classification")
 

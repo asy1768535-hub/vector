@@ -260,7 +260,7 @@ def test_0030_remains_linear_and_local_offline_sql_is_exactly_reversible():
     taxonomy_migration = script.get_revision("0034")
     assert taxonomy_migration is not None
     assert taxonomy_migration.down_revision == "0033"
-    assert script.get_heads() == ["0043"]
+    assert script.get_heads() == ["0050"]
 
     upgrade = _offline("upgrade", "0029:0030")
     downgrade = _offline("downgrade", "0030:0029")

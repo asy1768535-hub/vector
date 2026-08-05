@@ -177,7 +177,7 @@ def test_0034_orm_migration_and_offline_sql_are_reversible():
     assert "ck_classification_taxonomies_activation_shape" in taxonomy_checks
     assert "ck_classification_labels_parent_not_self" in label_checks
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_heads() == ["0043"]
+    assert script.get_heads() == ["0050"]
     assert script.get_revision("0034").down_revision == "0033"
     upgrade = _offline("upgrade", "0033:0034")
     downgrade = _offline("downgrade", "0034:0033")

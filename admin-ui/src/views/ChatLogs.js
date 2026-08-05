@@ -142,7 +142,9 @@ export default {
           <p class="chat-logs-desc">记录用户的检索与问答行为，便于问题追踪与效果评估</p>
         </div>
         <div class="chat-logs-header-actions">
-          <el-button @click="load(true)" :loading="loading">刷新</el-button>
+          <el-button class="app-refresh-button" @click="load(true)" :loading="loading">
+            <span class="app-refresh-icon" aria-hidden="true"></span>刷新
+          </el-button>
           <el-button @click="exportCSV" :disabled="!filtered.length">导出 CSV</el-button>
         </div>
       </header>

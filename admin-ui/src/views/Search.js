@@ -1,5 +1,5 @@
 import { computed, onMounted, ref, watch } from 'vue';
-import { useRouter } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import * as api from '../api.js';
 import { store } from '../store.js';
@@ -7,6 +7,7 @@ import { documentTypeIcon, documentDisplayName } from '../documents_ui.js';
 import { searchEmpty } from '../illustrations.js';
 import { csvEscape, downloadCSV } from '../logs_ui.js';
 import { createRequestFence, readProjection } from '../read_state_ui.js';
+import RetrievalModeSwitch from '../components/RetrievalModeSwitch.js';
 
 function formatScore(s) {
     return (Number(s || 0) * 100).toFixed(1) + '%';
@@ -29,11 +30,15 @@ function resultDocInfo(row) {
 }
 
 export default {
+    components: { RetrievalModeSwitch },
     setup() {
+        const route = useRoute();
         const router = useRouter();
         const libs = ref([]);
         const slug = ref(null);
-        const query = ref('');
+        const query = ref(String(route.query.q || route.query.query || ''));
+        const requestedSlug = String(route.query.library || route.query.slug
+            || String(route.query.libraries || '').split(',')[0] || '');
         const limit = ref(5);
         const results = ref([]);
         const loading = ref(false);
@@ -100,7 +105,11 @@ export default {
                 if (!libsRequestFence.isCurrent(requestToken)) return;
                 libs.value = nextLibraries;
                 libsResolved.value = true;
-                if (!slug.value && libs.value.length) slug.value = libs.value[0].slug;
+                if (!slug.value && libs.value.length) {
+                    slug.value = libs.value.some((item) => item.slug === requestedSlug)
+                        ? requestedSlug
+                        : libs.value[0].slug;
+                }
             } catch (e) {
                 if (!libsRequestFence.isCurrent(requestToken)) return;
                 libsError.value = e.message || '知识库列表加载失败';
@@ -163,8 +172,8 @@ export default {
                 return;
             }
             const href = router.resolve({
-                path: '/knowledge-assets/documents',
-                query: { slug: slug.value, open: docId },
+                path: '/knowledge-assets/catalog',
+                query: { library: slug.value, document: docId },
             }).href;
             window.open(href, '_blank', 'noopener');
         }
@@ -211,6 +220,7 @@ export default {
     },
     template: `
     <div class="search-workspace">
+        <retrieval-mode-switch :query-text="query" :library-slugs="slug ? [slug] : []" />
         <!-- Card 1: Search form -->
         <section class="search-card">
             <el-form :inline="true" @submit.prevent="handleSearch">

@@ -91,7 +91,12 @@ def test_manifest_freezes_dependencies_and_unchanged_accepted_frontend() -> None
 
 def test_post_candidate_patch_has_one_0043_head() -> None:
     scripts = ScriptDirectory.from_config(Config(str(ROOT / "alembic.ini")))
-    assert scripts.get_heads() == ["0043"]
+    assert scripts.get_heads() == ["0050"]
+    assert scripts.get_revision("0048").down_revision == "0047"
+    assert scripts.get_revision("0047").down_revision == "0046"
+    assert scripts.get_revision("0046").down_revision == "0045"
+    assert scripts.get_revision("0045").down_revision == "0044"
+    assert scripts.get_revision("0044").down_revision == "0043"
     assert scripts.get_revision("0043").down_revision == "0042"
     assert scripts.get_revision("0042").down_revision == "0041"
     assert scripts.get_revision("0041").down_revision == "0040"

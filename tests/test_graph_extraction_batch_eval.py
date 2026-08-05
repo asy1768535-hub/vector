@@ -90,10 +90,16 @@ def test_schema_router_keeps_only_model_facing_contract():
                 "active_attribute_definitions": [],
             }
         ],
+        "relation_constraints": [
+            {
+                "relation_type_key": "belongs_to",
+                "source_entity_type_key": "person",
+                "target_entity_type_key": "department",
+            }
+        ],
     }
     encoded = json.dumps(routed, sort_keys=True)
     assert "00000000" not in encoded
-    assert "relation_constraints" not in encoded
     assert "default_review_policy" not in encoded
 
 
@@ -163,6 +169,9 @@ def test_batch_prompt_shares_one_compact_schema_and_scopes_local_ids():
     assert len(messages) == 2
     assert "batch_key" in messages[0]["content"]
     assert "local_id values are scoped to one batch" in messages[0]["content"]
+    assert "match a supplied relation_constraint" in messages[0]["content"]
+    assert '"confidence":0.9' in messages[0]["content"]
+    assert '"confidence":0.0' not in messages[0]["content"]
     payload = json.loads(messages[1]["content"].split("\n", 1)[1])
     assert [row["batch_key"] for row in payload["batches"]] == ["u0", "u1"]
     assert payload["frozen_ontology"] == route_ontology_for_extraction(_ontology())
@@ -332,6 +341,78 @@ def test_batch_orchestration_skips_provider_when_every_unit_is_cached():
     provider_call.assert_not_awaited()
     assert persist.await_count == 4
     assert all(call.kwargs["prepared"].cache_hit for call in persist.await_args_list)
+
+
+def test_batch_preparation_failure_falls_back_to_single_units():
+    units = tuple(
+        SimpleNamespace(id=uuid.uuid4(), claim_token=uuid.uuid4()) for _ in range(2)
+    )
+    single_result = SimpleNamespace(
+        outcome="succeeded",
+        ready_for_materialization=False,
+    )
+    with (
+        patch(
+            "app.services.graph_extraction_batch_eval._prepare_graph_extraction_unit",
+            new=AsyncMock(side_effect=ValueError("incompatible batch")),
+        ),
+        patch(
+            "app.services.graph_extraction_batch_eval.process_graph_extraction_unit",
+            new=AsyncMock(return_value=single_result),
+        ) as process_single,
+        patch(
+            "app.services.graph_extraction_batch_eval._finish_batch",
+            new=AsyncMock(),
+        ) as finish_batch,
+    ):
+        result = asyncio.run(process_eval_graph_extraction_batch(_sessions, units=units))
+
+    assert result.outcomes == Counter({"succeeded": 2})
+    assert result.provider_call_count == 2
+    assert process_single.await_count == 2
+    finish_batch.assert_not_awaited()
+
+def test_full_schema_batches_split_before_provider_call():
+    units = tuple(
+        SimpleNamespace(id=uuid.uuid4(), claim_token=uuid.uuid4()) for _ in range(4)
+    )
+    prepared = tuple(
+        SimpleNamespace(
+            unit_id=unit.id,
+            model_config_snapshot={"schema_routing_enabled": False},
+        )
+        for unit in units
+    )
+    child_result = SimpleNamespace(
+        outcomes=Counter({"succeeded": 2}), provider_call_count=1, ready_job_ids=()
+    )
+    with (
+        patch(
+            "app.services.graph_extraction_batch_eval._prepare_graph_extraction_unit",
+            new=AsyncMock(side_effect=prepared),
+        ),
+        patch(
+            "app.services.graph_extraction_batch_eval._consume_cached_batch_rows",
+            new=AsyncMock(return_value=(Counter(), set(), units)),
+        ),
+        patch(
+            "app.services.graph_extraction_batch_eval.process_eval_graph_extraction_batch",
+            new=AsyncMock(return_value=child_result),
+        ) as process_child,
+        patch(
+            "app.services.graph_extraction_batch_eval.build_batched_graph_extraction_messages"
+        ) as build_messages,
+    ):
+        result = asyncio.run(process_eval_graph_extraction_batch(_sessions, units=units))
+
+    assert result.outcomes == Counter({"succeeded": 4})
+    assert result.provider_call_count == 2
+    assert process_child.await_count == 2
+    assert [call.kwargs["units"] for call in process_child.await_args_list] == [
+        units[:2],
+        units[2:],
+    ]
+    build_messages.assert_not_called()
 
 
 def test_batch_orchestration_calls_provider_once_and_persists_every_unit():

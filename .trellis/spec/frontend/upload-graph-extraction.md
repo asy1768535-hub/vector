@@ -66,6 +66,20 @@ The option lives in `DocumentRevision.parser_config`; it is not an
 - An unchanged/deduplicated upload never schedules another extraction.
 - Extraction materializes validated draft facts, then the system automatically
   plans and activates a graph Publication. Human review is not a prerequisite.
+- Replacing a Document invalidates bindings from the superseded Revision. An
+  identical validated Relation may move from `stale` back to `draft`, bind
+  current-Revision Evidence, and become `active` only through replacement
+  Publication activation.
+- An entity-only replacement may plan a clean Library-wide replacement only
+  when the current Publication is already `degraded`. The resulting snapshot
+  must still contain at least one eligible Relation; a zero-Relation snapshot
+  is rolled back and never activated.
+- A successful replacement records a snapshot diff for Entities and Relations
+  using stable fact IDs: `added`, `retained`, `changed`, and `removed`. Evidence
+  or fact-hash changes on the same ID count as `changed`, not delete-plus-add.
+- A skipped or failed replacement records that the formal graph was not
+  switched. Existing Publication history remains available for diagnosis and
+  rollback, while degraded or unvalidated facts remain excluded from Q&A.
 - Facts that fail validation remain excluded. Errors discovered during search,
   browsing, or Q&A are corrected later through the existing governance and
   versioned Publication workflow.

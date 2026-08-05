@@ -63,8 +63,11 @@ test('manual fact and correction forms use active context and exact state fences
         'api.addGraphEntityAlias',
         'expected_entity_state_hash: aliasDialog.expectedStateHash',
     ]) assert.ok(view.includes(token), `missing submitted-fact contract ${token}`);
-    assert.match(view, /v-if="canWrite && \['browse', 'entities'\]\.includes\(scope\.tab\)"/);
-    assert.match(view, /v-if="canWrite && \['browse', 'relations'\]\.includes\(scope\.tab\)"/);
+    assert.ok(view.includes('@create-entity="openFactDialog(\'entity\')"'));
+    assert.ok(view.includes('@create-relation="openFactDialog(\'relation\', $event)"'));
+    assert.ok(view.includes("String(endpoints.sourceEntityId || '')"));
+    assert.ok(view.includes("String(endpoints.ontologyVersionId || '')"));
+    assert.ok(view.includes('当前知识库还没有可编辑的 Schema'));
 });
 
 test('management commands carry state hashes, fixed reasons, confirmations and no retry loop', () => {

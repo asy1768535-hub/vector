@@ -152,8 +152,8 @@ test('route, API, view, menu, and responsive privacy contracts are wired', () =>
     assert.match(app, /path:\s*'classification'/);
     assert.match(app, /libraryManagement:\s*true/);
     assert.match(layout, /visibleSidebarGroups/);
-    assert.match(navigation, /access:\s*'classificationReview'/);
-    assert.match(navigation, /path:\s*APP_PATHS\.classificationReview/);
+    assert.match(app, /path:\s*'classification'[\s\S]*?APP_PATHS\.catalog/);
+    assert.doesNotMatch(navigation, /key:\s*'classificationReview'/);
     assert.match(layout, /class="header-user-label"/);
     assert.match(menu, /manageableLibraries/);
     assert.match(menu, /canAccessLibraryManagementRoute/);

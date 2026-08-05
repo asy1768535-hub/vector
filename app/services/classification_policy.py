@@ -74,7 +74,6 @@ def evaluate_classification_policy(
         primary = proposals[selected_primary_index]
         if primary.confidence_micros < CLASSIFICATION_MIN_CONFIDENCE_MICROS:
             per_item[selected_primary_index].add("primary_confidence_below_threshold")
-            run_reasons.add("primary_confidence_below_threshold")
         if len(primary_indices) > 1:
             runner_up = proposals[primary_indices[1]]
             if (
@@ -83,12 +82,13 @@ def evaluate_classification_policy(
             ):
                 per_item[selected_primary_index].add("primary_margin_below_threshold")
                 per_item[primary_indices[1]].add("primary_margin_below_threshold")
-                run_reasons.add("primary_margin_below_threshold")
 
+    selected_secondary_indices: list[int] = []
     for index in secondary_indices:
         if proposals[index].confidence_micros < CLASSIFICATION_MIN_CONFIDENCE_MICROS:
             per_item[index].add("secondary_confidence_below_threshold")
-            run_reasons.add("secondary_confidence_below_threshold")
+        else:
+            selected_secondary_indices.append(index)
 
     ordered_run_reasons = _ordered_reasons(run_reasons)
     ordered_item_reasons = tuple(_ordered_reasons(values) for values in per_item)
@@ -99,7 +99,7 @@ def evaluate_classification_policy(
             proposal_statuses=tuple("pending_review" for _ in proposals),
             proposal_reason_codes=ordered_item_reasons,
             selected_primary_index=selected_primary_index,
-            selected_secondary_indices=tuple(secondary_indices),
+            selected_secondary_indices=tuple(selected_secondary_indices),
         )
     if has_manual_decision_protection:
         return ClassificationPolicyEvaluation(
@@ -108,9 +108,9 @@ def evaluate_classification_policy(
             proposal_statuses=tuple("blocked_manual" for _ in proposals),
             proposal_reason_codes=ordered_item_reasons,
             selected_primary_index=selected_primary_index,
-            selected_secondary_indices=tuple(secondary_indices),
+            selected_secondary_indices=tuple(selected_secondary_indices),
         )
-    selected = {selected_primary_index, *secondary_indices}
+    selected = {selected_primary_index, *selected_secondary_indices}
     return ClassificationPolicyEvaluation(
         run_status="auto_applied",
         run_reason_codes=(),
@@ -120,5 +120,5 @@ def evaluate_classification_policy(
         ),
         proposal_reason_codes=ordered_item_reasons,
         selected_primary_index=selected_primary_index,
-        selected_secondary_indices=tuple(secondary_indices),
+        selected_secondary_indices=tuple(selected_secondary_indices),
     )

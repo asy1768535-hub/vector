@@ -21,12 +21,14 @@ from app.models.ontology_version import OntologyVersion
 from app.models.relation_type import RelationType
 from app.models.relation_type_constraint import RelationTypeConstraint
 from app.models.schema_lifecycle_action import SchemaLifecycleAction
+from app.schemas.schema_lifecycle import SchemaImportRequest
 from app.services import audit_log, ontology
 from app.services.schema_lifecycle_contracts import (
     SchemaLifecycleCommand,
     SchemaLifecycleError,
     deterministic_schema_child_id,
     deterministic_schema_clone_id,
+    deterministic_schema_import_id,
 )
 from app.services.schema_lifecycle_read import (
     SchemaVersionBundle,
@@ -368,6 +370,198 @@ async def clone_schema_version(
         item_count=item_count,
     )
     return SchemaLifecycleActionResult(action=action, bundle=draft, reused=False)
+
+
+async def import_schema_version(
+    db: AsyncSession,
+    library: Library,
+    command: SchemaLifecycleCommand,
+    spec: SchemaImportRequest,
+) -> SchemaLifecycleActionResult:
+    if (
+        command.library_id != library.id
+        or command.action_kind != "import_version"
+        or command.target_kind != "ontology_version"
+        or command.target_id != deterministic_schema_import_id(
+            library.id, command.idempotency_key
+        )
+        or spec.idempotency_key != command.idempotency_key
+    ):
+        raise SchemaLifecycleError(
+            "schema_lifecycle_request_invalid", "Schema import command is invalid"
+        )
+    await _lock_library(db, library)
+    replay = await _replay(db, library, command)
+    if replay is not None:
+        return replay
+
+    family = (
+        await db.execute(
+            select(OntologyVersion)
+            .where(
+                OntologyVersion.library_id == library.id,
+                OntologyVersion.version_key == spec.version_key,
+            )
+            .with_for_update()
+        )
+    ).scalars().all()
+    active_versions = [row for row in family if row.status == _ACTIVE]
+    if len(active_versions) > 1:
+        raise SchemaLifecycleError(
+            "schema_lifecycle_unavailable", "Active Schema identity is ambiguous"
+        )
+    draft = OntologyVersion(
+        id=command.target_id,
+        library_id=library.id,
+        version_key=spec.version_key,
+        version_no=max((row.version_no for row in family), default=0) + 1,
+        status=_DRAFT,
+        description=spec.description,
+        parent_version_id=active_versions[0].id if active_versions else None,
+    )
+    entity_keys = [row.key for row in spec.entity_types]
+    relation_keys = [row.key for row in spec.relation_types]
+    if len(entity_keys) != len(set(entity_keys)) or len(relation_keys) != len(set(relation_keys)):
+        raise SchemaLifecycleError(
+            "schema_lifecycle_request_invalid", "Schema type keys must be unique"
+        )
+    entity_ids = {
+        row.key: uuid.uuid5(draft.id, f"import:entity_type:{row.key}")
+        for row in spec.entity_types
+    }
+    relation_ids = {
+        row.key: uuid.uuid5(draft.id, f"import:relation_type:{row.key}")
+        for row in spec.relation_types
+    }
+    entities = tuple(
+        EntityType(
+            id=entity_ids[row.key],
+            library_id=library.id,
+            ontology_version_id=draft.id,
+            key=row.key,
+            label=row.label,
+            description=row.description,
+            properties_schema=deepcopy(row.properties_schema),
+            is_seeded=False,
+            status=_DRAFT,
+        )
+        for row in spec.entity_types
+    )
+    relations = tuple(
+        RelationType(
+            id=relation_ids[row.key],
+            library_id=library.id,
+            ontology_version_id=draft.id,
+            key=row.key,
+            label=row.label,
+            description=row.description,
+            direction=row.direction,
+            requires_evidence=row.requires_evidence,
+            default_review_policy=row.default_review_policy,
+            properties_schema=deepcopy(row.properties_schema),
+            is_seeded=False,
+            status=_DRAFT,
+        )
+        for row in spec.relation_types
+    )
+    owner_ids = {
+        **{("entity_type", key): value for key, value in entity_ids.items()},
+        **{("relation_type", key): value for key, value in relation_ids.items()},
+    }
+    attribute_keys = [
+        (row.owner_kind, row.owner_key, row.key) for row in spec.attributes
+    ]
+    if len(attribute_keys) != len(set(attribute_keys)):
+        raise SchemaLifecycleError(
+            "schema_lifecycle_request_invalid", "Schema attribute keys must be unique"
+        )
+    attributes = []
+    for row in spec.attributes:
+        owner_id = owner_ids.get((row.owner_kind, row.owner_key))
+        if owner_id is None:
+            raise SchemaLifecycleError(
+                "schema_lifecycle_request_invalid", "Schema attribute owner is unavailable"
+            )
+        attributes.append(
+            AttributeDefinition(
+                id=uuid.uuid5(
+                    draft.id,
+                    f"import:attribute:{row.owner_kind}:{row.owner_key}:{row.key}",
+                ),
+                library_id=library.id,
+                ontology_version_id=draft.id,
+                owner_kind=row.owner_kind,
+                owner_type_id=owner_id,
+                key=row.key,
+                label=row.label,
+                value_type=row.value_type,
+                required=row.required,
+                enum_values=deepcopy(row.enum_values),
+                validation_schema=deepcopy(row.validation_schema),
+                indexed=row.indexed,
+                status=_DRAFT,
+            )
+        )
+    constraint_keys = [
+        (
+            row.relation_type_key,
+            row.source_entity_type_key,
+            row.target_entity_type_key,
+        )
+        for row in spec.constraints
+    ]
+    if len(constraint_keys) != len(set(constraint_keys)):
+        raise SchemaLifecycleError(
+            "schema_lifecycle_request_invalid", "Schema constraints must be unique"
+        )
+    constraints = []
+    for row in spec.constraints:
+        relation_id = relation_ids.get(row.relation_type_key)
+        source_id = entity_ids.get(row.source_entity_type_key)
+        target_id = entity_ids.get(row.target_entity_type_key)
+        if relation_id is None or source_id is None or target_id is None:
+            raise SchemaLifecycleError(
+                "schema_lifecycle_request_invalid", "Schema constraint endpoint is unavailable"
+            )
+        constraints.append(
+            RelationTypeConstraint(
+                id=uuid.uuid5(
+                    draft.id,
+                    f"import:constraint:{row.relation_type_key}:{row.source_entity_type_key}:{row.target_entity_type_key}",
+                ),
+                library_id=library.id,
+                ontology_version_id=draft.id,
+                relation_type_id=relation_id,
+                source_entity_type_id=source_id,
+                target_entity_type_id=target_id,
+                cardinality=row.cardinality,
+                requires_review=row.requires_review,
+                status=_DRAFT,
+            )
+        )
+    bundle = SchemaVersionBundle(
+        version=draft,
+        entity_types=entities,
+        relation_types=relations,
+        attributes=tuple(attributes),
+        constraints=tuple(constraints),
+    )
+    db.add(draft)
+    await db.flush()
+    db.add_all([*entities, *relations, *attributes, *constraints])
+    await db.flush()
+    action = await _record_action(
+        db,
+        command=command,
+        version=draft,
+        target_id=draft.id,
+        state_hash=schema_version_state_hash(bundle),
+        item_count=sum(
+            len(rows)
+            for rows in (entities, relations, attributes, constraints)
+        ),
+    )
+    return SchemaLifecycleActionResult(action=action, bundle=bundle, reused=False)
 
 
 def _require_draft(bundle: SchemaVersionBundle, expected_hash: str) -> None:

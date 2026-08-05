@@ -16,6 +16,11 @@ from app.config import settings
 from app.db import get_db
 from app.deps import require_lib
 from app.models.library import Library
+from app.models.classification_taxonomy import (
+    ClassificationLabel,
+    ClassificationTaxonomy,
+    LibraryClassificationLabel,
+)
 from app.models.library_faq import LibraryFAQQuestion
 from app.models.user import User
 from app.schemas.admin import (
@@ -57,6 +62,40 @@ def _collection_name(slug: str) -> str:
     slug 是 unique + 不可变（schema 层面没暴露 slug 改写接口），所以名字稳定。
     """
     return f"lib_{slug}"
+
+async def _attach_active_classification_labels(
+    db: AsyncSession,
+    library: Library,
+) -> None:
+    taxonomy = (
+        await db.execute(
+            select(ClassificationTaxonomy).where(
+                ClassificationTaxonomy.organization_id == library.organization_id,
+                ClassificationTaxonomy.status == "active",
+            )
+        )
+    ).scalar_one_or_none()
+    if taxonomy is None:
+        return
+    labels = (
+        await db.execute(
+            select(ClassificationLabel)
+            .where(
+                ClassificationLabel.taxonomy_version_id == taxonomy.id,
+                ClassificationLabel.status == "active",
+            )
+            .order_by(ClassificationLabel.sort_order, ClassificationLabel.key)
+        )
+    ).scalars().all()
+    db.add_all(
+        LibraryClassificationLabel(
+            library_id=library.id,
+            taxonomy_version_id=taxonomy.id,
+            label_id=label.id,
+            ordinal=ordinal,
+        )
+        for ordinal, label in enumerate(labels)
+    )
 
 
 def _has_non_empty_source_config(value: object) -> bool:
@@ -144,6 +183,7 @@ async def create_library(
         qdrant_collection="",  # 写完 ID 后再 set
         source_config=source_config,
         graph_extraction_enabled=body.graph_extraction_enabled,
+        schema_mode=body.schema_mode,
         graph_extraction_build_mode=body.graph_extraction_build_mode,
         external_llm_enabled=body.external_llm_enabled,
         graph_extraction_allowed_security_levels=(
@@ -151,7 +191,19 @@ async def create_library(
                 body.graph_extraction_allowed_security_levels
             )
         ),
+        knowledge_artifact_auto_enabled=True,
+        summary_artifact_enabled=True,
+        outline_artifact_enabled=True,
+        knowledge_artifact_external_model_enabled=body.external_llm_enabled,
+        knowledge_artifact_allowed_security_levels=(
+            graph_extraction_safety.normalize_allowed_security_levels(
+                body.graph_extraction_allowed_security_levels
+            )
+        ),
         revision_retention_enabled=body.revision_retention_enabled,
+        classification_auto_enabled=True,
+        classification_external_model_enabled=True,
+        classification_allowed_security_levels=["internal"],
         revision_retention_days=body.revision_retention_days,
         revision_retention_notice_days=body.revision_retention_notice_days,
         created_by=actor.id,
@@ -187,8 +239,9 @@ async def create_library(
                 "知识库重建ID分配冲突，请重试",
             ) from retry_exc
 
-    if body.schema_template == "enterprise":
+    if body.schema_mode == "governed" and body.schema_template == "enterprise":
         await graph_seed.seed_enterprise_ontology(db, lib)
+    await _attach_active_classification_labels(db, lib)
 
     # 建 Qdrant collection（失败回滚库记录）
     try:
@@ -222,6 +275,7 @@ async def create_library(
                 "creation_generation": creation_generation,
                 "collection": lib.qdrant_collection,
                 "graph_extraction_enabled": lib.graph_extraction_enabled,
+                "schema_mode": lib.schema_mode,
                 "schema_template": body.schema_template,
             },
         )
@@ -347,16 +401,38 @@ async def update_library(
             lib.source_config = source_config
             changes["source_config"] = source_config
 
+    if "schema_mode" in body.model_fields_set and "graph_extraction_enabled" in body.model_fields_set:
+        if (body.schema_mode == "disabled") != (body.graph_extraction_enabled is False):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "schema_mode and graph_extraction_enabled must describe the same mode",
+            )
+
     safety_change_error = None
+    if "schema_mode" in body.model_fields_set:
+        lib.schema_mode = body.schema_mode
+        changes["schema_mode"] = body.schema_mode
+        if "graph_extraction_enabled" not in body.model_fields_set:
+            lib.graph_extraction_enabled = body.schema_mode != "disabled"
+            changes["graph_extraction_enabled"] = lib.graph_extraction_enabled
+            if not lib.graph_extraction_enabled:
+                safety_change_error = "library_opt_out"
+
     for field in (
         "graph_extraction_enabled",
         "graph_extraction_build_mode",
+        "graph_assisted_chat_mode",
         "external_llm_enabled",
     ):
         if field in body.model_fields_set:
             value = getattr(body, field)
             setattr(lib, field, value)
             changes[field] = value
+            if field == "graph_extraction_enabled" and "schema_mode" not in body.model_fields_set:
+                lib.schema_mode = "disabled" if value is False else (
+                    lib.schema_mode if lib.schema_mode != "disabled" else "governed"
+                )
+                changes["schema_mode"] = lib.schema_mode
             if value is False:
                 safety_change_error = "library_opt_out"
 

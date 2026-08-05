@@ -100,13 +100,13 @@ def test_publication_response_models_exclude_sensitive_payload_fields():
         "raw_output",
         "provider_request_id",
         "candidate_payload",
-        "fact_snapshot",
         "policy_snapshot",
         "properties",
         "error_message",
         "idempotency_key",
     }
     assert response_fields.isdisjoint(forbidden)
+    assert "fact_snapshot" in response_fields
 
 
 def test_release_docs_are_secret_free_and_record_all_scope_audits():

@@ -70,7 +70,7 @@ test('source information keeps reading and original-file download separate', () 
 test('edit copy separates metadata from overwrite/reimport semantics', () => {
     for (const token of [
         '基础信息编辑',
-        'external_id 当前版本不可修改',
+        '外部文档编号当前版本不可修改',
         '覆盖文档内容（文本覆盖）',
         '会替换正文、重新切分、重新向量化，旧问答引用不会自动更新',
         '重新导入并覆盖此文档',

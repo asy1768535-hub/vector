@@ -78,24 +78,41 @@ export function graphJobProgress(job) {
     const stage = job?.current_stage || 'preparing';
     const materialization = job?.statistics?.materialization || {};
     const candidates = job?.statistics?.candidate_pipeline || {};
-    const entityCount = materialization.entity_count ?? candidates.entity_candidate_count ?? null;
+    const entityCount = materialization.outcome === 'entities_only'
+        ? materialization.pending_entity_candidate_count ?? candidates.entity_candidate_count ?? null
+        : materialization.entity_count ?? candidates.entity_candidate_count ?? null;
     const relationCount = materialization.relation_count ?? candidates.relation_candidate_count ?? null;
+    const entitiesOnly = materialization.outcome === 'entities_only';
+    const publicationOutcome = job?.statistics?.publication?.outcome;
+    const currentGraphUnchanged = Boolean(
+        job?.statistics?.publication?.current_graph_unchanged,
+    );
+    const libraryGraphUpdated = entitiesOnly
+        && ['activated', 'already_published'].includes(publicationOutcome);
 
     if (status === 'succeeded') {
         return {
-            status, terminal: true, progress: 100, tone: 'success',
-            label: '知识图谱构建完成', entityCount, relationCount,
+            status, terminal: true, progress: 100, tone: entitiesOnly ? 'warning' : 'success',
+            label: libraryGraphUpdated
+                ? '暂无新关系，已更新库级图谱'
+                : entitiesOnly ? '仅有实体、暂无有效关系，未发布' : '知识图谱构建完成',
+            entityCount, relationCount,
         };
     }
     if (status === 'partially_succeeded') {
         return {
             status, terminal: true, progress: 100, tone: 'warning',
-            label: '知识图谱部分完成', entityCount, relationCount,
+            label: libraryGraphUpdated
+                ? '暂无新关系，已更新库级图谱'
+                : entitiesOnly ? '仅有实体、暂无有效关系，未发布' : '知识图谱部分完成',
+            entityCount, relationCount,
         };
     }
     if (GRAPH_TERMINAL_STATUSES.has(status)) {
         const label = status === 'failed'
-            ? '知识图谱构建失败'
+            ? currentGraphUnchanged
+                ? '图谱更新失败，当前正式图谱未切换'
+                : '知识图谱构建失败'
             : status === 'cancelled' ? '知识图谱构建已取消' : '知识图谱任务已被新任务替代';
         return {
             status, terminal: true, progress: 100, tone: 'exception',

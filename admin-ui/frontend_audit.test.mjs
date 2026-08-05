@@ -163,6 +163,16 @@ test('Audit: no unused targetTypeKey import', () => {
     assert.ok(!auditSrc.includes('targetTypeKey'), 'targetTypeKey removed from Audit import');
 });
 
+test('primary pages use readable terms while keeping protocol fields internal', () => {
+    const importSrc = readFileSync(new URL('./src/views/Import.js', import.meta.url), 'utf8');
+    const jobsSrc = readFileSync(new URL('./src/views/Jobs.js', import.meta.url), 'utf8');
+    assert.ok(importSrc.includes('externalId'));
+    assert.ok(importSrc.includes('外部文档编号'));
+    assert.ok(!importSrc.includes('placeholder="external_id'));
+    assert.ok(jobsSrc.includes('处理服务（Worker）'));
+    assert.ok(jobsSrc.includes('向量化'));
+});
+
 test('API: getLibraryJob removed', () => {
     assert.ok(!apiSrc.includes('getLibraryJob'), 'getLibraryJob removed');
 });

@@ -16,6 +16,7 @@ from app.schemas.schema_lifecycle import (
     SchemaConstraintCreateRequest,
     SchemaDraftDeleteRequest,
     SchemaEntityTypeCreateRequest,
+    SchemaImportRequest,
     SchemaItemDisableRequest,
     SchemaRelationTypeCreateRequest,
     SchemaVersionDisableRequest,
@@ -73,6 +74,7 @@ def test_schema_lifecycle_defaults_off_and_requires_organization_authorization()
 def test_action_model_and_migration_are_closed_bounded_and_private():
     assert set(SCHEMA_LIFECYCLE_ACTION_KINDS) == {
         "clone_version",
+        "import_version",
         "create_item",
         "update_item",
         "disable_item",
@@ -268,4 +270,44 @@ def test_http_command_contracts_are_strict_and_bounded():
             expected_active_version_id=None,
             confirmation="yes",
             idempotency_key="activate-1",
+        )
+
+
+def test_schema_import_contract_uses_keys_and_never_accepts_database_ids():
+    request = SchemaImportRequest(
+        version_key="finance",
+        idempotency_key="import-1",
+        entity_types=[{"key": "company", "label": "Company"}],
+        relation_types=[
+            {
+                "key": "owns",
+                "label": "Owns",
+                "direction": "directed",
+                "default_review_policy": "pending_review",
+            }
+        ],
+        attributes=[
+            {
+                "owner_kind": "entity_type",
+                "owner_key": "company",
+                "key": "name",
+                "label": "Name",
+                "value_type": "string",
+            }
+        ],
+        constraints=[
+            {
+                "relation_type_key": "owns",
+                "source_entity_type_key": "company",
+                "target_entity_type_key": "company",
+            }
+        ],
+    )
+    assert request.version_key == "finance"
+    assert request.attributes[0].owner_key == "company"
+    with pytest.raises(ValidationError):
+        SchemaImportRequest(
+            version_key="finance",
+            idempotency_key="import-2",
+            entity_types=[{"id": str(uuid.uuid4()), "key": "company", "label": "Company"}],
         )

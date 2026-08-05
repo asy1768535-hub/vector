@@ -78,8 +78,37 @@ def test_hosted_profile_requires_remote_https_dependencies() -> None:
         )
 
 
+def test_0047_enables_default_knowledge_artifacts() -> None:
+    migration = Path(
+        "alembic/versions/0047_enable_default_knowledge_artifacts.py"
+    ).read_text(encoding="utf-8")
+    assert 'revision: str = "0047"' in migration
+    assert 'down_revision: Union[str, None] = "0046"' in migration
+    assert "knowledge_artifact_auto_enabled = true" in migration
+    assert "summary_artifact_enabled = true" in migration
+    assert "outline_artifact_enabled = true" in migration
+    assert "classification_auto_enabled" not in migration
+
+
+def test_0048_enables_classification_with_default_taxonomy() -> None:
+    migration = Path(
+        "alembic/versions/0048_enable_default_classification.py"
+    ).read_text(encoding="utf-8")
+    assert 'revision: str = "0048"' in migration
+    assert 'down_revision: Union[str, None] = "0047"' in migration
+    assert "classification_auto_enabled = true" in migration
+    assert "classification_external_model_enabled = true" in migration
+    assert "classification_allowed_security_levels" in migration
+    assert "internal" in migration
+    assert "chr(58) || 'general-enterprise' || chr(58)" in migration
+    assert "':general-enterprise:v1'" not in migration
+    assert "INSERT INTO classification_taxonomies" in migration
+    assert "INSERT INTO classification_labels" in migration
+    assert "INSERT INTO library_classification_labels" in migration
+    assert ")) - 1)::integer" in migration
+
 def test_readiness_payload_contains_only_stable_content_free_codes() -> None:
-    assert health_api._MIGRATION_HEAD == "0045"
+    assert health_api._MIGRATION_HEAD == "0050"
     payload = _payload({"database": True, "embedding": False})
     assert payload == {
         "status": "not_ready",

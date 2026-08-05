@@ -6,7 +6,11 @@ from types import SimpleNamespace
 import pytest
 
 from app.services.graph_candidate_routing import (
+    CandidateRoute,
     ConfidencePolicyError,
+    _apply_concept_relation_gate,
+    _has_generic_entity_name,
+    _valid_evidence_chunk_count,
     compute_final_confidence_v1,
     load_confidence_policy_v1,
     route_entity_candidate_v1,
@@ -192,6 +196,9 @@ def test_relation_hard_route_precedence_threshold_and_evidence_group_rule():
         **(base | {"endpoint_rejected": True})
     ).review_reason == "endpoint_rejected"
     assert route_relation_candidate_v1(
+        **(base | {"self_relation": True})
+    ) == CandidateRoute("rejected", "self_relation")
+    assert route_relation_candidate_v1(
         **(base | {"evidence_ambiguous": True})
     ).review_reason == "evidence_ambiguous"
     assert route_relation_candidate_v1(
@@ -271,3 +278,135 @@ def test_automatic_routing_has_no_pending_review_outcomes():
         != "pending_review"
         for changes in relation_variants
     )
+
+
+def test_generic_names_are_rejected_and_concepts_require_publishable_support():
+    base = dict(
+        schema_invalid=False,
+        evidence_invalid=False,
+        evidence_ambiguous=False,
+        has_open_conflict=False,
+        normalization_method="new_entity",
+        matched_entity_id=None,
+        final_confidence=0.95,
+        automatic=True,
+    )
+    assert route_entity_candidate_v1(
+        **base, generic_name=True
+    ) == CandidateRoute("rejected", "generic_entity_name")
+
+    isolated = route_entity_candidate_v1(
+        **base, conceptual=True, repeated_evidence=False
+    )
+    assert isolated == CandidateRoute("pending_review", "concept_single_occurrence")
+    assert route_entity_candidate_v1(
+        **(base | {"automatic": False, "matched_entity_id": "existing"}),
+        conceptual=True,
+        repeated_evidence=False,
+    ) == isolated
+
+    assert route_entity_candidate_v1(
+        **base,
+        conceptual=True,
+        repeated_evidence=True,
+    ).status == "validated"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "2026年05月12日",
+        "2026-05-12",
+        "10.0.10.2",
+        "10.0.10.2:8113",
+        "https://example.test/docs",
+        "/api/v1/jobs",
+    ],
+)
+def test_structural_values_are_not_entities(name):
+    assert _has_generic_entity_name(
+        SimpleNamespace(normalized_name=name, canonical_name=name)
+    )
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "10.1 \u8be6\u7ec6\u8bbe\u8ba1\u4e0e\u7f16\u7801\u8854\u63a5",
+        "\u64cd\u4f5c\u5b89\u6392",
+    ],
+)
+def test_section_headings_and_generic_actions_are_not_entities(name):
+    assert _has_generic_entity_name(
+        SimpleNamespace(normalized_name=name, canonical_name=name)
+    )
+
+
+def test_named_objects_containing_digits_remain_entities():
+    assert not _has_generic_entity_name(
+        SimpleNamespace(
+            normalized_name="2026年度安全管理制度",
+            canonical_name="2026年度安全管理制度",
+        )
+    )
+
+
+def test_concept_evidence_counts_distinct_valid_chunks_only():
+    first_chunk = object()
+    rows = [
+        SimpleNamespace(validation_status="valid", resolved_chunk_id=first_chunk),
+        SimpleNamespace(validation_status="valid", resolved_chunk_id=first_chunk),
+        SimpleNamespace(validation_status="ambiguous", resolved_chunk_id=object()),
+        SimpleNamespace(validation_status="valid", resolved_chunk_id=object()),
+    ]
+    assert _valid_evidence_chunk_count(rows) == 2
+
+
+def test_concept_without_validated_relation_returns_to_pending_review():
+    concept = SimpleNamespace(
+        id="concept",
+        entity_type_key="term",
+        status="validated",
+        review_reason=None,
+        validation_errors=[],
+    )
+    concrete = SimpleNamespace(
+        id="organization",
+        entity_type_key="department",
+        status="validated",
+        review_reason=None,
+        validation_errors=[],
+    )
+    rejected_relation = SimpleNamespace(
+        source_candidate_id=concept.id,
+        target_candidate_id=concrete.id,
+        status="rejected",
+    )
+
+    _apply_concept_relation_gate([concept, concrete], [rejected_relation])
+
+    assert concept.status == "pending_review"
+    assert concept.review_reason == "concept_missing_valid_relation"
+    assert concrete.status == "validated"
+
+
+def test_concept_with_validated_relation_remains_publishable():
+    concept = SimpleNamespace(
+        id="concept",
+        entity_type_key="concept",
+        status="validated",
+        review_reason=None,
+        validation_errors=[],
+    )
+    concrete = SimpleNamespace(
+        id="system", entity_type_key="product", status="validated"
+    )
+    relation = SimpleNamespace(
+        source_candidate_id=concept.id,
+        target_candidate_id=concrete.id,
+        status="validated",
+    )
+
+    _apply_concept_relation_gate([concept, concrete], [relation])
+
+    assert concept.status == "validated"

@@ -32,12 +32,12 @@ export const LEGACY_REDIRECTS = Object.freeze({
     '/chat': APP_PATHS.chat,
     '/search': APP_PATHS.search,
     '/retrieval-test': APP_PATHS.retrievalTest,
-    '/documents': APP_PATHS.documents,
+    '/documents': APP_PATHS.catalog,
     '/catalog': APP_PATHS.catalog,
     '/import': APP_PATHS.importData,
     '/knowledge-graph': APP_PATHS.knowledgeGraph,
     '/schema-lifecycle': APP_PATHS.schemaLifecycle,
-    '/classification-review': APP_PATHS.classificationReview,
+    '/classification-review': APP_PATHS.catalog,
     '/users': APP_PATHS.users,
     '/permissions': APP_PATHS.permissions,
     '/dashboard': APP_PATHS.dashboard,
@@ -68,11 +68,7 @@ export const DOMAIN_TABS = Object.freeze({
     ]),
     knowledgeAssets: Object.freeze([
         {
-            key: 'documents', label: '文档', path: APP_PATHS.documents,
-            access: 'documents', icon: 'sidebar:document',
-        },
-        {
-            key: 'catalog', label: '知识目录', path: APP_PATHS.catalog,
+            key: 'catalog', label: '知识资产', path: APP_PATHS.catalog,
             access: 'catalog', icon: 'mdi:bookshelf',
         },
         {
@@ -87,13 +83,6 @@ export const DOMAIN_TABS = Object.freeze({
             path: APP_PATHS.knowledgeGraph,
             access: 'knowledgeGraph',
             icon: 'carbon:chart-relationship',
-        },
-        {
-            key: 'classificationReview',
-            label: '分类审核',
-            path: APP_PATHS.classificationReview,
-            access: 'classificationReview',
-            icon: 'mdi:certificate-outline',
         },
     ]),
     usersPermissions: Object.freeze([
@@ -251,18 +240,13 @@ export function domainTabs(domain, access) {
 export function sidebarItems(domain, access) {
     if (domain === 'knowledgeAssets') {
         const items = [];
-        const contentPaths = [
-            access?.documents ? APP_PATHS.documents : null,
-            access?.catalog ? APP_PATHS.catalog : null,
-        ].filter(Boolean);
-        if (contentPaths.length) {
+        const canReadContent = access?.documents || access?.catalog;
+        if (canReadContent) {
             items.push({
                 key: 'knowledgeContent',
-                label: '知识内容',
-                path: contentPaths.includes(APP_PATHS.documents)
-                    ? APP_PATHS.documents
-                    : APP_PATHS.catalog,
-                activePaths: contentPaths,
+                label: '知识资产',
+                path: APP_PATHS.catalog,
+                activePaths: [APP_PATHS.catalog, APP_PATHS.documents],
                 access: 'knowledgeContent',
                 icon: 'sidebar:document',
             });
@@ -337,8 +321,21 @@ export function domainTabTarget(path, currentQuery = {}) {
 
     const library = String(currentQuery.library || currentQuery.slug || '');
     if (!library) return target;
-    target.query = path === APP_PATHS.documents ? { slug: library } : { library };
+    target.query = { library };
     return target;
+}
+
+export function retrievalModeTarget(path, currentQuery = {}, state = {}) {
+    const queryText = String(state.queryText ?? currentQuery.q ?? currentQuery.query ?? '').trim();
+    const values = Array.isArray(state.librarySlugs)
+        ? state.librarySlugs
+        : String(currentQuery.libraries || currentQuery.library || '').split(',');
+    const librarySlugs = values.map((value) => String(value || '').trim()).filter(Boolean);
+    const query = {};
+    if (queryText) query.q = queryText;
+    if (path === APP_PATHS.search && librarySlugs[0]) query.library = librarySlugs[0];
+    if (path === APP_PATHS.retrievalTest && librarySlugs.length) query.libraries = librarySlugs.join(',');
+    return Object.keys(query).length ? { path, query } : { path };
 }
 
 export function legacyRedirectTarget(path, query = {}, hash = '') {

@@ -139,7 +139,9 @@ export default {
                 <p class="api-keys-desc">管理您的 API 密钥，用于通过 API 访问知识库服务。</p>
             </div>
             <div class="api-keys-header-actions">
-                <el-button @click="load(true)" :loading="loading">刷新</el-button>
+                <el-button class="app-refresh-button" @click="load(true)" :loading="loading">
+                  <span class="app-refresh-icon" aria-hidden="true"></span>刷新
+                </el-button>
                 <el-button type="primary" @click="openCreate">新建 API Key</el-button>
             </div>
         </div>

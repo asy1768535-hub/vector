@@ -24,6 +24,8 @@ from app.schemas.schema_lifecycle import (
     SchemaEntityTypeCreateRequest,
     SchemaEntityTypeUpdateRequest,
     SchemaImpactRead,
+    SchemaImportFileRequest,
+    SchemaImportRequest,
     SchemaItemDisableRequest,
     SchemaRelationTypeCreateRequest,
     SchemaRelationTypeUpdateRequest,
@@ -46,10 +48,12 @@ from app.services.schema_lifecycle_actions import (
     clone_schema_version,
     delete_schema_draft,
     disable_schema_version,
+    import_schema_version,
 )
 from app.services.schema_lifecycle_contracts import (
     SchemaLifecycleCommand,
     SchemaLifecycleError,
+    deterministic_schema_import_id,
     deterministic_schema_item_id,
 )
 from app.services.schema_lifecycle_impact import preview_schema_impact
@@ -59,6 +63,7 @@ from app.services.schema_lifecycle_read import (
     schema_version_detail,
 )
 from app.services.schema_lifecycle_validation import validate_schema_draft_bundle
+from app.services.schema_import_file import parse_schema_import_file
 
 
 router = APIRouter(
@@ -231,6 +236,50 @@ def _command(
         idempotency_key=idempotency_key,
         payload=payload,
     )
+
+
+async def _import_version_request(
+    body: SchemaImportRequest,
+    context: SchemaLifecycleContext,
+    db: AsyncSession,
+) -> SchemaCommandResultRead:
+    version_id = deterministic_schema_import_id(
+        context.library.id, body.idempotency_key
+    )
+    command = _command(
+        context,
+        version_id,
+        action_kind="import_version",
+        target_kind="ontology_version",
+        target_id=version_id,
+        expected_state_hash="0" * 64,
+        idempotency_key=body.idempotency_key,
+        payload=body.model_dump(mode="json", exclude={"idempotency_key"}),
+    )
+    return await _mutate(
+        db,
+        context,
+        lambda: import_schema_version(db, context.library, command, body),
+    )
+
+
+@router.post("/import", response_model=SchemaCommandResultRead)
+async def import_version(
+    body: SchemaImportRequest,
+    context: SchemaLifecycleContext = Depends(require_schema_lifecycle_context),
+    db: AsyncSession = Depends(get_db),
+) -> SchemaCommandResultRead:
+    return await _import_version_request(body, context, db)
+
+
+@router.post("/import-file", response_model=SchemaCommandResultRead)
+async def import_file(
+    body: SchemaImportFileRequest,
+    context: SchemaLifecycleContext = Depends(require_schema_lifecycle_context),
+    db: AsyncSession = Depends(get_db),
+) -> SchemaCommandResultRead:
+    parsed = _read_value(lambda: parse_schema_import_file(body))
+    return await _import_version_request(parsed, context, db)
 
 
 @router.get("/versions", response_model=SchemaVersionListRead)

@@ -77,9 +77,18 @@ layout, and hit testing.
   Publication, seed, counts, unique IDs, relation endpoints, hop depths,
   bounds, item hashes, Manifest hashes, and Evidence locator identities all
   match the submitted request.
-- The canvas uses deterministic radial layout: seed at the center, one-hop
-  Entities on the inner ring, and two-hop Entities on the outer ring. It has no
-  force physics, 3D, authoring, or cross-group edges.
+- The radial canvas uses locally vendored Cytoscape and a self-contained
+  d3-force bundle. Simulation node and link objects retain stable ID-based
+  identity across data refreshes. Dragging temporarily fixes only the grabbed
+  node in model coordinates, reheats the simulation, and releases it back into
+  soft link, collision, repulsion, and forceX/forceY centering forces. Data-only
+  refreshes, viewport resize, pan, and zoom never recreate the graph or restart
+  the simulation; explicit relayout is separate from fit-to-view. The canvas
+  remains presentation-only and has no 3D, authoring, or cross-group edges.
+  Radial Relations use Chinese presentation labels without mutating Schema
+  keys. Unfocused nodes and edges remain visibly traceable while their text is
+  hidden; selection, hover, or dragging reveals the focused Entity, its direct
+  neighbor names, and related Relation labels.
 - Canvas interactions and the equivalent semantic tables emit strict existing
   Entity, Relation, and Evidence identities to the parent. Do not duplicate
   drawers, source readers, or Evidence rendering.
@@ -130,8 +139,9 @@ layout, and hit testing.
   forced Evidence locator request.
 - Pure tests cover seed eligibility/deduplication, same-name Library separation,
   exact Publication and Ontology identity, counts, endpoint membership, hops,
-  Evidence locators, truncation, fixed errors, deterministic layout, and hit
-  testing.
+  Evidence locators, truncation, fixed errors, stable simulation identity,
+  model-coordinate dragging and release, edge-driven panning, graph diff, and
+  refresh state retention.
 - View tests assert the preserved non-default advanced tab, independent request sequences,
   partial-failure retention, existing detail/Evidence event reuse, accessible
   tables, privacy exclusions, internal scrolling, and no dedicated 520px

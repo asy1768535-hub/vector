@@ -455,7 +455,7 @@ def test_job_creation_freezes_config_and_adds_deterministic_units(monkeypatch):
     monkeypatch.setattr(
         settings,
         "graph_extraction_model",
-        "qwen3-30b-a3b-instruct-2507-fp8",
+        "qwen3.5-9b",
     )
     ontology = SimpleNamespace(id=ONTOLOGY_ID)
     snapshot = {
@@ -504,10 +504,10 @@ def test_job_creation_freezes_config_and_adds_deterministic_units(monkeypatch):
     provider_call.assert_not_awaited()
     assert isinstance(job, GraphExtractionJob)
     assert job.model_provider == "openai-compatible"
-    assert job.model_name == "qwen3-30b-a3b-instruct-2507-fp8"
+    assert job.model_name == "qwen3.5-9b"
     assert job.model_config_snapshot["provider"] == "openai-compatible"
     assert job.model_config_snapshot["base_url"] == "http://10.0.10.2:8113/v1"
-    assert job.model_config_snapshot["model"] == "qwen3-30b-a3b-instruct-2507-fp8"
+    assert job.model_config_snapshot["model"] == "qwen3.5-9b"
     assert job.policy_config_snapshot["candidate_review_policy"] == "precision_first_auto"
     assert job.idempotency_key == job.input_fingerprint
     assert job.counts == {

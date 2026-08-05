@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
-import { targetTypeMeta, targetDisplay, targetTypeKey, actionTone } from './src/admin_activity_ui.js';
+import { actorDisplay, targetTypeMeta, targetDisplay, targetTypeKey, actionTone } from './src/admin_activity_ui.js';
 
 const src = readFileSync(new URL('./src/views/Audit.js', import.meta.url), 'utf8');
 const css = readFileSync(new URL('./style.css', import.meta.url), 'utf8');
@@ -29,6 +29,13 @@ test('targetDisplay: extracts name/email/slug priority', () => {
     assert.equal(targetDisplay('a', { user_id: 'u1' }), 'u1');
     assert.equal(targetDisplay('a', { document_id: 'd1' }), 'd1');
     assert.equal(targetDisplay('a', null), '');
+});
+
+test('actor and UUID projections prefer readable values and shorten unresolved IDs', () => {
+    const id = '12345678-1234-1234-1234-123456789abc';
+    assert.equal(actorDisplay({ actor_user_id: id }, [{ id, email: 'alice@example.com' }]), 'alice@example.com');
+    assert.equal(actorDisplay({ actor_user_id: id }), '12345678…9abc');
+    assert.equal(targetDisplay('job.retry', { job_id: id }), '12345678…9abc');
 });
 
 test('targetTypeKey: extracts prefix for filtering', () => {
@@ -75,6 +82,12 @@ test('详情区使用 logs-detail-grid 四栏', () => {
     const tpl = src.slice(src.indexOf('template:'));
     assert.ok(tpl.includes('logs-detail-grid'), 'detail grid');
     assert.ok(tpl.includes('logs-detail-cell--full'), 'full-width cell');
+});
+
+test('主列表使用可读投影，原始数据保留在技术详情', () => {
+    assert.ok(src.includes('actorDisplay(row, users, store.user)'));
+    assert.ok(src.includes('技术详情'));
+    assert.ok(src.includes('prettyTarget(row.target)'));
 });
 test('受控展开保留 row-key=id', () => {
     assert.ok(src.includes('row-key="id"'), 'row-key id');

@@ -23,7 +23,7 @@ const OUTER = '40000000-0000-4000-8000-000000000003';
 const RELATION = '50000000-0000-4000-8000-000000000001';
 const RELATION_2 = '50000000-0000-4000-8000-000000000002';
 const ENTITY_TYPE = '60000000-0000-4000-8000-000000000001';
-const RELATION_TYPE = '70000000-0000-4000-8000-000000000001';
+const RELATION_TYPE = 'ee6a7def-d22a-cb63-4f3b-99ce126e9382';
 const EVIDENCE = '80000000-0000-4000-8000-000000000001';
 const DOCUMENT = '90000000-0000-4000-8000-000000000001';
 const REVISION = 'a0000000-0000-4000-8000-000000000001';
@@ -213,6 +213,18 @@ test('projects fixed errors and explicit truncation without raw server detail', 
         relations: 2,
         evidence: 2,
         truncationLabels: ['关系'],
+    });
+    assert.deepEqual(graphTraversalSummary({
+        entity_count: 223,
+        relation_count: 35,
+        evidence_count: 41,
+        nodes: Array(2),
+        relations: Array(1),
+    }), {
+        nodes: 223,
+        relations: 35,
+        evidence: 41,
+        truncationLabels: [],
     });
 });
 

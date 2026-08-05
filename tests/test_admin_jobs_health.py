@@ -13,6 +13,7 @@ from app.main import app
 from app.api.admin_jobs import (
     _embedding_monitor_row,
     _graph_monitor_row,
+    _graph_publication_status,
     _import_monitor_row,
     router as admin_jobs_router,
 )
@@ -258,3 +259,48 @@ def test_graph_monitor_exposes_frozen_mode_and_unit_progress():
         "completed_batches": 2,
         "planned_batches": 4,
     }
+
+
+def test_graph_monitor_exposes_entity_only_quality_statistics():
+    _, _, graph_job = _monitor_pipeline_jobs("succeeded")
+    graph_job.statistics = {
+        **(graph_job.statistics or {}),
+        "candidate_pipeline": {
+            "entity_candidate_count": 3,
+            "relation_candidate_count": 2,
+            "routing": {
+                "entities": {"validated": 0, "pending_review": 3},
+                "relations": {"validated": 0, "rejected": 2},
+            },
+            "failure_reasons": {
+                "entities": {"concept_requires_valid_relation": 1},
+                "relations": {"relation_evidence_invalid": 2},
+            },
+        },
+        "materialization": {
+            "outcome": "entities_only",
+            "publishable_entity_candidate_count": 0,
+            "publishable_relation_count": 0,
+            "pending_entity_candidate_count": 3,
+            "failure_reasons": {"no_valid_relation": 1},
+        },
+        "publication": {
+            "outcome": "skipped",
+            "entity_count": 0,
+            "relation_count": 0,
+            "failure_reason": "no_valid_relation",
+            "current_graph_unchanged": True,
+        },
+    }
+
+    row = _graph_monitor_row(graph_job, title="sample.docx", revision_no=2)
+
+    assert _graph_publication_status(graph_job, None) == "entities_only"
+    assert row.metrics["stage_counts"] == {
+        "extraction": {"entities": 3, "relations": 2},
+        "validation": {"entities": 0, "relations": 0},
+        "materialization": {"entities": 0, "relations": 0},
+        "publication": {"entities": 0, "relations": 0},
+    }
+    assert row.metrics["failure_reasons"]["publication"] == "no_valid_relation"
+    assert row.metrics["current_graph_unchanged"] is True

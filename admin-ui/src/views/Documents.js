@@ -6,7 +6,6 @@ import { store, hasPermission } from '../store.js';
 import { dataEmpty } from '../illustrations.js';
 import { readableLibraries, resolveSelectedSlug } from '../menu_access.js';
 import { copyTextToClipboard } from '../copy_text.js';
-import KnowledgeAssetViewSwitch from '../components/KnowledgeAssetViewSwitch.js';
 import { buildFolderTree, documentsInFolder } from '../folder_tree.js';
 import {
     documentDisplayName,
@@ -21,7 +20,6 @@ import {
 } from '../documents_ui.js';
 
 export default {
-    components: { KnowledgeAssetViewSwitch },
     setup() {
         const router = useRouter();
         const route = useRoute();
@@ -420,10 +418,9 @@ export default {
     },
     template: `
     <div class="documents-workspace">
-      <knowledge-asset-view-switch :library="slug || ''" />
       <section class="documents-overview">
         <div class="documents-heading">
-          <h2>文档管理</h2>
+          <h2>文档目录</h2>
           <el-select v-model="slug" placeholder="选择知识库" style="width: 100%">
             <el-option v-for="l in myLibs" :key="l.slug"
                        :label="l.name + ' (' + l.slug + ')'" :value="l.slug" />
@@ -445,7 +442,7 @@ export default {
                 type="info" :closable="false" show-icon />
 
       <section class="documents-filters">
-        <el-input v-model="filters.keyword" clearable placeholder="搜索文件名、external_id 或文档 ID" />
+        <el-input v-model="filters.keyword" clearable placeholder="搜索文件名、外部文档编号或文档 ID" />
         <el-select v-model="filters.status" clearable placeholder="全部状态">
           <el-option label="等待中" value="pending" />
           <el-option label="处理中" value="processing" />
@@ -466,7 +463,9 @@ export default {
                         start-placeholder="开始日期" end-placeholder="结束日期" style="width: 100%" />
         <div class="documents-filter-actions">
           <el-button @click="resetFilters">重置</el-button>
-          <el-button :loading="loading" @click="loadDocs(true)">刷新</el-button>
+          <el-button class="app-refresh-button" :loading="loading" @click="loadDocs(true)">
+            <span class="app-refresh-icon" aria-hidden="true"></span>刷新
+          </el-button>
         </div>
       </section>
 
@@ -474,7 +473,7 @@ export default {
         <aside class="documents-folder-pane" aria-label="文档目录">
           <div class="documents-folder-head">
             <local-icon icon="mdi:folder-outline"></local-icon>
-            <strong>目录</strong>
+            <strong>文档结构</strong>
           </div>
           <button type="button" class="documents-folder-root"
                   :class="{ 'is-active': selectedFolderId === 'all' }"
@@ -566,7 +565,7 @@ export default {
               <span>状态</span><span>{{ documentStatusLabel(detail.row.status) }}</span>
               <span>版本</span><span>v{{ detail.row.current_revision || 0 }}</span>
               <span>文档 ID</span><span class="documents-copy-line"><code>{{ detail.row.id }}</code><el-button text class="documents-copy-btn" title="复制文档 ID" @click="copyDocValue(detail.row.id, '文档 ID')"><local-icon icon="mdi:content-copy"></local-icon></el-button></span>
-              <span>external_id</span><span>{{ detail.row.external_id || '—' }}</span>
+              <span>外部文档编号</span><span>{{ detail.row.external_id || '—' }}</span>
               <span>来源路径</span><span>{{ detail.row.source_path || '—' }}</span>
               <span>更新时间</span><span>{{ formatDocumentTime(detail.row.updated_at) }}</span>
               <span>content_hash</span><span class="documents-copy-line"><code :title="detail.row.content_hash || ''">{{ shortText(detail.row.content_hash, 28) }}</code><el-button v-if="detail.row.content_hash" text class="documents-copy-btn" title="复制 content_hash" @click="copyDocValue(detail.row.content_hash, 'content_hash')"><local-icon icon="mdi:content-copy"></local-icon></el-button></span>
@@ -646,11 +645,11 @@ export default {
         <el-form label-width="110px">
           <section class="documents-edit-section">
             <h3>{{ dialog.mode === 'edit' ? '基础信息编辑' : '基础信息' }}</h3>
-            <p v-if="dialog.mode === 'edit'" class="documents-edit-hint">标题和 metadata 会随下方文本覆盖一起提交；external_id 当前版本不可修改。</p>
+            <p v-if="dialog.mode === 'edit'" class="documents-edit-hint">标题和元数据会随下方文本覆盖一起提交；外部文档编号当前版本不可修改。</p>
             <el-form-item label="标题"><el-input v-model="dialog.form.title" /></el-form-item>
-            <el-form-item label="external_id">
-              <el-input v-model="dialog.form.external_id" :disabled="dialog.mode === 'edit'" placeholder="可选；用于幂等/upsert" />
-              <div v-if="dialog.mode === 'edit'" class="documents-form-help">后端当前不支持在文档页单独修改 external_id。</div>
+            <el-form-item label="外部文档编号">
+              <el-input v-model="dialog.form.external_id" :disabled="dialog.mode === 'edit'" placeholder="可选；用于与外部业务系统建立对应关系" />
+              <div v-if="dialog.mode === 'edit'" class="documents-form-help">当前不支持在文档页单独修改外部文档编号。</div>
             </el-form-item>
             <el-form-item label="metadata">
               <el-input v-model="dialog.form.metadata_json" type="textarea" :rows="3"

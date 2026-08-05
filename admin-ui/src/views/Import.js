@@ -33,7 +33,7 @@ const GRAPH_CONFIG_REASON = {
     library_disabled: '当前知识库未开启图谱抽取',
     external_model_disabled: '当前知识库未允许外部模型',
     security_levels_missing: '当前知识库未配置允许的安全级别',
-    active_ontology_missing: '当前知识库没有生效中的 Schema',
+    active_ontology_missing: '当前知识库没有生效中的知识结构（Schema）',
 };
 const BUILD_MODE_LABEL = { fast: '快速', standard: '标准', deep: '深度' };
 
@@ -634,7 +634,7 @@ export default {
         async function runQueue(onlyFailed) {
             if (!slug.value) return;
             if (multiBlockedByExtId.value) {
-                ElMessage.warning('多文件模式下，external_id（外部文档标识）只能用于单个文件');
+                ElMessage.warning('多文件模式下，外部文档编号只能用于单个文件');
                 return;
             }
             uploading.value = true;
@@ -777,8 +777,8 @@ export default {
 
         function backToDocuments() {
             router.push({
-                path: '/knowledge-assets/documents',
-                query: slug.value ? { slug: slug.value } : {},
+                path: '/knowledge-assets/catalog',
+                query: slug.value ? { library: slug.value } : {},
             });
         }
 
@@ -911,7 +911,7 @@ export default {
                                     </span>
                                 </div>
                                 <div class="rdoc-l2">
-                                    <span class="rdoc-ext">{{ d.external_id || '—' }}</span>
+                                    <span class="rdoc-ext">外部文档编号：{{ d.external_id || '—' }}</span>
                                     <span class="rdoc-time">{{ d.updated_at ? new Date(d.updated_at).toLocaleString('zh-CN') : '' }}</span>
                                 </div>
                             </div>
@@ -982,12 +982,17 @@ export default {
                         <p :class="graphExtractionReady ? 'is-ready' : 'is-blocked'">{{ graphExtractionStatus }}</p>
                     </template>
                 </div>
-                <div v-if="showExtId" class="import-extid-row">
-                    <el-input v-model="externalId" placeholder="external_id（外部文档标识，可选）" clearable />
-                </div>
-                <el-button class="import-extid-toggle" text @click="showExtId = !showExtId; if (!showExtId) externalId = ''">
-                    {{ showExtId ? '移除 external_id（外部文档标识）' : '设置 external_id（外部文档标识）' }}
-                </el-button>
+                <el-collapse class="import-advanced-settings">
+                    <el-collapse-item title="高级设置" name="advanced">
+                        <el-button class="import-extid-toggle" text @click="showExtId = !showExtId">
+                            {{ showExtId ? '收起外部文档编号' : '设置外部文档编号' }}
+                        </el-button>
+                        <div v-if="showExtId" class="import-extid-row">
+                            <el-input v-model="externalId" placeholder="外部文档编号（可选）" clearable />
+                            <p>用于与外部业务系统中的文档建立对应关系，普通上传无需填写。</p>
+                        </div>
+                    </el-collapse-item>
+                </el-collapse>
             </section>
 
             <!-- Right: file list -->

@@ -116,6 +116,11 @@ DEFAULT_RELATION_TYPES: tuple[RelationTypeSeed, ...] = (
     RelationTypeSeed("depends_on", "Depends On"),
     RelationTypeSeed("owns", "Owns"),
     RelationTypeSeed(
+        "contains",
+        "Contains",
+        description="A page, document, product, or project explicitly contains a component, artifact, or process.",
+    ),
+    RelationTypeSeed(
         "related_to",
         "Related To",
         direction=RELATION_DIRECTION_UNDIRECTED,
@@ -171,6 +176,12 @@ DEFAULT_RELATION_CONSTRAINT_GROUPS: tuple[RelationConstraintSeedGroup, ...] = (
         "owns",
         ("department",),
         ("product", "project"),
+        cardinality="one_to_many",
+    ),
+    RelationConstraintSeedGroup(
+        "contains",
+        ("document", "product", "project"),
+        ("document", "process", "product"),
         cardinality="one_to_many",
     ),
     RelationConstraintSeedGroup(

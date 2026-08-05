@@ -1,4 +1,5 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
+import { useRoute } from 'vue-router';
 import { ElMessage } from 'element-plus';
 
 import * as api from '../api.js';
@@ -18,6 +19,7 @@ import {
 } from '../retrieval_test_ui.js';
 import { searchEmpty, serviceError } from '../illustrations.js';
 import { store } from '../store.js';
+import RetrievalModeSwitch from '../components/RetrievalModeSwitch.js';
 
 function fixedRequestError(error) {
     if (error?.status === 403) return '你没有运行该组织检索诊断的权限';
@@ -35,11 +37,13 @@ function sameOrderedValues(left, right) {
 }
 
 export default {
+    components: { RetrievalModeSwitch },
     setup() {
+        const route = useRoute();
         const organizations = computed(() => organizationAdminMemberships(store.organizations));
         const organizationId = ref('');
         const librarySlugs = ref([]);
-        const query = ref('');
+        const query = ref(String(route.query.q || route.query.query || ''));
         const topK = ref(10);
         const candidateK = ref(30);
         const scoreThreshold = ref(0);
@@ -277,8 +281,17 @@ export default {
 
         onMounted(() => {
             if (organizations.value.length) {
-                organizationId.value = String(organizations.value[0].organization_id);
-                onOrganizationChange();
+                const requested = String(route.query.libraries || route.query.library || '')
+                    .split(',').map((value) => value.trim()).filter(Boolean).slice(0, 20);
+                const organization = organizations.value.find((item) => {
+                    const readable = librariesForOrganization(store.permissions, item.organization_id);
+                    return requested.some((slug) => readable.some((library) => library.slug === slug));
+                }) || organizations.value[0];
+                organizationId.value = String(organization.organization_id);
+                const choices = availableLibraries.value;
+                const preserved = requested.filter((slug) => choices.some((item) => item.slug === slug));
+                librarySlugs.value = preserved.length ? preserved : (choices.length ? [choices[0].slug] : []);
+                scheduleCompatibility();
             }
         });
 
@@ -303,6 +316,7 @@ export default {
     },
     template: `
     <div class="retrieval-test-workspace">
+      <retrieval-mode-switch :query-text="query" :library-slugs="librarySlugs" />
       <header class="retrieval-test-header">
         <div>
           <h2>检索诊断</h2>
@@ -452,14 +466,14 @@ export default {
                 <el-table-column type="expand" width="46">
                   <template #default="{row}">
                     <dl class="retrieval-test-hit-detail">
-                      <div><dt>Document</dt><dd :title="row.source.document_id">{{ shortRetrievalId(row.source.document_id) }}</dd></div>
-                      <div><dt>Revision</dt><dd :title="row.source.document_revision_id">{{ shortRetrievalId(row.source.document_revision_id) }}</dd></div>
-                      <div><dt>Chunk</dt><dd :title="row.source.chunk_id">{{ shortRetrievalId(row.source.chunk_id) }}</dd></div>
+                      <div><dt>文档</dt><dd :title="row.source.document_id">{{ shortRetrievalId(row.source.document_id) }}</dd></div>
+                      <div><dt>文档版本</dt><dd :title="row.source.document_revision_id">{{ shortRetrievalId(row.source.document_revision_id) }}</dd></div>
+                      <div><dt>文本片段</dt><dd :title="row.source.chunk_id">{{ shortRetrievalId(row.source.chunk_id) }}</dd></div>
                       <div><dt>片段序号</dt><dd>{{ row.source.seq ?? '—' }}</dd></div>
                       <div><dt>向量分数</dt><dd>{{ formatRetrievalNumber(row.source.vector_score) }}</dd></div>
                       <div><dt>重排分数</dt><dd>{{ formatRetrievalNumber(row.source.rerank_score) }}</dd></div>
                       <div><dt>本地 RRF</dt><dd>{{ formatRetrievalNumber(row.source.local_rrf_score) }}</dd></div>
-                      <div><dt>稠密排名</dt><dd>{{ row.source.dense_rank ?? '—' }}</dd></div>
+                      <div><dt>向量检索排名</dt><dd>{{ row.source.dense_rank ?? '—' }}</dd></div>
                       <div><dt>关键词排名</dt><dd>{{ row.source.keyword_rank ?? '—' }}</dd></div>
                       <div class="retrieval-test-rewrite-row"><dt>查询来源</dt><dd><el-tag v-for="kind in row.source.rewrite_sources" :key="kind" size="small" type="info">{{ rewriteSourceLabel(kind) }}</el-tag><span v-if="!row.source.rewrite_sources.length">—</span></dd></div>
                     </dl>

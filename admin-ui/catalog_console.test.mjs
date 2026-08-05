@@ -24,6 +24,8 @@ import {
     getCatalogDocumentProcessing,
     listCatalogDocuments,
     retryCatalogDocumentProcessing,
+    setDocumentClassification,
+    removeDocumentClassification,
 } from './src/api.js';
 import { canManageLibrary } from './src/menu_access.js';
 
@@ -261,6 +263,37 @@ test('processing API uses the exact current-document routes and fenced retry bod
     });
 });
 
+test('classification editing uses the document endpoint and effective decision fence', async () => {
+    const originalFetch = globalThis.fetch;
+    const requests = [];
+    globalThis.fetch = async (path, options = {}) => {
+        requests.push({ path: String(path), options });
+        return new Response(JSON.stringify({ ok: true }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+        });
+    };
+    const body = {
+        expected_effective_decision_set_id: 'decision-set-1',
+        primary_label_id: 'label-a',
+        secondary_label_ids: ['label-b'],
+    };
+    try {
+        await setDocumentClassification('contracts', 'doc-1', body);
+        await removeDocumentClassification('contracts', 'doc-1', {
+            expected_effective_decision_set_id: 'decision-set-1',
+        });
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+    assert.deepEqual(requests.map((item) => item.path), [
+        '/libraries/contracts/classifications/documents/doc-1',
+        '/libraries/contracts/classifications/documents/doc-1',
+    ]);
+    assert.equal(requests[0].options.method, 'PUT');
+    assert.deepEqual(JSON.parse(requests[0].options.body), body);
+    assert.equal(requests[1].options.method, 'DELETE');
+});
 test('wires a read-gated Catalog route inside the knowledge asset domain', () => {
     assert.match(app, /path:\s*'catalog'/);
     assert.match(app, /KnowledgeCatalog/);
@@ -270,7 +303,7 @@ test('wires a read-gated Catalog route inside the knowledge asset domain', () =>
     assert.match(app, /canAccessEffectiveRoute/);
     assert.match(layout, /visibleSidebarGroups/);
     assert.match(navigation, /knowledgeAssets/);
-    assert.match(navigation, /label:\s*'知识目录'/);
+    assert.match(navigation, /label:\s*'知识资产'/);
     assert.match(navigation, /path:\s*APP_PATHS\.catalog/);
     assert.match(navigation, /access:\s*'catalog'/);
 });
@@ -314,6 +347,9 @@ test('view keeps list, deep-linked detail, evidence, and file access in one read
         'api.getCatalogDocumentProcessing',
         'api.retryCatalogDocumentProcessing',
         'processingResponseMatches',
+        'classificationEditor',
+        'api.setDocumentClassification',
+        'expected_effective_decision_set_id',
         'source_job_id: stage.job_id',
         'retry_generation: stage.retry_generation',
     ]) assert.ok(view.includes(token), `missing view contract ${token}`);
@@ -323,11 +359,36 @@ test('view keeps list, deep-linked detail, evidence, and file access in one read
     assert.doesNotMatch(view, /style="[^"]*"/, 'Catalog template must not use inline styles');
 });
 
+test('document detail shows content directly and only surfaces processing failures', () => {
+    assert.ok(view.includes('processingIssues'));
+    assert.ok(view.includes('<h3>处理异常</h3>'));
+    assert.ok(view.includes('v-for="stage in processingIssues"'));
+    assert.ok(!view.includes('<h3>知识能力</h3>'));
+    assert.ok(!view.includes('<h3>文档处理</h3>'));
+    assert.ok(!view.includes('catalog-capability-grid'));
+});
+
+test('pending classifications are reviewed inside the catalog document detail', () => {
+    for (const token of [
+        'loadCurrentClassificationReview',
+        'api.listClassificationReviews',
+        'reviewPageMatches',
+        'api.reviewClassificationRun',
+        'expected_run_status: run.status',
+        "submitClassificationReview('accept')",
+        "submitClassificationReview('change')",
+        "submitClassificationReview('reject')",
+        '确认建议',
+        '调整后确认',
+    ]) assert.ok(view.includes(token), `missing inline review contract ${token}`);
+    assert.match(view, /state === 'pending_review'[\s\S]*?\? '审核' : '详情'/);
+    assert.ok(css.includes('.catalog-classification-review'));
+});
+
 test('catalog styles are compact, responsive, and bounded', () => {
     for (const token of [
         '.catalog-workspace',
         '.catalog-filter-band',
-        '.catalog-capability-grid',
         '.catalog-graph-grid',
         '.catalog-processing-list',
         '.catalog-processing-row',

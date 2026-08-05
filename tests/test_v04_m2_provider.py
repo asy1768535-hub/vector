@@ -65,6 +65,18 @@ def test_center_only_prompt_is_versioned_and_restricts_neighbor_evidence():
     assert graph_extraction_prompt_hash(center_only=True) != graph_extraction_prompt_hash()
 
 
+def test_prompt_treats_titles_as_context_and_filters_weak_entities():
+    system = _messages()[0]["content"]
+
+    assert "titles" in system
+    assert "context only" in system
+    assert "chunk text" in system
+    assert "organizations" in system
+    assert "generic names" in system
+    assert "重大" in system
+    assert "term or concept" in system
+
+
 @pytest.mark.asyncio
 async def test_deepseek_adapter_uses_exact_openai_compatible_contract():
     captured: dict = {}

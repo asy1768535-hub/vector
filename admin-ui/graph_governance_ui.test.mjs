@@ -12,6 +12,7 @@ import {
     graphEntityPageMatches,
     graphErrorProjection,
     graphEvidenceMatches,
+    graphEntityTypeLabel,
     graphFactLabel,
     graphGovernanceContextMatches,
     graphLibraryCapabilities,
@@ -123,18 +124,27 @@ test('normalizes route scope without crossing Organizations or retaining unsafe 
         relation: RELATION_A,
     }, permissions, organizations);
     assert.deepEqual(readScope, {
-        tab: 'entities',
+        tab: 'browse',
         organizationId: ORG_A,
         librarySlugs: ['legal-b', 'legal-a'],
         entityId: ENTITY_A,
         relationId: '',
     });
     assert.deepEqual(graphRouteQuery(readScope), {
-        tab: 'entities',
+        tab: 'browse',
         organization: ORG_A,
         libraries: 'legal-b,legal-a',
         entity: ENTITY_A,
     });
+
+    const legacyExplore = resolveGraphScope({
+        tab: 'explore',
+        organization: ORG_A,
+        libraries: 'legal-a',
+        entity: ENTITY_A,
+    }, permissions, organizations);
+    assert.equal(legacyExplore.tab, 'browse');
+    assert.equal(graphRouteQuery(legacyExplore).tab, 'browse');
 
     const managementScope = resolveGraphScope({
         tab: 'review',
@@ -155,6 +165,8 @@ test('preserves opaque cursor history and uses bounded labels and errors', () =>
     const page2 = advanceGraphCursor({ history: [], current: null }, 'opaque-2');
     const page3 = advanceGraphCursor(page2, 'opaque-3');
     assert.deepEqual(retreatGraphCursor(page3), { history: [null], current: 'opaque-2' });
+    assert.equal(graphEntityTypeLabel({ key: 'term', label: 'Term' }), '术语');
+    assert.equal(graphEntityTypeLabel({ key: 'custom', label: 'Custom' }), 'Custom');
     assert.equal(graphFactLabel('active'), '生效');
     assert.equal(graphFactLabel('future'), '未知状态');
     assert.equal(graphReviewLabel('approved'), '已通过');
@@ -248,6 +260,11 @@ test('validates Evidence and governance context before display', () => {
     };
     assert.equal(graphGovernanceContextMatches(context, {
         libraryId: LIB_A_ID,
+        librarySlug: 'legal-a',
+    }), true);
+    const deterministicLibraryId = '00000000-0000-0000-0000-000000000001';
+    assert.equal(graphGovernanceContextMatches({ ...context, library_id: deterministicLibraryId }, {
+        libraryId: deterministicLibraryId,
         librarySlug: 'legal-a',
     }), true);
     assert.equal(graphGovernanceContextMatches({ ...context, library_slug: 'other' }, {

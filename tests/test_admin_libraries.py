@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import IntegrityError
 
+import pytest
+
 from app.api import admin_libraries
 from app.auth.backend import current_superuser
 from app.db import get_db
@@ -16,6 +18,20 @@ from app.models.library import Library
 from app.models.user import User
 from app.schemas.admin import LibraryRead
 
+
+_ORIGINAL_ATTACH_ACTIVE_CLASSIFICATION_LABELS = (
+    admin_libraries._attach_active_classification_labels
+)
+
+
+@pytest.fixture(autouse=True)
+def _stub_classification_label_attachment():
+    with patch.object(
+        admin_libraries,
+        "_attach_active_classification_labels",
+        new=AsyncMock(),
+    ) as attach:
+        yield attach
 
 def _custom_source_config(table: str = "custom_docs") -> dict[str, object]:
     return {
@@ -129,7 +145,7 @@ def test_create_library_reuses_deleted_name_with_generation_slug():
     assert record.await_args.args[3]["requested_slug"] == "library_medical"
 
 
-def test_create_library_defaults_source_enrichment_on():
+def test_create_library_defaults_source_enrichment_on(_stub_classification_label_attachment):
     body = admin_libraries.LibraryCreate(slug="default_lib", name="默认开启")
     assert body.ocr_enabled is True
     assert body.docx_table_aware is True
@@ -147,8 +163,51 @@ def test_create_library_defaults_source_enrichment_on():
     assert lib.source_config is not None
     assert lib.source_config["table"] == "default_lib"
     assert lib.source_config["key_field"] == "text_id"
+    assert lib.knowledge_artifact_auto_enabled is True
+    assert lib.summary_artifact_enabled is True
+    assert lib.outline_artifact_enabled is True
+    assert lib.classification_auto_enabled is True
+    assert lib.classification_external_model_enabled is True
+    assert lib.classification_allowed_security_levels == ["internal"]
+    _stub_classification_label_attachment.assert_awaited_once_with(db, lib)
     db.add.assert_called_once()
 
+
+def test_attach_active_classification_labels_binds_enabled_labels_in_order():
+    organization_id = uuid.uuid4()
+    taxonomy = MagicMock(id=uuid.uuid4())
+    labels = [
+        MagicMock(id=uuid.uuid4(), sort_order=10, key="first"),
+        MagicMock(id=uuid.uuid4(), sort_order=20, key="second"),
+    ]
+    taxonomy_result = MagicMock()
+    taxonomy_result.scalar_one_or_none.return_value = taxonomy
+    labels_result = MagicMock()
+    labels_result.scalars.return_value.all.return_value = labels
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[taxonomy_result, labels_result])
+    db.add_all = MagicMock()
+    library = Library(
+        id=uuid.uuid4(),
+        organization_id=organization_id,
+        slug="classified",
+        name="Classified",
+        embedding_model="bge-m3",
+        embedding_dim=1024,
+        vector_distance="cosine",
+        chunk_size=1000,
+        chunk_overlap=120,
+        retrieval_mode="dense",
+        qdrant_collection="lib_classified",
+    )
+
+    asyncio.run(_ORIGINAL_ATTACH_ACTIVE_CLASSIFICATION_LABELS(db, library))
+
+    bindings = list(db.add_all.call_args.args[0])
+    assert [item.library_id for item in bindings] == [library.id, library.id]
+    assert [item.taxonomy_version_id for item in bindings] == [taxonomy.id, taxonomy.id]
+    assert [item.label_id for item in bindings] == [labels[0].id, labels[1].id]
+    assert [item.ordinal for item in bindings] == [0, 1]
 
 def test_create_library_grants_creator_all_permissions_when_org_auth_enabled(monkeypatch):
     body = admin_libraries.LibraryCreate(slug="owned_lib", name="创建者权限")
@@ -278,6 +337,48 @@ def test_create_library_does_not_seed_schema_by_default():
         asyncio.run(admin_libraries.create_library(body, _superuser(), db))
 
     seed.assert_not_awaited()
+
+
+def test_create_library_explore_mode_does_not_seed_formal_schema():
+    body = admin_libraries.LibraryCreate(
+        slug="explore_graph",
+        name="Explore Graph",
+        graph_extraction_enabled=True,
+        external_llm_enabled=True,
+        graph_extraction_allowed_security_levels=["internal"],
+        schema_mode="explore",
+    )
+
+    with patch.object(admin_libraries.qdrant, "ensure_collection", new=AsyncMock()), \
+         patch.object(admin_libraries.audit_log, "record", new=AsyncMock()), \
+         patch.object(
+             admin_libraries.graph_seed,
+             "seed_enterprise_ontology",
+             new=AsyncMock(),
+         ) as seed:
+        db = AsyncMock()
+        db.flush = AsyncMock()
+        db.commit = AsyncMock()
+        db.refresh = AsyncMock()
+        db.add = MagicMock()
+
+        lib = asyncio.run(admin_libraries.create_library(body, _superuser(), db))
+
+    assert lib.schema_mode == "explore"
+    assert lib.graph_extraction_enabled is True
+    seed.assert_not_awaited()
+
+
+def test_legacy_graph_create_defaults_to_governed_schema_mode():
+    body = admin_libraries.LibraryCreate(
+        slug="legacy_graph",
+        name="Legacy Graph",
+        graph_extraction_enabled=True,
+        external_llm_enabled=True,
+        graph_extraction_allowed_security_levels=["internal"],
+    )
+
+    assert body.schema_mode == "governed"
 
 
 def test_create_library_rejects_incomplete_graph_extraction_configuration():

@@ -34,6 +34,7 @@ export default {
                 rerank_enabled: null, ocr_enabled: true, docx_table_aware: true,
                 retrieval_mode: 'dense', source_enrichment_enabled: true,
                 graph_extraction_enabled: false, graph_extraction_build_mode: 'standard',
+                schema_mode: 'disabled',
                 schema_template: 'none',
                 chunk_size: 1000, chunk_overlap: 120 },
         });
@@ -44,6 +45,7 @@ export default {
                 rerank_enabled: null, ocr_enabled: null, docx_table_aware: null,
                 retrieval_mode: 'dense', source_enrichment_enabled: true,
                 graph_extraction_enabled: false, graph_extraction_build_mode: 'standard',
+                graph_assisted_chat_mode: 'off',
                 chunk_size: 1000, chunk_overlap: 120 },
         });
 
@@ -68,6 +70,10 @@ export default {
         function toggleLabel(val) { if (val === true) return '开启'; if (val === false) return '关闭'; return '继承'; }
         function embedDisplay(row) { return (row.embedding_model || '全局默认') + ' / ' + (row.embedding_dim ? row.embedding_dim + 'd' : '—'); }
         function sourceDisplay(config) { return config ? `开启（${srcSummary(config)}）` : '关闭'; }
+        function schemaModeDisplay(row) {
+            return { disabled: '普通知识库', explore: 'AI 探索', governed: 'Schema 治理' }[row?.schema_mode]
+                || (row?.graph_extraction_enabled ? 'Schema 治理' : '普通知识库');
+        }
 
         async function load(forceRefresh = false) {
             const requestToken = librariesRequestFence.begin();
@@ -107,6 +113,7 @@ export default {
                 rerank_enabled: null, ocr_enabled: true, docx_table_aware: true,
                 retrieval_mode: 'dense', source_enrichment_enabled: true,
                 graph_extraction_enabled: false, graph_extraction_build_mode: 'standard',
+                schema_mode: 'disabled',
                 schema_template: 'none',
                 chunk_size: 1000, chunk_overlap: 120 };
             create.open = true;
@@ -120,19 +127,14 @@ export default {
             create.slugEdited = true;
         }
 
-        function onCreateGraphToggle(enabled) {
-            if (enabled && create.form.schema_template === 'none') {
-                create.form.schema_template = 'enterprise';
-            }
-            if (!enabled) create.form.schema_template = 'none';
-        }
-
         async function submitCreate() {
             if (create.submitting) return;
             const body = { ...create.form };
             for (const k of ['embedding_model', 'embedding_base_url']) if (!body[k]) body[k] = null;
             if (!body.embedding_dim) body.embedding_dim = null;
             if (!body.embed_batch_size) body.embed_batch_size = null;
+            body.graph_extraction_enabled = body.schema_mode !== 'disabled';
+            if (body.schema_mode !== 'governed') body.schema_template = 'none';
             body.external_llm_enabled = body.graph_extraction_enabled;
             body.graph_extraction_allowed_security_levels = body.graph_extraction_enabled
                 ? ['internal']
@@ -162,7 +164,8 @@ export default {
                 chunk_size: row.chunk_size, chunk_overlap: row.chunk_overlap,
                 source_enrichment_enabled: row.source_config != null,
                 graph_extraction_enabled: row.graph_extraction_enabled === true,
-                graph_extraction_build_mode: row.graph_extraction_build_mode || 'standard' };
+                graph_extraction_build_mode: row.graph_extraction_build_mode || 'standard',
+                graph_assisted_chat_mode: row.graph_assisted_chat_mode || 'off' };
             edit.graphSecurityLevels = Array.isArray(row.graph_extraction_allowed_security_levels)
                 ? [...row.graph_extraction_allowed_security_levels]
                 : [];
@@ -235,10 +238,10 @@ export default {
 
         onMounted(() => load(false));
 
-        return { libs, loading, librariesResolved, librariesError, librariesReadState, showDeleted, create, edit, stats, pagedLibraries, detailOpen, selectedLibrary,
+        return { libs, loading, librariesResolved, librariesError, librariesReadState, showDeleted, create, edit, stats, pagedLibraries, detailOpen, selectedLibrary, schemaModeDisplay,
             keyword, statusFilter, retrievalFilter, page, pageSize, resetFilters, openDetail,
             load, openCreate, submitCreate, openEdit, submitEdit, rebuild, del, testEmbedding,
-            onCreateNameInput, onCreateSlugInput, onCreateGraphToggle,
+            onCreateNameInput, onCreateSlugInput,
             dataEmpty, srcSummary, sourceDisplay, libraryStatus, toggleLabel, embedDisplay,
             faqMgr, loadFaq, openFaq, addFaq, saveFaq, removeFaq };
     },
@@ -247,7 +250,9 @@ export default {
       <header class="libraries-header">
         <div><h2 class="libraries-title">知识库管理</h2><p class="libraries-desc">管理知识库配置、检索模式与处理能力</p></div>
         <div class="libraries-header-actions">
-          <el-button @click="load(true)" :loading="loading">刷新</el-button>
+          <el-button class="app-refresh-button" @click="load(true)" :loading="loading">
+            <span class="app-refresh-icon" aria-hidden="true"></span>刷新
+          </el-button>
           <el-button type="primary" @click="openCreate">新建知识库</el-button>
         </div>
       </header>
@@ -384,6 +389,10 @@ export default {
                 <span class="libraries-detail-label">知识图谱</span>
                 <span class="libraries-detail-value"><el-tag :type="selectedLibrary.graph_extraction_enabled ? 'success' : 'info'" size="small">{{ selectedLibrary.graph_extraction_enabled ? '开启' : '关闭' }}</el-tag></span>
               </div>
+              <div class="libraries-detail-field">
+                <span class="libraries-detail-label">知识组织</span>
+                <span class="libraries-detail-value">{{ schemaModeDisplay(selectedLibrary) }}</span>
+              </div>
               <div v-if="selectedLibrary.graph_extraction_enabled" class="libraries-detail-field">
                 <span class="libraries-detail-label">构建模式</span>
                 <span class="libraries-detail-value">{{ { fast: '快速', standard: '标准', deep: '深度' }[selectedLibrary.graph_extraction_build_mode] || '标准' }}</span>
@@ -440,12 +449,14 @@ export default {
             <el-row :gutter="16">
               <el-col :span="12"><el-form-item label="检索模式"><el-select v-model="create.form.retrieval_mode" class="libraries-form-control"><el-option value="dense" label="向量检索 dense" /><el-option value="hybrid" label="混合检索 hybrid" /></el-select><div class="libraries-form-hint">hybrid=向量+关键词(pg_trgm) RRF</div></el-form-item></el-col>
               <el-col :span="12"><el-form-item label="Rerank"><el-select v-model="create.form.rerank_enabled" class="libraries-form-control"><el-option :value="null" label="继承全局" /><el-option :value="true" label="开启" /><el-option :value="false" label="关闭" /></el-select><div class="libraries-form-hint">需先在 .env 配 RERANK_* 才生效</div></el-form-item></el-col>
-              <el-col :span="12"><el-form-item label="知识图谱"><el-switch v-model="create.form.graph_extraction_enabled" active-text="上传时默认建立知识图谱" @change="onCreateGraphToggle" /></el-form-item></el-col>
-              <el-col v-if="create.form.graph_extraction_enabled" :span="12"><el-form-item label="构建模式"><el-radio-group v-model="create.form.graph_extraction_build_mode"><el-radio-button value="fast">快速</el-radio-button><el-radio-button value="standard">标准</el-radio-button><el-radio-button value="deep">深度</el-radio-button></el-radio-group><div class="libraries-form-hint">标准模式兼顾完整度与速度</div></el-form-item></el-col>
-              <el-col v-if="create.form.graph_extraction_enabled" :span="12"><el-form-item label="Schema"><el-select v-model="create.form.schema_template" class="libraries-form-control"><el-option value="enterprise" label="基础企业 Schema（推荐）" /><el-option value="none" label="暂不创建 Schema" /></el-select><div class="libraries-form-hint">基础模板会随知识库创建并立即激活，之后可在 Schema 管理中扩展</div></el-form-item></el-col>
+              <el-col :span="24"><el-form-item label="知识组织方式"><el-radio-group v-model="create.form.schema_mode"><el-radio-button value="disabled">普通知识库</el-radio-button><el-radio-button value="explore">AI 探索</el-radio-button><el-radio-button value="governed">Schema 治理</el-radio-button></el-radio-group><div class="libraries-form-hint">普通模式只做文档与向量检索；AI 探索先保留探索策略；Schema 治理用于按激活版本抽取。</div></el-form-item></el-col>
+              <el-col v-if="create.form.schema_mode !== 'disabled'" :span="12"><el-form-item label="构建模式"><el-radio-group v-model="create.form.graph_extraction_build_mode"><el-radio-button value="fast">快速</el-radio-button><el-radio-button value="standard">标准</el-radio-button><el-radio-button value="deep">深度</el-radio-button></el-radio-group><div class="libraries-form-hint">标准模式兼顾完整度与速度</div></el-form-item></el-col>
+              <el-col v-if="create.form.schema_mode === 'governed'" :span="12"><el-form-item label="初始 Schema"><el-select v-model="create.form.schema_template" class="libraries-form-control"><el-option value="enterprise" label="基础企业 Schema（推荐）" /><el-option value="none" label="稍后导入自定义 Schema" /></el-select><div class="libraries-form-hint">导入只创建草稿；激活后才用于后续图谱抽取</div></el-form-item></el-col>
             </el-row>
-            <el-alert v-if="create.form.graph_extraction_enabled && create.form.schema_template === 'enterprise'" type="info" :closable="false" class="libraries-form-alert">将创建并激活基础企业 Schema，包含人员、部门、岗位、制度、流程、项目、产品、客户、文档和术语等实体类型及基础关系。</el-alert>
-            <el-alert v-else-if="create.form.graph_extraction_enabled" type="warning" :closable="false" class="libraries-form-alert">知识图谱已开启，但没有选择 Schema。创建后必须先在 Schema 管理中建立并激活 Schema，才能进行带图谱的文件上传。</el-alert>
+            <el-alert v-if="create.form.schema_mode === 'disabled'" type="info" :closable="false" class="libraries-form-alert">不会启动知识图谱抽取，也不会创建或修改 Schema；适合先使用普通文档检索。</el-alert>
+            <el-alert v-else-if="create.form.schema_mode === 'explore'" type="warning" :closable="false" class="libraries-form-alert">AI 探索模式不会创建正式 Schema。当前图谱抽取器仍要求先导入并激活 Schema；你可以在 Schema 管理中导入 JSON、YAML 或 YML 文件后再开始抽取。</el-alert>
+            <el-alert v-else-if="create.form.schema_template === 'enterprise'" type="info" :closable="false" class="libraries-form-alert">将创建并激活基础企业 Schema，之后可在 Schema 管理中导入新版本扩展。</el-alert>
+            <el-alert v-else type="warning" :closable="false" class="libraries-form-alert">知识图谱已开启，但暂时没有激活 Schema。创建后请先导入并激活 Schema，才能进行带图谱的文件上传。</el-alert>
           </div>
         </el-form>
         <template #footer><el-button @click="create.open = false" :disabled="create.submitting">取消</el-button><el-button type="primary" :loading="create.submitting" @click="submitCreate">创建</el-button></template>
@@ -481,6 +492,7 @@ export default {
               <el-col :span="12"><el-form-item label="PGSQL 全文源"><el-switch v-model="edit.form.source_enrichment_enabled" active-text="启用正文回查" /></el-form-item></el-col>
               <el-col :span="12"><el-form-item label="知识图谱"><el-switch v-model="edit.form.graph_extraction_enabled" active-text="上传时默认建立知识图谱" /></el-form-item></el-col>
               <el-col v-if="edit.form.graph_extraction_enabled" :span="12"><el-form-item label="构建模式"><el-radio-group v-model="edit.form.graph_extraction_build_mode"><el-radio-button value="fast">快速</el-radio-button><el-radio-button value="standard">标准</el-radio-button><el-radio-button value="deep">深度</el-radio-button></el-radio-group></el-form-item></el-col>
+              <el-col v-if="edit.form.graph_extraction_enabled" :span="12"><el-form-item label="问答图谱"><el-select v-model="edit.form.graph_assisted_chat_mode" class="libraries-form-control"><el-option value="off" label="关闭" /><el-option value="shadow" label="影子评估" /><el-option value="enabled" label="增强回答" /></el-select><div class="libraries-form-hint">影子评估只统计命中，不改变回答；质量门通过后再启用增强回答</div></el-form-item></el-col>
               <el-col v-if="edit.form.graph_extraction_enabled" :span="12"><el-form-item label="Schema"><el-button type="primary" plain @click="edit.open=false;$router.push({ path: '/knowledge-governance/schema', query: { library: edit.slug, tab: 'overview' } })">打开 Schema 管理</el-button></el-form-item></el-col>
             </el-row>
             <el-alert v-if="edit.form.graph_extraction_enabled" type="info" :closable="false" class="libraries-form-alert">开启后，新上传和替换文件会默认进入图谱抽取流程；上传页仍可针对单次任务关闭。系统会自动验证并发布合格事实；使用中发现错误后可在知识治理中修正。</el-alert>

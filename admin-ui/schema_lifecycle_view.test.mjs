@@ -15,15 +15,17 @@ test('Schema lifecycle view exposes the complete bounded workflow', () => {
         "tab: 'overview'",
         "'entities'", "'relations'", "'attributes'", "'constraints'", "'impact'",
         'cloneSchemaVersion', 'validateSchemaVersion', 'getSchemaImpact',
+        'importSchemaFile', '导入文件', '导入全新知识结构文件', 'schema-import',
         'activateSchemaVersion', 'createSchemaEntityType', 'createSchemaRelationType',
         'createSchemaAttribute', 'createSchemaConstraint',
         'updateSchemaItem', 'disableSchemaItem',
         'deleteSchemaDraft', 'disableSchemaVersion',
+        '新建草稿', 'selectedVersion.value',
         'expected_version_state_hash', 'expected_active_version_id',
         "confirmation: 'activate_schema_version'",
         "confirmation: 'delete_schema_draft'",
         "confirmation: 'disable_schema_version'",
-        '删除草稿', '停用 Schema',
+        '删除草稿', '停用知识结构',
     ]) assert.ok(view.includes(token), `missing ${token}`);
     assert.ok(app.includes("path: 'schema'"));
     assert.ok(app.includes('libraryManagement: true'));

@@ -10,6 +10,10 @@ from app.main import assert_graph_extraction_startup_security
 
 
 EXPECTED_DEFAULTS = {
+    "db_pool_size": 2,
+    "db_max_overflow": 8,
+    "db_pool_timeout_seconds": 30,
+    "db_pool_recycle_seconds": 900,
     "graph_extraction_enabled": False,
     "graph_extraction_auto_trigger_enabled": False,
     "graph_extraction_base_url": "https://api.deepseek.com/v1",
@@ -217,7 +221,7 @@ def test_valid_local_qwen_graph_extraction_contract_passes(monkeypatch):
     monkeypatch.setattr(
         settings,
         "graph_extraction_model",
-        "qwen3-30b-a3b-instruct-2507-fp8",
+        "qwen3.5-9b",
     )
     assert_graph_extraction_startup_security()
 

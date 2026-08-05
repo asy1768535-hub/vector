@@ -175,9 +175,9 @@ export default {
             if (h) {
                 const ok = 'online', fail = 'offline';
                 list.push({ name: 'PostgreSQL', status: h.db ? ok : fail, statusText: h.db ? '在线' : '离线', tag: h.db ? 'success' : 'danger', instances: '—', heartbeat: '—' });
-                list.push({ name: 'Qdrant', status: h.qdrant ? ok : fail, statusText: h.qdrant ? '在线' : '离线', tag: h.qdrant ? 'success' : 'danger', instances: '—', heartbeat: '—' });
+                list.push({ name: '向量数据库（Qdrant）', status: h.qdrant ? ok : fail, statusText: h.qdrant ? '在线' : '离线', tag: h.qdrant ? 'success' : 'danger', instances: '—', heartbeat: '—' });
                 const embOk = h.embedding === 'ok';
-                list.push({ name: 'Embedding', status: embOk ? ok : fail, statusText: embOk ? '在线' : '离线', tag: embOk ? 'success' : 'danger', instances: '—', heartbeat: '—' });
+                list.push({ name: '向量化服务', status: embOk ? ok : fail, statusText: embOk ? '在线' : '离线', tag: embOk ? 'success' : 'danger', instances: '—', heartbeat: '—' });
             }
             return list;
         });
@@ -198,7 +198,10 @@ export default {
         <!-- Header -->
         <div class="dashboard-header">
             <h2 class="dashboard-title">概览</h2>
-            <el-button :loading="loading || healthLoading" @click="refreshDashboard">刷新</el-button>
+            <el-button class="app-refresh-button" :loading="loading || healthLoading"
+                       @click="refreshDashboard">
+              <span class="app-refresh-icon" aria-hidden="true"></span>刷新
+            </el-button>
         </div>
 
         <section v-if="dashboardReadState === 'idle' || dashboardReadState === 'loading'"

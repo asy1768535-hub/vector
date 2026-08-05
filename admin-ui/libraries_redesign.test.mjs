@@ -294,9 +294,13 @@ test('detail drawer displays source enrichment enabled or disabled clearly', () 
     assert.match(source, /sourceDisplay\(selectedLibrary\.source_config\)/);
 });
 
-test('create and edit dialogs expose the library graph extraction default', () => {
+test('create dialog exposes schema mode and edit keeps graph extraction switch', () => {
     assert.match(source, /graph_extraction_enabled:\s*false/);
-    assert.match(source, /v-model="create\.form\.graph_extraction_enabled"/);
+    assert.match(source, /schema_mode:\s*'disabled'/);
+    assert.match(source, /v-model="create\.form\.schema_mode"/);
+    assert.match(source, /value="disabled"/);
+    assert.match(source, /value="explore"/);
+    assert.match(source, /value="governed"/);
     assert.match(source, /v-model="edit\.form\.graph_extraction_enabled"/);
     assert.match(source, /上传时默认建立知识图谱/);
     assert.match(source, /external_llm_enabled = body\.graph_extraction_enabled/);
@@ -304,15 +308,14 @@ test('create and edit dialogs expose the library graph extraction default', () =
     assert.match(source, /diff\.graph_extraction_enabled === true/);
 });
 
-test('create dialog selects and submits a Schema template', () => {
+test('create dialog selects and submits a governed Schema template', () => {
     assert.match(source, /schema_template:\s*'none'/);
-    assert.match(source, /v-if="create\.form\.graph_extraction_enabled"/);
+    assert.match(source, /v-if="create\.form\.schema_mode === 'governed'"/);
     assert.match(source, /v-model="create\.form\.schema_template"/);
     assert.match(source, /基础企业 Schema（推荐）/);
-    assert.match(source, /暂不创建 Schema/);
-    assert.match(source, /@change="onCreateGraphToggle"/);
-    assert.match(source, /create\.form\.schema_template = 'enterprise'/);
-    assert.match(source, /if \(!enabled\) create\.form\.schema_template = 'none'/);
+    assert.match(source, /稍后导入自定义 Schema/);
+    assert.match(source, /if \(body\.schema_mode !== 'governed'\) body\.schema_template = 'none'/);
+    assert.doesNotMatch(source, /onCreateGraphToggle/);
     assert.match(source, /将创建并激活基础企业 Schema/);
 });
 

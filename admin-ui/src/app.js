@@ -32,12 +32,10 @@ import Dashboard from './views/Dashboard.js';
 import Users from './views/Users.js';
 import Libraries from './views/Libraries.js';
 import Permissions from './views/Permissions.js';
-import Documents from './views/Documents.js';
 import KnowledgeCatalog from './views/KnowledgeCatalog.js';
 import GraphGovernance from './views/GraphGovernance.js';
 import SchemaLifecycle from './views/SchemaLifecycle.js';
 import RetrievalTest from './views/RetrievalTest.js';
-import ClassificationReview from './views/ClassificationReview.js';
 import Search from './views/Search.js';
 import Chat from './views/Chat.js';
 import ChatLogs from './views/ChatLogs.js';
@@ -124,11 +122,17 @@ const routes = [
                 children: [
                     {
                         path: 'documents',
-                        component: Documents,
+                        redirect: (to) => ({
+                            path: APP_PATHS.catalog,
+                            query: {
+                                ...(to.query.slug ? { library: to.query.slug } : {}),
+                                ...(to.query.open ? { document: to.query.open } : {}),
+                            },
+                        }),
                         meta: {
                             domain: 'knowledgeAssets',
                             domainTitle: '知识资产',
-                            title: '文档',
+                            title: '文档目录',
                             perm: 'read',
                         },
                     },
@@ -138,7 +142,7 @@ const routes = [
                         meta: {
                             domain: 'knowledgeAssets',
                             domainTitle: '知识资产',
-                            title: '知识目录',
+                            title: '知识资产',
                             perm: 'read',
                             effectivePerm: 'read',
                         },
@@ -187,7 +191,11 @@ const routes = [
                     },
                     {
                         path: 'classification',
-                        component: ClassificationReview,
+                        redirect: (to) => ({
+                            path: APP_PATHS.catalog,
+                            query: to.query,
+                            hash: to.hash,
+                        }),
                         meta: {
                             domain: 'knowledgeGovernance',
                             domainTitle: '知识治理',

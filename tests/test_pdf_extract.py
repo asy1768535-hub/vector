@@ -60,11 +60,36 @@ def test_text_pages_do_not_call_ocr(patch_reader, render_spy):
     assert "第一页" in out and "第二页" in out
 
 
+def test_text_page_with_embedded_image_uses_ocr_when_enabled(monkeypatch, render_spy):
+    page = types.SimpleNamespace(
+        extract_text=lambda: "native text with enough characters for the fast path",
+        images=[types.SimpleNamespace(data=b"embedded image")],
+    )
+    monkeypatch.setattr(
+        pdf_extract,
+        "_open_reader",
+        lambda data: types.SimpleNamespace(pages=[page]),
+    )
+
+    ocr_calls = []
+    out = extract_pdf_text(
+        b"x",
+        **_kw(
+            ocr_enabled=True,
+            ocr=lambda data: ocr_calls.append(data) or "image region text",
+        ),
+    )
+
+    assert render_spy == []
+    assert ocr_calls == [b"embedded image"]
+    assert "image region text" in out
+
+
 def test_build_pdf_source_records_page_locations(patch_reader, render_spy):
     patch_reader(["第一页足够长的正文内容用于定位", "第二页足够长的正文内容用于定位"])
 
     source = build_pdf_source(
-        b"x", chunk_size=20, chunk_overlap=0, **_kw(ocr_enabled=False)
+        b"x", chunk_size=20, chunk_overlap=0, **_kw(ocr_enabled=False, min_text_chars=1)
     )
 
     assert source["normalized_text"].strip()
@@ -73,6 +98,7 @@ def test_build_pdf_source_records_page_locations(patch_reader, render_spy):
     assert pages == {1, 2}
     for chunk in source["chunks"]:
         assert chunk["location"]["type"] == "page"
+        assert chunk["location"]["extraction_mode"] == "native"
         assert source["normalized_text"][chunk["source_start"]:chunk["source_end"]] == chunk["text"]
 
 
@@ -81,6 +107,52 @@ def test_scanned_page_uses_ocr_when_enabled(patch_reader, render_spy):
     out = extract_pdf_text(b"x", **_kw(ocr_enabled=True, ocr=lambda b: "扫描识别出的文字"))
     assert render_spy == [0]           # 渲染了第 0 页
     assert "扫描识别出的文字" in out
+
+
+def test_build_pdf_source_records_mixed_extraction_mode(monkeypatch, render_spy):
+    page = types.SimpleNamespace(
+        extract_text=lambda: "native text with enough characters for the fast path",
+        images=[types.SimpleNamespace(data=b"embedded image")],
+    )
+    monkeypatch.setattr(
+        pdf_extract,
+        "_open_reader",
+        lambda data: types.SimpleNamespace(pages=[page]),
+    )
+
+    source = build_pdf_source(
+        b"x",
+        chunk_size=80,
+        chunk_overlap=0,
+        **_kw(ocr_enabled=True, ocr=lambda b: "image region text"),
+    )
+
+    assert render_spy == []
+    assert {chunk["location"]["extraction_mode"] for chunk in source["chunks"]} == {"mixed"}
+
+
+def test_native_visual_page_without_image_regions_is_marked_unparsed(monkeypatch, render_spy):
+    page = types.SimpleNamespace(
+        extract_text=lambda: "native text with enough characters for the fast path",
+        images=[object()],
+    )
+    monkeypatch.setattr(
+        pdf_extract,
+        "_open_reader",
+        lambda data: types.SimpleNamespace(pages=[page]),
+    )
+
+    source = build_pdf_source(
+        b"x",
+        chunk_size=80,
+        chunk_overlap=0,
+        **_kw(ocr_enabled=True, ocr=lambda _data: "unused"),
+    )
+
+    assert render_spy == []
+    assert {chunk["location"]["extraction_mode"] for chunk in source["chunks"]} == {
+        "native_visual_unparsed"
+    }
 
 
 def test_mixed_pdf_keeps_text_and_ocr_in_page_order(patch_reader, render_spy):

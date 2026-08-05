@@ -121,6 +121,9 @@ class LibraryCreate(BaseModel):
     external_llm_enabled: bool = False
     graph_extraction_allowed_security_levels: list[str] = Field(default_factory=list)
     schema_template: str = Field(default="none", pattern="^(none|enterprise)$")
+    schema_mode: str = Field(
+        default="disabled", pattern="^(disabled|explore|governed)$"
+    )
 
     @field_validator("graph_extraction_allowed_security_levels", mode="before")
     @classmethod
@@ -138,6 +141,14 @@ class LibraryCreate(BaseModel):
     def _check_chunk_params(self):
         _validate_chunk_overlap(self)
         _validate_revision_retention_policy(self)
+        if "schema_mode" not in self.model_fields_set:
+            self.schema_mode = "governed" if self.graph_extraction_enabled else "disabled"
+        if self.schema_mode == "disabled" and self.graph_extraction_enabled:
+            raise ValueError("schema_mode=disabled requires graph extraction to be disabled")
+        if self.schema_mode in {"explore", "governed"} and not self.graph_extraction_enabled:
+            raise ValueError("schema_mode requires graph extraction to be enabled")
+        if self.schema_mode != "governed" and self.schema_template != "none":
+            raise ValueError("schema_template is only available in governed mode")
         if self.graph_extraction_enabled:
             if not self.external_llm_enabled:
                 raise ValueError("external_llm_enabled must be true when graph extraction is enabled")
@@ -189,8 +200,14 @@ class LibraryUpdate(BaseModel):
     # source_config 哨兵：不传=不改；传 {} =清空；传非空 dict=自定义。
     source_config: Optional[dict[str, Any]] = Field(default=None)
     graph_extraction_enabled: Optional[bool] = None
+    schema_mode: Optional[str] = Field(
+        default=None, pattern="^(disabled|explore|governed)$"
+    )
     graph_extraction_build_mode: Optional[str] = Field(
         default=None, pattern="^(fast|standard|deep)$"
+    )
+    graph_assisted_chat_mode: Optional[str] = Field(
+        default=None, pattern="^(off|shadow|enabled)$"
     )
     external_llm_enabled: Optional[bool] = None
     graph_extraction_allowed_security_levels: Optional[list[str]] = None
@@ -291,7 +308,9 @@ class LibraryRead(BaseModel):
     qdrant_collection: str
     source_config: Optional[dict[str, Any]] = None
     graph_extraction_enabled: bool = False
+    schema_mode: str = "disabled"
     graph_extraction_build_mode: str = "standard"
+    graph_assisted_chat_mode: str = "off"
     external_llm_enabled: bool = False
     graph_extraction_allowed_security_levels: list[str] = Field(default_factory=list)
     knowledge_artifact_auto_enabled: bool = False
@@ -318,6 +337,16 @@ class LibraryRead(BaseModel):
     @classmethod
     def _default_graph_extraction_build_mode(cls, value):
         return value if value in {"fast", "standard", "deep"} else "standard"
+
+    @field_validator("graph_assisted_chat_mode", mode="before")
+    @classmethod
+    def _default_graph_assisted_chat_mode(cls, value):
+        return value if value in {"off", "shadow", "enabled"} else "off"
+
+    @field_validator("schema_mode", mode="before")
+    @classmethod
+    def _default_schema_mode(cls, value):
+        return "disabled" if value is None else value
 
     @field_validator(
         "classification_auto_enabled",

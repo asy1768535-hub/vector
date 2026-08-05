@@ -25,7 +25,6 @@ const FULL_ACCESS = {
     import: true,
     knowledgeGraph: true,
     schemaLifecycle: true,
-    classificationReview: true,
     account: true,
     apiKeys: true,
 };
@@ -49,9 +48,9 @@ test('eight functional groups and their leaf pages provide local SVG sidebar ico
         'auditCenter',
     ]);
     const leafItems = SIDEBAR_GROUPS.flatMap((group) => group.items);
-    assert.equal(leafItems.length, 17);
+    assert.equal(leafItems.length, 16);
     assert.equal(
-        leafItems.filter((item) => item.label === '知识内容').length,
+        leafItems.filter((item) => item.label === '知识资产').length,
         1,
     );
 

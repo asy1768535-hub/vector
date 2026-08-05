@@ -367,7 +367,7 @@ def test_configured_provider_builds_local_qwen_adapter_without_http(monkeypatch)
         {
             "provider": "openai-compatible",
             "base_url": "http://10.0.10.2:8113/v1",
-            "model": "qwen3-30b-a3b-instruct-2507-fp8",
+            "model": "qwen3.5-9b",
         }
     )
     monkeypatch.setattr(
@@ -381,7 +381,7 @@ def test_configured_provider_builds_local_qwen_adapter_without_http(monkeypatch)
     assert configured is adapter.return_value
     adapter.assert_called_once_with(
         base_url="http://10.0.10.2:8113/v1",
-        model="qwen3-30b-a3b-instruct-2507-fp8",
+        model="qwen3.5-9b",
         api_key="LOCAL-TEST-KEY",
         timeout_seconds=10.0,
         max_output_tokens=None,

@@ -179,7 +179,9 @@ export default {
                 <el-option label="启用" value="active" />
                 <el-option label="停用" value="disabled" />
             </el-select>
-            <el-button :loading="loading" @click="loadUsers(true)">刷新</el-button>
+            <el-button class="app-refresh-button" :loading="loading" @click="loadUsers(true)">
+              <span class="app-refresh-icon" aria-hidden="true"></span>刷新
+            </el-button>
         </div>
 
         <section v-if="usersReadState === 'fatal'" class="users-read-state" role="alert">

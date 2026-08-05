@@ -42,6 +42,49 @@ test('graphJobProgress maps real stages and extraction counts', () => {
     assert.equal(completed.tone, 'success');
 });
 
+test('graphJobProgress warns when only entity candidates remain', () => {
+    const completed = graphJobProgress({
+        status: 'succeeded',
+        statistics: {
+            materialization: {
+                outcome: 'entities_only',
+                entity_count: 0,
+                relation_count: 0,
+                pending_entity_candidate_count: 3,
+            },
+        },
+    });
+    assert.equal(completed.tone, 'warning');
+    assert.equal(completed.label, '仅有实体、暂无有效关系，未发布');
+    assert.equal(completed.entityCount, 3);
+    assert.equal(completed.relationCount, 0);
+});
+
+test('graphJobProgress reports library graph replacement after entity-only update', () => {
+    const completed = graphJobProgress({
+        status: 'succeeded',
+        statistics: {
+            materialization: {
+                outcome: 'entities_only',
+                pending_entity_candidate_count: 2,
+                relation_count: 0,
+            },
+            publication: { outcome: 'activated' },
+        },
+    });
+    assert.equal(completed.label, '暂无新关系，已更新库级图谱');
+    assert.equal(completed.entityCount, 2);
+    assert.equal(completed.relationCount, 0);
+});
+
+test('graphJobProgress keeps the current graph label when update fails', () => {
+    const failed = graphJobProgress({
+        status: 'failed',
+        statistics: { publication: { current_graph_unchanged: true } },
+    });
+    assert.equal(failed.label, '图谱更新失败，当前正式图谱未切换');
+});
+
 test('localizes security levels without changing submitted enum values', () => {
     assert.equal(SECURITY_LEVEL_LABEL.internal, '内部');
     assert.equal(securityLevelLabel('internal'), '内部');
@@ -49,7 +92,9 @@ test('localizes security levels without changing submitted enum values', () => {
     assert.equal(securityLevelLabel('partner-only'), 'partner-only（自定义安全级别）');
     assert.ok(source.includes('formatSize, fileTypeIcon, securityLevelLabel, MAX_BATCH_SIZE'));
     assert.ok(source.includes(':label="securityLevelLabel(level)" :value="level"'));
-    assert.ok(source.includes('external_id（外部文档标识）'));
+    assert.ok(source.includes('外部文档编号'));
+    assert.ok(source.includes('用于与外部业务系统中的文档建立对应关系，普通上传无需填写。'));
+    assert.ok(source.includes('title="高级设置"'));
     assert.equal(source.includes('placeholder="external_id"'), false);
 });
 

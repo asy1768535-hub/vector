@@ -11,6 +11,7 @@ import {
     domainTabs,
     firstDomainPath,
     legacyRedirectTarget,
+    retrievalModeTarget,
     sidebarItems,
     visibleSidebarDomains,
     visibleSidebarGroups,
@@ -48,7 +49,6 @@ test('sidebar leaf pages follow fine-grained access', () => {
         '检索诊断',
     ]);
     assert.deepEqual(domainTabs('knowledgeAssets', READER_ACCESS).map((item) => item.key), [
-        'documents',
         'catalog',
     ]);
     assert.deepEqual(domainTabs('knowledgeGovernance', READER_ACCESS).map((item) => item.key), [
@@ -70,7 +70,7 @@ test('sidebar leaf pages follow fine-grained access', () => {
         [
             APP_PATHS.chat,
             APP_PATHS.search,
-            APP_PATHS.documents,
+            APP_PATHS.catalog,
             APP_PATHS.knowledgeGraph,
             APP_PATHS.profile,
             APP_PATHS.apiKeys,
@@ -78,28 +78,26 @@ test('sidebar leaf pages follow fine-grained access', () => {
     );
 });
 
-test('documents and catalog share one knowledge content sidebar entry', () => {
+test('knowledge assets use one content sidebar entry', () => {
     const items = sidebarItems('knowledgeAssets', READER_ACCESS);
-    assert.deepEqual(items.map((item) => item.label), ['知识内容']);
-    assert.equal(items[0].path, APP_PATHS.documents);
-    assert.deepEqual(items[0].activePaths, [APP_PATHS.documents, APP_PATHS.catalog]);
+    assert.deepEqual(items.map((item) => item.label), ['知识资产']);
+    assert.equal(items[0].path, APP_PATHS.catalog);
+    assert.deepEqual(items[0].activePaths, [APP_PATHS.catalog, APP_PATHS.documents]);
 
     const documentsOnly = sidebarItems('knowledgeAssets', {
         documents: true,
         catalog: false,
     });
-    assert.equal(documentsOnly[0].path, APP_PATHS.documents);
-    assert.deepEqual(documentsOnly[0].activePaths, [APP_PATHS.documents]);
+    assert.equal(documentsOnly[0].path, APP_PATHS.catalog);
+    assert.deepEqual(documentsOnly[0].activePaths, [APP_PATHS.catalog, APP_PATHS.documents]);
 });
 
 test('Schema management is shown in the administrator Library section', () => {
     assert.deepEqual(domainTabs('knowledgeGovernance', {
         knowledgeGraph: true,
         schemaLifecycle: true,
-        classificationReview: true,
     }).map((item) => item.key), [
         'knowledgeGraph',
-        'classificationReview',
     ]);
     assert.deepEqual(domainTabs('libraries', SCHEMA_ADMIN_ACCESS).map((item) => item.key), [
         'schemaLifecycle',
@@ -152,7 +150,7 @@ test('default routes and domain roots choose the first accessible leaf', () => {
 test('knowledge asset tabs translate Library context without leaking it to other domains', () => {
     assert.deepEqual(domainTabTarget(APP_PATHS.documents, { library: 'legal' }), {
         path: APP_PATHS.documents,
-        query: { slug: 'legal' },
+        query: { library: 'legal' },
     });
     assert.deepEqual(domainTabTarget(APP_PATHS.catalog, { slug: 'legal' }), {
         path: APP_PATHS.catalog,
@@ -164,6 +162,15 @@ test('knowledge asset tabs translate Library context without leaking it to other
     });
     assert.deepEqual(domainTabTarget(APP_PATHS.chat, { library: 'legal' }), {
         path: APP_PATHS.chat,
+    });
+});
+
+test('retrieval modes preserve query text and applicable library scope', () => {
+    assert.deepEqual(retrievalModeTarget(APP_PATHS.retrievalTest, {}, {
+        queryText: '合同期限', librarySlugs: ['legal'],
+    }), { path: APP_PATHS.retrievalTest, query: { q: '合同期限', libraries: 'legal' } });
+    assert.deepEqual(retrievalModeTarget(APP_PATHS.search, { q: '合同期限', libraries: 'a,b' }), {
+        path: APP_PATHS.search, query: { q: '合同期限', library: 'a' },
     });
 });
 

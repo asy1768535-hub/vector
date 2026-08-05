@@ -20,7 +20,11 @@ from app.models.library import Library
 from app.models.ontology_version import OntologyVersion
 from app.models.relation_evidence import RelationEvidence
 from app.schemas.chat_graph_context import ChatGraphContextResponse
-from app.schemas.v06_graph_retrieval import GraphRetrievalQueryRequest, GraphRetrievalSeed
+from app.schemas.v06_graph_retrieval import (
+    GraphRetrievalQueryRequest,
+    GraphRetrievalQueryResponse,
+    GraphRetrievalSeed,
+)
 from app.services import graph_retrieval
 
 
@@ -35,6 +39,14 @@ class ChatGraphContextServiceError(RuntimeError):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(code)
+
+
+@dataclass(frozen=True, slots=True)
+class ChatGraphQueryResult:
+    graph: GraphRetrievalQueryResponse | None
+    exact_fact_count: int = 0
+    exact_seed_count: int = 0
+    exact_seeds_truncated: bool = False
 
 
 @dataclass(slots=True)
@@ -225,38 +237,31 @@ def _matching_publication_items(library: Library, evidence_ids: Sequence[uuid.UU
     )
 
 
-async def load_chat_graph_context(
+async def query_chat_graph_for_chunks(
     db: AsyncSession,
     library: Library,
-    chunk_id: uuid.UUID,
+    chunk_ids: Sequence[uuid.UUID],
     *,
     config: Settings = settings,
-) -> ChatGraphContextResponse:
-    chunk = await _load_visible_chunk(db, library, chunk_id)
-    evidence_ids = await _chunk_evidence_ids(db, chunk)
+) -> ChatGraphQueryResult:
+    evidence_groups: list[tuple[uuid.UUID, ...]] = []
+    seen: set[uuid.UUID] = set()
+    for chunk_id in chunk_ids:
+        if chunk_id in seen:
+            continue
+        seen.add(chunk_id)
+        chunk = await _load_visible_chunk(db, library, chunk_id)
+        evidence_groups.append(await _chunk_evidence_ids(db, chunk))
+    evidence_ids = _bounded_evidence_ids(*evidence_groups)
     if not evidence_ids:
-        return ChatGraphContextResponse(
-            contract_version="v1",
-            chunk_id=chunk.id,
-            exact_fact_count=0,
-            exact_seed_count=0,
-            exact_seeds_truncated=False,
-            graph=None,
-        )
+        return ChatGraphQueryResult(graph=None)
 
     rows = (await db.execute(_matching_publication_items(library, evidence_ids))).all()
     if len(rows) > MAX_CONTEXT_FACT_ROWS:
         raise ChatGraphContextServiceError("graph_retrieval_limit_exceeded")
     candidate = _select_candidate(rows)
     if candidate is None:
-        return ChatGraphContextResponse(
-            contract_version="v1",
-            chunk_id=chunk.id,
-            exact_fact_count=0,
-            exact_seed_count=0,
-            exact_seeds_truncated=False,
-            graph=None,
-        )
+        return ChatGraphQueryResult(graph=None)
     if candidate.publication_status == "degraded":
         raise ChatGraphContextServiceError("graph_publication_unavailable")
 
@@ -289,11 +294,27 @@ async def load_chat_graph_context(
         )
     except graph_retrieval.GraphRetrievalServiceError as exc:
         raise ChatGraphContextServiceError(exc.code) from exc
-    return ChatGraphContextResponse(
-        contract_version="v1",
-        chunk_id=chunk.id,
+    return ChatGraphQueryResult(
+        graph=graph,
         exact_fact_count=len(candidate.fact_ids),
         exact_seed_count=len(selected_seed_ids),
         exact_seeds_truncated=len(ordered_seed_ids) > len(selected_seed_ids),
-        graph=graph,
+    )
+
+
+async def load_chat_graph_context(
+    db: AsyncSession,
+    library: Library,
+    chunk_id: uuid.UUID,
+    *,
+    config: Settings = settings,
+) -> ChatGraphContextResponse:
+    result = await query_chat_graph_for_chunks(db, library, [chunk_id], config=config)
+    return ChatGraphContextResponse(
+        contract_version="v1",
+        chunk_id=chunk_id,
+        exact_fact_count=result.exact_fact_count,
+        exact_seed_count=result.exact_seed_count,
+        exact_seeds_truncated=result.exact_seeds_truncated,
+        graph=result.graph,
     )

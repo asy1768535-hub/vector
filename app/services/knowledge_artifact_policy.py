@@ -7,9 +7,7 @@ from app.config import Settings, settings
 from app.models.document_revision import DocumentRevision
 from app.models.knowledge_artifact_job import KnowledgeArtifactJob
 from app.services.knowledge_artifact_provider import (
-    DEEPSEEK_BASE_URL,
-    DEEPSEEK_MODEL_NAME,
-    DEEPSEEK_PROVIDER_NAME,
+    OPENAI_COMPATIBLE_PROVIDER_NAME,
 )
 from app.services.knowledge_artifacts import (
     ArtifactContractError,
@@ -121,8 +119,9 @@ def validate_enqueue_scope(
 
 def _model_config_hash(config: Settings) -> str:
     identity = {
-        "provider": DEEPSEEK_PROVIDER_NAME,
-        "model": config.knowledge_artifact_model,
+        "provider": OPENAI_COMPATIBLE_PROVIDER_NAME,
+        "base_url": config.graph_extraction_base_url,
+        "model": config.graph_extraction_model,
         "prompt_version": config.knowledge_artifact_prompt_version,
         "max_source_chars": config.knowledge_artifact_model_max_source_chars,
         "temperature": 0,
@@ -151,35 +150,21 @@ def select_generation_spec(
             fail_artifact_runtime(
                 "library_artifact_type_disabled", "Outline artifacts are disabled"
             )
-        return GenerationSpec(
-            artifact_type="outline",
-            contract_version="outline-v1",
-            extractor_version=config.knowledge_artifact_outline_extractor_version,
-            generation_mode="deterministic",
-            model_provider=None,
-            model_name=None,
-            model_config_hash=None,
-        )
-    if artifact_type != "summary":
+        contract_version = "outline-v1"
+        extractor_version = config.knowledge_artifact_outline_extractor_version
+    elif artifact_type == "summary":
+        if not getattr(library, "summary_artifact_enabled", False):
+            fail_artifact_runtime(
+                "library_artifact_type_disabled", "Summary artifacts are disabled"
+            )
+        contract_version = "summary-v1"
+        extractor_version = config.knowledge_artifact_summary_extractor_version
+    else:
         fail_artifact_runtime(
             "unsupported_artifact_type", "artifact type is not supported"
         )
-    if not getattr(library, "summary_artifact_enabled", False):
-        fail_artifact_runtime(
-            "library_artifact_type_disabled", "Summary artifacts are disabled"
-        )
     if source_character_count <= 0:
-        fail_artifact_runtime("artifact_source_empty", "Summary source is empty")
-    if source_character_count <= config.knowledge_artifact_short_summary_max_chars:
-        return GenerationSpec(
-            artifact_type="summary",
-            contract_version="summary-v1",
-            extractor_version=config.knowledge_artifact_summary_extractor_version,
-            generation_mode="deterministic",
-            model_provider=None,
-            model_name=None,
-            model_config_hash=None,
-        )
+        fail_artifact_runtime("artifact_source_empty", "Artifact source is empty")
     if not config.knowledge_artifact_external_model_enabled:
         fail_artifact_runtime(
             "external_model_disabled", "external artifact model is disabled globally"
@@ -209,23 +194,23 @@ def select_generation_spec(
             "security_level_denied", "Revision security level is not allowed"
         )
     if (
-        config.knowledge_artifact_base_url != DEEPSEEK_BASE_URL
-        or config.knowledge_artifact_model != DEEPSEEK_MODEL_NAME
+        not config.graph_extraction_base_url.strip()
+        or not config.graph_extraction_model.strip()
     ):
         fail_artifact_runtime(
-            "provider_config_invalid", "artifact provider identity is not approved"
+            "provider_config_invalid", "artifact model endpoint and model are required"
         )
-    if not config.knowledge_artifact_api_key.get_secret_value().strip():
+    if not config.graph_extraction_api_key.get_secret_value().strip():
         fail_artifact_runtime(
             "provider_credential_missing", "artifact provider credential is missing"
         )
     return GenerationSpec(
-        artifact_type="summary",
-        contract_version="summary-v1",
-        extractor_version=config.knowledge_artifact_summary_extractor_version,
+        artifact_type=artifact_type,
+        contract_version=contract_version,
+        extractor_version=extractor_version,
         generation_mode="model",
-        model_provider=DEEPSEEK_PROVIDER_NAME,
-        model_name=config.knowledge_artifact_model,
+        model_provider=OPENAI_COMPATIBLE_PROVIDER_NAME,
+        model_name=config.graph_extraction_model,
         model_config_hash=_model_config_hash(config),
     )
 

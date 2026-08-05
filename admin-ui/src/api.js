@@ -312,6 +312,16 @@ export const reviewClassificationRun = (slug, runId, body) =>
         `/libraries/${slug}/classifications/runs/${runId}/review`,
         jsonBody('POST', body),
     );
+export const setDocumentClassification = (slug, documentId, body) =>
+    request(
+        `/libraries/${slug}/classifications/documents/${documentId}`,
+        jsonBody('PUT', body),
+    );
+export const removeDocumentClassification = (slug, documentId, body) =>
+    request(
+        `/libraries/${slug}/classifications/documents/${documentId}`,
+        jsonBody('DELETE', body),
+    );
 
 // ── v0.8 Organization retrieval diagnostics ────────────────
 export const checkLibraryCompatibility = (body) =>
@@ -530,6 +540,17 @@ export const getActiveGraphPublication = (slug, ontologyVersionId = '') => {
 };
 export const getGraphPublication = (slug, publicationId) =>
     request(`/libraries/${slug}/v05/graph-publications/${publicationId}`);
+export const listGraphPublicationItems = (slug, publicationId, params = {}) => {
+    const query = new URLSearchParams();
+    for (const key of ['item_kind', 'status', 'page', 'page_size']) {
+        const value = params?.[key];
+        if (value !== null && value !== undefined && value !== '') query.set(key, String(value));
+    }
+    const suffix = query.toString();
+    return request(
+        `/libraries/${slug}/v05/graph-publications/${publicationId}/items${suffix ? `?${suffix}` : ''}`,
+    );
+};
 export const activateGraphPublication = (slug, publicationId, body) => graphCommand(
     `/libraries/${slug}/v05/graph-publications/${publicationId}/activate`,
     body,
@@ -680,6 +701,14 @@ const schemaPath = (slug, versionId, suffix = '') => (
 
 export const listSchemaVersions = (slug) => request(`/libraries/${slug}/schema-lifecycle/versions`);
 export const getSchemaVersion = (slug, versionId) => request(schemaPath(slug, versionId));
+export const importSchemaVersion = (slug, body) => request(
+    `/libraries/${slug}/schema-lifecycle/import`,
+    jsonBody('POST', body),
+);
+export const importSchemaFile = (slug, body) => request(
+    `/libraries/${slug}/schema-lifecycle/import-file`,
+    jsonBody('POST', body),
+);
 export const validateSchemaVersion = (slug, versionId) =>
     request(schemaPath(slug, versionId, '/validate'), { method: 'POST' });
 export const getSchemaImpact = (slug, versionId) => request(schemaPath(slug, versionId, '/impact'));

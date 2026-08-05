@@ -50,6 +50,19 @@ function scoreClass(s) {
 
 function nowISO() { return new Date().toISOString(); }
 
+const LAST_CHAT_LIBRARY_KEY = 'vectorDatabase.chat.lastLibrary';
+
+function savedChatLibrary() {
+    try { return window.localStorage.getItem(LAST_CHAT_LIBRARY_KEY) || ''; }
+    catch (_) { return ''; }
+}
+
+function saveChatLibrary(slug) {
+    try {
+        if (slug) window.localStorage.setItem(LAST_CHAT_LIBRARY_KEY, slug);
+    } catch (_) { /* storage may be disabled */ }
+}
+
 export default {
     components: { GraphCanvas },
     setup() {
@@ -118,7 +131,11 @@ export default {
         async function loadLibs(forceRefresh = false) {
             try {
                 libs.value = await api.listChatLibraries(forceRefresh);
-                if (libs.value.length && !currentSlug.value) currentSlug.value = libs.value[0].slug;
+                const preferred = currentSlug.value || savedChatLibrary();
+                currentSlug.value = libs.value.some((item) => item.slug === preferred)
+                    ? preferred
+                    : (libs.value[0]?.slug || null);
+                saveChatLibrary(currentSlug.value);
             } catch (e) { ElMessage.error(e.message); }
         }
 
@@ -150,6 +167,7 @@ export default {
         }
 
         function onLibChange() {
+            saveChatLibrary(currentSlug.value);
             _cleanupStream();
             closeAndInvalidateSourceDialog();
             closeAndInvalidateCitationGraph();
@@ -177,6 +195,7 @@ export default {
             closeAndInvalidateSourceDialog();
             closeAndInvalidateCitationGraph();
             currentSlug.value = conv.library_slug;
+            saveChatLibrary(currentSlug.value);
             currentConvId.value = conv.id;
             messages.value = [];
             try {
@@ -185,6 +204,8 @@ export default {
                     role: m.role === 'assistant' ? 'ai' : 'user',
                     text: m.content + (m.status === 'failed' && m.error_message ? '\n\n*[失败]* ' + m.error_message : ''),
                     sources: m.sources || [],
+                    graph_augmented: m.graph_augmented === true,
+                    graph_evidence: m.graph_evidence || [],
                     error: m.status === 'failed',
                     time: m.created_at || null,
                 }));
@@ -235,7 +256,18 @@ export default {
         }
 
         function messageGraphSource(message) {
-            return (message?.sources || []).find((source) => source?.chunk_id) || null;
+            return (message?.graph_evidence || []).find((source) => source?.chunk_id)
+                || (message?.sources || []).find((source) => source?.chunk_id)
+                || null;
+        }
+
+        function citationSources(message) {
+            const sources = [...(message?.sources || [])];
+            for (const evidence of message?.graph_evidence || []) {
+                const index = Number(evidence.citation_index) - 1;
+                if (index >= 0) sources[index] = evidence;
+            }
+            return sources;
         }
 
         function citationGraphError(error) {
@@ -420,7 +452,7 @@ export default {
         function handleCitationClick(message, event) {
             const index = extractCitationIndex(event.target);
             if (index === null) return;
-            openCitationChunk(message.sources?.[index]);
+            openCitationChunk(citationSources(message)[index]);
         }
 
         function handleCitationKeydown(message, event) {
@@ -428,7 +460,7 @@ export default {
             const index = extractCitationIndex(event.target);
             if (index === null) return;
             event.preventDefault();
-            openCitationChunk(message.sources?.[index]);
+            openCitationChunk(citationSources(message)[index]);
         }
 
         async function openDocDetail(source) {
@@ -483,7 +515,7 @@ export default {
             const userTime = nowISO();
             messages.value.push({ role: 'user', text: q, time: userTime });
             input.value = '';
-            const aiMsg = { role: 'ai', text: '', sources: [], error: false, cursor: false, statusText: '正在检索资料…', time: null };
+            const aiMsg = { role: 'ai', text: '', sources: [], graph_augmented: false, graph_evidence: [], error: false, cursor: false, statusText: '正在检索资料…', time: null };
             messages.value.push(aiMsg);
             _aiMsgRef = aiMsg;
             loading.value = true;
@@ -497,6 +529,8 @@ export default {
                     onSources: (o) => {
                         if (o.conversation_id) currentConvId.value = o.conversation_id;
                         aiMsg.sources = o.sources || [];
+                        aiMsg.graph_augmented = o.graph_augmented === true;
+                        aiMsg.graph_evidence = o.graph_evidence || [];
                         aiMsg.statusText = '正在生成答案…';
                         aiMsg.cursor = true;
                         scrollToBottom();
@@ -532,7 +566,7 @@ export default {
                     const detail = e.message || '';
                     if (detail.includes('未启用') || detail.toLowerCase().includes('chat')) {
                         chatDisabled.value = true;
-                        aiMsg.text = 'Chat 功能未启用，请管理员配置 CHAT_*';
+                        aiMsg.text = '智能问答功能未启用，请联系管理员';
                     } else if (detail.toLowerCase().includes('rebuilding')) {
                         aiMsg.text = '知识库正在重建或索引暂不可用，请稍后再试';
                     } else {
@@ -567,6 +601,7 @@ export default {
             citationGraphDialog, openCitationGraph, closeAndInvalidateCitationGraph,
             selectCitationGraphNode, selectCitationGraphRelation, clearCitationGraphSelection,
             citationGraphSelection, citationGraphExpansionStatus, messageGraphSource,
+            citationSources,
             expandingGraphEntityId, expandedGraphEntityIdList,
             citationGraphNodes, citationGraphRelations, citationGraphNodeName, citationGraphRelationLine,
             focusCitationGraphNode, chatGraphRelationLabel,
@@ -581,7 +616,7 @@ export default {
         <aside class="chat-history-panel">
             <div class="chat-history-title-row">
                 <span class="chat-history-panel-title">会话历史</span>
-                <el-button class="chat-new-button" circle :disabled="!currentSlug"
+                <el-button class="chat-new-button" circle
                            aria-label="新建会话" title="新建会话" @click="newChat">
                     <local-icon icon="mdi:plus"></local-icon>
                 </el-button>
@@ -622,12 +657,14 @@ export default {
                                class="chat-library-select" @change="onLibChange">
                         <el-option v-for="l in libs" :key="l.slug" :label="l.name" :value="l.slug" />
                     </el-select>
-                    <el-button class="chat-refresh-btn" text @click="loadLibs(true)">刷新</el-button>
+                    <el-button class="chat-refresh-btn app-refresh-button" text @click="loadLibs(true)">
+                      <span class="app-refresh-icon" aria-hidden="true"></span>刷新
+                    </el-button>
                 </div>
             </div>
 
             <el-alert v-if="chatDisabled" type="warning" :closable="false" show-icon
-                      title="Chat 功能未启用" style="margin: 0 18px 16px" />
+                      title="智能问答功能未启用" style="margin: 0 18px 16px" />
 
             <!-- Messages -->
             <div ref="streamRef" class="chat-messages">
@@ -652,13 +689,13 @@ export default {
                             <div v-if="m.role === 'ai'" class="chat-markdown"
                                  @click="handleCitationClick(m, $event)"
                                  @keydown="handleCitationKeydown(m, $event)"
-                                 v-html="renderMarkdown(m.text, m.sources) + (m.cursor ? '<span class=\\'chat-cursor\\'>|</span>' : '')"></div>
+                                 v-html="renderMarkdown(m.text, citationSources(m)) + (m.cursor ? '<span class=\\'chat-cursor\\'>|</span>' : '')"></div>
                             <div v-if="m.role === 'ai' && m.time" class="chat-msg-time">{{ fmtTime(m.time) }}</div>
                             <div v-if="m.role === 'ai' && m.text" class="chat-answer-actions">
                                 <el-button v-if="m.time && messageGraphSource(m)" class="chat-answer-graph"
                                            plain size="small" type="primary" title="查看回答引用在知识图谱中的位置"
                                            @click="openCitationGraph(messageGraphSource(m))">
-                                    <local-icon icon="carbon:chart-relationship"></local-icon>
+                                    <span class="chat-knowledge-graph-icon" aria-hidden="true"></span>
                                     <span>查看知识图谱</span>
                                 </el-button>
                                 <el-button class="chat-copy-answer" text aria-label="复制回答" title="复制回答" @click="copyAnswer(m.text)">
@@ -666,6 +703,23 @@ export default {
                                 </el-button>
                             </div>
                         </div>
+
+                        <section v-if="m.role === 'ai' && m.graph_augmented && m.graph_evidence?.length"
+                                 class="chat-graph-evidence">
+                            <header>
+                                <span class="chat-graph-badge"><span class="chat-knowledge-graph-icon" aria-hidden="true"></span>知识图谱增强</span>
+                                <span>关系证据（{{ m.graph_evidence.length }}）</span>
+                            </header>
+                            <button v-for="evidence in m.graph_evidence" :key="evidence.relation_id"
+                                    type="button" class="chat-graph-evidence-row"
+                                    @click="openDocDetail(evidence)">
+                                <span class="chat-graph-citation">[{{ evidence.citation_index }}]</span>
+                                <strong>{{ evidence.source_entity_name }}</strong>
+                                <span>{{ evidence.relation_label }}</span>
+                                <strong>{{ evidence.target_entity_name }}</strong>
+                                <small>{{ evidence.title || '查看关系原文' }}</small>
+                            </button>
+                        </section>
 
                         <!-- Collapsible sources -->
                         <el-collapse v-if="m.role === 'ai' && m.sources && m.sources.length" class="chat-sources">
@@ -707,7 +761,7 @@ export default {
                         <el-button type="primary" plain @click="copySourceText(recalledChunkDialog.source.content)">复制片段</el-button>
                         <el-button v-if="recalledChunkDialog.source.chunk_id" type="primary"
                                    @click="openCitationGraph(recalledChunkDialog.source)">
-                            <local-icon icon="carbon:chart-relationship"></local-icon>
+                            <span class="chat-knowledge-graph-icon" aria-hidden="true"></span>
                             知识图谱
                         </el-button>
                     </div>
@@ -810,14 +864,16 @@ export default {
             <div class="chat-input-bar">
                 <div class="chat-input-shell">
                     <el-input v-model="input" type="textarea" :rows="2" resize="none"
-                              placeholder="继续提问，或输入问题..."
+                              :placeholder="messages.length ? '继续提问……' : '输入问题……'"
                               :maxlength="2000"
                               @keydown.enter.exact.prevent="send"
                               class="chat-input" />
                     <div class="chat-input-footer">
                         <div class="chat-input-footer-left">
                             <span class="chat-input-hint">{{ (input || '').length }} / 2000</span>
-                            <span class="chat-input-hint">检索数量</span>
+                            <el-tooltip content="结果不足时可适当提高，数值越大检索范围越广。" placement="top">
+                                <span class="chat-input-hint">检索数量（Top K）</span>
+                            </el-tooltip>
                             <el-select v-model="topK" size="small" class="chat-topk-select">
                                 <el-option :value="3" label="3" />
                                 <el-option :value="5" label="5" />
@@ -825,7 +881,7 @@ export default {
                                 <el-option :value="20" label="20" />
                             </el-select>
                         </div>
-                        <el-button type="primary" :loading="loading" :disabled="!currentSlug"
+                        <el-button type="primary" :loading="loading"
                                    @click="send" class="chat-send-btn">
                             发送
                         </el-button>

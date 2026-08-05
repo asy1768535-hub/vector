@@ -123,7 +123,7 @@ export default {
           <local-icon icon="service:embedding-worker" class="runtime-overview-icon runtime-overview-icon--embedding" />
           <div class="runtime-overview-body">
             <b>{{ summary.embeddingPending != null ? summary.embeddingPending : '—' }}</b>
-            <span>Embedding 队列</span>
+            <span>向量化队列</span>
           </div>
         </div>
         <div class="runtime-overview-item">
@@ -156,7 +156,9 @@ export default {
         <div class="runtime-card-header">
           <span class="runtime-card-title">服务在线状态</span>
           <div class="runtime-card-header-actions">
-            <el-button size="small" @click="load(true)" :loading="loading">刷新</el-button>
+            <el-button class="app-refresh-button" size="small" @click="load(true)" :loading="loading">
+              <span class="app-refresh-icon" aria-hidden="true"></span>刷新
+            </el-button>
             <span class="runtime-auto-label">自动刷新</span>
             <el-switch v-model="autoRefresh" size="small" />
           </div>
@@ -208,7 +210,7 @@ export default {
         <!-- Embedding 任务 -->
         <div class="runtime-card">
           <div class="runtime-card-header">
-            <span class="runtime-card-title">Embedding 任务</span>
+            <span class="runtime-card-title">向量化任务</span>
           </div>
           <div class="runtime-card-body">
             <div class="runtime-metrics">

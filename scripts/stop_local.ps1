@@ -37,6 +37,7 @@ function Stop-ByPidFile($pidFile, $label) {
 Write-Host "=== Stop local project processes ===" -ForegroundColor Cyan
 
 # Stop workers first, then API
+Stop-ByPidFile (Join-Path $pidDir "classifications.pid") "Classification Worker"
 Stop-ByPidFile (Join-Path $pidDir "knowledge_artifacts.pid") "Knowledge Artifact Worker"
 Stop-ByPidFile (Join-Path $pidDir "graph_extractor.pid") "Graph Extractor"
 Stop-ByPidFile (Join-Path $pidDir "cleanup.pid") "Cleanup Worker"

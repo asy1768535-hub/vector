@@ -16,7 +16,7 @@ DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 DEEPSEEK_MODEL_NAME = "deepseek-v4-pro"
 LOCAL_PROVIDER_NAME = "openai-compatible"
 LOCAL_BASE_URL = "http://10.0.10.2:8113/v1"
-LOCAL_MODEL_NAME = "qwen3-30b-a3b-instruct-2507-fp8"
+LOCAL_MODEL_NAME = "qwen3.5-9b"
 
 
 def graph_extraction_provider_name(*, base_url: str, model: str) -> str:

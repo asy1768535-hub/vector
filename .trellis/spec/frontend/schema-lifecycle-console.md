@@ -6,7 +6,7 @@
 
 Use this contract when changing `/knowledge-governance/schema` (legacy
 `/schema-lifecycle`), its menu access, strict API
-clients, version routing, draft forms, validation, impact, clone, activation,
+clients, version routing, draft forms, JSON file import, validation, impact, clone, activation,
 draft deletion, or active-version disable.
 This is a management workspace; Documents and Knowledge Catalog remain primary
 product entry points.
@@ -41,6 +41,9 @@ live in `schema_lifecycle_ui.js`.
 - Version list, detail, validation, impact, and mutation flows use independent
   monotonic request tokens. Responses must repeat exact Library/version
   identity, child scope, count, and state hash before display.
+- Import reads a JSON, YAML, or YML file locally, submits the file text to the
+  server for strict parsing and validation, creates a new draft, and never
+  activates it automatically.
 - Clone refreshes the version list before replacing the URL with the returned
   draft ID. This prevents route normalization from selecting the old version
   while the new draft is not yet present in the client list.

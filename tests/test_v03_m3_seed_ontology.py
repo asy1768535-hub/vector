@@ -229,6 +229,7 @@ def test_default_seed_data_matches_m3_scope_and_related_to_policy():
         "references",
         "approves",
         "depends_on",
+        "contains",
         "related_to",
     } <= set(relation_specs)
 
@@ -236,6 +237,10 @@ def test_default_seed_data_matches_m3_scope_and_related_to_policy():
     assert related_to.requires_evidence is True
     assert related_to.default_review_policy == REVIEW_POLICY_PENDING_REVIEW
     assert related_to.default_review_policy != REVIEW_POLICY_AUTO_ACTIVE
+
+    contains = relation_specs["contains"]
+    assert contains.requires_evidence is True
+    assert contains.default_review_policy == REVIEW_POLICY_AUTO_ACTIVE
 
 
 def test_seed_creates_draft_ontology_children_before_activating():

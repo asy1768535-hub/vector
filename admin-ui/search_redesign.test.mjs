@@ -3,6 +3,7 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 
 const source = readFileSync(new URL('./src/views/Search.js', import.meta.url), 'utf8');
+const switchSource = readFileSync(new URL('./src/components/RetrievalModeSwitch.js', import.meta.url), 'utf8');
 const css = readFileSync(new URL('./style.css', import.meta.url), 'utf8');
 
 // ── API calls and permissions preserved ──
@@ -51,15 +52,24 @@ test('CSV export uses shared logs_ui helpers with formula injection prevention',
 // ── Document detail link ──
 test('document detail link routes to the knowledge asset document workspace', () => {
     assert.ok(
-        source.includes("'/knowledge-assets/documents'")
-            || source.includes('"/knowledge-assets/documents"'),
+        source.includes("'/knowledge-assets/catalog'")
+            || source.includes('"/knowledge-assets/catalog"'),
         'routes to the canonical document workspace',
     );
-    assert.ok(source.includes('open'), 'includes open query param');
-    assert.ok(source.includes('slug'), 'includes slug query param');
+    assert.ok(source.includes('query: { library: slug.value, document: docId }'), 'includes canonical library/document query params');
+    assert.ok(!source.includes('query: { slug:'), 'does not use legacy slug detail query');
+    assert.ok(!source.includes('open: docId'), 'does not use legacy open detail query');
     assert.ok(source.includes('window.open'), 'uses window.open');
     assert.ok(source.includes('router.resolve'), 'uses router.resolve');
     assert.ok(source.includes('document_id'), 'uses document_id not chunk_id');
+});
+
+test('single-library search links to federated diagnostics through the shared switch', () => {
+    assert.ok(source.includes('RetrievalModeSwitch'));
+    assert.ok(source.includes(':query-text="query"'));
+    assert.ok(switchSource.includes('单库检索'));
+    assert.ok(switchSource.includes('多库诊断'));
+    assert.ok(switchSource.includes('access.value.retrievalTest'));
 });
 
 // ── Empty states ──

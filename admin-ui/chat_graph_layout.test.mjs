@@ -71,3 +71,32 @@ test('a requested node becomes the only center while all neighbors remain distin
     assert.equal(layout.nodes.filter((node) => node.role === 'focus').length, 1);
     assert.equal(layout.nodes.find((node) => node.role === 'focus').id, 'seed-4');
 });
+
+test('panorama groups real components without library nodes or synthetic edges', () => {
+    const libraries = [
+        { id: 'library-a', slug: 'a', name: '工程资料库' },
+        { id: 'library-b', slug: 'b', name: '设备知识库' },
+    ];
+    const nodes = [
+        { ...seed, id: 'a-1', library: libraries[0], depth: 1 },
+        { ...inbound, id: 'a-2', library: libraries[0], depth: 1 },
+        { ...outbound, id: 'b-1', library: libraries[1], depth: 1 },
+    ];
+    const relations = [{
+        id: 'real-edge',
+        source_entity_id: 'a-1',
+        target_entity_id: 'a-2',
+        relation_type: { label: '关联', direction: 'directed' },
+    }];
+    const layout = layoutCitationGraph({ panorama: true, nodes, relations }, 1000, 600);
+    assert.equal(layout.nodes.some((node) => node.role === 'focus'), false);
+    assert.deepEqual(layout.relations.map((relation) => relation.id), ['real-edge']);
+    assert.equal(layout.nodes.some((node) => node.id.startsWith('library:')), false);
+    const isolated = layout.nodes.find((node) => node.id === 'b-1');
+    assert.equal(isolated.role, 'isolated');
+    assert.ok(isolated.x > 720);
+    const pair = ['a-1', 'a-2'].map((id) => layout.nodes.find((node) => node.id === id));
+    assert.ok(Math.hypot(pair[0].x - pair[1].x, pair[0].y - pair[1].y) <= 70);
+    assert.ok(pair.every((node) => node.role === 'pair'));
+    assert.ok(Math.max(...pair.map((node) => node.x)) < isolated.x);
+});

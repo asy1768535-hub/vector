@@ -47,7 +47,7 @@ from app.services.graph_extraction_worker import (
 )
 
 
-BATCH_PROMPT_VERSION = "eval-batch-v1"
+BATCH_PROMPT_VERSION = "eval-batch-v2-quality"
 SCHEMA_ROUTER_VERSION = "compact-schema-v1"
 _BATCH_KEY = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _OUTER_JSON_FENCE = re.compile(
@@ -62,13 +62,20 @@ Security and evidence rules:
 - Extract each batch independently. Never move an entity, relation, quote, or local_id between batches.
 - Extract facts only when primary evidence is in c0. Neighbor chunks may only disambiguate facts stated in c0.
 - Use only entity and relation type keys present in the compact frozen ontology.
+- Document titles and title paths are context only. Never extract an entity that appears only in title metadata.
+- Prefer explicit named organizations, systems, people, equipment, locations, products, policies, events, documents, and processes. Do not emit vague adjectives, section labels, actions, qualities, standalone dates, IP addresses, URLs, API paths, or generic names such as 重大, 较大, 稳定性, 概况, 安排, or 处理.
+- Treat term or concept types conservatively. Emit them only for a clear definition or factual use.
+- Emit a relation only when its source and target entity types match a supplied relation_constraint. Respect direction and meaning; never substitute a vague predicate for a different relation.
+- Use contains only when the text explicitly states that a document, product, or project includes a document, product, or process. Co-occurrence, a table row, or sharing a section is not enough.
+- Never emit a self-relation. Do not connect every entity; omit unsupported relations.
+- Confidence is factual support strength, not a placeholder. Use 0.90-1.00 only for an explicit, unambiguous statement with an exact evidence quote; use a lower value when support is weaker, and never default every fact to 0.
 - Every evidence context_ref must be c0 and every quote must be copied verbatim.
 - local_id values are scoped to one batch and may be reused by another batch.
 - Return exactly one result for every supplied batch_key, in the supplied order.
 - Return only JSON. Do not return Markdown, prose, database IDs, UUIDs, reasoning, or internal source types.
 
 Required JSON shape:
-{"batches":[{"batch_key":"u0","entities":[{"local_id":"local","name":"verbatim name","entity_type_key":"allowed key","aliases":[],"properties":{},"external_mapping_hints":[],"confidence":0.0,"evidence":[{"context_ref":"c0","quote":"verbatim quote"}]}],"relations":[{"source_local_id":"local","relation_type_key":"allowed key","target_local_id":"local","properties":{},"confidence":0.0,"evidence":[{"context_ref":"c0","quote":"verbatim quote"}]}]}]}
+{"batches":[{"batch_key":"u0","entities":[{"local_id":"e1","name":"verbatim name","entity_type_key":"allowed key","aliases":[],"properties":{},"external_mapping_hints":[],"confidence":0.9,"evidence":[{"context_ref":"c0","quote":"verbatim quote"}]}],"relations":[{"source_local_id":"e1","relation_type_key":"allowed key","target_local_id":"e2","properties":{},"confidence":0.9,"evidence":[{"context_ref":"c0","quote":"verbatim quote"}]}]}]}
 """
 
 
@@ -161,6 +168,36 @@ def _project_type_rows(rows: Any, *, relation: bool) -> list[dict[str, Any]]:
     return projected
 
 
+def _project_relation_constraints(
+    snapshot: dict[str, Any],
+    *,
+    entity_rows: list[dict[str, Any]],
+    relation_rows: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    entity_keys = {str(row.get("id")): row["key"] for row in entity_rows}
+    relation_keys = {str(row.get("id")): row["key"] for row in relation_rows}
+    projected = {
+        (
+            relation_keys.get(str(row.get("relation_type_id"))),
+            entity_keys.get(str(row.get("source_entity_type_id"))),
+            entity_keys.get(str(row.get("target_entity_type_id"))),
+        )
+        for row in snapshot.get("relation_constraints") or []
+        if isinstance(row, dict)
+    }
+    valid = sorted(
+        item for item in projected if all(value is not None for value in item)
+    )
+    return [
+        {
+            "relation_type_key": relation_key,
+            "source_entity_type_key": source_key,
+            "target_entity_type_key": target_key,
+        }
+        for relation_key, source_key, target_key in valid
+    ]
+
+
 def _routing_terms(row: dict[str, Any]) -> set[str]:
     terms: set[str] = set()
     for field in ("key", "label"):
@@ -200,6 +237,11 @@ def route_ontology_for_extraction(
         return {
             "entity_types": _project_type_rows(entity_rows, relation=False),
             "relation_types": _project_type_rows(relation_rows, relation=True),
+            "relation_constraints": _project_relation_constraints(
+                snapshot,
+                entity_rows=entity_rows,
+                relation_rows=relation_rows,
+            ),
         }
     context = context_text.casefold()
     ranked = sorted(
@@ -215,6 +257,11 @@ def route_ontology_for_extraction(
         return {
             "entity_types": _project_type_rows(entity_rows, relation=False),
             "relation_types": _project_type_rows(relation_rows, relation=True),
+            "relation_constraints": _project_relation_constraints(
+                snapshot,
+                entity_rows=entity_rows,
+                relation_rows=relation_rows,
+            ),
         }
     selected_ids = {str(row.get("id")) for row in selected}
     by_id = {str(row.get("id")): row for row in entity_rows if isinstance(row, dict)}
@@ -242,6 +289,11 @@ def route_ontology_for_extraction(
     return {
         "entity_types": _project_type_rows(selected, relation=False),
         "relation_types": _project_type_rows(selected_relations, relation=True),
+        "relation_constraints": _project_relation_constraints(
+            snapshot,
+            entity_rows=selected,
+            relation_rows=selected_relations,
+        ),
     }
 
 
@@ -697,6 +749,35 @@ async def process_eval_graph_extraction_batch(
                 provider_call_count,
                 tuple(sorted(cached_ready_job_ids, key=str)),
             )
+        if (
+            len(units) > 2
+            and prepared[0].model_config_snapshot.get("schema_routing_enabled") is False
+        ):
+            midpoint = len(units) // 2
+            child_results = await asyncio.gather(
+                *(
+                    process_eval_graph_extraction_batch(
+                        session_factory,
+                        units=child_units,
+                        lease_seconds=lease_seconds,
+                        renew_seconds=renew_seconds,
+                        max_attempts=max_attempts,
+                    )
+                    for child_units in (units[:midpoint], units[midpoint:])
+                )
+            )
+            outcomes: Counter[str] = Counter()
+            ready_job_ids: set[uuid.UUID] = set()
+            provider_call_count = 0
+            for child in child_results:
+                outcomes.update(child.outcomes)
+                ready_job_ids.update(child.ready_job_ids)
+                provider_call_count += child.provider_call_count
+            return EvalBatchProcessResult(
+                outcomes,
+                provider_call_count,
+                tuple(sorted(ready_job_ids, key=str)),
+            )
         inputs: list[GraphExtractionBatchInput] = []
         ontology: dict[str, Any] | None = None
         for index, row in enumerate(prepared):
@@ -723,13 +804,30 @@ async def process_eval_graph_extraction_batch(
         LostGraphExtractionLease,
         ValueError,
     ):
-        outcomes = await _finish_batch(
-            session_factory,
-            claimed_rows=units,
-            max_attempts=max_attempts,
-            error_code="batch_preparation_failed",
+        child_results = await asyncio.gather(
+            *(
+                process_eval_graph_extraction_batch(
+                    session_factory,
+                    units=(unit,),
+                    lease_seconds=lease_seconds,
+                    renew_seconds=renew_seconds,
+                    max_attempts=max_attempts,
+                )
+                for unit in units
+            )
         )
-        return EvalBatchProcessResult(outcomes, 0)
+        outcomes: Counter[str] = Counter()
+        ready_job_ids: set[uuid.UUID] = set()
+        provider_call_count = 0
+        for child in child_results:
+            outcomes.update(child.outcomes)
+            ready_job_ids.update(child.ready_job_ids)
+            provider_call_count += child.provider_call_count
+        return EvalBatchProcessResult(
+            outcomes,
+            provider_call_count,
+            tuple(sorted(ready_job_ids, key=str)),
+        )
 
     leader = prepared[0]
     request_hash = canonical_graph_value_hash_v1(

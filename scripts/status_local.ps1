@@ -36,6 +36,16 @@ $artifactEnabledText = if ($env:KNOWLEDGE_ARTIFACT_RUNTIME_ENABLED) {
     }
 }
 $knowledgeArtifactEnabled = $artifactEnabledText -match '(?i)^(true|1|yes|on)$'
+$classificationEnabledText = if ($env:CLASSIFICATION_RUNTIME_ENABLED) {
+    $env:CLASSIFICATION_RUNTIME_ENABLED
+} elseif (Test-Path $envPath) {
+    $match = Select-String -Path $envPath -Pattern '^\s*CLASSIFICATION_RUNTIME_ENABLED\s*=\s*(.*)' | Select-Object -First 1
+    if ($match -and $match.Matches.Groups[1].Value) {
+        $match.Matches.Groups[1].Value.Trim()
+    }
+}
+$classificationEnabled = $classificationEnabledText -match '(?i)^(true|1|yes|on)$'
+
 
 function Test-PidAlive($pidFile, $label) {
     if (-not (Test-Path $pidFile)) {
@@ -77,6 +87,12 @@ if ($knowledgeArtifactEnabled) {
 } else {
     Write-Host "  Knowledge Artifact Worker : DISABLED" -ForegroundColor DarkGray
 }
+if ($classificationEnabled) {
+    $classificationAlive = Test-PidAlive (Join-Path $pidDir "classifications.pid") "Classification Worker"
+} else {
+    Write-Host "  Classification Worker : DISABLED" -ForegroundColor DarkGray
+}
+
 
 Write-Host ""
 
