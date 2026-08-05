@@ -223,7 +223,7 @@ def test_api_key_identity_is_non_secret_and_cookie_scope_remains_compatible():
 
 def test_0040_orm_migration_and_offline_sql_are_exactly_reversible():
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_heads() == ["0050"]
+    assert script.get_heads() == ["0052"]
     assert script.get_revision("0040").down_revision == "0039"
     assert script.get_revision("0041").down_revision == "0040"
 

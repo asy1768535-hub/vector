@@ -173,7 +173,7 @@ def test_graph_governance_models_are_exported_and_match_durable_shape():
 
 def test_0038_migration_is_additive_reversible_and_precedes_current_head():
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_heads() == ["0050"]
+    assert script.get_heads() == ["0052"]
     assert script.get_revision("0038").down_revision == "0037"
     assert script.get_revision("0039").down_revision == "0038"
     assert script.get_revision("0041").down_revision == "0040"

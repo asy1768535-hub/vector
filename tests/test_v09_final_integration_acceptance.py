@@ -53,10 +53,19 @@ def _git(*args: str) -> str:
     return result.stdout.strip()
 
 
-def _sha256(path: Path) -> str:
-    # The frozen manifest was recorded from the accepted Windows worktree.
-    content = path.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
-    return hashlib.sha256(content).hexdigest()
+def _normalized_windows_bytes(content: bytes) -> bytes:
+    return content.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+
+
+def _git_bytes(*args: str) -> bytes:
+    result = subprocess.run(
+        ("git", *args),
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    return result.stdout
 
 
 def _manifest() -> dict:
@@ -83,15 +92,23 @@ def test_final_candidate_identity_and_ordered_dependency_closure() -> None:
 
 def test_manifest_freezes_dependencies_and_unchanged_accepted_frontend() -> None:
     manifest = _manifest()
-    assert _sha256(ROOT / "requirements.txt") == manifest["requirements_sha256"]
-    assert _sha256(ROOT / "pyproject.toml") == manifest["pyproject_sha256"]
+    assert hashlib.sha256(
+        _normalized_windows_bytes(_git_bytes("show", f"{PRODUCT_CANDIDATE}:requirements.txt"))
+    ).hexdigest() == manifest["requirements_sha256"]
+    assert hashlib.sha256(
+        _normalized_windows_bytes(_git_bytes("show", f"{PRODUCT_CANDIDATE}:pyproject.toml"))
+    ).hexdigest() == manifest["pyproject_sha256"]
     assert _git("rev-parse", f"{PRODUCT_CANDIDATE}:admin-ui") == FRONTEND_TREE
     assert _git("rev-parse", "e6b98ce:admin-ui") == FRONTEND_TREE
 
 
 def test_post_candidate_patch_has_one_0043_head() -> None:
     scripts = ScriptDirectory.from_config(Config(str(ROOT / "alembic.ini")))
-    assert scripts.get_heads() == ["0050"]
+    assert scripts.get_heads() == ["0052"]
+    assert scripts.get_revision("0052").down_revision == "0051"
+    assert scripts.get_revision("0051").down_revision == "0050"
+    assert scripts.get_revision("0050").down_revision == "0049"
+    assert scripts.get_revision("0049").down_revision == "0048"
     assert scripts.get_revision("0048").down_revision == "0047"
     assert scripts.get_revision("0047").down_revision == "0046"
     assert scripts.get_revision("0046").down_revision == "0045"
