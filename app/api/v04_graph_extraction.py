@@ -19,6 +19,7 @@ from app.models.graph_candidates import GraphEntityCandidate, GraphRelationCandi
 from app.models.graph_extraction_job import GraphExtractionJob
 from app.models.graph_extraction_unit import GraphExtractionUnit
 from app.models.library import Library
+from app.models.schema_discovery_run import SchemaDiscoveryRun
 from app.models.user import User
 from app.schemas.graph_extraction_jobs import (
     GraphExtractionCandidateList,
@@ -30,10 +31,13 @@ from app.schemas.graph_extraction_jobs import (
     GraphExtractionUploadConfiguration,
     GraphExtractionUnitList,
     GraphExtractionUnitRead,
+    SchemaDiscoveryRunList,
+    SchemaDiscoveryRunRead,
 )
 from app.services import graph_extraction_jobs
 from app.services.graph_extraction_jobs import GraphExtractionJobError
 from app.services.graph_extraction_triggers import graph_extraction_upload_configuration
+from app.services.schema_discovery_runs import ensure_schema_discovery_run_for_revision
 from app.services.organization_authorization import (
     OrganizationAuthorizationError,
     authorize_library_management,
@@ -114,6 +118,17 @@ async def create_graph_extraction(
         document_id=body.document_id,
     )
     try:
+        if library.schema_mode == "explore":
+            _run, job = await ensure_schema_discovery_run_for_revision(
+                db,
+                library=library,
+                document=document,
+                revision=revision,
+                requested_by=user,
+                build_mode=body.build_mode,
+            )
+            await db.commit()
+            return GraphExtractionJobRead.model_validate(job)
         job = await graph_extraction_jobs.create_graph_extraction_job(
             db,
             library=library,
@@ -129,12 +144,15 @@ async def create_graph_extraction(
         return GraphExtractionJobRead.model_validate(job)
     except GraphExtractionJobError as exc:
         _raise_job_error(exc)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
 
 
 @router.get("/", response_model=GraphExtractionJobList)
 async def list_graph_extractions(
     job_status: str | None = Query(default=None, alias="status", max_length=32),
     document_id: uuid.UUID | None = Query(default=None),
+    schema_discovery_run_id: uuid.UUID | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     library: Library = Depends(require_lib("read")),
@@ -145,6 +163,8 @@ async def list_graph_extractions(
         filters.append(GraphExtractionJob.status == job_status)
     if document_id is not None:
         filters.append(GraphExtractionJob.document_id == document_id)
+    if schema_discovery_run_id is not None:
+        filters.append(GraphExtractionJob.schema_discovery_run_id == schema_discovery_run_id)
     total = int((await db.execute(select(func.count(GraphExtractionJob.id)).where(*filters))).scalar_one())
     result = await db.execute(
         select(GraphExtractionJob)
@@ -155,6 +175,33 @@ async def list_graph_extractions(
     )
     return GraphExtractionJobList(
         items=[GraphExtractionJobRead.model_validate(row) for row in result.scalars()],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/schema-discovery-runs", response_model=SchemaDiscoveryRunList)
+async def list_schema_discovery_runs(
+    status_filter: str | None = Query(default=None, alias="status", max_length=32),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    library: Library = Depends(require_lib("read")),
+    db: AsyncSession = Depends(get_db),
+) -> SchemaDiscoveryRunList:
+    filters = [SchemaDiscoveryRun.library_id == library.id]
+    if status_filter is not None:
+        filters.append(SchemaDiscoveryRun.status == status_filter)
+    total = int((await db.execute(select(func.count(SchemaDiscoveryRun.id)).where(*filters))).scalar_one())
+    result = await db.execute(
+        select(SchemaDiscoveryRun)
+        .where(*filters)
+        .order_by(SchemaDiscoveryRun.created_at.desc(), SchemaDiscoveryRun.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    return SchemaDiscoveryRunList(
+        items=[SchemaDiscoveryRunRead.model_validate(row) for row in result.scalars()],
         total=total,
         limit=limit,
         offset=offset,
@@ -371,6 +418,7 @@ async def rerun_graph_extraction(
             requested_by=user,
             idempotency_key=body.client_idempotency_key,
             rerun_of_job_id=source.id,
+            build_mode=source.build_mode,
         )
         await db.commit()
         return GraphExtractionJobRead.model_validate(job)

@@ -46,6 +46,7 @@ from app.models.extraction_raw_output_attempt import ExtractionRawOutputAttempt
 from app.models.folder import Folder
 from app.models.graph_extraction_job import GraphExtractionJob
 from app.models.graph_extraction_unit import GraphExtractionUnit
+from app.models.canonical_mapping import GraphClaimMapping, GraphMappingAuthoritySnapshot
 from app.models.graph_governance_action import (
     GraphGovernanceAction,
     GraphGovernanceActionItem,
@@ -80,7 +81,10 @@ from app.models.revision_purge_operation import RevisionPurgeOperation
 from app.models.relation_evidence import RelationEvidence
 from app.models.relation_type import RelationType
 from app.models.relation_type_constraint import RelationTypeConstraint
+from app.models.raw_claim import GraphRawClaim, GraphRawClaimOccurrence
+from app.models.claim_decision import GraphClaimDecision
 from app.models.schema_lifecycle_action import SchemaLifecycleAction
+from app.models.schema_discovery_run import SchemaDiscoveryRun
 from app.models.service_heartbeat import ServiceHeartbeat
 from app.models.sync_source import SyncSource
 from app.models.user import User
@@ -128,6 +132,8 @@ __all__ = [
     "Folder",
     "GraphExtractionJob",
     "GraphExtractionUnit",
+    "GraphClaimMapping",
+    "GraphMappingAuthoritySnapshot",
     "GraphGovernanceAction",
     "GraphGovernanceActionItem",
     "GraphPublication",
@@ -148,6 +154,7 @@ __all__ = [
     "LibraryFAQQuestion",
     "MigrationBackfillState",
     "OntologyVersion",
+    "SchemaDiscoveryRun",
     "Organization",
     "OrganizationCapabilityRollout",
     "OrganizationMembership",
@@ -160,6 +167,9 @@ __all__ = [
     "RelationEvidence",
     "RelationType",
     "RelationTypeConstraint",
+    "GraphRawClaim",
+    "GraphRawClaimOccurrence",
+    "GraphClaimDecision",
     "SchemaLifecycleAction",
     "ServiceHeartbeat",
     "SyncSource",

@@ -36,3 +36,15 @@ def test_xlsx_empty_sheet_skipped():
     buf = io.BytesIO()
     wb.save(buf)
     assert extract_xlsx_segments(buf.getvalue()) == []
+
+
+def test_xlsx_staging_path_does_not_require_xlsx_suffix(tmp_path):
+    path = tmp_path / "00000000000000000000000000000000.upload"
+    wb = openpyxl.Workbook()
+    wb.active.append(["name", "value"])
+    wb.active.append(["asset", "42"])
+    wb.save(path)
+
+    segments = extract_xlsx_segments(path)
+
+    assert segments[0]["rows"] == ["name | value", "asset | 42"]

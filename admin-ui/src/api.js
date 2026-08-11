@@ -110,6 +110,7 @@ const _listLibsKey = (params) => 'listLibraries:' + new URLSearchParams(params).
 export const listLibraries = (params = {}, forceRefresh) => cachedRequest(_listLibsKey(params), () => request('/admin/libraries?' + new URLSearchParams(params).toString()), 30000, forceRefresh);
 export const createLibrary = (data) => request('/admin/libraries', jsonBody('POST', data));
 export const updateLibrary = (slug, data) => request(`/admin/libraries/${slug}`, jsonBody('PATCH', data));
+export const getLibrary = (slug) => request(`/admin/libraries/${slug}`);
 export const deleteLibrary = (slug) => request(`/admin/libraries/${slug}`, { method: 'DELETE' });
 export const rebuildLibraryCollection = (slug) =>
     request(`/admin/libraries/${slug}/rebuild-collection`, { method: 'POST' });
@@ -213,6 +214,10 @@ export const getUploadGraphExtractionConfiguration = (slug) =>
     request(`/libraries/${slug}/v04/graph-extractions/upload-configuration`);
 export const listGraphExtractions = (slug, params = {}) =>
     request(`/libraries/${slug}/v04/graph-extractions/?${new URLSearchParams(params).toString()}`);
+export const retryGraphExtraction = (slug, jobId) =>
+    request(`/libraries/${slug}/v04/graph-extractions/${jobId}/retry`, { method: 'POST' });
+export const listSchemaDiscoveryRuns = (slug, params = {}) =>
+    request(`/libraries/${slug}/v04/graph-extractions/schema-discovery-runs?${new URLSearchParams(params).toString()}`);
 // 任务状态（库级，普通用户可查）：按文档列出
 export const listDocumentJobs = (slug, documentId, forceRefresh) => cachedRequest(`listDocumentJobs:${slug}:${documentId}`, () => request(`/libraries/${slug}/documents/${documentId}/jobs`), 15000, forceRefresh);
 export const getDocumentSource = (slug, documentId, chunkId) =>
@@ -583,6 +588,10 @@ export const listMonitoredTasks = (params = {}, forceRefresh) => cachedRequest(
     forceRefresh,
 );
 export const retryJob = (id) => request(`/admin/jobs/${id}/retry`, { method: 'POST' });
+export const retryMonitoredTasks = (items) => request('/admin/jobs/monitor/retry', {
+    method: 'POST',
+    body: JSON.stringify({ items }),
+});
 export const jobStats = (forceRefresh) => cachedRequest('jobStats', () => request('/admin/jobs/stats'), 10000, forceRefresh);
 export const monitoredTaskStats = (forceRefresh) => cachedRequest(
     'monitoredTaskStats',

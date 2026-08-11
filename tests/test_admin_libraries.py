@@ -369,7 +369,7 @@ def test_create_library_explore_mode_does_not_seed_formal_schema():
     seed.assert_not_awaited()
 
 
-def test_legacy_graph_create_defaults_to_governed_schema_mode():
+def test_graph_create_defaults_to_ai_discovery_schema_mode():
     body = admin_libraries.LibraryCreate(
         slug="legacy_graph",
         name="Legacy Graph",
@@ -378,7 +378,7 @@ def test_legacy_graph_create_defaults_to_governed_schema_mode():
         graph_extraction_allowed_security_levels=["internal"],
     )
 
-    assert body.schema_mode == "governed"
+    assert body.schema_mode == "explore"
 
 
 def test_create_library_rejects_incomplete_graph_extraction_configuration():

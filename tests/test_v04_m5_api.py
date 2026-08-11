@@ -272,3 +272,40 @@ def test_full_rerun_requires_admin_even_with_library_insert_permission():
     assert response.status_code == 403
     assert response.json()["detail"] == "admin_required"
     create.assert_not_awaited()
+
+
+def test_full_rerun_preserves_source_build_mode():
+    db = AsyncMock()
+    document, revision = _document_scope()
+    source = _job(build_mode="deep")
+
+    async def get_row(model, object_id):
+        return {
+            (Document, DOC_ID): document,
+            (DocumentRevision, REV_ID): revision,
+        }.get((model, object_id))
+
+    db.get = AsyncMock(side_effect=get_row)
+    db.commit = AsyncMock()
+    try:
+        with (
+            patch("app.deps.load_active_library", new=AsyncMock(return_value=_library())),
+            patch(
+                "app.api.v04_graph_extraction.graph_extraction_jobs.get_graph_extraction_job",
+                new=AsyncMock(return_value=source),
+            ),
+            patch(
+                "app.api.v04_graph_extraction.graph_extraction_jobs.create_graph_extraction_job",
+                new=AsyncMock(return_value=_job(build_mode="deep")),
+            ) as create,
+        ):
+            response = _client(db).post(
+                f"/libraries/m5-api/v04/graph-extractions/{JOB_ID}/rerun",
+                json={"client_idempotency_key": "rerun-deep-001"},
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["build_mode"] == "deep"
+    assert create.await_args.kwargs["build_mode"] == "deep"

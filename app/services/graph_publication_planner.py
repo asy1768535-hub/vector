@@ -51,7 +51,6 @@ PUBLICATION_REUSABLE_STATUSES = ("planned", "activating", "active", "degraded")
 PUBLISHABLE_FACT_STATUSES = {GRAPH_FACT_STATUS_ACTIVE, GRAPH_FACT_STATUS_DRAFT}
 SUPPORT_TYPE_SUPPORTS = "supports"
 SUPPORT_TYPE_CONTRADICTS = "contradicts"
-_STANDALONE_ASSET_ENTITY_TYPE_KEYS: frozenset[str] = frozenset()
 
 
 class GraphPublicationPlanError(RuntimeError):
@@ -268,27 +267,19 @@ def _blocking_add(blocked: dict[str, int], reason: str) -> None:
     blocked[reason] = blocked.get(reason, 0) + 1
 
 
-def _is_standalone_asset_entity(
-    entity: Entity,
-    entity_types: dict[uuid.UUID, EntityType],
-) -> bool:
-    entity_type = entity_types.get(entity.entity_type_id)
-    return (
-        entity_type is not None
-        and entity_type.key.strip().casefold() in _STANDALONE_ASSET_ENTITY_TYPE_KEYS
-    )
-
-
 async def _active_ontology(
     db: AsyncSession,
     library: Library,
     ontology_version_id: uuid.UUID | None,
+    allow_explicit_draft: bool = False,
 ) -> OntologyVersion:
     if ontology_version_id is not None:
         ontology = await db.get(OntologyVersion, ontology_version_id)
         if ontology is None or ontology.library_id != library.id:
             raise GraphPublicationPlanError("ontology_not_found", "ontology version not found")
-        if ontology.status != ONTOLOGY_STATUS_ACTIVE:
+        if ontology.status != ONTOLOGY_STATUS_ACTIVE and not (
+            allow_explicit_draft and ontology.status == "draft"
+        ):
             raise GraphPublicationPlanError("ontology_not_active", "ontology version is not active")
         return ontology
     result = await db.execute(
@@ -495,12 +486,15 @@ async def _eligible_entity_item(
     mentions_by_entity: dict[uuid.UUID, list[EntityMention]],
     config: Settings,
     blocked: dict[str, int],
+    allow_draft_schema: bool = False,
 ) -> GraphPublicationItem | None:
     if entity.status not in PUBLISHABLE_FACT_STATUSES:
         _blocking_add(blocked, f"entity_status_{entity.status}")
         return None
     entity_type = entity_types.get(entity.entity_type_id)
-    if entity_type is None or entity_type.status != SCHEMA_STATUS_ACTIVE:
+    if entity_type is None or entity_type.status not in (
+        {SCHEMA_STATUS_ACTIVE, "draft"} if allow_draft_schema else {SCHEMA_STATUS_ACTIVE}
+    ):
         _blocking_add(blocked, "entity_type_not_active")
         return None
     try:
@@ -563,6 +557,7 @@ async def _eligible_relation_item(
     evidence_by_relation: dict[uuid.UUID, list[RelationEvidence]],
     config: Settings,
     blocked: dict[str, int],
+    allow_draft_schema: bool = False,
 ) -> GraphPublicationItem | None:
     if relation.status not in PUBLISHABLE_FACT_STATUSES:
         _blocking_add(blocked, f"relation_status_{relation.status}")
@@ -573,7 +568,9 @@ async def _eligible_relation_item(
         _blocking_add(blocked, "relation_endpoint_not_published")
         return None
     relation_type = relation_types.get(relation.relation_type_id)
-    if relation_type is None or relation_type.status != SCHEMA_STATUS_ACTIVE:
+    if relation_type is None or relation_type.status not in (
+        {SCHEMA_STATUS_ACTIVE, "draft"} if allow_draft_schema else {SCHEMA_STATUS_ACTIVE}
+    ):
         _blocking_add(blocked, "relation_type_not_active")
         return None
     constraint = relation_constraints.get(
@@ -689,11 +686,15 @@ async def build_graph_publication_snapshot(
     ontology: OntologyVersion,
     *,
     include_drafts: bool,
+    allow_explicit_draft: bool = False,
     enforce_item_limit: bool = True,
     projection: GraphPublicationProjection | None = None,
     config: Settings = settings,
 ) -> GraphPublicationSnapshot:
-    if ontology.library_id != library.id or ontology.status != ONTOLOGY_STATUS_ACTIVE:
+    if ontology.library_id != library.id or (
+        ontology.status != ONTOLOGY_STATUS_ACTIVE
+        and not (allow_explicit_draft and ontology.status == "draft")
+    ):
         raise GraphPublicationPlanError("ontology_not_active", "ontology version is not active")
 
     entity_types = {
@@ -723,7 +724,9 @@ async def build_graph_publication_snapshot(
             select(RelationTypeConstraint).where(
                 RelationTypeConstraint.library_id == library.id,
                 RelationTypeConstraint.ontology_version_id == ontology.id,
-                RelationTypeConstraint.status == SCHEMA_STATUS_ACTIVE,
+                RelationTypeConstraint.status.in_((SCHEMA_STATUS_ACTIVE, "draft"))
+                if allow_explicit_draft
+                else RelationTypeConstraint.status == SCHEMA_STATUS_ACTIVE,
             ),
         )
     }
@@ -794,6 +797,7 @@ async def build_graph_publication_snapshot(
             mentions_by_entity=mentions_by_entity,
             config=config,
             blocked=blocked,
+            allow_draft_schema=allow_explicit_draft,
         )
         if item is not None:
             entity_items_by_id[entity.id] = item
@@ -803,7 +807,6 @@ async def build_graph_publication_snapshot(
         if entity.id in entity_items_by_id
     }
     relation_items: list[GraphPublicationItem] = []
-    relations_by_id = {relation.id: relation for relation in relations}
     for relation in sorted(relations, key=lambda row: str(row.id)):
         if relation.status == GRAPH_FACT_STATUS_DRAFT and not include_drafts:
             _blocking_add(blocked, "relation_draft_not_included")
@@ -818,27 +821,14 @@ async def build_graph_publication_snapshot(
             evidence_by_relation=evidence_by_relation,
             config=config,
             blocked=blocked,
+            allow_draft_schema=allow_explicit_draft,
         )
         if item is not None:
             relation_items.append(item)
-    relation_endpoint_entity_ids = {
-        endpoint_id
-        for item in relation_items
-        for endpoint_id in (
-            relations_by_id[item.relation_id].source_entity_id,
-            relations_by_id[item.relation_id].target_entity_id,
-        )
-    }
     items: list[GraphPublicationItem] = []
     for entity in sorted(entities, key=lambda row: str(row.id)):
         item = entity_items_by_id.get(entity.id)
         if item is None:
-            continue
-        if (
-            entity.id not in relation_endpoint_entity_ids
-            and not _is_standalone_asset_entity(entity, entity_types)
-        ):
-            _blocking_add(blocked, "orphan_entity")
             continue
         items.append(item)
     items.extend(relation_items)
@@ -895,6 +885,8 @@ async def plan_graph_publication(
     expected_parent_publication_id: uuid.UUID | None = None,
     requested_by_user_id: uuid.UUID | None = None,
     projection: GraphPublicationProjection | None = None,
+    allow_explicit_draft: bool = False,
+    plan_options: dict[str, Any] | None = None,
     config: Settings = settings,
 ) -> GraphPublicationPlanResult:
     if source_mode not in {
@@ -905,7 +897,12 @@ async def plan_graph_publication(
         raise GraphPublicationPlanError("invalid_source_mode", "invalid graph publication source mode")
     if not idempotency_key:
         idempotency_key = f"plan:{uuid.uuid4()}"
-    ontology = await _active_ontology(db, library, ontology_version_id)
+    ontology = await _active_ontology(
+        db,
+        library,
+        ontology_version_id,
+        allow_explicit_draft=allow_explicit_draft,
+    )
     if not dry_run:
         await _lock_publication_scope(db, library.id)
         idempotent = await _load_idempotent_publication(
@@ -952,9 +949,20 @@ async def plan_graph_publication(
         library,
         ontology,
         include_drafts=include_drafts,
+        allow_explicit_draft=allow_explicit_draft,
         projection=projection,
         config=config,
     )
+    persisted_plan_options = dict(plan_options or {}) or None
+    if projection is not None:
+        persisted_plan_options = {
+            **dict(plan_options or {}),
+            "graph_governance": {
+                "action_ids": [str(value) for value in projection.action_ids],
+                "action_set_hash": projection.action_set_hash,
+                "contract_version": "graph-governance-v1",
+            },
+        }
     return await _persist_graph_publication_snapshot(
         db,
         library,
@@ -966,17 +974,7 @@ async def plan_graph_publication(
         dry_run=dry_run,
         idempotency_key=idempotency_key,
         requested_by_user_id=requested_by_user_id,
-        plan_options=(
-            {
-                "graph_governance": {
-                    "action_ids": [str(value) for value in projection.action_ids],
-                    "action_set_hash": projection.action_set_hash,
-                    "contract_version": "graph-governance-v1",
-                }
-            }
-            if projection is not None
-            else None
-        ),
+        plan_options=persisted_plan_options,
         config=config,
     )
 

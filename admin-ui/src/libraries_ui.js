@@ -66,6 +66,33 @@ export function libraryStatus(row) {
         : { label: '正常', type: 'success' };
 }
 
+const CANONICAL_MAPPING_POLICY_LABELS = {
+    inherit: '继承',
+    disabled: '关闭',
+    enabled: '开启',
+};
+
+export function canonicalMappingPolicyLabel(policy) {
+    return CANONICAL_MAPPING_POLICY_LABELS[policy] || '未返回';
+}
+
+export function canonicalMappingGlobalLabel(enabled) {
+    if (enabled === true) return '全局已开启';
+    if (enabled === false) return '全局已关闭';
+    return '未返回';
+}
+
+export function canonicalMappingResolvedLabel(resolved) {
+    if (resolved === true) return '已生效';
+    if (resolved === false) return '未生效';
+    return '未返回';
+}
+
+export function canonicalMappingRollbackVerified(row) {
+    return row?.canonical_mapping_shadow_policy === 'disabled'
+        && row?.canonical_mapping_shadow_resolved === false;
+}
+
 export function srcSummary(cfg) {
     if (!cfg) return '未配置';
     const table = cfg.db_name ? `${cfg.db_name}.${cfg.table}` : cfg.table;

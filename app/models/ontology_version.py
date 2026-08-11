@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func, text
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -52,6 +52,8 @@ class OntologyVersion(Base):
     version_no: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default=ONTOLOGY_STATUS_DRAFT)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    origin: Mapped[str] = mapped_column(String(32), nullable=False, default="user", server_default="user")
+    confirmed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     parent_version_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("ontology_versions.id", ondelete="SET NULL"),

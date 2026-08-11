@@ -8,7 +8,8 @@ from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy.exc import DBAPIError
 
 from app.config import settings
 from app.db import async_session_factory
@@ -21,6 +22,7 @@ from app.models.graph_extraction_unit import GraphExtractionUnit
 from app.models.library import Library
 from app.models.ontology_version import OntologyVersion
 from app.services.graph_candidate_aggregation import (
+    CandidateAggregationError,
     canonical_graph_value_hash_v1,
     recompute_job_candidate_aggregates,
     stage_unit_candidate_occurrences,
@@ -33,7 +35,10 @@ from app.services.graph_extraction_attempts import (
     create_pending_attempt,
     finalize_attempt,
 )
-from app.services.graph_extraction_cache import load_cached_graph_extraction_payload
+from app.services.graph_extraction_cache import (
+    load_cached_graph_extraction_payload,
+    load_replay_graph_extraction_payload,
+)
 from app.services.graph_extraction_context import (
     ContextBuildError,
     build_context_snapshot,
@@ -56,9 +61,29 @@ from app.services.graph_extraction_provider import (
     OpenAICompatibleGraphExtractor,
     graph_extraction_provider_name,
 )
+from app.services.shadow_rollout import resolve_library_shadow_extraction
 
 
 UnitTerminalStatus = Literal["succeeded", "failed", "cancelled"]
+
+
+def shadow_enabled_library_sql_predicate():
+    """Return the SQL predicate reserved for shadow-enabled job routing."""
+
+    return and_(
+        Library.graph_extraction_enabled.is_(True),
+        Library.external_llm_enabled.is_(True),
+        or_(
+            and_(
+                settings.graph_claim_shadow_enabled,
+                Library.claim_graph_shadow_policy != "disabled",
+            ),
+            and_(
+                not settings.graph_claim_shadow_enabled,
+                Library.claim_graph_shadow_policy == "enabled",
+            ),
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +123,9 @@ class PreparedGraphExtractionUnit:
     cache_key: str | None = None
     cache_enabled: bool = False
     cache_hit: bool = False
+    shadow_enabled: bool = False
+    center_only: bool = False
+    has_prior_attempts: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,10 +166,17 @@ async def claim_graph_extraction_unit(
                 GraphExtractionJob,
                 GraphExtractionJob.id == GraphExtractionUnit.job_id,
             )
+            .join(Library, Library.id == GraphExtractionJob.library_id)
             .where(
                 GraphExtractionUnit.status == "queued",
                 GraphExtractionUnit.model_attempt_count < max_attempts,
-                (GraphExtractionJob.model_config_snapshot["batch_size"].as_integer().is_(None)),
+                or_(
+                    GraphExtractionJob.model_config_snapshot["batch_size"].as_integer().is_(None),
+                    and_(
+                        GraphExtractionJob.model_config_snapshot["batch_size"].as_integer() >= 1,
+                        shadow_enabled_library_sql_predicate(),
+                    ),
+                ),
                 GraphExtractionJob.status.in_(("queued", "processing")),
             )
             .order_by(
@@ -432,11 +467,18 @@ def _require_live_scope_safety(
             "security_level_denied",
             "revision security level is no longer authorized",
         )
+    frozen_snapshot = job.ontology_snapshot or {}
+    explicit_ai_draft = bool(
+        job.schema_discovery_run_id is not None
+        and frozen_snapshot.get("schema_state") == "ai_draft"
+        and frozen_snapshot.get("confirmed") is False
+        and frozen_snapshot.get("ontology_version_id") == str(job.ontology_version_id)
+    )
     if (
         ontology is None
         or ontology.id != job.ontology_version_id
         or ontology.library_id != library.id
-        or ontology.status != "active"
+        or (ontology.status != "active" and not (explicit_ai_draft and ontology.status == "draft"))
     ):
         raise GraphExtractionWorkerError(
             "active_ontology_changed",
@@ -586,6 +628,9 @@ async def _prepare_graph_extraction_unit(
                 visibility_scope=_revision.visibility_scope,
                 cache_key=cache_key,
                 cache_enabled=cache_enabled,
+                shadow_enabled=resolve_library_shadow_extraction(_library),
+                center_only=center_only,
+                has_prior_attempts=unit.model_attempt_count > 0,
             )
 
 
@@ -641,6 +686,20 @@ async def _load_prepared_cache(
             security_level=prepared.security_level,
             visibility_scope=prepared.visibility_scope,
             current_unit_id=prepared.unit_id,
+        )
+
+
+async def _load_prepared_replay(
+    session_factory,
+    prepared: PreparedGraphExtractionUnit,
+):
+    if not prepared.has_prior_attempts:
+        return None
+    async with session_factory() as db:
+        return await load_replay_graph_extraction_payload(
+            db,
+            unit_id=prepared.unit_id,
+            context_snapshot_id=prepared.context_snapshot_id,
         )
 
 
@@ -999,7 +1058,21 @@ async def _persist_payload_process_result(
         )
         outcome = "cancelled" if finished else "lost_lease"
         return GraphExtractionProcessResult(outcome, exc.code)
-    except Exception:  # noqa: BLE001
+    except CandidateAggregationError as exc:
+        finished = await _finish_claim_after_error(
+            session_factory,
+            unit_id=prepared.unit_id,
+            claim_token=prepared.claim_token,
+            max_attempts=max_attempts,
+            status="failed",
+            error_code=exc.code,
+            error_message=type(exc).__name__,
+        )
+        outcome = "failed" if finished else "lost_lease"
+        return GraphExtractionProcessResult(outcome, exc.code)
+    except (DBAPIError, OSError):
+        raise
+    except Exception as exc:  # noqa: BLE001
         finished = await _finish_claim_after_error(
             session_factory,
             unit_id=prepared.unit_id,
@@ -1007,6 +1080,7 @@ async def _persist_payload_process_result(
             max_attempts=max_attempts,
             status="failed",
             error_code="candidate_processing_failed",
+            error_message=type(exc).__name__,
         )
         outcome = "failed" if finished else "lost_lease"
         return GraphExtractionProcessResult(outcome, "candidate_processing_failed")
@@ -1024,6 +1098,7 @@ async def process_graph_extraction_unit(
     unit_id: uuid.UUID,
     claim_token: uuid.UUID,
     provider=None,
+    shadow_provider=None,
     lease_seconds: int | None = None,
     renew_seconds: int | None = None,
     max_attempts: int | None = None,
@@ -1064,15 +1139,42 @@ async def process_graph_extraction_unit(
         outcome = "failed" if finished else "lost_lease"
         return GraphExtractionProcessResult(outcome, "context_build_failed")
 
+    replayed_payload = await _load_prepared_replay(session_factory, prepared)
+    if replayed_payload is not None:
+        replayed_result = await _persist_payload_process_result(
+            session_factory,
+            prepared=prepared,
+            payload=replayed_payload,
+            max_attempts=max_attempts,
+        )
+        if prepared.shadow_enabled and replayed_result.outcome == "succeeded":
+            from app.services.graph_claim_shadow_worker import record_shadow_skip
+
+            await record_shadow_skip(
+                session_factory,
+                job_id=prepared.job_id,
+                reason="canonical_replay",
+            )
+        return replayed_result
+
     request_hash = _request_payload_hash(prepared)
     cached_payload = await _load_prepared_cache(session_factory, prepared)
     if cached_payload is not None:
-        return await _persist_payload_process_result(
+        cached_result = await _persist_payload_process_result(
             session_factory,
             prepared=replace(prepared, cache_hit=True),
             payload=cached_payload,
             max_attempts=max_attempts,
         )
+        if prepared.shadow_enabled and cached_result.outcome == "succeeded":
+            from app.services.graph_claim_shadow_worker import record_shadow_skip
+
+            await record_shadow_skip(
+                session_factory,
+                job_id=prepared.job_id,
+                reason="canonical_cache_hit",
+            )
+        return cached_result
     try:
         async with session_factory() as db:
             attempt = await create_pending_attempt(
@@ -1201,12 +1303,37 @@ async def process_graph_extraction_unit(
         outcome = "failed" if finished else "lost_lease"
         return GraphExtractionProcessResult(outcome, error_code)
 
-    return await _persist_payload_process_result(
+    result = await _persist_payload_process_result(
         session_factory,
         prepared=prepared,
         payload=payload,
         max_attempts=max_attempts,
     )
+    if result.outcome == "succeeded" and prepared.shadow_enabled:
+        try:
+            from app.services.graph_claim_shadow_worker import run_shadow_after_canonical
+
+            await run_shadow_after_canonical(
+                session_factory,
+                prepared=prepared,
+                provider=shadow_provider,
+            )
+        except Exception:  # noqa: BLE001 - shadow cannot alter canonical outcome
+            from app.services.graph_claim_shadow_worker import (
+                ShadowRunSummary,
+                record_shadow_statistics,
+            )
+
+            await record_shadow_statistics(
+                session_factory,
+                job_id=prepared.job_id,
+                summary=ShadowRunSummary(
+                    status="failed",
+                    reason="shadow_internal_error",
+                ),
+                attempted=1,
+            )
+    return result
 
 
 def graph_extraction_worker_id() -> str:
@@ -1228,7 +1355,17 @@ async def run_graph_extraction_worker(
     metadata.setdefault("lost_lease", 0)
     metadata.setdefault("published", 0)
     metadata.setdefault("publication_failed", 0)
+    metadata.setdefault("schema_discovery_runs", 0)
     while True:
+        if session_factory is async_session_factory:
+            from app.services.schema_discovery_runs import process_next_schema_discovery_run
+
+            discovery_run = await process_next_schema_discovery_run(
+                session_factory=session_factory,
+            )
+            if discovery_run is not None:
+                metadata["schema_discovery_runs"] += 1
+                continue
         from app.services.graph_extraction_triggers import (
             compensate_ready_graph_extractions,
         )
@@ -1358,13 +1495,30 @@ async def run_graph_extraction_worker_pool(
     metadata = metadata if metadata is not None else {}
     concurrency = settings.graph_extraction_worker_concurrency
     metadata["worker_concurrency"] = concurrency
+
+    async def run_resilient_loop() -> None:
+        while True:
+            try:
+                await run_graph_extraction_worker(
+                    watch=watch,
+                    metadata=metadata,
+                    session_factory=session_factory,
+                )
+                return
+            except (DBAPIError, OSError):
+                if not watch:
+                    raise
+                metadata["database_reconnects"] = int(
+                    metadata.get("database_reconnects", 0)
+                ) + 1
+                if session_factory is async_session_factory:
+                    from app.db import get_engine
+
+                    await get_engine().dispose()
+                await asyncio.sleep(
+                    max(1.0, settings.graph_extraction_worker_poll_seconds)
+                )
+
     await asyncio.gather(
-        *(
-            run_graph_extraction_worker(
-                watch=watch,
-                metadata=metadata,
-                session_factory=session_factory,
-            )
-            for _ in range(concurrency)
-        )
+        *(run_resilient_loop() for _ in range(concurrency))
     )

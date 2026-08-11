@@ -1274,7 +1274,11 @@ async def import_file(
         from app.services.graph_extraction_triggers import graph_extraction_upload_configuration
 
         graph_config = await graph_extraction_upload_configuration(db, lib)
-        if not graph_config["available"]:
+        graph_allowed = graph_config["available"] or (
+            graph_config.get("schema_mode") == "explore"
+            and graph_config.get("exploration_available")
+        )
+        if not graph_allowed:
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
                 {"code": "graph_extraction_unavailable", "reasons": graph_config["reasons"]},

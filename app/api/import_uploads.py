@@ -56,7 +56,10 @@ async def create_import_session(
             )
 
             graph = await graph_extraction_upload_configuration(db, lib)
-            if not graph["available"]:
+            graph_allowed = graph["available"] or (
+                graph.get("schema_mode") == "explore" and graph.get("exploration_available")
+            )
+            if not graph_allowed:
                 raise import_uploads.ImportUploadError(
                     "graph_extraction_unavailable",
                     "graph extraction is unavailable",

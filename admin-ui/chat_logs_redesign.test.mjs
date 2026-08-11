@@ -95,7 +95,8 @@ test('引用来源样式支持紧凑摘要和详情正文', () => {
 
 test('引用来源摘要只显示文档名和分级相似度', () => {
     const sourceBlock = src.slice(src.indexOf('logs-source-list'), src.indexOf('logs-source-detail-dialog'));
-    assert.ok(src.includes('sourceScoreTone(s.score)'), 'source score tone helper is used');
+    assert.ok(src.includes('sourceScoreTone(s)'), 'source score tone helper is used');
+    assert.ok(src.includes('fmtSourceScore(s)'), 'source score formatter receives source metadata');
     assert.ok(sourceBlock.includes('logs-source-score-pill'), 'score pill class in source card');
     assert.ok(!sourceBlock.includes('sourceMeta(s)'), 'compact card omits document metadata');
     assert.ok(!sourceBlock.includes('document_id'), 'compact card omits document id');
@@ -107,6 +108,7 @@ test('引用来源列表使用两列紧凑网格和相似度分级', () => {
     assert.match(css, /\.logs-source-score-pill--high\s*\{/);
     assert.match(css, /\.logs-source-score-pill--medium\s*\{/);
     assert.match(css, /\.logs-source-score-pill--low\s*\{/);
+    assert.match(css, /\.logs-source-score-pill--neutral\s*\{/);
     assert.doesNotMatch(src, /<el-button link type="primary" size="small" @click="openSourceDetail\(s\)">查看详情<\/el-button>/);
 });
 
@@ -176,6 +178,18 @@ test('筛选网格子项允许收缩，避免日期框覆盖关键词输入框',
     const rangeRule = css.match(/\.chat-logs-fg-time\s+\.logs-filter-range\s*\{([^}]*)\}/)?.[1] || '';
     assert.match(rangeRule, /max-width:\s*100%/);
     assert.match(rangeRule, /box-sizing:\s*border-box/);
+});
+
+test('citation score semantics use display_score and never scale RRF', () => {
+    const start = src.indexOf('function clampDisplayScore');
+    const end = src.indexOf('const UUID_RE');
+    const fmt = Function(`${src.slice(start, end)}; return fmtSourceScore;`)();
+    assert.equal(fmt({ score_type: 'rerank', display_score: 0.863 }), '相关度 86.3%');
+    assert.equal(fmt({ score_type: 'vector', display_score: 0.724 }), '向量相似度 72.4%');
+    assert.equal(fmt({ score_type: 'rrf', display_score: 0.0164 }), '融合排序');
+    assert.equal(fmt({ score_type: 'legacy', display_score: 0.9 }), '历史排序');
+    assert.equal(fmt({ score_type: 'vector', display_score: 1.5 }), '向量相似度 100.0%');
+    assert.equal(fmt({ score_type: 'vector', display_score: -0.1 }), '向量相似度 0.0%');
 });
 
 console.log('chat logs redesign test passed');

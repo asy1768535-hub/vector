@@ -307,6 +307,8 @@ class Settings(BaseSettings):
 
     # ---- v0.2 Evidence Foundation feature flags ----
     enable_evidence_write_path: bool = False
+    enable_evidence_locator_read: bool = True
+    enable_evidence_locator_projection: bool = True
     enable_revision_id_worker: bool = False
     enable_revision_id_visibility: bool = False
     enable_sync_source_api: bool = False
@@ -318,6 +320,8 @@ class Settings(BaseSettings):
 
     # ---- v0.4 Graph Extraction Pipeline (M1 defaults; fail closed) ----
     graph_extraction_enabled: bool = False
+    graph_claim_shadow_enabled: bool = False
+    canonical_mapping_shadow_enabled: bool = False
     graph_extraction_auto_trigger_enabled: bool = False
     graph_extraction_base_url: str = "https://api.deepseek.com/v1"
     graph_extraction_model: str = "deepseek-v4-pro"
@@ -326,10 +330,11 @@ class Settings(BaseSettings):
     graph_extraction_temperature: float = 0.0
     graph_extraction_response_format: str = "json_object"
     graph_extraction_max_context_chars: int = 24_000
+    graph_extraction_context_window_tokens: int = 8_192
     graph_extraction_previous_chunks: int = 1
     graph_extraction_next_chunks: int = 1
     graph_extraction_default_build_mode: str = "standard"
-    graph_extraction_schema_routing_enabled: bool = False
+    graph_extraction_schema_routing_enabled: bool = True
     graph_extraction_cache_enabled: bool = False
     graph_extraction_center_only_enabled: bool = True
     graph_extraction_output_budget_enabled: bool = True
@@ -506,10 +511,12 @@ def validate_graph_extraction_startup(config: Settings) -> None:
 
     if config.graph_extraction_timeout_seconds >= lease:
         raise RuntimeError("[security] graph extraction provider timeout must be below the Unit lease")
-    if not 2 <= config.graph_extraction_batch_size <= 8:
-        raise RuntimeError("[security] graph extraction batch size must be within 2..8")
+    if not 1 <= config.graph_extraction_batch_size <= 8:
+        raise RuntimeError("[security] graph extraction batch size must be within 1..8")
     if not 1 <= config.graph_extraction_worker_concurrency <= 8:
         raise RuntimeError("[security] graph extraction worker concurrency must be within 1..8")
+    if not 512 <= config.graph_extraction_context_window_tokens <= 32_768:
+        raise RuntimeError("[security] graph extraction context window must be within 512..32768 tokens")
 
     if not 1 <= config.graph_extraction_provider_max_concurrency <= 8:
         raise RuntimeError("[security] graph extraction Provider concurrency must be within 1..8")
@@ -636,9 +643,7 @@ def validate_classification_runtime_startup(config: Settings) -> None:
         ("https://api.deepseek.com/v1", "deepseek-v4-pro"),
         ("http://10.0.10.2:8113/v1", "qwen3.5-9b"),
     }:
-        raise RuntimeError(
-            "[security] classification requires an approved provider identity"
-        )
+        raise RuntimeError("[security] classification requires an approved provider identity")
     if not config.classification_api_key.get_secret_value().strip():
         raise RuntimeError("[security] CLASSIFICATION_API_KEY is required for classification")
 

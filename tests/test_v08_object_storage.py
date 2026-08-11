@@ -789,6 +789,46 @@ def test_revision_file_persistence_is_scope_fenced_idempotent_and_document_first
     assert exc_info.value.code == "invalid_revision_file_capture"
 
 
+def test_revision_file_persistence_keeps_explicit_preallocated_id():
+    from app.services.revision_files import persist_revision_file_capture
+
+    library_id = uuid.uuid4()
+    document_id = uuid.uuid4()
+    revision_id = uuid.uuid4()
+    document = SimpleNamespace(
+        id=document_id,
+        library_id=library_id,
+        latest_revision_id=revision_id,
+        current_revision_id=None,
+        deleted_at=None,
+    )
+    revision = SimpleNamespace(
+        id=revision_id,
+        library_id=library_id,
+        document_id=document_id,
+        status="pending",
+    )
+    file_id = uuid.uuid4()
+    prepared = replace(
+        asyncio.run(
+            prepare_managed_capture_for_test(
+                library_id=library_id,
+                document_id=document_id,
+                revision_id=revision_id,
+            )
+        ),
+        file_id=file_id,
+    )
+    db = _RevisionFileDb(
+        [_DbResult([document]), _DbResult([revision]), _DbResult([])]
+    )
+
+    row = asyncio.run(persist_revision_file_capture(db, prepared=prepared))
+
+    assert row.id == file_id
+    assert db.added == [row]
+
+
 async def prepare_managed_capture_for_test(
     *, library_id: uuid.UUID, document_id: uuid.UUID, revision_id: uuid.UUID
 ):

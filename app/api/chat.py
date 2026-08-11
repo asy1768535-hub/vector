@@ -85,12 +85,29 @@ def _to_source(record) -> ChatSource:
         except (TypeError, ValueError):
             return None
 
+    def _score(v):
+        try:
+            return None if v is None else float(v)
+        except (TypeError, ValueError):
+            return None
+
+    rerank_score = _score(md.get("rerank_score"))
+    vector_score = _score(md.get("vector_score"))
+    if rerank_score is not None:
+        score_type, display_score = "rerank", rerank_score
+    elif vector_score is not None:
+        score_type, display_score = "vector", vector_score
+    else:
+        score_type, display_score = "rrf", None
+
     return ChatSource(
         title=record.title or "",
         document_id=_s(md.get("document_id")),
         chunk_id=_s(md.get("chunk_id")),
         seq=_i(md.get("seq")),
         score=float(record.score or 0.0),
+        score_type=score_type,
+        display_score=display_score,
         content=record.content or "",
     )
 

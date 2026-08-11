@@ -184,6 +184,9 @@ async def create_library(
         source_config=source_config,
         graph_extraction_enabled=body.graph_extraction_enabled,
         schema_mode=body.schema_mode,
+        schema_confirmation_policy=body.schema_confirmation_policy,
+        claim_graph_shadow_policy=body.claim_graph_shadow_policy,
+        canonical_mapping_shadow_policy=body.canonical_mapping_shadow_policy,
         graph_extraction_build_mode=body.graph_extraction_build_mode,
         external_llm_enabled=body.external_llm_enabled,
         graph_extraction_allowed_security_levels=(
@@ -276,6 +279,9 @@ async def create_library(
                 "collection": lib.qdrant_collection,
                 "graph_extraction_enabled": lib.graph_extraction_enabled,
                 "schema_mode": lib.schema_mode,
+                "schema_confirmation_policy": lib.schema_confirmation_policy,
+                "claim_graph_shadow_policy": lib.claim_graph_shadow_policy,
+                "canonical_mapping_shadow_policy": lib.canonical_mapping_shadow_policy,
                 "schema_template": body.schema_template,
             },
         )
@@ -417,6 +423,18 @@ async def update_library(
             changes["graph_extraction_enabled"] = lib.graph_extraction_enabled
             if not lib.graph_extraction_enabled:
                 safety_change_error = "library_opt_out"
+
+    if "schema_confirmation_policy" in body.model_fields_set:
+        lib.schema_confirmation_policy = body.schema_confirmation_policy
+        changes["schema_confirmation_policy"] = body.schema_confirmation_policy
+
+    if "claim_graph_shadow_policy" in body.model_fields_set:
+        lib.claim_graph_shadow_policy = body.claim_graph_shadow_policy
+        changes["claim_graph_shadow_policy"] = body.claim_graph_shadow_policy
+
+    if "canonical_mapping_shadow_policy" in body.model_fields_set:
+        lib.canonical_mapping_shadow_policy = body.canonical_mapping_shadow_policy
+        changes["canonical_mapping_shadow_policy"] = body.canonical_mapping_shadow_policy
 
     for field in (
         "graph_extraction_enabled",

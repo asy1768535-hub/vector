@@ -99,6 +99,10 @@ class ChatMessageSource(Base):
     document_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     chunk_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    score_type: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="rrf", server_default="rrf"
+    )
+    display_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     content: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

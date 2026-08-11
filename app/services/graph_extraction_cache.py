@@ -74,3 +74,28 @@ async def load_cached_graph_extraction_payload(
         if payload is not None:
             return payload
     return None
+
+
+async def load_replay_graph_extraction_payload(
+    db,
+    *,
+    unit_id: uuid.UUID,
+    context_snapshot_id: uuid.UUID,
+) -> GraphExtractionPayload | None:
+    result = await db.execute(
+        select(ExtractionRawOutputAttempt.parsed_response)
+        .where(
+            ExtractionRawOutputAttempt.extraction_unit_id == unit_id,
+            ExtractionRawOutputAttempt.context_snapshot_id == context_snapshot_id,
+            ExtractionRawOutputAttempt.request_status == "succeeded",
+            ExtractionRawOutputAttempt.parse_status == "valid",
+            ExtractionRawOutputAttempt.parsed_response.is_not(None),
+            ExtractionRawOutputAttempt.purged_at.is_(None),
+        )
+        .order_by(ExtractionRawOutputAttempt.attempt_no.asc())
+    )
+    for value in result.scalars().all():
+        payload = normalize_cached_graph_extraction_payload(value)
+        if payload is not None:
+            return payload
+    return None

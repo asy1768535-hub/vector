@@ -36,9 +36,15 @@ const GRAPH_CONFIG_REASON = {
     active_ontology_missing: '当前知识库没有生效中的知识结构（Schema）',
 };
 const BUILD_MODE_LABEL = { fast: '快速', standard: '标准', deep: '深度' };
+const SCHEMA_MODE_LABEL = { disabled: '普通上传', explore: 'AI 探索', governed: 'Schema 治理' };
 
 function buildModeLabel(value) {
     return BUILD_MODE_LABEL[value] || BUILD_MODE_LABEL.standard;
+}
+
+function schemaModeLabel(config) {
+    if (config?.exploration_available) return 'AI 探索';
+    return SCHEMA_MODE_LABEL[config?.schema_mode] || SCHEMA_MODE_LABEL.disabled;
 }
 
 export default {
@@ -125,20 +131,51 @@ export default {
             queue.value.filter((it) => it.status === 'invalid').length
         );
         const hasFailed = computed(() => failedCount.value > 0);
+        const graphExplorationMode = computed(() =>
+            graphExtractionConfig.value?.schema_mode === 'explore'
+        );
+        const formalGraphExtractionRequested = computed(() =>
+            graphExtractionRequested.value &&
+            graphExtractionConfig.value?.schema_mode === 'governed' &&
+            graphExtractionConfig.value?.available === true
+        );
+        const graphJobRequested = computed(() =>
+            graphExtractionRequested.value &&
+            (
+                graphExtractionConfig.value?.available === true ||
+                graphExtractionConfig.value?.exploration_available === true
+            )
+        );
         const graphExtractionReady = computed(() => (
             !graphExtractionRequested.value || (
-                graphExtractionConfig.value?.available === true &&
-                graphExtractionConfig.value.allowed_security_levels.includes(
-                    graphExtractionSecurityLevel.value,
-                )
+                graphExplorationMode.value
+                    ? graphExtractionConfig.value?.exploration_available === true &&
+                        graphExtractionConfig.value.allowed_security_levels.includes(
+                            graphExtractionSecurityLevel.value,
+                        )
+                    : graphExtractionConfig.value?.available === true &&
+                        graphExtractionConfig.value.allowed_security_levels.includes(
+                            graphExtractionSecurityLevel.value,
+                        )
             )
         ));
         const graphExtractionStatus = computed(() => {
             if (!graphExtractionRequested.value) return '';
             if (graphExtractionConfigLoading.value) return '正在检查当前知识库配置...';
             if (graphExtractionConfigError.value) return graphExtractionConfigError.value;
+            if (graphExplorationMode.value && graphExtractionConfig.value?.exploration_available) {
+                return 'AI 自动发现：将根据首次文件自动生成候选知识结构，随后按本次任务冻结的 Schema 抽取';
+            }
             if (!graphExtractionConfig.value?.available) {
-                return (graphExtractionConfig.value?.reasons || [])
+                const reasons = (graphExtractionConfig.value?.reasons || [])
+                    .filter((reason) => !(
+                        graphExtractionConfig.value?.schema_mode === 'explore'
+                        && reason === 'active_ontology_missing'
+                    ));
+                if (!reasons.length && graphExtractionConfig.value?.schema_mode === 'governed') {
+                    return '严格 Schema 模式需要已确认并生效的 Schema，当前不可上传图谱文件';
+                }
+                return reasons
                     .map((reason) => GRAPH_CONFIG_REASON[reason] || '图谱抽取配置不可用')
                     .join('；');
             }
@@ -251,6 +288,9 @@ export default {
                 if (
                     !config ||
                     typeof config.default_requested !== 'boolean' ||
+                    typeof config.exploration_available !== 'boolean' ||
+                    typeof config.requires_active_schema !== 'boolean' ||
+                    !['disabled', 'explore', 'governed'].includes(config.schema_mode) ||
                     !Object.hasOwn(BUILD_MODE_LABEL, config.default_build_mode) ||
                     !Array.isArray(config.allowed_security_levels) ||
                     !Array.isArray(config.reasons)
@@ -273,14 +313,18 @@ export default {
         }
 
         function graphUploadOptions() {
-            return graphExtractionRequested.value ? {
+            return graphJobRequested.value ? {
                 graphExtractionRequested: true,
                 securityLevel: graphExtractionSecurityLevel.value,
             } : {};
         }
 
         function graphConfirmationText() {
-            return graphExtractionRequested.value
+            if (!graphExtractionRequested.value) return '';
+            if (graphExplorationMode.value) {
+                return '；AI 自动发现（AI 自主抽取）将根据本次文件生成候选知识结构，并冻结到本次任务';
+            }
+            return formalGraphExtractionRequested.value
                 ? `；安全级别为“${securityLevelLabel(graphExtractionSecurityLevel.value)}”，使用${buildModeLabel(graphExtractionConfig.value?.default_build_mode)}模式，向量化后自动抽取并发布合格事实`
                 : '';
         }
@@ -558,7 +602,7 @@ export default {
         async function handleBatchReplace() {
             const ready = batchReplaceReadyItems.value;
             if (!slug.value || !ready.length) return;
-            const graphRequested = graphExtractionRequested.value;
+            const graphRequested = graphJobRequested.value;
             try {
                 await ElMessageBox.confirm(
                     `将覆盖 ${ready.length} 个已有文档；覆盖后会重新切分、重新向量化${graphConfirmationText()}；历史问答引用不会自动更新。`,
@@ -631,6 +675,20 @@ export default {
             if (!importJobsTimer) importJobsTimer = setTimeout(pollImportJobs, 300);
         }
 
+        async function retryGraphImport(importJob) {
+            try {
+                return await api.retryGraphExtraction(
+                    slug.value,
+                    importJob.retry_target_id,
+                );
+            } catch (error) {
+                if (error?.body?.detail !== 'no_retryable_units') throw error;
+                return api.rerunGraphExtraction(slug.value, importJob.retry_target_id, {
+                    client_idempotency_key: `import-graph-rerun-${importJob.retry_target_id}-${Date.now()}`,
+                });
+            }
+        }
+
         async function runQueue(onlyFailed) {
             if (!slug.value) return;
             if (multiBlockedByExtId.value) {
@@ -669,6 +727,28 @@ export default {
                         it.error = '';
                         try {
                             if (onlyFailed && it.importJobId && it.importJob?.status === 'failed') {
+                                if (
+                                    it.importJob.retry_target_type === 'graph'
+                                    && it.importJob.retry_target_id
+                                ) {
+                                    await retryGraphImport(it.importJob);
+                                    it.importJob = {
+                                        ...it.importJob,
+                                        status: 'processing',
+                                        current_stage: 'graph',
+                                        last_error: null,
+                                        retry_target_type: null,
+                                        retry_target_id: null,
+                                    };
+                                    it.status = 'processing';
+                                    it.error = '';
+                                    it.stageLabel = IMPORT_STAGE_LABEL.graph;
+                                    it.progress = importStageProgress(it.importJob, 100);
+                                    return;
+                                }
+                                if (it.importJob.retry_target_type !== 'import') {
+                                    throw new Error('当前失败任务没有可用的重试方式，请刷新后查看最新状态');
+                                }
                                 const retried = await api.retryImportJob(slug.value, it.importJobId);
                                 it.importJob = retried;
                                 it.status = 'processing';
@@ -734,7 +814,7 @@ export default {
                 return;
             }
             const file = replaceFile.value;
-            const graphRequested = graphExtractionRequested.value;
+            const graphRequested = graphJobRequested.value;
             try {
                 await ElMessageBox.confirm(
                     `确认用 "${file.name}" 替换当前文档？文档内容将完全覆盖，文档版本号递增，并重新向量化${graphConfirmationText()}。`,
@@ -845,7 +925,8 @@ export default {
             applyingRouteReplace, batchReplaceItems, batchReplacing, batchReplaceReadyItems,
             graphExtractionRequested, graphExtractionConfig, graphExtractionConfigLoading,
             graphExtractionConfigError, graphExtractionSecurityLevel,
-            graphExtractionReady, graphExtractionStatus, buildModeLabel,
+            graphExtractionReady, graphExtractionStatus, buildModeLabel, schemaModeLabel,
+            graphJobRequested,
             docs, docsLoading, loading, importResult, docQuery,
             queue, uploading, stats, dragOver, importConfiguration, importConfigurationLoading,
             displayDocs, extIdSet, multiBlockedByExtId,
@@ -973,12 +1054,12 @@ export default {
                     </div>
                     <template v-if="graphExtractionRequested">
                         <el-select v-model="graphExtractionSecurityLevel"
-                                   :disabled="graphExtractionConfigLoading || !graphExtractionConfig?.available"
+                                   :disabled="graphExtractionConfigLoading || (!graphExtractionConfig?.available && !graphExtractionConfig?.exploration_available)"
                                    placeholder="选择安全级别">
                             <el-option v-for="level in graphExtractionConfig?.allowed_security_levels || []"
                                        :key="level" :label="securityLevelLabel(level)" :value="level" />
                         </el-select>
-                        <p class="import-graph-mode">构建模式：{{ buildModeLabel(graphExtractionConfig?.default_build_mode) }}</p>
+                        <p class="import-graph-mode">抽取策略：{{ schemaModeLabel(graphExtractionConfig) }} · 构建模式：{{ buildModeLabel(graphExtractionConfig?.default_build_mode) }}</p>
                         <p :class="graphExtractionReady ? 'is-ready' : 'is-blocked'">{{ graphExtractionStatus }}</p>
                     </template>
                 </div>
@@ -1121,12 +1202,12 @@ export default {
                     </div>
                     <template v-if="graphExtractionRequested">
                         <el-select v-model="graphExtractionSecurityLevel"
-                                   :disabled="graphExtractionConfigLoading || !graphExtractionConfig?.available"
+                                   :disabled="graphExtractionConfigLoading || (!graphExtractionConfig?.available && !graphExtractionConfig?.exploration_available)"
                                    placeholder="选择安全级别">
                             <el-option v-for="level in graphExtractionConfig?.allowed_security_levels || []"
                                        :key="level" :label="securityLevelLabel(level)" :value="level" />
                         </el-select>
-                        <p class="import-graph-mode">构建模式：{{ buildModeLabel(graphExtractionConfig?.default_build_mode) }}</p>
+                        <p class="import-graph-mode">抽取策略：{{ schemaModeLabel(graphExtractionConfig) }} · 构建模式：{{ buildModeLabel(graphExtractionConfig?.default_build_mode) }}</p>
                         <p :class="graphExtractionReady ? 'is-ready' : 'is-blocked'">{{ graphExtractionStatus }}</p>
                     </template>
                 </div>

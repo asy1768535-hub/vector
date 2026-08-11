@@ -10,6 +10,7 @@ from app.models.graph_extraction_job import GraphExtractionJob
 from app.models.graph_publication import GraphPublication
 from app.models.graph_publication_item import GraphPublicationItem
 from app.models.library import Library
+from app.models.ontology_version import OntologyVersion
 from app.services.graph_publication_activation import (
     GraphPublicationActivationError,
     activate_graph_publication,
@@ -237,12 +238,34 @@ async def auto_publish_graph_extraction_job(
                     raise GraphExtractionAutoPublicationError(
                         "library_not_found", "graph extraction Library was not found"
                     )
+                ontology = await db.get(OntologyVersion, job.ontology_version_id)
+                explicit_ai_draft = bool(
+                    ontology is not None
+                    and getattr(job, "schema_discovery_run_id", None) is not None
+                    and ontology.status == "draft"
+                    and (job.ontology_snapshot or {}).get("schema_state") == "ai_draft"
+                    and (job.ontology_snapshot or {}).get("confirmed") is False
+                    and (job.ontology_snapshot or {}).get("ontology_version_id") == str(job.ontology_version_id)
+                )
+                include_drafts = explicit_ai_draft
                 try:
                     plan = await plan_graph_publication(
                         db,
                         library,
                         ontology_version_id=job.ontology_version_id,
-                        include_drafts=False,
+                        # v0.4 materialization intentionally creates draft facts.
+                        # Auto-publication may include them only when the job has
+                        # passed the materializer's relation/evidence gates.
+                        include_drafts=include_drafts or has_publishable_relation,
+                        allow_explicit_draft=explicit_ai_draft,
+                        plan_options=(
+                            {
+                                "explicit_ai_draft": True,
+                                "schema_discovery_run_id": str(getattr(job, "schema_discovery_run_id")),
+                            }
+                            if explicit_ai_draft
+                            else None
+                        ),
                         idempotency_key=idempotency_key,
                         requested_by_user_id=job.requested_by,
                     )

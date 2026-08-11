@@ -186,6 +186,9 @@ class ImportJobRead(BaseModel):
         "graph",
         "completed",
     ]
+    schema_discovery_state: Literal["waiting_schema"] | None = None
+    retry_target_type: Literal["import", "graph"] | None = None
+    retry_target_id: uuid.UUID | None = None
     attempt_count: int = Field(ge=0)
     last_error: str | None
     result_operation: str | None

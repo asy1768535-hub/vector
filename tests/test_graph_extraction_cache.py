@@ -8,6 +8,7 @@ from sqlalchemy.dialects import postgresql
 
 from app.services.graph_extraction_cache import (
     load_cached_graph_extraction_payload,
+    load_replay_graph_extraction_payload,
     normalize_cached_graph_extraction_payload,
 )
 
@@ -54,3 +55,33 @@ def test_cache_lookup_is_library_and_security_scoped():
     assert library_id in compiled.params.values()
     assert "internal" in compiled.params.values()
     assert "organization" in compiled.params.values()
+
+
+def test_replay_lookup_uses_first_valid_response_for_same_unit_and_context():
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = [
+        {"entities": "invalid"},
+        {"batch_key": "u0", **_payload()},
+    ]
+    db = AsyncMock()
+    db.execute.return_value = result
+    unit_id = uuid.uuid4()
+    context_snapshot_id = uuid.uuid4()
+
+    payload = asyncio.run(
+        load_replay_graph_extraction_payload(
+            db,
+            unit_id=unit_id,
+            context_snapshot_id=context_snapshot_id,
+        )
+    )
+
+    assert payload is not None
+    statement = db.execute.await_args.args[0]
+    compiled = statement.compile(dialect=postgresql.dialect())
+    sql = str(compiled)
+    assert "extraction_raw_output_attempts.extraction_unit_id" in sql
+    assert "extraction_raw_output_attempts.context_snapshot_id" in sql
+    assert "extraction_raw_output_attempts.attempt_no ASC" in sql
+    assert unit_id in compiled.params.values()
+    assert context_snapshot_id in compiled.params.values()

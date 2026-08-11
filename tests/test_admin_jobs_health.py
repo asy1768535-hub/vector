@@ -75,6 +75,7 @@ def test_reset_failed_accepts_library_filter():
             target = rec.call_args.args[3]
             assert target["library_id"] == str(lib_id)
             assert target["reset_count"] == 3
+            assert "attempt_count" in str(db.execute.call_args.args[0])
     finally:
         app.dependency_overrides.clear()
 
@@ -134,6 +135,29 @@ def test_retry_processing_job_rejected_to_avoid_duplicate_workers():
             resp = client.post(f"/admin/jobs/{job.id}/retry")
         assert resp.status_code == status.HTTP_400_BAD_REQUEST
         assert "processing" in resp.json()["detail"]
+        db.execute.assert_not_awaited()
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_retry_route_does_not_accept_unknown_import_or_graph_ids():
+    su = User(id=uuid.uuid4(), email="su@example.com", is_superuser=True, is_active=True)
+
+    async def _ov_su():
+        return su
+
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=None)
+
+    async def _ov_db():
+        return db
+
+    app.dependency_overrides[current_superuser] = _ov_su
+    app.dependency_overrides[get_db] = _ov_db
+    try:
+        client = TestClient(app)
+        resp = client.post(f"/admin/jobs/{uuid.uuid4()}/retry")
+        assert resp.status_code == status.HTTP_404_NOT_FOUND
         db.execute.assert_not_awaited()
     finally:
         app.dependency_overrides.clear()
@@ -204,6 +228,13 @@ def test_monitor_import_waits_for_graph_job_after_embedding_finishes():
     assert row.stage == "awaiting_graph"
 
 
+def test_monitor_maps_graph_waiting_schema_to_pending_for_closed_stats():
+    _, _, graph_job = _monitor_pipeline_jobs("waiting_schema")
+    row = _graph_monitor_row(graph_job, title="sample.docx")
+    assert row.status == "pending"
+    assert row.raw_status == "waiting_schema"
+
+
 def test_monitor_import_tracks_graph_extraction_until_it_finishes():
     import_job, embedding_job, graph_job = _monitor_pipeline_jobs("processing")
     processing = _import_monitor_row(
@@ -237,6 +268,33 @@ def test_monitor_only_marks_embedding_jobs_retryable():
     assert embedding_row.retryable is True
     assert graph_row.status == "failed"
     assert graph_row.retryable is False
+    assert embedding_row.retry_capability == "supported"
+    assert graph_row.retry_capability == "stale"
+    assert graph_row.retry_reason == "旧版本或非 production 图谱任务不可重试"
+
+
+def test_monitor_marks_exhausted_embedding_attempts_non_retryable():
+    _, embedding_job, _ = _monitor_pipeline_jobs("failed")
+    embedding_job.status = "failed"
+    embedding_job.attempt_count = settings.embed_worker_max_attempts
+    row = _embedding_monitor_row(embedding_job, title="sample.docx")
+    assert row.retryable is False
+    assert row.retry_capability == "exhausted"
+    assert row.retry_reason == "尝试次数耗尽"
+    assert row.raw_error is None
+
+
+def test_monitor_import_and_graph_failed_errors_keep_raw_error_and_capability():
+    import_job, embedding_job, graph_job = _monitor_pipeline_jobs("failed")
+    import_job.status = "failed"
+    import_job.last_error = None
+    import_row = _import_monitor_row(import_job, embedding_job=embedding_job, graph_job=graph_job)
+    graph_row = _graph_monitor_row(graph_job, title="sample.docx")
+    assert import_row.retryable is True
+    assert import_row.retry_capability == "supported"
+    assert import_row.raw_error is None
+    assert graph_row.retryable is False
+    assert graph_row.raw_error is None
 
 
 def test_monitor_routes_are_registered_before_dynamic_retry_route():
@@ -304,3 +362,218 @@ def test_graph_monitor_exposes_entity_only_quality_statistics():
     }
     assert row.metrics["failure_reasons"]["publication"] == "no_valid_relation"
     assert row.metrics["current_graph_unchanged"] is True
+
+
+def test_graph_monitor_marks_latest_failed_job_with_retryable_units():
+    _, _, graph_job = _monitor_pipeline_jobs("failed")
+    graph_job.execution_mode = "production"
+    row = _graph_monitor_row(
+        graph_job,
+        title="sample.docx",
+        latest_production=True,
+        has_retryable_units=True,
+    )
+    assert row.retryable is True
+    assert row.retry_target_type == "graph"
+    assert row.retry_target_id == graph_job.id
+    assert row.retry_generation == graph_job.retry_generation
+
+
+def test_import_downstream_failure_targets_real_embedding_job():
+    import_job, embedding_job, graph_job = _monitor_pipeline_jobs("processing")
+    embedding_job.status = "failed"
+    import_job.current_stage = "embedding"
+    row = _import_monitor_row(
+        import_job,
+        embedding_job=embedding_job,
+        graph_job=graph_job,
+    )
+    assert row.retryable is True
+    assert row.retry_target_type == "embedding"
+    assert row.retry_target_id == embedding_job.id
+
+
+def test_import_own_failure_does_not_route_to_stale_downstream_job():
+    import_job, embedding_job, graph_job = _monitor_pipeline_jobs("failed")
+    import_job.status = "failed"
+    import_job.current_stage = "parsing"
+    embedding_job.status = "failed"
+    graph_job.status = "failed"
+    row = _import_monitor_row(
+        import_job,
+        embedding_job=embedding_job,
+        graph_job=graph_job,
+    )
+    assert row.retry_target_type == "import"
+    assert row.retry_target_id == import_job.id
+    assert row.retryable is True
+
+
+def test_unified_retry_deduplicates_embedding_targets_and_audits_each_result():
+    su = User(id=uuid.uuid4(), email="su@example.com", is_superuser=True, is_active=True)
+    job_id = uuid.uuid4()
+    job = EmbeddingJob(
+        id=job_id,
+        library_id=uuid.uuid4(),
+        document_id=uuid.uuid4(),
+        status="failed",
+        attempt_count=1,
+        created_at=datetime.now(timezone.utc),
+    )
+
+    async def _ov_su():
+        return su
+
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=job)
+    db.flush = AsyncMock()
+    db.commit = AsyncMock()
+
+    async def _ov_db():
+        return db
+
+    app.dependency_overrides[current_superuser] = _ov_su
+    app.dependency_overrides[get_db] = _ov_db
+    try:
+        with patch("app.api.admin_jobs.audit_log.record", new_callable=AsyncMock) as audit:
+            client = TestClient(app)
+            response = client.post(
+                "/admin/jobs/monitor/retry",
+                json={
+                    "items": [
+                        {"task_type": "embedding", "job_id": str(job_id), "observed_generation": 1},
+                        {"task_type": "embedding", "job_id": str(job_id), "observed_generation": 1},
+                    ]
+                },
+            )
+        assert response.status_code == status.HTTP_200_OK
+        payload = response.json()["results"]
+        assert [item["status"] for item in payload] == ["succeeded", "rejected"]
+        assert payload[1]["reason"] == "duplicate_target"
+        assert job.status == "pending"
+        assert audit.await_count == 2
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_unified_retry_rejects_stale_embedding_generation_without_mutation():
+    su = User(id=uuid.uuid4(), email="su@example.com", is_superuser=True, is_active=True)
+    job = EmbeddingJob(
+        id=uuid.uuid4(),
+        library_id=uuid.uuid4(),
+        document_id=uuid.uuid4(),
+        status="failed",
+        attempt_count=3,
+        created_at=datetime.now(timezone.utc),
+    )
+
+    async def _ov_su():
+        return su
+
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=job)
+    db.commit = AsyncMock()
+
+    async def _ov_db():
+        return db
+
+    app.dependency_overrides[current_superuser] = _ov_su
+    app.dependency_overrides[get_db] = _ov_db
+    try:
+        with patch("app.api.admin_jobs.audit_log.record", new_callable=AsyncMock):
+            client = TestClient(app)
+            response = client.post(
+                "/admin/jobs/monitor/retry",
+                json={
+                    "items": [
+                        {"task_type": "embedding", "job_id": str(job.id), "observed_generation": 2}
+                    ]
+                },
+            )
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["results"][0]["reason"] == "stale_generation"
+        assert job.status == "failed"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_unified_retry_routes_graph_without_embedding_retry_api():
+    su = User(id=uuid.uuid4(), email="su@example.com", is_superuser=True, is_active=True)
+    _, _, graph_job = _monitor_pipeline_jobs("failed")
+    graph_job.execution_mode = "production"
+    library = MagicMock(id=graph_job.library_id)
+    execute_result = MagicMock()
+    execute_result.scalar_one_or_none.return_value = graph_job.id
+
+    async def _ov_su():
+        return su
+
+    db = AsyncMock()
+    db.get = AsyncMock(side_effect=[graph_job, library])
+    db.execute = AsyncMock(return_value=execute_result)
+    db.commit = AsyncMock()
+
+    async def _ov_db():
+        return db
+
+    app.dependency_overrides[current_superuser] = _ov_su
+    app.dependency_overrides[get_db] = _ov_db
+    try:
+        with patch("app.api.admin_jobs.retry_graph_extraction_job", new_callable=AsyncMock) as graph_retry, \
+             patch("app.api.admin_jobs.retry_job", new_callable=AsyncMock) as embedding_retry, \
+             patch("app.api.admin_jobs.audit_log.record", new_callable=AsyncMock):
+            graph_retry.return_value = graph_job
+            client = TestClient(app)
+            response = client.post(
+                "/admin/jobs/monitor/retry",
+                json={
+                    "items": [
+                        {"task_type": "graph", "job_id": str(graph_job.id), "observed_generation": 0}
+                    ]
+                },
+            )
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["results"][0]["status"] == "succeeded"
+        graph_retry.assert_awaited_once()
+        embedding_retry.assert_not_awaited()
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_unified_retry_routes_import_to_import_service_only():
+    su = User(id=uuid.uuid4(), email="su@example.com", is_superuser=True, is_active=True)
+    import_job, _, _ = _monitor_pipeline_jobs("failed")
+    import_job.status = "failed"
+    import_job.current_stage = "parsing"
+
+    async def _ov_su():
+        return su
+
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=import_job)
+    db.commit = AsyncMock()
+
+    async def _ov_db():
+        return db
+
+    app.dependency_overrides[current_superuser] = _ov_su
+    app.dependency_overrides[get_db] = _ov_db
+    try:
+        with patch("app.api.admin_jobs.import_uploads.retry_job", new_callable=AsyncMock) as import_retry, \
+             patch("app.api.admin_jobs.retry_graph_extraction_job", new_callable=AsyncMock) as graph_retry, \
+             patch("app.api.admin_jobs.audit_log.record", new_callable=AsyncMock):
+            client = TestClient(app)
+            response = client.post(
+                "/admin/jobs/monitor/retry",
+                json={
+                    "items": [
+                        {"task_type": "import", "job_id": str(import_job.id), "observed_generation": 1}
+                    ]
+                },
+            )
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["results"][0]["status"] == "succeeded"
+        import_retry.assert_awaited_once()
+        graph_retry.assert_not_awaited()
+    finally:
+        app.dependency_overrides.clear()

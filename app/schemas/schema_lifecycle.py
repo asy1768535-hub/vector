@@ -457,6 +457,8 @@ class SchemaVersionSummaryRead(StrictSchemaLifecycleModel):
     version_no: int
     status: str
     description: str | None
+    origin: str
+    confirmed: bool
     parent_version_id: uuid.UUID | None
     published_at: datetime | None
     created_at: datetime | None

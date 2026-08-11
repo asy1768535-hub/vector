@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import logging
+import math
+from collections.abc import Mapping
 from typing import Sequence
 
 import httpx
@@ -79,7 +81,13 @@ async def rank_candidates(
     return order[:top_k], scores
 
 
-def _parse_results(body: dict, top_n: int) -> list[tuple[int, float]]:
+def _parse_results(
+    body: object,
+    top_n: int,
+    *,
+    provider: str = "standard",
+    total: int | None = None,
+) -> list[tuple[int, float]]:
     """解析 rerank 响应 {"results":[{"index","relevance_score"}]}。
 
     兼容两种包装：标准格式直接在 body["results"]；DashScope 原生在 body["output"]["results"]。
@@ -90,17 +98,50 @@ def _parse_results(body: dict, top_n: int) -> list[tuple[int, float]]:
     去重在截断之前：标准 reranker 不该返回重复 index，但异常时若重复，降序后保留首次
     （最高分）出现，避免重复 index 占用 top_n 名额、把合法的不同文档挤出结果。
     """
-    results = body.get("results")
-    if results is None:
-        results = (body.get("output") or {}).get("results")
-    results = results or []
+    if provider == "tei":
+        if not isinstance(body, list):
+            raise RerankError("TEI rerank response must be a JSON array")
+        results = body
+        score_key = "score"
+    else:
+        if not isinstance(body, Mapping):
+            raise RerankError("rerank response must be a JSON object")
+        results = body.get("results")
+        if results is None:
+            output = body.get("output")
+            results = output.get("results") if isinstance(output, Mapping) else None
+        results = [] if results is None else results
+        score_key = "relevance_score"
+    if not isinstance(results, list):
+        raise RerankError("rerank results must be a JSON array")
     out: list[tuple[int, float]] = []
     for item in results:
+        if not isinstance(item, Mapping):
+            raise RerankError("rerank result item must be an object")
         idx = item.get("index")
         if idx is None:
+            if provider == "tei":
+                raise RerankError("TEI rerank result is missing index")
             continue
-        score = item.get("relevance_score")
-        out.append((int(idx), float(score) if score is not None else 0.0))
+        if isinstance(idx, bool) or not isinstance(idx, int) or idx < 0:
+            raise RerankError(f"invalid rerank index: {idx!r}")
+        if total is not None and idx >= total:
+            raise RerankError(f"rerank index out of range: {idx}")
+        raw_score = item.get(score_key)
+        if raw_score is None:
+            if provider == "tei":
+                raise RerankError("TEI rerank result is missing score")
+            score = 0.0
+        else:
+            if isinstance(raw_score, bool):
+                raise RerankError(f"invalid rerank score: {raw_score!r}")
+            try:
+                score = float(raw_score)
+            except (TypeError, ValueError) as exc:
+                raise RerankError(f"invalid rerank score: {raw_score!r}") from exc
+            if not math.isfinite(score):
+                raise RerankError(f"non-finite rerank score: {raw_score!r}")
+        out.append((idx, score))
     out.sort(key=lambda item: (-item[1], item[0]))
     deduped: list[tuple[int, float]] = []
     seen: set[int] = set()
@@ -131,11 +172,24 @@ async def rerank(
     """
     if not documents:
         return []
+    eff_provider = (provider or settings.rerank_provider or "standard").lower()
     url = base_url or settings.rerank_base_url
     # key 优先级：显式传入 > RERANK_API_KEY > 复用 EMBEDDING_API_KEY（同服务商同 key 省事）
-    key = api_key if api_key is not None else (settings.rerank_api_key or settings.embedding_api_key)
+    if api_key is not None:
+        key = api_key
+    elif eff_provider == "tei":
+        key = settings.rerank_api_key
+    else:
+        key = settings.rerank_api_key or settings.embedding_api_key
     mdl = model or settings.rerank_model
-    if (provider or settings.rerank_provider or "standard").lower() == "dashscope":
+    if eff_provider == "tei":
+        payload = {
+            "query": query,
+            "texts": list(documents),
+            "return_text": False,
+            "raw_scores": False,
+        }
+    elif eff_provider == "dashscope":
         # DashScope 原生 text-rerank：input/parameters 结构，结果在 output.results
         payload = {
             "model": mdl,
@@ -154,4 +208,6 @@ async def rerank(
         resp = await client.post(url, json=payload, headers=headers)
     if resp.status_code != 200:
         raise RerankError(f"rerank service {resp.status_code}: {resp.text[:300]}")
-    return _parse_results(resp.json(), top_n)
+    return _parse_results(
+        resp.json(), top_n, provider=eff_provider, total=len(documents)
+    )

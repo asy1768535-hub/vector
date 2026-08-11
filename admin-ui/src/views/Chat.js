@@ -39,13 +39,14 @@ function fmtTime(iso) {
     return `${M}/${D} ${hh}:${mm}`;
 }
 
-function fmtScore(s) { return (Number(s || 0) * 100).toFixed(1) + '%'; }
-
-function scoreClass(s) {
-    const v = Number(s || 0);
-    if (v >= 0.7) return 'high';
-    if (v >= 0.5) return 'mid';
-    return 'low';
+function fmtScore(source) {
+    if (source?.score_type === 'rrf') return '融合排序';
+    const raw = source?.display_score;
+    if (raw === null || raw === undefined || !Number.isFinite(Number(raw))) return '融合排序';
+    const score = Math.max(0, Math.min(1, Number(raw)));
+    const label = source.score_type === 'rerank' ? '相关度'
+        : source.score_type === 'vector' ? '向量相似度' : '';
+    return label ? `${label} ${(score * 100).toFixed(1)}%` : '融合排序';
 }
 
 function nowISO() { return new Date().toISOString(); }
@@ -607,7 +608,7 @@ export default {
             focusCitationGraphNode, chatGraphRelationLabel,
             closeAndInvalidateSourceDialog,
             sourceWindowParts, formatLocation,
-            fmtScore, scoreClass, fmtTime, renderMarkdown,
+            fmtScore, fmtTime, renderMarkdown,
         };
     },
     template: `
@@ -731,7 +732,7 @@ export default {
                                     <div class="chat-source-left">
                                         <span class="chat-source-num">{{ si + 1 }}.</span>
                                         <span class="chat-source-title" :title="s.title || '(无标题)'">{{ s.title || '(无标题)' }}</span>
-                                        <span class="chat-source-score" :class="'score--' + scoreClass(s.score)">{{ fmtScore(s.score) }}</span>
+                                        <span class="chat-source-score">{{ fmtScore(s) }}</span>
                                         <div class="chat-source-summary">{{ s.content || '' }}</div>
                                     </div>
                                     <div class="chat-source-right">
@@ -753,7 +754,7 @@ export default {
                 <template v-if="recalledChunkDialog.source">
                     <div class="chat-source-dialog-meta">
                         <span>{{ recalledChunkDialog.source.title || '(无标题)' }}</span>
-                        <span>相似度 {{ fmtScore(recalledChunkDialog.source.score) }}</span>
+                        <span>{{ fmtScore(recalledChunkDialog.source) }}</span>
                         <span v-if="recalledChunkDialog.source.seq !== undefined">分片 {{ recalledChunkDialog.source.seq }}</span>
                     </div>
                     <pre class="chat-recalled-text">{{ recalledChunkDialog.source.content || '暂无引用内容' }}</pre>
@@ -849,7 +850,7 @@ export default {
                         <span>{{ sourceLocationDialog.data?.document_title || sourceLocationDialog.source?.title || '(无标题)' }}</span>
                         <span v-if="sourceLocationDialog.data?.file_type">{{ sourceLocationDialog.data.file_type }}</span>
                         <span v-if="sourceLocationDialog.data?.location">{{ formatLocation(sourceLocationDialog.data.location) }}</span>
-                        <span v-if="sourceLocationDialog.source">相似度 {{ fmtScore(sourceLocationDialog.source.score) }}</span>
+                        <span v-if="sourceLocationDialog.source">{{ fmtScore(sourceLocationDialog.source) }}</span>
                         <span v-if="sourceLocationDialog.source?.seq !== undefined">分片 {{ sourceLocationDialog.source?.seq }}</span>
                         <span v-else-if="sourceLocationDialog.data?.chunk_seq !== undefined">分片 {{ sourceLocationDialog.data.chunk_seq }}</span>
                     </div>

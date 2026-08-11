@@ -10,6 +10,8 @@ import hashlib
 
 from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 
+from app.services.parser_units import build_parser_unit, parser_provenance, text_range
+
 _SEPARATORS = ["\n\n", "\n", "。", "！", "？", ". ", "? ", "! ", " ", ""]
 _HEADERS_TO_SPLIT_ON = [("#", "h1"), ("##", "h2"), ("###", "h3"), ("####", "h4")]
 _SORTED_HEADERS = sorted(_HEADERS_TO_SPLIT_ON, key=lambda split: len(split[0]), reverse=True)
@@ -434,6 +436,11 @@ def _table_chunk_spans(
             "text": full_text,
             "source_start": 0,
             "source_end": len(flat),
+            "source_ranges": [{
+                "start": 0,
+                "end": len(flat),
+                "hash": _span_hash(flat),
+            }],
             "row_start_idx": 0,
             "row_end_idx": max(0, len(data_rows) - 1),
             "location": _table_chunk_location(seg, row_numbers,
@@ -471,6 +478,18 @@ def _table_chunk_spans(
                 "text": full_text,
                 "source_start": src_start,
                 "source_end": src_end,
+                "source_ranges": [
+                    {
+                        "start": 0,
+                        "end": preamble_len,
+                        "hash": _span_hash(flat[:preamble_len]),
+                    },
+                    {
+                        "start": src_start,
+                        "end": src_end,
+                        "hash": _span_hash(flat[src_start:src_end]),
+                    },
+                ],
                 "row_start_idx": group_start_idx,
                 "row_end_idx": group_start_idx + len(group) - 1,
                 "location": _table_chunk_location(seg, row_numbers,
@@ -492,6 +511,18 @@ def _table_chunk_spans(
             "text": full_text,
             "source_start": src_start,
             "source_end": src_end,
+            "source_ranges": [
+                {
+                    "start": 0,
+                    "end": preamble_len,
+                    "hash": _span_hash(flat[:preamble_len]),
+                },
+                {
+                    "start": src_start,
+                    "end": src_end,
+                    "hash": _span_hash(flat[src_start:src_end]),
+                },
+            ],
             "row_start_idx": group_start_idx,
             "row_end_idx": group_start_idx + len(group) - 1,
             "location": _table_chunk_location(seg, row_numbers,
@@ -590,18 +621,55 @@ def build_structured_source_from_segments(
 
     # ── 第三遍：组装最终 chunks ──
     chunks: list[dict] = []
+    output_segments: list[dict] = []
     for idx, sr in enumerate(seg_records):
         gbase = offset_map[idx]["global_base"]
+        segment = sr["seg"]
+        parser = segment.get("parser") or parser_provenance(
+            "structured-splitter",
+            "v1",
+            {"chunk_size": chunk_size, "chunk_overlap": chunk_overlap},
+        )
+        unit_key = segment.get("unit_key") or f"{segment.get('source_kind', 'text')}:segment:{idx}"
+        segment_unit = build_parser_unit(
+            source_kind=segment.get("source_kind", "text"),
+            unit_kind="table" if segment.get("kind") == "table" else "section",
+            ordinal=idx,
+            unit_key=unit_key,
+            parser=parser,
+            location=_segment_location(segment),
+            source_text=normalized_text,
+            source_start=gbase,
+            source_end=gbase + len(sr["flat"]),
+            source_ranges=[text_range(normalized_text, gbase, gbase + len(sr["flat"]))],
+            parent_key=segment.get("parent_key"),
+            section_path=segment.get("section_path"),
+            quality=segment.get("quality"),
+        )
+        output_segment = dict(segment)
+        output_segment["unit_key"] = unit_key
+        output_segment["parser_unit"] = segment_unit
+        output_segments.append(output_segment)
         for rec in sr["chunks"]:
             loc = rec.get("location") or _segment_location(sr["seg"])
             src_start = gbase + rec["source_start"]
             src_end = gbase + rec["source_end"]
-            chunks.append({
+            output_chunk = {
                 "text": rec["text"],
                 "source_start": src_start,
                 "source_end": src_end,
                 "location": loc,
                 "source_span_hash": _span_hash(normalized_text[src_start:src_end]),
-            })
+            }
+            if rec.get("source_ranges"):
+                output_chunk["source_ranges"] = [
+                    {
+                        **item,
+                        "start": gbase + item["start"],
+                        "end": gbase + item["end"],
+                    }
+                    for item in rec.get("source_ranges") or []
+                ]
+            chunks.append(output_chunk)
 
-    return {"normalized_text": normalized_text, "chunks": chunks}
+    return {"normalized_text": normalized_text, "chunks": chunks, "segments": output_segments}

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
@@ -114,15 +114,24 @@ class LibraryCreate(BaseModel):
     revision_retention_enabled: bool = False
     revision_retention_days: int = Field(default=60, ge=30, le=60)
     revision_retention_notice_days: int = Field(default=7, ge=1, le=14)
-    graph_extraction_enabled: bool = False
+    graph_extraction_enabled: bool = True
     graph_extraction_build_mode: str = Field(
         default="standard", pattern="^(fast|standard|deep)$"
     )
-    external_llm_enabled: bool = False
-    graph_extraction_allowed_security_levels: list[str] = Field(default_factory=list)
+    external_llm_enabled: bool = True
+    graph_extraction_allowed_security_levels: list[str] = Field(default_factory=lambda: ["internal"])
     schema_template: str = Field(default="none", pattern="^(none|enterprise)$")
     schema_mode: str = Field(
-        default="disabled", pattern="^(disabled|explore|governed)$"
+        default="explore", pattern="^(disabled|explore|governed)$"
+    )
+    schema_confirmation_policy: str = Field(
+        default="required", pattern="^(required|automatic)$"
+    )
+    claim_graph_shadow_policy: str = Field(
+        default="inherit", pattern="^(inherit|enabled|disabled)$"
+    )
+    canonical_mapping_shadow_policy: str = Field(
+        default="inherit", pattern="^(inherit|enabled|disabled)$"
     )
 
     @field_validator("graph_extraction_allowed_security_levels", mode="before")
@@ -142,7 +151,11 @@ class LibraryCreate(BaseModel):
         _validate_chunk_overlap(self)
         _validate_revision_retention_policy(self)
         if "schema_mode" not in self.model_fields_set:
-            self.schema_mode = "governed" if self.graph_extraction_enabled else "disabled"
+            self.schema_mode = (
+                "governed"
+                if self.schema_template == "enterprise"
+                else "explore" if self.graph_extraction_enabled else "disabled"
+            )
         if self.schema_mode == "disabled" and self.graph_extraction_enabled:
             raise ValueError("schema_mode=disabled requires graph extraction to be disabled")
         if self.schema_mode in {"explore", "governed"} and not self.graph_extraction_enabled:
@@ -150,6 +163,13 @@ class LibraryCreate(BaseModel):
         if self.schema_mode != "governed" and self.schema_template != "none":
             raise ValueError("schema_template is only available in governed mode")
         if self.graph_extraction_enabled:
+            if "graph_extraction_enabled" in self.model_fields_set and (
+                "external_llm_enabled" not in self.model_fields_set
+                or "graph_extraction_allowed_security_levels" not in self.model_fields_set
+            ):
+                raise ValueError(
+                    "explicit graph extraction enablement requires model permission and security levels"
+                )
             if not self.external_llm_enabled:
                 raise ValueError("external_llm_enabled must be true when graph extraction is enabled")
             if not self.graph_extraction_allowed_security_levels:
@@ -202,6 +222,15 @@ class LibraryUpdate(BaseModel):
     graph_extraction_enabled: Optional[bool] = None
     schema_mode: Optional[str] = Field(
         default=None, pattern="^(disabled|explore|governed)$"
+    )
+    schema_confirmation_policy: Optional[str] = Field(
+        default=None, pattern="^(required|automatic)$"
+    )
+    claim_graph_shadow_policy: Optional[str] = Field(
+        default=None, pattern="^(inherit|enabled|disabled)$"
+    )
+    canonical_mapping_shadow_policy: Optional[str] = Field(
+        default=None, pattern="^(inherit|enabled|disabled)$"
     )
     graph_extraction_build_mode: Optional[str] = Field(
         default=None, pattern="^(fast|standard|deep)$"
@@ -307,12 +336,18 @@ class LibraryRead(BaseModel):
     retrieval_mode: str = "dense"
     qdrant_collection: str
     source_config: Optional[dict[str, Any]] = None
-    graph_extraction_enabled: bool = False
+    graph_extraction_enabled: bool = True
     schema_mode: str = "disabled"
+    schema_confirmation_policy: str = "required"
+    claim_graph_shadow_policy: str = "inherit"
+    claim_graph_shadow_enabled: bool = False
+    canonical_mapping_shadow_policy: str = "inherit"
+    canonical_mapping_shadow_global_enabled: bool = False
+    canonical_mapping_shadow_resolved: bool = False
     graph_extraction_build_mode: str = "standard"
     graph_assisted_chat_mode: str = "off"
-    external_llm_enabled: bool = False
-    graph_extraction_allowed_security_levels: list[str] = Field(default_factory=list)
+    external_llm_enabled: bool = True
+    graph_extraction_allowed_security_levels: list[str] = Field(default_factory=lambda: ["internal"])
     knowledge_artifact_auto_enabled: bool = False
     summary_artifact_enabled: bool = False
     outline_artifact_enabled: bool = False
@@ -347,6 +382,47 @@ class LibraryRead(BaseModel):
     @classmethod
     def _default_schema_mode(cls, value):
         return "disabled" if value is None else value
+
+    @field_validator("schema_confirmation_policy", mode="before")
+    @classmethod
+    def _default_schema_confirmation_policy(cls, value):
+        return "required" if value is None else value
+
+    @field_validator("claim_graph_shadow_policy", mode="before")
+    @classmethod
+    def _default_claim_graph_shadow_policy(cls, value):
+        return "inherit" if value is None else value
+
+    @field_validator("canonical_mapping_shadow_policy", mode="before")
+    @classmethod
+    def _default_canonical_mapping_shadow_policy(cls, value):
+        return "inherit" if value is None else value
+
+    @model_validator(mode="after")
+    def _resolve_claim_graph_shadow_enabled(self):
+        from app.services.shadow_rollout import resolve_shadow_enabled
+
+        self.claim_graph_shadow_enabled = resolve_shadow_enabled(
+            policy=self.claim_graph_shadow_policy,
+            graph_extraction_enabled=self.graph_extraction_enabled,
+            external_llm_enabled=self.external_llm_enabled,
+        )
+        return self
+
+    @model_validator(mode="after")
+    def _resolve_canonical_mapping_shadow_enabled(self):
+        from app.config import settings
+        from app.services.canonical_mapping_shadow import resolve_canonical_mapping_shadow
+
+        self.canonical_mapping_shadow_global_enabled = settings.canonical_mapping_shadow_enabled
+        self.canonical_mapping_shadow_resolved = resolve_canonical_mapping_shadow(
+            global_enabled=settings.canonical_mapping_shadow_enabled,
+            policy=self.canonical_mapping_shadow_policy,
+            schema_mode=self.schema_mode,
+            graph_extraction_enabled=self.graph_extraction_enabled,
+            external_llm_enabled=self.external_llm_enabled,
+        )
+        return self
 
     @field_validator(
         "classification_auto_enabled",
@@ -513,11 +589,40 @@ class TaskMonitorRead(BaseModel):
     created_at: datetime
     claimed_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
+    retry_target_type: Optional[str] = None
+    retry_target_id: Optional[uuid.UUID] = None
+    retry_generation: int = 0
     retryable: bool = False
+    retry_capability: str = "unsupported"
+    retry_reason: str = "当前任务类型暂不支持"
+    raw_error: Optional[str] = None
     build_mode: Optional[str] = None
     publication_status: Optional[str] = None
     progress: Optional[dict[str, Any]] = None
     metrics: Optional[dict[str, Any]] = None
+
+
+class TaskMonitorRetryItem(BaseModel):
+    task_type: Literal["import", "embedding", "graph"]
+    job_id: uuid.UUID
+    observed_generation: int = Field(ge=0)
+
+
+class TaskMonitorRetryRequest(BaseModel):
+    items: list[TaskMonitorRetryItem] = Field(min_length=1, max_length=500)
+
+
+class TaskMonitorRetryResult(BaseModel):
+    task_type: Literal["import", "embedding", "graph"]
+    job_id: uuid.UUID
+    status: Literal["succeeded", "rejected"]
+    retry_generation: Optional[int] = None
+    reason: str
+    message: str
+
+
+class TaskMonitorRetryResponse(BaseModel):
+    results: list[TaskMonitorRetryResult]
 
 
 class TaskMonitorStats(BaseModel):
@@ -529,6 +634,17 @@ class TaskMonitorStats(BaseModel):
     superseded: int
     retryable_failed: int
     total: int
+    retryable_embedding_failed: int = 0
+
+    @model_validator(mode="after")
+    def _status_counts_close(self) -> "TaskMonitorStats":
+        state_total = sum(
+            getattr(self, key)
+            for key in ("pending", "processing", "done", "failed", "cancelled", "superseded")
+        )
+        if state_total != self.total:
+            raise ValueError("task monitor status counts must equal total")
+        return self
 
 
 # ── Operations status（运行状态监控，docs/26 / 批次 C2） ──────────────────

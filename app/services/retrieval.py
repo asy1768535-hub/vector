@@ -29,6 +29,7 @@ from app.services import (
     source_enrichment,
     visibility,
 )
+from app.services.evidence_locator_projection import validate_projection
 from app.services import rerank as rerank_svc
 
 log = logging.getLogger(__name__)
@@ -423,7 +424,10 @@ async def run_retrieval(
     # 源库补全：payload 只有外键时，回查源库把正文拼回（未配置则 texts/rows 全 None）
     enr = await source_enrichment.enrich_payloads(source_config, payloads)
 
-    internal_keys = {"text", "title", "library_id", "document_id", "chunk_id", "seq"}
+    internal_keys = {
+        "text", "title", "library_id", "document_id", "chunk_id", "seq",
+        "evidence_locator_v1", "evidence_locator_v1_projection",
+    }
     extra_columns = enr.parsed["extra_columns"] if enr.enabled else []
 
     # 最终展示内容（源库补全优先），同时作为 rerank 的输入
@@ -464,6 +468,22 @@ async def run_retrieval(
         metadata.setdefault("document_id", payload.get("document_id"))
         metadata.setdefault("chunk_id", payload.get("chunk_id"))
         metadata.setdefault("seq", payload.get("seq"))
+        locator_projection = (
+            validate_projection(
+                payload.get("evidence_locator_v1_projection"),
+                expected_identity={
+                    "document_id": payload.get("document_id"),
+                    "document_revision_id": payload.get("document_revision_id"),
+                    "document_revision": payload.get("document_revision"),
+                    "document_revision_no": payload.get("document_revision_no"),
+                    "chunk_id": payload.get("chunk_id"),
+                },
+            )
+            if settings.enable_evidence_locator_read
+            else None
+        )
+        if locator_projection is not None:
+            metadata["evidence_locator_v1_projection"] = locator_projection
         if src_row:
             for col in extra_columns:
                 metadata.setdefault(col, src_row.get(col))

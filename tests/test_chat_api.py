@@ -38,6 +38,26 @@ def _rec(content="片段正文", *, doc="d1", chunk="c1", score=0.88, md=None):
     return DifyRecord(content=content, score=score, title="标题", metadata=meta)
 
 
+@pytest.mark.parametrize(
+    ("metadata", "score_type", "display_score"),
+    [
+        ({"rerank_score": 0.863, "vector_score": 0.724, "rrf_score": 0.0164}, "rerank", 0.863),
+        ({"vector_score": 0.724, "rrf_score": 0.0164}, "vector", 0.724),
+        ({"rrf_score": 0.0164}, "rrf", None),
+    ],
+)
+def test_chat_source_uses_only_reliable_display_scores(metadata, score_type, display_score):
+    record = DifyRecord(
+        content="source", score=0.0164, title="source",
+        metadata={"document_id": "d1", "chunk_id": "c1", **metadata},
+    )
+    source = chat_api._to_source(record)
+
+    assert source.score == 0.0164
+    assert source.score_type == score_type
+    assert source.display_score == display_score
+
+
 class _Conv:
     def __init__(self):
         self.id = uuid.uuid4()
@@ -196,6 +216,26 @@ def _patch_pipeline(records, *, answer="答案"):
     return base + _history_patches(), retr, gen
 
 
+def test_messages_return_rerank_display_score():
+    records = [DifyRecord(
+        content="source", score=0.0164, title="source",
+        metadata={"document_id": "d1", "chunk_id": "c1", "rerank_score": 0.863},
+    )]
+    _override(mock_user, AsyncMock())
+    patches, _retr, _gen = _patch_pipeline(records)
+    for p in patches:
+        p.start()
+    try:
+        response = TestClient(app).post("/chat/messages", json={"library_slug": "medical", "query": "q"})
+    finally:
+        for p in reversed(patches):
+            p.stop()
+
+    assert response.status_code == 200
+    assert response.json()["sources"][0]["score_type"] == "rerank"
+    assert response.json()["sources"][0]["display_score"] == 0.863
+
+
 def test_messages_calls_retrieval_and_returns_sources():
     records = [_rec("片段A", doc="d1", chunk="c1", score=0.91, md={"seq": 7})]
     _override(mock_user, AsyncMock())
@@ -337,6 +377,30 @@ def test_stream_emits_sources_then_deltas_then_done():
     assert '"type": "done"' in body
     # sources 事件必须在 delta 之前
     assert body.index('"sources"') < body.index('"delta"')
+
+
+def test_stream_emits_vector_display_score():
+    records = [DifyRecord(
+        content="source", score=0.0164, title="source",
+        metadata={"document_id": "d1", "chunk_id": "c1", "vector_score": 0.724},
+    )]
+    _override(mock_user, AsyncMock())
+
+    async def fake_stream(*_args, **_kwargs):
+        yield "answer"
+
+    patches = _stream_patches(records, fake_stream)
+    for p in patches:
+        p.start()
+    try:
+        response = TestClient(app).post("/chat/stream", json={"library_slug": "medical", "query": "q"})
+    finally:
+        for p in reversed(patches):
+            p.stop()
+
+    assert response.status_code == 200
+    assert '"score_type": "vector"' in response.text
+    assert '"display_score": 0.724' in response.text
 
 
 def test_stream_emits_error_event_on_chat_error():

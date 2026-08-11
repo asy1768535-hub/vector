@@ -5,6 +5,8 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from fastapi import Response
 
 from app.api import health as health_api
@@ -108,7 +110,7 @@ def test_0048_enables_classification_with_default_taxonomy() -> None:
     assert ")) - 1)::integer" in migration
 
 def test_readiness_payload_contains_only_stable_content_free_codes() -> None:
-    assert health_api._MIGRATION_HEAD == "0050"
+    assert health_api._MIGRATION_HEAD == "0058"
     payload = _payload({"database": True, "embedding": False})
     assert payload == {
         "status": "not_ready",
@@ -119,6 +121,107 @@ def test_readiness_payload_contains_only_stable_content_free_codes() -> None:
     assert "http" not in serialized
     assert "model" not in serialized
     assert "exception" not in serialized
+
+
+def test_health_migration_head_matches_alembic_head() -> None:
+    script = ScriptDirectory.from_config(Config("alembic.ini"))
+    assert script.get_current_head() == health_api._MIGRATION_HEAD
+
+
+class _FakeMigrationSession:
+    def __init__(self, revision: str | None = None, error: Exception | None = None):
+        self.revision = revision
+        self.error = error
+
+    async def __aenter__(self) -> "_FakeMigrationSession":
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        return None
+
+    async def execute(self, statement: object) -> object:
+        if self.error is not None:
+            raise self.error
+        return type("Result", (), {"scalar_one": lambda _: self.revision})()
+
+
+@pytest.mark.parametrize("revision", ["0058"])
+def test_check_migrations_accepts_current_head(monkeypatch, revision: str) -> None:
+    monkeypatch.setattr(
+        health_api,
+        "async_session_factory",
+        lambda: _FakeMigrationSession(revision=revision),
+    )
+    assert asyncio.run(health_api._check_migrations()) is True
+
+
+@pytest.mark.parametrize("revision", ["0055", "0043", None, ""])
+def test_check_migrations_rejects_stale_other_and_empty_heads(
+    monkeypatch, revision: str | None
+) -> None:
+    monkeypatch.setattr(
+        health_api,
+        "async_session_factory",
+        lambda: _FakeMigrationSession(revision=revision),
+    )
+    assert asyncio.run(health_api._check_migrations()) is False
+
+
+def test_check_migrations_fails_closed_on_query_error(monkeypatch) -> None:
+    monkeypatch.setattr(
+        health_api,
+        "async_session_factory",
+        lambda: _FakeMigrationSession(error=RuntimeError("database unavailable")),
+    )
+    assert asyncio.run(health_api._check_migrations()) is False
+
+
+def test_liveness_does_not_depend_on_migration_state() -> None:
+    assert asyncio.run(health_api.liveness()) == {"status": "live"}
+
+
+def test_readiness_preserves_other_dependency_states(monkeypatch) -> None:
+    async def available() -> bool:
+        return True
+
+    async def initialization_unavailable() -> bool:
+        return False
+
+    async def rerank_not_configured() -> str:
+        return "not_configured"
+
+    monkeypatch.setattr(health_api, "_check_db", available)
+    monkeypatch.setattr(health_api, "_check_migrations", available)
+    monkeypatch.setattr(health_api, "_check_initialization", initialization_unavailable)
+    monkeypatch.setattr(health_api, "_check_qdrant", available)
+    monkeypatch.setattr(health_api, "_check_embedding", available)
+    monkeypatch.setattr(health_api, "_check_rerank", rerank_not_configured)
+    monkeypatch.setattr(health_api, "_check_storage", available)
+
+    response = Response()
+    payload = asyncio.run(health_api.readiness(response))
+    assert response.status_code == 503
+    assert payload == {
+        "status": "not_ready",
+        "components": {
+            "database": "ok",
+            "embedding": "ok",
+            "initialization": "fail",
+            "migrations": "ok",
+            "object_storage": "ok",
+            "qdrant": "ok",
+            "rerank": "not_configured",
+        },
+        "failure_codes": ["initialization_unavailable", "rerank_unavailable"],
+    }
+
+
+def test_chat_source_migration_marks_preexisting_scores_legacy() -> None:
+    migration = Path(
+        "alembic/versions/0054_chat_source_display_scores.py"
+    ).read_text(encoding="utf-8")
+    assert "server_default=\"rrf\"" in migration
+    assert "SET score_type = 'legacy'" in migration
 
 
 def test_legacy_health_shape_is_compatible_and_redacted(monkeypatch) -> None:

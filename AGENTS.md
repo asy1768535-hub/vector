@@ -3,22 +3,33 @@
 
 This project is indexed by GitNexus as **vectorDatabase** (35965 symbols, 64683 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
-> If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
+> If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first. If GitNexus cannot run because its runtime, parser dependencies, or MCP tools are unavailable, use the documented fallback below.
 
 ## Always Do
 
-- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `gitnexus_impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
-- **MUST run `gitnexus_detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows.
+- **MUST run impact analysis before editing any symbol.** When GitNexus is available, run `gitnexus_impact({target: "symbolName", direction: "upstream"})`; otherwise complete the documented unavailable-tool fallback. Report the blast radius (direct callers, affected processes, risk level) to the user.
+- **MUST check affected scope before committing.** Run `gitnexus_detect_changes()` when available; otherwise complete the documented unavailable-tool fallback checks.
 - **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
-- When exploring unfamiliar code, use `gitnexus_query({query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
-- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `gitnexus_context({name: "symbolName"})`.
+- When GitNexus is available and you are exploring unfamiliar code, use `gitnexus_query({query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
+- When GitNexus is available and you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `gitnexus_context({name: "symbolName"})`.
+
+## Fallback When GitNexus Is Unavailable
+
+GitNexus is development tooling, not a runtime dependency. Its failure must not require adding parser or native-build dependencies to this project, and must not block scoped business work when a manual safety review is possible.
+
+Use this fallback only after one documented GitNexus attempt fails. Report the command and error to the user, then:
+
+1. Before editing a function, class, or method, locate its definition and direct callers with `rg` or `git grep`, inspect the relevant API/service/worker/test flow, and report the estimated blast radius and risk level.
+2. Treat shared services, public APIs, database models/migrations, worker orchestration, authentication, and publication paths as HIGH risk unless the inspected call sites show otherwise. Warn the user before editing HIGH or CRITICAL risk code.
+3. Before committing, run `git diff --name-only`, `git diff --check`, focused tests for every affected flow, and manually report the changed symbols and expected execution paths. This is the fallback for `gitnexus_detect_changes()`.
+4. Record that GitNexus was unavailable in the final report. Stop using the fallback once GitNexus is healthy again.
 
 ## Never Do
 
-- NEVER edit a function, class, or method without first running `gitnexus_impact` on it.
+- NEVER edit a function, class, or method without first completing either `gitnexus_impact` or the documented unavailable-tool fallback.
 - NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
 - NEVER rename symbols with find-and-replace — use `gitnexus_rename` which understands the call graph.
-- NEVER commit changes without running `gitnexus_detect_changes()` to check affected scope.
+- NEVER commit changes without running either `gitnexus_detect_changes()` or the documented unavailable-tool fallback checks.
 
 ## Resources
 

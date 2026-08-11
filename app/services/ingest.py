@@ -23,7 +23,12 @@ from app.models.chunk import Chunk
 from app.models.document import Document
 from app.models.embedding_job import EmbeddingJob
 from app.models.library import Library
-from app.services.evidence_write_path import PreparedChunk, create_evidence_generation
+from app.services.evidence_write_path import (
+    PreparedChunk,
+    create_evidence_generation,
+    validate_prepared_chunk_ranges,
+    validate_parser_segments,
+)
 from app.services.metadata_guard import validate_external_metadata
 from app.services import splitter as splitter_service
 
@@ -159,6 +164,10 @@ async def ingest_text(
     security_level: str | None = None,
     chunks: list[str | dict] | None = None,
     source_path: str | None = None,
+    segments: list[dict] | None = None,
+    file_name: str | None = None,
+    raw_file_sha256: str | None = None,
+    document_revision_file_id: uuid.UUID | None = None,
 ) -> tuple[Document, EmbeddingJob, int, bool]:
     """返回 (document, job, chunk_count, was_existing)。
 
@@ -167,6 +176,7 @@ async def ingest_text(
     """
     if _evidence_write_enabled():
         validate_external_metadata(metadata)
+    validate_parser_segments(segments)
     chash = _content_hash(text)
 
     # 身份解析（external_id 优先，否则 content_hash）→ 命中已有活动文档直接返回（不重复 embed）
@@ -188,6 +198,14 @@ async def ingest_text(
     )
     if not chunks_text:
         raise ValueError("text produced zero chunks after splitting")
+    prepared_chunks = None
+    if _evidence_write_enabled():
+        prepared_chunks = _prepare_evidence_chunks(
+            chunks_text, title=title, external_id=external_id, revision=1
+        )
+        validate_prepared_chunk_ranges(
+            normalized_text=text, prepared_chunks=prepared_chunks
+        )
 
     doc = Document(
         library_id=library.id,
@@ -224,9 +242,6 @@ async def ingest_text(
         return winner, job, chunk_count, True
 
     if _evidence_write_enabled():
-        prepared_chunks = _prepare_evidence_chunks(
-            chunks_text, title=title, external_id=external_id, revision=doc.current_revision
-        )
         result = await create_evidence_generation(
             db,
             library=library,
@@ -237,6 +252,10 @@ async def ingest_text(
             splitter=splitter,
             created_by=created_by,
             prepared_chunks=prepared_chunks,
+            segments=segments,
+            file_name=file_name,
+            raw_file_sha256=raw_file_sha256,
+            document_revision_file_id=document_revision_file_id,
         )
         log.info(
             "evidence ingest queued: lib=%s doc_id=%s rev=%s revision_id=%s chunks=%s job_id=%s",
@@ -291,6 +310,10 @@ async def reingest_document(
     splitter: str,
     force: bool = False,
     chunks: list[str | dict] | None = None,
+    segments: list[dict] | None = None,
+    file_name: str | None = None,
+    raw_file_sha256: str | None = None,
+    document_revision_file_id: uuid.UUID | None = None,
 ) -> tuple[EmbeddingJob | None, int, bool]:
     """更新已存在文档：删旧 chunk → 用新文本重切 → 更新 doc → 新建 pending job。
 
@@ -306,6 +329,7 @@ async def reingest_document(
     """
     if _evidence_write_enabled():
         validate_external_metadata(metadata)
+    validate_parser_segments(segments)
     new_hash = _content_hash(new_text)
     unchanged = (
         not force
@@ -327,9 +351,21 @@ async def reingest_document(
     )
     if not chunks_text:
         raise ValueError("text produced zero chunks after splitting")
+    prepared_chunks = None
+    if _evidence_write_enabled():
+        prepared_chunks = _prepare_evidence_chunks(
+            chunks_text,
+            title=title,
+            external_id=document.external_id,
+            revision=document.current_revision + 1,
+        )
+        validate_prepared_chunk_ranges(
+            normalized_text=new_text, prepared_chunks=prepared_chunks
+        )
 
     # 删旧 chunk（旧 Qdrant points 不在此同步清，靠 revision 过滤 + 批次 B outbox）
-    await db.execute(sa_delete(Chunk).where(Chunk.document_id == document.id))
+    if not segments:
+        await db.execute(sa_delete(Chunk).where(Chunk.document_id == document.id))
 
     document.content_hash = new_hash
     document.title = title
@@ -341,9 +377,6 @@ async def reingest_document(
     job = await _new_generation(db, library, document)
 
     if _evidence_write_enabled():
-        prepared_chunks = _prepare_evidence_chunks(
-            chunks_text, title=title, external_id=document.external_id, revision=document.current_revision
-        )
         result = await create_evidence_generation(
             db,
             library=library,
@@ -355,6 +388,10 @@ async def reingest_document(
             created_by=document.created_by,
             prepared_chunks=prepared_chunks,
             job=job,
+            segments=segments,
+            file_name=file_name,
+            raw_file_sha256=raw_file_sha256,
+            document_revision_file_id=document_revision_file_id,
         )
         from app.services import cleanup as cleanup_service
         if not settings.enable_revision_id_worker:

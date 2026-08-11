@@ -3,8 +3,9 @@ import { ElMessage, ElMessageBox } from 'element-plus';
 import * as api from '../api.js';
 import { dataEmpty } from '../illustrations.js';
 import {
-    computeLibraryStats, filterLibraries, librarySlugFromName, libraryStatus, paginateLibraries,
-    srcSummary,
+    canonicalMappingGlobalLabel, canonicalMappingPolicyLabel, canonicalMappingResolvedLabel,
+    canonicalMappingRollbackVerified, computeLibraryStats, filterLibraries, librarySlugFromName,
+    libraryStatus, paginateLibraries, srcSummary,
 } from '../libraries_ui.js';
 import { createRequestFence, readProjection } from '../read_state_ui.js';
 
@@ -33,18 +34,24 @@ export default {
                 vector_distance: 'cosine', embedding_base_url: '', embed_batch_size: 32,
                 rerank_enabled: null, ocr_enabled: true, docx_table_aware: true,
                 retrieval_mode: 'dense', source_enrichment_enabled: true,
-                graph_extraction_enabled: false, graph_extraction_build_mode: 'standard',
-                schema_mode: 'disabled',
+                graph_extraction_enabled: true, graph_extraction_build_mode: 'standard',
+                schema_mode: 'explore',
+                schema_confirmation_policy: 'required',
+                canonical_mapping_shadow_policy: 'inherit',
                 schema_template: 'none',
                 chunk_size: 1000, chunk_overlap: 120 },
         });
         const edit = reactive({
             open: false, slug: '', initial: null, graphSecurityLevels: [],
+            canonicalMapping: { policy: undefined, globalEnabled: undefined, resolved: undefined },
             form: { name: '', description: '', embedding_model: '', embedding_dim: null,
                 vector_distance: 'cosine', embedding_base_url: '', embed_batch_size: null,
                 rerank_enabled: null, ocr_enabled: null, docx_table_aware: null,
                 retrieval_mode: 'dense', source_enrichment_enabled: true,
                 graph_extraction_enabled: false, graph_extraction_build_mode: 'standard',
+                schema_mode: 'disabled',
+                schema_confirmation_policy: 'required',
+                canonical_mapping_shadow_policy: 'inherit',
                 graph_assisted_chat_mode: 'off',
                 chunk_size: 1000, chunk_overlap: 120 },
         });
@@ -114,6 +121,8 @@ export default {
                 retrieval_mode: 'dense', source_enrichment_enabled: true,
                 graph_extraction_enabled: false, graph_extraction_build_mode: 'standard',
                 schema_mode: 'disabled',
+                schema_confirmation_policy: 'required',
+                canonical_mapping_shadow_policy: 'inherit',
                 schema_template: 'none',
                 chunk_size: 1000, chunk_overlap: 120 };
             create.open = true;
@@ -164,15 +173,24 @@ export default {
                 chunk_size: row.chunk_size, chunk_overlap: row.chunk_overlap,
                 source_enrichment_enabled: row.source_config != null,
                 graph_extraction_enabled: row.graph_extraction_enabled === true,
+                schema_mode: row.schema_mode || (row.graph_extraction_enabled ? 'governed' : 'disabled'),
+                schema_confirmation_policy: row.schema_confirmation_policy || 'required',
+                canonical_mapping_shadow_policy: row.canonical_mapping_shadow_policy || 'inherit',
                 graph_extraction_build_mode: row.graph_extraction_build_mode || 'standard',
                 graph_assisted_chat_mode: row.graph_assisted_chat_mode || 'off' };
             edit.graphSecurityLevels = Array.isArray(row.graph_extraction_allowed_security_levels)
                 ? [...row.graph_extraction_allowed_security_levels]
                 : [];
+            edit.canonicalMapping = {
+                policy: row.canonical_mapping_shadow_policy,
+                globalEnabled: row.canonical_mapping_shadow_global_enabled,
+                resolved: row.canonical_mapping_shadow_resolved,
+            };
             edit.form = { ...snapshot }; edit.initial = snapshot; edit.open = true;
         }
 
         async function submitEdit() {
+            edit.form.graph_extraction_enabled = edit.form.schema_mode !== 'disabled';
             const diff = {};
             for (const k of Object.keys(edit.form)) if (edit.form[k] !== edit.initial[k]) diff[k] = edit.form[k];
             if (Object.keys(diff).length === 0) { ElMessage.info('未做任何修改'); edit.open = false; return; }
@@ -186,7 +204,26 @@ export default {
                 try { await ElMessageBox.confirm('修改向量维度或距离算法后，现有 Qdrant collection 结构将不再匹配。\n保存后请立即执行「重建 collection」，否则后续摄入或检索可能失败。\n\n继续保存吗？', '危险操作', { type: 'warning', confirmButtonText: '确认保存', cancelButtonText: '取消' }); }
                 catch (_) { return; }
             }
-            try { await api.updateLibrary(edit.slug, diff); ElMessage.success('已保存'); edit.open = false; await load(true); }
+            try {
+                await api.updateLibrary(edit.slug, diff);
+                if (diff.canonical_mapping_shadow_policy === 'disabled') {
+                    const readback = await api.getLibrary(edit.slug);
+                    if (!canonicalMappingRollbackVerified(readback)) {
+                        throw new Error('Canonical Mapping 影子评估回读校验失败');
+                    }
+                    edit.canonicalMapping = {
+                        policy: readback.canonical_mapping_shadow_policy,
+                        globalEnabled: readback.canonical_mapping_shadow_global_enabled,
+                        resolved: readback.canonical_mapping_shadow_resolved,
+                    };
+                    if (selectedLibrary.value?.slug === edit.slug) selectedLibrary.value = readback;
+                    ElMessage.success('Canonical Mapping 影子评估已关闭');
+                } else {
+                    ElMessage.success('已保存');
+                }
+                edit.open = false;
+                await load(true);
+            }
             catch (e) { ElMessage.error(e.message); }
         }
 
@@ -243,6 +280,7 @@ export default {
             load, openCreate, submitCreate, openEdit, submitEdit, rebuild, del, testEmbedding,
             onCreateNameInput, onCreateSlugInput,
             dataEmpty, srcSummary, sourceDisplay, libraryStatus, toggleLabel, embedDisplay,
+            canonicalMappingGlobalLabel, canonicalMappingPolicyLabel, canonicalMappingResolvedLabel,
             faqMgr, loadFaq, openFaq, addFaq, saveFaq, removeFaq };
     },
     template: `
@@ -403,6 +441,23 @@ export default {
               </div>
             </section>
 
+            <section v-if="selectedLibrary.schema_mode !== 'disabled'" class="libraries-detail-section">
+              <h4 class="libraries-detail-section-title">Canonical Mapping 影子评估</h4>
+              <div class="libraries-detail-field">
+                <span class="libraries-detail-label">库级 policy</span>
+                <span class="libraries-detail-value">{{ canonicalMappingPolicyLabel(selectedLibrary.canonical_mapping_shadow_policy) }}</span>
+              </div>
+              <div class="libraries-detail-field">
+                <span class="libraries-detail-label">global gate</span>
+                <span class="libraries-detail-value"><el-tag :type="selectedLibrary.canonical_mapping_shadow_global_enabled === true ? 'success' : 'info'" size="small">{{ canonicalMappingGlobalLabel(selectedLibrary.canonical_mapping_shadow_global_enabled) }}</el-tag></span>
+              </div>
+              <div class="libraries-detail-field">
+                <span class="libraries-detail-label">effective / resolved</span>
+                <span class="libraries-detail-value"><el-tag :type="selectedLibrary.canonical_mapping_shadow_resolved === true ? 'success' : 'info'" size="small">{{ canonicalMappingResolvedLabel(selectedLibrary.canonical_mapping_shadow_resolved) }}</el-tag></span>
+              </div>
+              <p class="libraries-form-hint">仅后台质量评估，不改变当前实体关系，不进入发布。</p>
+            </section>
+
             <section class="libraries-detail-section">
               <h4 class="libraries-detail-section-title">存储与来源</h4>
               <div class="libraries-detail-field">
@@ -449,14 +504,16 @@ export default {
             <el-row :gutter="16">
               <el-col :span="12"><el-form-item label="检索模式"><el-select v-model="create.form.retrieval_mode" class="libraries-form-control"><el-option value="dense" label="向量检索 dense" /><el-option value="hybrid" label="混合检索 hybrid" /></el-select><div class="libraries-form-hint">hybrid=向量+关键词(pg_trgm) RRF</div></el-form-item></el-col>
               <el-col :span="12"><el-form-item label="Rerank"><el-select v-model="create.form.rerank_enabled" class="libraries-form-control"><el-option :value="null" label="继承全局" /><el-option :value="true" label="开启" /><el-option :value="false" label="关闭" /></el-select><div class="libraries-form-hint">需先在 .env 配 RERANK_* 才生效</div></el-form-item></el-col>
-              <el-col :span="24"><el-form-item label="知识组织方式"><el-radio-group v-model="create.form.schema_mode"><el-radio-button value="disabled">普通知识库</el-radio-button><el-radio-button value="explore">AI 探索</el-radio-button><el-radio-button value="governed">Schema 治理</el-radio-button></el-radio-group><div class="libraries-form-hint">普通模式只做文档与向量检索；AI 探索先保留探索策略；Schema 治理用于按激活版本抽取。</div></el-form-item></el-col>
+              <el-col :span="24"><el-form-item label="知识组织方式"><el-radio-group v-model="create.form.schema_mode"><el-radio-button value="disabled">不构建知识图谱</el-radio-button><el-radio-button value="explore">AI 自动发现</el-radio-button><el-radio-button value="governed">使用已有 Schema</el-radio-button></el-radio-group><div class="libraries-form-hint">AI 自动发现默认根据首次文件生成候选业务 Schema；确认后才成为长期 Schema。</div></el-form-item></el-col>
               <el-col v-if="create.form.schema_mode !== 'disabled'" :span="12"><el-form-item label="构建模式"><el-radio-group v-model="create.form.graph_extraction_build_mode"><el-radio-button value="fast">快速</el-radio-button><el-radio-button value="standard">标准</el-radio-button><el-radio-button value="deep">深度</el-radio-button></el-radio-group><div class="libraries-form-hint">标准模式兼顾完整度与速度</div></el-form-item></el-col>
+              <el-col v-if="create.form.schema_mode !== 'disabled'" :span="12"><el-form-item label="Schema 确认"><el-radio-group v-model="create.form.schema_confirmation_policy"><el-radio-button value="required">人工确认</el-radio-button><el-radio-button value="automatic">自动批准</el-radio-button></el-radio-group></el-form-item></el-col>
+              <el-col v-if="create.form.schema_mode !== 'disabled'" :span="12"><el-form-item label="Canonical Mapping"><el-select v-model="create.form.canonical_mapping_shadow_policy" class="libraries-form-control"><el-option value="inherit" label="继承（inherit）" /><el-option value="disabled" label="关闭（disabled）" /><el-option value="enabled" label="开启（enabled）" /></el-select><div class="libraries-form-hint">影子评估：仅后台质量评估，不改变当前实体关系，不进入发布。</div></el-form-item></el-col>
               <el-col v-if="create.form.schema_mode === 'governed'" :span="12"><el-form-item label="初始 Schema"><el-select v-model="create.form.schema_template" class="libraries-form-control"><el-option value="enterprise" label="基础企业 Schema（推荐）" /><el-option value="none" label="稍后导入自定义 Schema" /></el-select><div class="libraries-form-hint">导入只创建草稿；激活后才用于后续图谱抽取</div></el-form-item></el-col>
             </el-row>
             <el-alert v-if="create.form.schema_mode === 'disabled'" type="info" :closable="false" class="libraries-form-alert">不会启动知识图谱抽取，也不会创建或修改 Schema；适合先使用普通文档检索。</el-alert>
-            <el-alert v-else-if="create.form.schema_mode === 'explore'" type="warning" :closable="false" class="libraries-form-alert">AI 探索模式不会创建正式 Schema。当前图谱抽取器仍要求先导入并激活 Schema；你可以在 Schema 管理中导入 JSON、YAML 或 YML 文件后再开始抽取。</el-alert>
+            <el-alert v-else-if="create.form.schema_mode === 'explore'" type="warning" :closable="false" class="libraries-form-alert">AI 探索模式用于首次面对陌生文件：先上传并向量化资料，再沉淀候选实体、关系和 Schema 草稿；Schema 激活后，后续新增和替换文件才按长期约束抽取。</el-alert>
             <el-alert v-else-if="create.form.schema_template === 'enterprise'" type="info" :closable="false" class="libraries-form-alert">将创建并激活基础企业 Schema，之后可在 Schema 管理中导入新版本扩展。</el-alert>
-            <el-alert v-else type="warning" :closable="false" class="libraries-form-alert">知识图谱已开启，但暂时没有激活 Schema。创建后请先导入并激活 Schema，才能进行带图谱的文件上传。</el-alert>
+            <el-alert v-else type="warning" :closable="false" class="libraries-form-alert">Schema 治理适合已有长期结构约束的库；如果暂时没有激活 Schema，首次资料仍会先按 AI 探索完成上传和向量化。</el-alert>
           </div>
         </el-form>
         <template #footer><el-button @click="create.open = false" :disabled="create.submitting">取消</el-button><el-button type="primary" :loading="create.submitting" @click="submitCreate">创建</el-button></template>
@@ -490,12 +547,21 @@ export default {
               <el-col :span="12"><el-form-item label="图片 OCR"><el-select v-model="edit.form.ocr_enabled" class="libraries-form-control"><el-option :value="null" label="继承全局" /><el-option :value="true" label="开启" /><el-option :value="false" label="关闭" /></el-select><div class="libraries-form-hint">改开关只影响之后新上传/重灌的文档</div></el-form-item></el-col>
               <el-col :span="12"><el-form-item label="DOCX 表格"><el-select v-model="edit.form.docx_table_aware" class="libraries-form-control"><el-option :value="null" label="继承全局" /><el-option :value="true" label="开启" /><el-option :value="false" label="关闭" /></el-select><div class="libraries-form-hint">改开关只影响之后新上传/重灌的文档</div></el-form-item></el-col>
               <el-col :span="12"><el-form-item label="PGSQL 全文源"><el-switch v-model="edit.form.source_enrichment_enabled" active-text="启用正文回查" /></el-form-item></el-col>
-              <el-col :span="12"><el-form-item label="知识图谱"><el-switch v-model="edit.form.graph_extraction_enabled" active-text="上传时默认建立知识图谱" /></el-form-item></el-col>
-              <el-col v-if="edit.form.graph_extraction_enabled" :span="12"><el-form-item label="构建模式"><el-radio-group v-model="edit.form.graph_extraction_build_mode"><el-radio-button value="fast">快速</el-radio-button><el-radio-button value="standard">标准</el-radio-button><el-radio-button value="deep">深度</el-radio-button></el-radio-group></el-form-item></el-col>
-              <el-col v-if="edit.form.graph_extraction_enabled" :span="12"><el-form-item label="问答图谱"><el-select v-model="edit.form.graph_assisted_chat_mode" class="libraries-form-control"><el-option value="off" label="关闭" /><el-option value="shadow" label="影子评估" /><el-option value="enabled" label="增强回答" /></el-select><div class="libraries-form-hint">影子评估只统计命中，不改变回答；质量门通过后再启用增强回答</div></el-form-item></el-col>
-              <el-col v-if="edit.form.graph_extraction_enabled" :span="12"><el-form-item label="Schema"><el-button type="primary" plain @click="edit.open=false;$router.push({ path: '/knowledge-governance/schema', query: { library: edit.slug, tab: 'overview' } })">打开 Schema 管理</el-button></el-form-item></el-col>
+              <el-col :span="24"><el-form-item label="知识组织方式"><el-radio-group v-model="edit.form.schema_mode"><el-radio-button value="disabled">普通知识库</el-radio-button><el-radio-button value="explore">AI 探索</el-radio-button><el-radio-button value="governed">Schema 治理</el-radio-button></el-radio-group><div class="libraries-form-hint">普通模式只做文档与向量检索；AI 探索用于第一次陌生资料；Schema 治理用于按激活版本长期约束抽取。</div></el-form-item></el-col>
+              <el-col v-if="edit.form.schema_mode !== 'disabled'" :span="12"><el-form-item label="构建模式"><el-radio-group v-model="edit.form.graph_extraction_build_mode"><el-radio-button value="fast">快速</el-radio-button><el-radio-button value="standard">标准</el-radio-button><el-radio-button value="deep">深度</el-radio-button></el-radio-group></el-form-item></el-col>
+              <el-col v-if="edit.form.schema_mode !== 'disabled'" :span="12"><el-form-item label="Schema 确认"><el-radio-group v-model="edit.form.schema_confirmation_policy"><el-radio-button value="required">人工确认</el-radio-button><el-radio-button value="automatic">自动批准</el-radio-button></el-radio-group></el-form-item></el-col>
+              <el-col v-if="edit.form.schema_mode !== 'disabled'" :span="12"><el-form-item label="问答图谱"><el-select v-model="edit.form.graph_assisted_chat_mode" class="libraries-form-control"><el-option value="off" label="关闭" /><el-option value="shadow" label="影子评估" /><el-option value="enabled" label="增强回答" /></el-select><div class="libraries-form-hint">影子评估只统计命中，不改变回答；质量门通过后再启用增强回答</div></el-form-item></el-col>
+              <el-col v-if="edit.form.schema_mode !== 'disabled'" :span="12"><el-form-item label="Canonical Mapping"><el-select v-model="edit.form.canonical_mapping_shadow_policy" class="libraries-form-control"><el-option value="inherit" label="继承（inherit）" /><el-option value="disabled" label="关闭（disabled）" /><el-option value="enabled" label="开启（enabled）" /></el-select><div class="libraries-form-hint">影子评估：仅后台质量评估，不改变当前实体关系，不进入发布。</div></el-form-item></el-col>
+              <el-col v-if="edit.form.schema_mode !== 'disabled'" :span="24"><div class="libraries-canonical-state">
+                <div class="libraries-canonical-state-item"><span class="libraries-canonical-state-label">库级 policy</span><strong>{{ canonicalMappingPolicyLabel(edit.canonicalMapping.policy) }}</strong></div>
+                <div class="libraries-canonical-state-item"><span class="libraries-canonical-state-label">global gate</span><strong>{{ canonicalMappingGlobalLabel(edit.canonicalMapping.globalEnabled) }}</strong></div>
+                <div class="libraries-canonical-state-item"><span class="libraries-canonical-state-label">effective / resolved</span><strong>{{ canonicalMappingResolvedLabel(edit.canonicalMapping.resolved) }}</strong></div>
+              </div></el-col>
+              <el-col v-if="edit.form.schema_mode !== 'disabled'" :span="12"><el-form-item label="Schema"><el-button type="primary" plain @click="edit.open=false;$router.push({ path: '/knowledge-governance/schema', query: { library: edit.slug, tab: 'overview' } })">打开 Schema 管理</el-button></el-form-item></el-col>
             </el-row>
-            <el-alert v-if="edit.form.graph_extraction_enabled" type="info" :closable="false" class="libraries-form-alert">开启后，新上传和替换文件会默认进入图谱抽取流程；上传页仍可针对单次任务关闭。系统会自动验证并发布合格事实；使用中发现错误后可在知识治理中修正。</el-alert>
+            <el-alert v-if="edit.form.schema_mode === 'disabled'" type="info" :closable="false" class="libraries-form-alert">当前为普通知识库：上传只入库并向量化，不做实体关系抽取。</el-alert>
+            <el-alert v-else-if="edit.form.schema_mode === 'explore'" type="warning" :closable="false" class="libraries-form-alert">AI 探索用于第一次陌生资料：先上传并向量化，再沉淀候选实体、关系和 Schema 草稿。</el-alert>
+            <el-alert v-else type="info" :closable="false" class="libraries-form-alert">Schema 治理用于长期约束。缺少有效 Schema 时会明确阻止上传；如需先让 AI 根据文件发现结构，请切换到“AI 自动发现”。</el-alert>
           </div>
           <el-alert v-if="edit.form.source_enrichment_enabled" type="info" :closable="false" class="libraries-form-alert">PGSQL 全文源按<b>约定</b>自动配置：源表 = <code>{{ edit.slug || '<库唯一ID>' }}</code>（本库唯一ID）· 开启时已有高级配置会保持不变；从关闭改为开启会按约定重新生成。</el-alert>
           <el-alert v-else type="warning" :closable="false" class="libraries-form-alert">已关闭全文源补全：检索结果只使用向量库已有文本，不自动回查 PGSQL 全文源。</el-alert>

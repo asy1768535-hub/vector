@@ -128,7 +128,8 @@ async def save_assistant_message(
     for i, s in enumerate(sources):
         db.add(ChatMessageSource(
             message_id=msg.id, seq=i, title=s.title or None,
-            document_id=s.document_id, chunk_id=s.chunk_id, score=s.score, content=s.content,
+            document_id=s.document_id, chunk_id=s.chunk_id, score=s.score,
+            score_type=s.score_type, display_score=s.display_score, content=s.content,
         ))
     await db.flush()
     await db.refresh(msg)
@@ -165,7 +166,8 @@ async def get_conversation_messages(
 def src_to_schema(s: ChatMessageSource) -> ChatSource:
     return ChatSource(
         title=s.title or "", document_id=s.document_id, chunk_id=s.chunk_id,
-        score=float(s.score or 0.0), content=s.content or "",
+        score=float(s.score or 0.0), score_type=s.score_type, display_score=s.display_score,
+        content=s.content or "",
     )
 
 

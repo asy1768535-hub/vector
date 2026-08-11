@@ -36,6 +36,8 @@ from app.models.graph_publication_item import (
 from app.models.knowledge_relation import KnowledgeRelation
 from app.models.library import Library
 from app.models.ontology_version import ONTOLOGY_STATUS_ACTIVE, OntologyVersion
+from app.models.schema_discovery_run import SchemaDiscoveryRun
+from app.models.graph_extraction_job import GraphExtractionJob
 from app.models.relation_evidence import RelationEvidence
 from app.models.revision_retention import RevisionRetentionRecord
 from app.models.revision_purge_operation import RevisionPurgeOperation
@@ -177,10 +179,36 @@ async def _lock_active_ontology(
         .execution_options(populate_existing=True)
     )
     ontology = result.scalars().first()
+    explicit_draft = False
+    options = publication.plan_options or {}
+    run_id = options.get("schema_discovery_run_id")
+    if options.get("explicit_ai_draft") is True and isinstance(run_id, str):
+        try:
+            parsed_run_id = uuid.UUID(run_id)
+        except ValueError:
+            parsed_run_id = None
+        if parsed_run_id is not None:
+            run = await db.get(SchemaDiscoveryRun, parsed_run_id)
+            job_id = (
+                await db.execute(
+                    select(GraphExtractionJob.id)
+                    .where(
+                        GraphExtractionJob.schema_discovery_run_id == parsed_run_id,
+                        GraphExtractionJob.ontology_version_id == publication.ontology_version_id,
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            explicit_draft = bool(
+                run is not None
+                and run.status == "succeeded"
+                and run.ontology_version_id == publication.ontology_version_id
+                and job_id is not None
+            )
     if (
         ontology is None
         or ontology.library_id != publication.library_id
-        or ontology.status != ONTOLOGY_STATUS_ACTIVE
+        or (ontology.status != ONTOLOGY_STATUS_ACTIVE and not (explicit_draft and ontology.status == "draft"))
     ):
         raise GraphPublicationActivationError("ontology_not_active", "ontology version is not active")
     return ontology
@@ -613,6 +641,7 @@ async def _activate_locked(
         raise GraphPublicationActivationError("publication_disabled", "graph publication is disabled")
 
     ontology = await _lock_active_ontology(db, publication)
+    allow_explicit_draft = ontology.status == "draft"
     previous = await _lock_current_publication(
         db,
         library_id=publication.library_id,
@@ -655,6 +684,7 @@ async def _activate_locked(
         library,
         ontology,
         include_drafts=publication.include_drafts,
+        allow_explicit_draft=allow_explicit_draft,
         projection=projection,
         config=config,
     )
@@ -673,6 +703,7 @@ async def _activate_locked(
             library,
             ontology,
             include_drafts=publication.include_drafts,
+            allow_explicit_draft=allow_explicit_draft,
             projection=projection,
             config=config,
         )

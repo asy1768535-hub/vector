@@ -10,6 +10,7 @@ import pytest
 from app.models.graph_extraction_job import GraphExtractionJob
 from app.models.graph_publication import GraphPublication
 from app.models.library import Library
+from app.models.ontology_version import OntologyVersion
 from app.services.graph_extraction_auto_publication import (
     GraphExtractionAutoPublicationError,
     auto_publish_graph_extraction_job,
@@ -46,12 +47,14 @@ class _Session:
         *,
         job=None,
         library=None,
+        ontology=None,
         existing=None,
         execute_results=None,
         publications=None,
     ) -> None:
         self.job = job
         self.library = library
+        self.ontology = ontology or SimpleNamespace(version_key="enterprise")
         self.existing = existing
         self.execute_results = list(execute_results or [])
         self.publications = dict(publications or {})
@@ -70,6 +73,8 @@ class _Session:
             return self.job
         if model is Library:
             return self.library
+        if model is OntologyVersion:
+            return self.ontology
         if model is not GraphPublication:
             return None
         return self.publications.get(_row_id)
@@ -174,10 +179,22 @@ def _publication_items(publication, *, entity=None, relation=None):
 
 
 @pytest.mark.parametrize("job_status", ["succeeded", "partially_succeeded"])
-def test_auto_publish_activates_full_and_partial_success(job_status):
+@pytest.mark.parametrize(
+    ("ontology_key", "expected_include_drafts"),
+        [("enterprise", True), ("ai-exploration", True)],
+)
+def test_auto_publish_activates_full_and_partial_success(
+    job_status,
+    ontology_key,
+    expected_include_drafts,
+):
     job = _job(status=job_status)
     publication = _publication()
-    planning_session = _Session(job=job, library=_library())
+    planning_session = _Session(
+        job=job,
+        library=_library(),
+        ontology=SimpleNamespace(version_key=ontology_key),
+    )
     activation_session = _Session(
         job=job,
         execute_results=[_publication_items(publication)],
@@ -213,12 +230,12 @@ def test_auto_publish_activates_full_and_partial_success(job_status):
     assert activation_session.commits == 1
     assert job.statistics["publication"]["outcome"] == "activated"
     plan.assert_awaited_once()
-    assert plan.await_args.kwargs["include_drafts"] is False
+    assert plan.await_args.kwargs["include_drafts"] is expected_include_drafts
     assert job.statistics["publication"]["diff"] == {
         "entity": {"added": 1, "retained": 0, "changed": 0, "removed": 0},
         "relation": {"added": 1, "retained": 0, "changed": 0, "removed": 0},
     }
-    assert plan.await_args.kwargs["include_drafts"] is False
+    assert plan.await_args.kwargs["include_drafts"] is expected_include_drafts
     assert plan.await_args.kwargs["requested_by_user_id"] == USER_ID
     assert activate.await_args.kwargs["activated_by_user_id"] == USER_ID
 

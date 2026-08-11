@@ -13,6 +13,7 @@ from app.models.knowledge_relation import KnowledgeRelation
 from app.services.graph_extraction_materializer import (
     GraphExtractionMaterializationError,
     GraphExtractionMaterializationResult,
+    _add_extracted_aliases,
     _draft_relation,
     _entity_candidate_eligible,
     _eligible_matched_entity,
@@ -118,6 +119,7 @@ def _entity_candidate(*, key: str, matched_entity_id=None, confidence=0.95):
         entity_type_key=key,
         canonical_name=f"{key} name",
         normalized_name=f"{key} name",
+        proposed_aliases=[],
         proposed_properties={},
         matched_entity_id=matched_entity_id,
         materialized_entity_id=None,
@@ -127,6 +129,33 @@ def _entity_candidate(*, key: str, matched_entity_id=None, confidence=0.95):
         review_reason=None,
         purged_at=None,
     )
+
+
+def test_extracted_aliases_are_persisted_once_and_skip_the_canonical_name():
+    candidate = _entity_candidate(key="project")
+    candidate.proposed_aliases = ["青岩光伏电站项目", " 青岩光伏电站项目 ", "青岩光伏电站"]
+    entity = Entity(
+        id=uuid.uuid4(),
+        library_id=LIB_ID,
+        ontology_version_id=ONTOLOGY_ID,
+        entity_type_id=PERSON_TYPE_ID,
+        canonical_name="青岩光伏电站",
+        normalized_name="青岩光伏电站",
+        status="draft",
+        source_type="extracted",
+    )
+    db = FakeDB()
+
+    _add_extracted_aliases(
+        db,
+        library=SimpleNamespace(id=LIB_ID),
+        candidate=candidate,
+        entity=entity,
+    )
+
+    assert [(row.alias, row.normalized_alias) for row in db.added] == [
+        ("青岩光伏电站项目", "青岩光伏电站项目")
+    ]
 
 
 def _relation_candidate(source_id, target_id, **changes):
@@ -216,7 +245,7 @@ def test_materializer_reuses_entity_created_after_candidate_matching():
         ("partially_succeeded", {"failed": 1}, "partially_succeeded", "unit_failures"),
     ],
 )
-def test_materializer_creates_only_draft_facts_and_active_support_rows(
+def test_materializer_creates_evidenced_independent_entities_and_draft_facts(
     initial_status, counts, expected_status, expected_error
 ):
     matched_id = uuid.uuid4()
@@ -270,6 +299,7 @@ def test_materializer_creates_only_draft_facts_and_active_support_rows(
     mention_rows = [
         SimpleNamespace(status="active", created_by_job_id=None, extraction_key=None),
         SimpleNamespace(status="active", created_by_job_id=None, extraction_key=None),
+        SimpleNamespace(status="active", created_by_job_id=None, extraction_key=None),
     ]
     draft_relation = KnowledgeRelation(
         id=uuid.uuid4(),
@@ -288,6 +318,10 @@ def test_materializer_creates_only_draft_facts_and_active_support_rows(
             _Result([relation, evidence_group]),
             _Result([person_evidence, team_evidence, orphan_evidence]),
             _Result([relation_evidence]),
+            _Result(),
+            _Result(),
+            _Result(),
+            _Result(),
             _Result(),
             _Result(),
             _Result(),
@@ -342,31 +376,28 @@ def test_materializer_creates_only_draft_facts_and_active_support_rows(
     ):
         result = asyncio.run(_materialize_job_transaction(db, job_id=JOB_ID))
 
-    assert result == GraphExtractionMaterializationResult(1, 2, 1, 1)
-    create_entity.assert_awaited_once()
+    assert result == GraphExtractionMaterializationResult(2, 3, 1, 1)
+    assert create_entity.await_count == 2
     assert create_entity.await_args.args[2].status == "draft"
     create_relation.assert_awaited_once()
     assert create_relation.await_args.args[2].status == "draft"
     assert all(row.status == "active" for row in mention_rows)
     assert formal_evidence.status == "active"
-    assert create_mention.await_count == 2
+    assert create_mention.await_count == 3
     create_relation_evidence.assert_awaited_once()
     assert person.status == "materialized"
     assert team.status == "materialized"
     assert relation.status == "materialized"
     assert draft_relation.review_status == "not_required"
     assert evidence_group.status == "validated"
-    assert orphan.status == "pending_review"
-    assert orphan.review_reason == "orphan_entity"
-    assert {item["code"] for item in orphan.validation_errors} == {"orphan_entity"}
+    assert orphan.status == "materialized"
+    assert orphan.materialized_entity_id == new_entity.id
     assert job.status == expected_status
     assert job.error_code == expected_error
-    assert job.statistics["materialization"]["pending_entity_candidate_count"] == 1
-    assert job.statistics["materialization"]["failure_reasons"] == {"orphan_entity": 1}
+    assert job.statistics["materialization"]["pending_entity_candidate_count"] == 0
+    assert job.statistics["materialization"]["failure_reasons"] == {}
     assert job.statistics["materialization"]["publishable_relation_count"] == 1
-    assert (
-        job.statistics["materialization"]["publishable_relation_evidence_count"] == 1
-    )
+    assert job.statistics["materialization"]["publishable_relation_evidence_count"] == 1
 
 
 def test_materializer_retains_entity_candidates_when_no_valid_relation_exists():
@@ -428,9 +459,7 @@ def test_materializer_retains_entity_candidates_when_no_valid_relation_exists():
     assert result == GraphExtractionMaterializationResult(0, 0, 0, 0)
     assert person.status == "pending_review"
     assert person.review_reason == "entities_without_valid_relation"
-    assert {item["code"] for item in person.validation_errors} == {
-        "entities_without_valid_relation"
-    }
+    assert {item["code"] for item in person.validation_errors} == {"entities_without_valid_relation"}
     assert job.statistics["materialization"]["outcome"] == "entities_only"
     assert job.statistics["materialization"]["pending_entity_candidate_count"] == 1
     create_entity.assert_not_awaited()

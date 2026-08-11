@@ -15,8 +15,16 @@ import io
 import logging
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pypdf
+
+from app.services.parser_units import (
+    build_ocr_parser_units,
+    build_parser_unit,
+    ocr_result_text_and_blocks,
+    parser_provenance,
+)
 
 log = logging.getLogger(__name__)
 PdfSource = bytes | Path
@@ -91,7 +99,7 @@ def _extract_pdf_parts(
     data: PdfSource,
     *,
     ocr_enabled: bool,
-    ocr: Callable[[bytes], str] | None,
+    ocr: Callable[[bytes], Any] | None,
     min_text_chars: int,
     render_dpi: int,
     max_ocr_pages: int,
@@ -102,7 +110,7 @@ def _extract_pdf_parts(
     except Exception:  # noqa: BLE001  —— 不向外暴露内部细节（可能含路径/正文）
         raise PdfExtractError("PDF 解析失败（文件可能损坏或加密）") from None
 
-    parts: list[tuple[int, str, str]] = []
+    parts: list[tuple[int, str, str, list[dict[str, Any]]]] = []
     ocr_pages_used = 0
 
     for idx, page in enumerate(pages):
@@ -125,30 +133,32 @@ def _extract_pdf_parts(
 
         has_visual_content = _page_has_visual_content(page)
         if meaningful_chars >= min_text_chars and not has_visual_content:
-            parts.append((idx, text, "native"))
+            parts.append((idx, text, "native", []))
             continue
 
         if meaningful_chars >= min_text_chars:
             if not ocr_enabled or ocr is None or not embedded_images:
-                parts.append((idx, text, "native_visual_unparsed"))
+                parts.append((idx, text, "native_visual_unparsed", []))
                 continue
             if ocr_pages_used >= max_ocr_pages:
                 raise PdfExtractError(
                     f"PDF visual OCR pages exceed limit {max_ocr_pages}; processing stopped"
                 )
             ocr_pages_used += 1
-            image_texts = [
-                value
-                for image_data in embedded_images
-                if (value := (ocr(image_data) or "").strip())
-                and _meaningful_char_count(value) > 0
-            ]
+            image_texts: list[str] = []
+            ocr_blocks: list[dict[str, Any]] = []
+            for image_data in embedded_images:
+                value, blocks = ocr_result_text_and_blocks(ocr(image_data))
+                if value and _meaningful_char_count(value) > 0:
+                    image_texts.append(value)
+                    ocr_blocks.extend(blocks)
             merged = "\n".join([text, *image_texts])
             parts.append(
                 (
                     idx,
                     merged,
                     "mixed" if image_texts else "native_visual_unparsed",
+                    ocr_blocks,
                 )
             )
             continue
@@ -157,7 +167,7 @@ def _extract_pdf_parts(
         if not ocr_enabled:
             if text:  # 保留已有短文字；纯空白/图片页才跳过
                 mode = "native_visual_unparsed" if has_visual_content else "native_short"
-                parts.append((idx, text, mode))
+                parts.append((idx, text, mode, []))
             continue
         if ocr is None:
             raise PdfOcrUnavailableError(
@@ -170,7 +180,7 @@ def _extract_pdf_parts(
 
         png = _render_page_png(data, idx, render_dpi)
         ocr_pages_used += 1
-        ocr_text = (ocr(png) or "").strip()
+        ocr_text, ocr_blocks = ocr_result_text_and_blocks(ocr(png))
         del png  # 立即释放该页 PNG 引用
         # 合并原短文字与 OCR 结果；OCR 为空也保留原文字，不让短文字页丢内容
         merged = "\n".join(
@@ -178,7 +188,7 @@ def _extract_pdf_parts(
         )
         if merged:
             mode = "mixed" if text else "ocr"
-            parts.append((idx, merged, mode))
+            parts.append((idx, merged, mode, ocr_blocks))
 
     if not parts:
         if ocr_enabled:
@@ -192,7 +202,7 @@ def extract_pdf_text(
     data: PdfSource,
     *,
     ocr_enabled: bool,
-    ocr: Callable[[bytes], str] | None,
+    ocr: Callable[[bytes], Any] | None,
     min_text_chars: int,
     render_dpi: int,
     max_ocr_pages: int,
@@ -211,7 +221,7 @@ def extract_pdf_text(
     )
 
     return "\n\n".join(
-        f"【第 {idx + 1} 页】\n{text}" for idx, text, _mode in parts
+        f"【第 {idx + 1} 页】\n{text}" for idx, text, _mode, _blocks in parts
     )
 
 
@@ -221,7 +231,7 @@ def build_pdf_source(
     chunk_size: int,
     chunk_overlap: int,
     ocr_enabled: bool,
-    ocr: Callable[[bytes], str] | None,
+    ocr: Callable[[bytes], Any] | None,
     min_text_chars: int,
     render_dpi: int,
     max_ocr_pages: int,
@@ -238,8 +248,18 @@ def build_pdf_source(
     )
     text_parts: list[str] = []
     chunks: list[dict] = []
+    segments: list[dict] = []
     cursor = 0
-    for page_index, page_text, extraction_mode in parts:
+    parser = parser_provenance(
+        "pypdf",
+        "v1",
+        {
+            "min_text_chars": min_text_chars,
+            "render_dpi": render_dpi,
+            "max_ocr_pages": max_ocr_pages,
+        },
+    )
+    for page_index, page_text, extraction_mode, ocr_blocks in parts:
         segment = f"【第 {page_index + 1} 页】\n{page_text}"
         if text_parts:
             text_parts.append("\n\n")
@@ -247,6 +267,69 @@ def build_pdf_source(
         base_offset = cursor
         text_parts.append(segment)
         cursor += len(segment)
+        text_offset = base_offset + len(segment) - len(page_text)
+        normalized_text = "".join(text_parts)
+        parser_extraction_mode = (
+            "unparsed" if extraction_mode == "native_visual_unparsed"
+            else "native" if extraction_mode == "native_short"
+            else extraction_mode
+        )
+        quality = {
+            "extraction_mode": parser_extraction_mode,
+            "native_text_present": bool(page_text.strip()) and extraction_mode != "ocr",
+            "visual_content_unparsed": extraction_mode == "native_visual_unparsed",
+            "ocr_blocks": ocr_blocks,
+        }
+        if extraction_mode == "native_visual_unparsed":
+            quality["unparsed_reason"] = "native_visual_content_without_ocr"
+        location = {
+            "type": "page",
+            "page": page_index + 1,
+            "extraction_mode": extraction_mode,
+        }
+        segment_record = {
+            "kind": "prose",
+            "text": page_text,
+            "source_kind": "pdf",
+            "ordinal": len(segments),
+            "unit_key": f"pdf:page:{page_index + 1}",
+            "parser": parser,
+            "location": location,
+            "quality": quality,
+        }
+        segment_record["parser_unit"] = build_parser_unit(
+            source_kind="pdf",
+            unit_kind="section",
+            ordinal=segment_record["ordinal"],
+            unit_key=segment_record["unit_key"],
+            parser=parser,
+            location=location,
+            source_text=normalized_text,
+            source_start=text_offset,
+            source_end=text_offset + len(page_text),
+            quality={
+                "extraction_mode": parser_extraction_mode,
+                "native_text_present": quality["native_text_present"],
+                "visual_content_unparsed": quality["visual_content_unparsed"],
+                **(
+                    {"unparsed_reason": quality["unparsed_reason"]}
+                    if "unparsed_reason" in quality else {}
+                ),
+            },
+        )
+        if ocr_blocks and extraction_mode in {"ocr", "mixed"}:
+            segment_record["structured_units"] = build_ocr_parser_units(
+                ocr_blocks,
+                source_kind="pdf",
+                parser=parser,
+                parent_key=segment_record["unit_key"],
+                extraction_mode=extraction_mode,
+                unit_text=page_text,
+                normalized_text=normalized_text,
+                normalized_offset=text_offset,
+                page=page_index + 1,
+            )
+        segments.append(segment_record)
         for chunk in split_structured_text(
             segment,
             chunk_size=chunk_size,
@@ -258,9 +341,19 @@ def build_pdf_source(
                 "extraction_mode": extraction_mode,
             },
         ):
-            chunks.append({
+            output_chunk = {
                 **chunk,
                 "source_start": base_offset + chunk["source_start"],
                 "source_end": base_offset + chunk["source_end"],
-            })
-    return {"normalized_text": "".join(text_parts), "chunks": chunks}
+            }
+            if chunk.get("source_ranges"):
+                output_chunk["source_ranges"] = [
+                    {
+                        **source_range,
+                        "start": base_offset + source_range["start"],
+                        "end": base_offset + source_range["end"],
+                    }
+                    for source_range in chunk["source_ranges"]
+                ]
+            chunks.append(output_chunk)
+    return {"normalized_text": "".join(text_parts), "chunks": chunks, "segments": segments}

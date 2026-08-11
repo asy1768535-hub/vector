@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -10,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from pydantic import SecretStr
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.exc import DBAPIError
 
 from app.models.graph_extraction_job import GraphExtractionJob
 from app.schemas.graph_extraction import GraphExtractionPayload
@@ -590,6 +592,96 @@ def test_orchestration_calls_provider_outside_transactions_and_persists_valid_pa
     persist.assert_awaited_once()
 
 
+def test_retry_replays_first_valid_unit_payload_without_provider_call():
+    prepared = replace(_prepared(), has_prior_attempts=True)
+    replay = GraphExtractionPayload(entities=[], relations=[])
+    sessions = _SessionFactory()
+    provider = AsyncMock()
+
+    with (
+        patch(
+            "app.services.graph_extraction_worker._prepare_graph_extraction_unit",
+            new=AsyncMock(return_value=prepared),
+        ),
+        patch(
+            "app.services.graph_extraction_worker._load_prepared_replay",
+            new=AsyncMock(return_value=replay),
+        ) as load_replay,
+        patch(
+            "app.services.graph_extraction_worker.create_pending_attempt",
+            new=AsyncMock(),
+        ) as create_attempt,
+        patch(
+            "app.services.graph_extraction_worker._persist_candidate_result",
+            new=AsyncMock(return_value=True),
+        ) as persist,
+    ):
+        result = asyncio.run(
+            process_graph_extraction_unit(
+                sessions,
+                unit_id=UNIT_ID,
+                claim_token=CLAIM_TOKEN,
+                provider=provider,
+                max_attempts=3,
+            )
+        )
+
+    assert result == GraphExtractionProcessResult(
+        "succeeded",
+        ready_for_materialization=True,
+    )
+    load_replay.assert_awaited_once_with(sessions, prepared)
+    create_attempt.assert_not_awaited()
+    provider.extract.assert_not_awaited()
+    persist.assert_awaited_once_with(
+        sessions,
+        prepared=prepared,
+        payload=replay,
+    )
+
+
+def test_candidate_database_failure_reaches_worker_reconnect_boundary():
+    prepared = replace(_prepared(), has_prior_attempts=True)
+    replay = GraphExtractionPayload(entities=[], relations=[])
+    sessions = _SessionFactory()
+    database_error = DBAPIError(
+        statement=None,
+        params=None,
+        orig=ConnectionResetError("database reset"),
+        connection_invalidated=True,
+    )
+
+    with (
+        patch(
+            "app.services.graph_extraction_worker._prepare_graph_extraction_unit",
+            new=AsyncMock(return_value=prepared),
+        ),
+        patch(
+            "app.services.graph_extraction_worker._load_prepared_replay",
+            new=AsyncMock(return_value=replay),
+        ),
+        patch(
+            "app.services.graph_extraction_worker._persist_candidate_result",
+            new=AsyncMock(side_effect=database_error),
+        ),
+        patch(
+            "app.services.graph_extraction_worker._finish_claim_after_error",
+            new=AsyncMock(),
+        ) as finish,
+        pytest.raises(DBAPIError),
+    ):
+        asyncio.run(
+            process_graph_extraction_unit(
+                sessions,
+                unit_id=UNIT_ID,
+                claim_token=CLAIM_TOKEN,
+                max_attempts=3,
+            )
+        )
+
+    finish.assert_not_awaited()
+
+
 @pytest.mark.parametrize("category", ["timeout", "network_error", "http_error"])
 def test_provider_failure_finalizes_attempt_and_fails_unit_without_candidate_write(
     category,
@@ -821,6 +913,33 @@ def test_watch_entrypoint_delegates_to_active_worker_with_m5_heartbeat(monkeypat
     }
 
 
+def test_watch_entrypoint_reconnects_after_transient_database_failure(monkeypatch):
+    from app import db as db_module
+    from app.services import graph_extraction_worker as worker_service
+    from app.services import heartbeat
+    from app.workers import graph_extractor
+
+    monkeypatch.setattr(graph_extractor.settings, "graph_extraction_enabled", True)
+    monkeypatch.setattr(graph_extractor, "validate_graph_extraction_startup", lambda _: None)
+    monkeypatch.setattr(heartbeat, "make_instance_id", lambda: "worker-instance")
+    monkeypatch.setattr(heartbeat, "heartbeat_loop", AsyncMock())
+    monkeypatch.setattr(heartbeat, "beat", AsyncMock(return_value=True))
+    active = AsyncMock(side_effect=[ConnectionResetError("database reset"), None])
+    monkeypatch.setattr(worker_service, "run_graph_extraction_worker_pool", active)
+    engine = SimpleNamespace(dispose=AsyncMock())
+    monkeypatch.setattr(db_module, "get_engine", lambda: engine)
+    sleep = AsyncMock()
+    monkeypatch.setattr(graph_extractor.asyncio, "sleep", sleep)
+
+    asyncio.run(graph_extractor.run(watch=True))
+
+    assert active.await_count == 2
+    engine.dispose.assert_awaited_once()
+    sleep.assert_awaited_once()
+    metadata = active.await_args_list[-1].kwargs["metadata"]
+    assert metadata["database_reconnects"] == 1
+
+
 def test_worker_pool_starts_four_controlled_loops_with_unique_ids(monkeypatch):
     from app.services import graph_extraction_worker as worker
 
@@ -838,6 +957,33 @@ def test_worker_pool_starts_four_controlled_loops_with_unique_ids(monkeypatch):
     assert active.await_count == 4
     assert metadata["worker_concurrency"] == 4
     assert len({worker.graph_extraction_worker_id() for _ in range(4)}) == 4
+
+
+def test_worker_pool_restarts_only_the_loop_with_transient_database_failure(
+    monkeypatch,
+):
+    from app.services import graph_extraction_worker as worker
+
+    monkeypatch.setattr(worker.settings, "graph_extraction_worker_concurrency", 2)
+    active = AsyncMock(
+        side_effect=[ConnectionResetError("database reset"), None, None]
+    )
+    monkeypatch.setattr(worker, "run_graph_extraction_worker", active)
+    sleep = AsyncMock()
+    monkeypatch.setattr(worker.asyncio, "sleep", sleep)
+    metadata = {}
+
+    asyncio.run(
+        worker.run_graph_extraction_worker_pool(
+            watch=True,
+            metadata=metadata,
+            session_factory=_SessionFactory(),
+        )
+    )
+
+    assert active.await_count == 3
+    sleep.assert_awaited_once()
+    assert metadata["database_reconnects"] == 1
 
 
 def test_worker_materializes_only_when_processing_marks_job_ready():

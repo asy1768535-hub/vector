@@ -20,6 +20,7 @@ from app.models.document import Document
 from app.models.document_file import DocumentFile
 from app.models.document_import_job import DocumentImportJob
 from app.models.document_revision import DocumentRevision
+from app.models.document_revision_file import DocumentRevisionFile
 from app.models.library import Library
 from app.schemas.storage import SourceLocatorV1
 from app.services import folders as folders_service
@@ -36,6 +37,7 @@ from app.services.revision_files import (
     persist_revision_file_capture,
     prepare_managed_file_path,
 )
+from app.services.evidence_write_path import validate_parser_segments
 
 logging.basicConfig(
     level=logging.INFO,
@@ -215,10 +217,11 @@ async def _persist_revision_file(
     document: Document,
     source: Path,
     revision_id: uuid.UUID | None,
-) -> None:
+    file_id: uuid.UUID | None = None,
+) -> DocumentRevisionFile | None:
     if not settings.revision_file_storage_enabled:
         await _persist_legacy_file(db, job=job, document=document, source=source)
-        return
+        return None
     if revision_id is None:
         raise RuntimeError("revision file storage requires a DocumentRevision")
     prepared = await prepare_managed_file_path(
@@ -230,14 +233,38 @@ async def _persist_revision_file(
         expected_sha256=job.sha256,
         source_locator=SourceLocatorV1(kind="upload"),
     )
-    await persist_revision_file_capture(
+    return await persist_revision_file_capture(
         db,
         prepared=bind_prepared_file_object(
             prepared,
             document_id=document.id,
             document_revision_id=revision_id,
+            file_id=file_id,
         ),
-    )
+        )
+
+
+async def _apply_import_revision_scope(
+    db: AsyncSession,
+    *,
+    job: DocumentImportJob,
+    document: Document,
+    revision_id: uuid.UUID | None,
+) -> None:
+    if job.security_level is not None:
+        document.security_level = job.security_level
+    if revision_id is None:
+        return
+    revision = await db.get(DocumentRevision, revision_id)
+    if revision is None:
+        return
+    if job.security_level is not None:
+        revision.security_level = job.security_level
+    if job.graph_extraction_requested:
+        revision.parser_config = {
+            **(revision.parser_config or {}),
+            "graph_extraction_requested": True,
+        }
 
 
 async def _process_claimed_job(job_id: uuid.UUID) -> None:
@@ -258,6 +285,7 @@ async def _process_claimed_job(job_id: uuid.UUID) -> None:
             library,
             file_name=job.file_name,
         )
+    validate_parser_segments(parsed.segments)
 
     await _set_stage(job_id, "chunking")
     remove_staging = False
@@ -293,6 +321,12 @@ async def _process_claimed_job(job_id: uuid.UUID) -> None:
                 job.document_revision_id = (
                     target.latest_revision_id or target.current_revision_id
                 )
+                await _apply_import_revision_scope(
+                    db,
+                    job=job,
+                    document=target,
+                    revision_id=job.document_revision_id,
+                )
                 job.finished_at = datetime.now(timezone.utc)
                 job.worker_id = None
                 job.claimed_at = None
@@ -302,6 +336,11 @@ async def _process_claimed_job(job_id: uuid.UUID) -> None:
                 return
 
             if target is None:
+                candidate_revision_file_id = (
+                    uuid.uuid4()
+                    if settings.enable_evidence_write_path and settings.revision_file_storage_enabled
+                    else None
+                )
                 document, embedding_job, _chunk_count, _existing = (
                     await ingest_service.ingest_text(
                         db=db,
@@ -314,11 +353,21 @@ async def _process_claimed_job(job_id: uuid.UUID) -> None:
                         created_by=job.requested_by_user_id,
                         security_level=job.security_level,
                         chunks=parsed.chunks,
+                        segments=parsed.segments,
+                        file_name=job.file_name,
+                        raw_file_sha256=job.sha256 if candidate_revision_file_id else None,
+                        document_revision_file_id=candidate_revision_file_id,
                         source_path=source_path,
                     )
                 )
-                operation = "created"
+                operation = "unchanged" if _existing else "created"
+                revision_file_id = candidate_revision_file_id if not _existing else None
             else:
+                candidate_revision_file_id = (
+                    uuid.uuid4()
+                    if settings.enable_evidence_write_path and settings.revision_file_storage_enabled
+                    else None
+                )
                 embedding_job, _chunk_count, changed = (
                     await ingest_service.reingest_document(
                         db=db,
@@ -330,10 +379,15 @@ async def _process_claimed_job(job_id: uuid.UUID) -> None:
                         splitter=parsed.splitter_name,
                         force=job.replace_document_id is not None,
                         chunks=parsed.chunks,
+                        segments=parsed.segments,
+                        file_name=job.file_name,
+                        raw_file_sha256=job.sha256 if candidate_revision_file_id else None,
+                        document_revision_file_id=candidate_revision_file_id,
                     )
                 )
                 document = target
                 operation = "updated" if changed else "unchanged"
+                revision_file_id = candidate_revision_file_id if changed else None
             if source_path is not None:
                 document.source_path = source_path
             document.folder_id = await folders_service.ensure_folder_path(
@@ -344,20 +398,21 @@ async def _process_claimed_job(job_id: uuid.UUID) -> None:
                 if embedding_job is not None
                 else document.latest_revision_id or document.current_revision_id
             )
-            await _persist_revision_file(
+            if operation != "unchanged" or not settings.revision_file_storage_enabled:
+                await _persist_revision_file(
+                    db,
+                    job=job,
+                    document=document,
+                    source=source,
+                    revision_id=revision_id,
+                    file_id=revision_file_id,
+                )
+            await _apply_import_revision_scope(
                 db,
                 job=job,
                 document=document,
-                source=source,
                 revision_id=revision_id,
             )
-            if job.graph_extraction_requested and revision_id is not None:
-                revision = await db.get(DocumentRevision, revision_id)
-                if revision is not None:
-                    revision.parser_config = {
-                        **(revision.parser_config or {}),
-                        "graph_extraction_requested": True,
-                    }
             job.result_operation = operation
             job.document_id = document.id
             job.document_revision_id = revision_id

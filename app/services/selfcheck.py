@@ -13,8 +13,11 @@ import logging
 import httpx
 
 from app.config import settings
+from app.schemas.evidence_locator import EVIDENCE_LOCATOR_CONTRACT_VERSION
 from app.services import embedding
 from app.services import rerank as rerank_svc
+from app.services.evidence_locator_projection import LOCATOR_PROJECTION_VERSION
+from app.services.parser_units import PARSER_UNIT_CONTRACT_VERSION
 
 log = logging.getLogger(__name__)
 
@@ -98,12 +101,12 @@ async def probe_rerank() -> tuple[str, str]:
     ok/fail 仅在「已配置 且（全局开 或 有库级 rerank_enabled=true 覆盖）」时给出。
     rerank 是检索期可选能力（失败会回退向量序），不参与 worker 的 consumable 判定。
     """
-    if not rerank_svc.is_configured():
-        return "off", "not configured"
     # 全局未开时，只要有库级覆盖为 true，实际检索仍会走 rerank → 应探测
     active = settings.rerank_enabled or await any_library_rerank_enabled()
     if not active:
         return "off", "disabled (no library override)"
+    if not rerank_svc.is_configured():
+        return "off", "not configured"
     try:
         await rerank_svc.rerank("healthcheck", ["healthcheck document"], top_n=1)
         return "ok", "ok"
@@ -143,6 +146,17 @@ async def run_startup_check(context: str) -> bool:
     qdr_ok, qdr_msg = await probe_qdrant()
 
     log.info("[selfcheck:%s] ===== 启动自检 =====", context)
+    log.info(
+        "[selfcheck:%s] evidence_locator contract=%s parser_unit=%s projection=%s "
+        "read=%s projection_enabled=%s write_path=%s",
+        context,
+        EVIDENCE_LOCATOR_CONTRACT_VERSION,
+        PARSER_UNIT_CONTRACT_VERSION,
+        LOCATOR_PROJECTION_VERSION,
+        settings.enable_evidence_locator_read,
+        settings.enable_evidence_locator_projection,
+        settings.enable_evidence_write_path,
+    )
 
     if emb_ok and emb_msg == "ok":
         log.info("[selfcheck:%s] embedding OK   model=%s dim=%s url=%s",

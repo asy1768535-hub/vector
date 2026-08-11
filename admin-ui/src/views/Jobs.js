@@ -1,8 +1,8 @@
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue';
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import * as api from '../api.js';
 import { taskEmpty } from '../illustrations.js';
-import { STATUS_LABEL, STATUS_TAG, STATUS_ICON, TASK_TYPE_LABEL, STAGE_LABEL, formatJobTime, jobDuration, shortId, filterJobs, paginateJobs, libraryName } from '../jobs_ui.js';
+import { STATUS_LABEL, STATUS_TAG, STATUS_ICON, TASK_TYPE_LABEL, STAGE_LABEL, formatJobTime, jobDuration, shortId, filterJobs, paginateJobs, libraryName, jobErrorText, jobStageLabel, retryReasonLabel, statsStatusTotal, retryTargetKey, isRetrySelectable, uniqueRetryRows, retryItem, retryTypeSummary } from '../jobs_ui.js';
 
 const BUILD_MODE_LABEL = { fast: '快速', standard: '标准', deep: '深度' };
 const PUBLICATION_STATUS_LABEL = {
@@ -56,7 +56,7 @@ export default {
         const advancedOpen = ref(false);
         const emptyStats = () => ({
             pending: 0, processing: 0, done: 0, failed: 0,
-            cancelled: 0, superseded: 0, retryable_failed: 0, total: 0,
+            cancelled: 0, superseded: 0, retryable_failed: 0, retryable_embedding_failed: 0, total: 0,
         });
         const stats = ref(emptyStats());
         const statsFailed = ref(false);
@@ -64,7 +64,7 @@ export default {
         const page = ref(1);
         const pageSize = ref(10);
         const selectedJob = ref(null);
-        const detailCardRef = ref(null);
+        const detailOpen = ref(false);
         const truncated = ref(false);
         const libsFailed = ref(false);
 
@@ -78,7 +78,7 @@ export default {
             ]);
             if (jr.status === 'fulfilled') {
                 jobs.value = jr.value || [];
-                truncated.value = (jr.value || []).length >= 500;
+                truncated.value = (jr.value || []).length >= 1500;
                 if (selectedJob.value) {
                     const fresh = (jr.value || []).find((j) => j.id === selectedJob.value.id);
                     if (fresh) selectedJob.value = fresh;
@@ -119,6 +119,17 @@ export default {
 
         const filtered = computed(() => filterJobs(jobs.value, filters));
         const paged = computed(() => paginateJobs(filtered.value, page.value, pageSize.value));
+        const retryableCount = computed(() => uniqueRetryRows(filtered.value).length);
+        const canResetFailed = computed(() => filters.library_id
+            ? jobs.value.some((job) => job.library_id === filters.library_id
+                && isRetrySelectable(job) && job.retry_target_type === 'embedding')
+            : !statsFailed.value && stats.value.retryable_embedding_failed > 0);
+
+        watch([filtered, paged], () => {
+            if (selectedJob.value && !paged.value.items.some((job) => job.id === selectedJob.value.id)) {
+                closeDetail();
+            }
+        });
 
         function resetFilters() {
             Object.assign(filters, { task_type: '', status: '', library_id: '', worker_id: '', document_id: '', dateFrom: '', dateTo: '' });
@@ -129,55 +140,63 @@ export default {
             return selectedJob.value && selectedJob.value.id === row.id;
         }
 
-        async function openDetail(row) {
-            if (isSelected(row)) {
-                // 收起：不滚动
-                selectedJob.value = null;
-            } else {
-                // 切换或首次打开
-                selectedJob.value = row;
-                await nextTick();
-                detailCardRef.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-            }
+        function openDetail(row, _column, event) {
+            if (event?.target?.closest('button, input, .el-checkbox')) return;
+            selectedJob.value = row;
+            detailOpen.value = true;
         }
 
-        function closeDetail() { selectedJob.value = null; }
+        function closeDetail() { detailOpen.value = false; }
+        function clearDetail() { selectedJob.value = null; }
 
         async function retry(row) {
             if (retryingId.value) return;
-            retryingId.value = row.id;
-            try { await api.retryJob(row.id); ElMessage.success('已提交重试'); await refreshAll(); }
-            catch (e) { ElMessage.error(e.message); }
+            if (!isRetrySelectable(row)) return;
+            retryingId.value = retryTargetKey(row);
+            try {
+                const response = await api.retryMonitoredTasks([retryItem(row)]);
+                const result = response.results?.[0];
+                if (result?.status === 'succeeded') ElMessage.success(result.message);
+                else ElMessage.warning(result?.message || '重试被拒绝');
+                await refreshAll();
+            } catch (e) { ElMessage.error(e.message); }
             finally { retryingId.value = null; }
-        }
-
-        function isRetrySelectable(row) {
-            return row.status === 'failed' && row.retryable;
+            return;
         }
 
         function onFailedSelectionChange(rows) {
-            selectedFailedJobs.value = (rows || []).filter(isRetrySelectable);
+            selectedFailedJobs.value = uniqueRetryRows(rows);
+        }
+
+        function retryResultSummary(results) {
+            return (results || [])
+                .filter((result) => result.status === 'rejected')
+                .map((result) => `${result.task_type}:${shortId(result.job_id)} ${result.message}`)
+                .join('；');
         }
 
         async function retrySelected() {
-            const rows = [...selectedFailedJobs.value];
+            const rows = uniqueRetryRows(selectedFailedJobs.value);
             if (!rows.length || retryingSelected.value) return;
             try {
                 await ElMessageBox.confirm(
-                    `将重试所选的 ${rows.length} 条失败任务，确定继续？`,
+                    `将重试所选 ${rows.length} 条失败任务（${retryTypeSummary(rows)}），确认继续？`,
                     '重试所选任务',
                     { type: 'warning', confirmButtonText: '重试', cancelButtonText: '取消' },
                 );
             } catch (_) { return; }
             retryingSelected.value = true;
             try {
-                const results = await Promise.allSettled(rows.map((row) => api.retryJob(row.id)));
-                const succeeded = results.filter((result) => result.status === 'fulfilled').length;
-                const failed = results.length - succeeded;
+                const response = await api.retryMonitoredTasks(rows.map(retryItem));
+                const results = response.results || [];
+                const succeeded = results.filter((result) => result.status === 'succeeded').length;
+                const rejected = results.length - succeeded;
                 if (succeeded) ElMessage.success(`已重试 ${succeeded} 条任务`);
-                if (failed) ElMessage.warning(`${failed} 条任务重试失败，请查看任务状态`);
+                if (rejected) ElMessage.warning(`有 ${rejected} 条任务被拒绝：${retryResultSummary(results)}`);
                 await refreshAll();
-            } finally { retryingSelected.value = false; }
+            } catch (e) { ElMessage.error(e.message); }
+            finally { retryingSelected.value = false; }
+            return;
         }
 
         function handleMoreAction(command) {
@@ -185,6 +204,10 @@ export default {
         }
 
         async function resetFailed() {
+            if (!filters.library_id && statsFailed.value) {
+                ElMessage.info('当前无法确定可重试任务数量，请先刷新统计');
+                return;
+            }
             if (filters.library_id) {
                 try {
                     await ElMessageBox.confirm(
@@ -221,13 +244,13 @@ export default {
 
         return {
             jobs, libs, loading, resetting, retryingId, retryingSelected, selectedFailedJobs, advancedOpen, stats, statsFailed,
-            filters, page, pageSize, selectedJob, detailCardRef, truncated, libsFailed,
-            filtered, paged, load, refreshAll, resetFilters, openDetail, closeDetail, retry, retrySelected, resetFailed,
-            isSelected, isRetrySelectable, onFailedSelectionChange, handleMoreAction,
+            filters, page, pageSize, selectedJob, detailOpen, truncated, libsFailed,
+            filtered, paged, retryableCount, canResetFailed, load, refreshAll, resetFilters, openDetail, closeDetail, retry, retrySelected, resetFailed,
+            clearDetail, isSelected, retryTargetKey, isRetrySelectable, onFailedSelectionChange, handleMoreAction,
             STATUS_LABEL, STATUS_TAG, STATUS_ICON, TASK_TYPE_LABEL, STAGE_LABEL,
             formatJobTime, jobDuration, shortId, libraryName, taskEmpty,
             buildModeLabel, publicationStatusLabel, publicationFailureReasonLabel,
-            publicationDiffLabel, formatEta,
+            publicationDiffLabel, formatEta, jobErrorText, jobStageLabel, retryReasonLabel, statsStatusTotal,
         };
     },
     template: `
@@ -242,7 +265,7 @@ export default {
             <el-button>更多操作</el-button>
             <template #dropdown>
               <el-dropdown-menu>
-                <el-dropdown-item command="reset-failed" :disabled="resetting || (!filters.library_id && !statsFailed && !stats.retryable_failed)">
+                <el-dropdown-item command="reset-failed" :disabled="resetting || !canResetFailed">
                   {{ filters.library_id ? '重试当前知识库的全部失败向量任务' : '重试全部失败的向量任务' }}
                 </el-dropdown-item>
               </el-dropdown-menu>
@@ -271,6 +294,15 @@ export default {
           <local-icon icon="status:failed" class="jobs-stat-icon" />
           <div class="jobs-stat-body"><b>{{ statsFailed ? '—' : stats.failed }}</b><span>失败</span></div>
         </div>
+        <div class="jobs-stat jobs-stat--cancelled">
+          <local-icon icon="status:skipped" class="jobs-stat-icon" />
+          <div class="jobs-stat-body"><b>{{ statsFailed ? '—' : stats.cancelled }}</b><span>已取消</span></div>
+        </div>
+        <div class="jobs-stat jobs-stat--superseded">
+          <local-icon icon="status:skipped" class="jobs-stat-icon" />
+          <div class="jobs-stat-body"><b>{{ statsFailed ? '—' : stats.superseded }}</b><span>已覆盖</span></div>
+        </div>
+        <div class="jobs-stats-total">统计总数：{{ statsFailed ? '—' : statsStatusTotal(stats) }} / {{ statsFailed ? '—' : stats.total }}</div>
       </section>
 
       <section class="jobs-toolbar">
@@ -306,15 +338,16 @@ export default {
         </div>
       </section>
 
-      <el-alert v-if="truncated" type="info" :closable="false" show-icon title="结果可能被截断，仅展示前500条" />
+      <el-alert v-if="truncated" type="info" :closable="false" show-icon title="结果可能被截断，仅展示前1500条" />
       <el-alert v-if="libsFailed" type="warning" :closable="false" show-icon title="知识库列表加载失败，不影响任务查看" />
 
       <section class="jobs-table-card">
         <div class="jobs-table-actions">
-          <span>仅失败且可重试的任务可以勾选</span>
-          <el-button type="primary" plain :disabled="!selectedFailedJobs.length" :loading="retryingSelected" @click="retrySelected">
+          <span>仅失败且可重试的任务可以勾选；当前可选择 {{ retryableCount }} 条。表格可横向滚动查看全部列</span>
+          <el-button type="primary" plain :disabled="!selectedFailedJobs.length || !retryableCount" :loading="retryingSelected" @click="retrySelected">
             重试所选<span v-if="selectedFailedJobs.length">（{{ selectedFailedJobs.length }}）</span>
           </el-button>
+          <span v-if="!retryableCount" class="jobs-retry-unavailable">当前失败任务均不可重试</span>
         </div>
         <div class="jobs-table-shell">
           <el-table :data="paged.items" v-loading="loading"
@@ -330,7 +363,7 @@ export default {
             <el-table-column type="selection" width="46" :selectable="isRetrySelectable" />
             <el-table-column label="任务 / 文档" min-width="200">
               <template #default="{row}">
-                <div class="jobs-doc-id">{{ row.title || shortId(row.document_id) }}</div>
+                <div class="jobs-doc-id" :title="row.title || row.document_id">{{ row.title || shortId(row.document_id) }}</div>
                 <div class="jobs-doc-ver">{{ shortId(row.document_id) }}<span v-if="row.document_revision"> · v{{ row.document_revision }}</span></div>
               </template>
             </el-table-column>
@@ -338,7 +371,7 @@ export default {
               <template #default="{row}">{{ TASK_TYPE_LABEL[row.task_type] || row.task_type }}</template>
             </el-table-column>
             <el-table-column label="知识库" min-width="140">
-              <template #default="{row}">{{ libraryName(libs, row.library_id) }}</template>
+              <template #default="{row}"><span class="jobs-library-name" :title="libraryName(libs, row.library_id)">{{ libraryName(libs, row.library_id) }}</span></template>
             </el-table-column>
             <el-table-column label="状态" width="130" align="center">
               <template #default="{row}">
@@ -347,7 +380,7 @@ export default {
               </template>
             </el-table-column>
             <el-table-column label="当前阶段" min-width="140">
-              <template #default="{row}">{{ STAGE_LABEL[row.stage] || row.stage || '—' }}</template>
+              <template #default="{row}">{{ jobStageLabel(row) }}</template>
             </el-table-column>
             <el-table-column label="处理服务" width="120" show-overflow-tooltip prop="worker_id" />
             <el-table-column label="尝试" width="60" align="center" prop="attempt_count" />
@@ -355,21 +388,20 @@ export default {
               <template #default="{row}">{{ jobDuration(row) }}</template>
             </el-table-column>
             <el-table-column label="最后错误" min-width="160" show-overflow-tooltip>
-              <template #default="{row}"><span class="jobs-error-text">{{ row.last_error || '—' }}</span></template>
+              <template #default="{row}"><span class="jobs-error-text" :title="jobErrorText(row)">{{ jobErrorText(row) }}</span></template>
             </el-table-column>
             <el-table-column label="创建时间" width="150">
               <template #default="{row}">{{ formatJobTime(row.created_at) }}</template>
             </el-table-column>
-            <el-table-column label="操作" width="160" align="center" fixed="right">
+            <el-table-column label="操作" width="190" align="center">
               <template #default="{row}">
                 <el-button size="small" type="primary"
                            :aria-expanded="isSelected(row) ? 'true' : 'false'"
                            @click.stop="openDetail(row)">
-                  {{ isSelected(row) ? '收起详情' : '查看详情' }}
+                  查看详情
                 </el-button>
-                <el-button size="small" link type="primary"
-                           :loading="retryingId === row.id"
-                           :disabled="!row.retryable"
+                <el-button v-if="row.retryable" size="small" link type="primary"
+                           :loading="retryingId === retryTargetKey(row)"
                            @click.stop="retry(row)">
                   <local-icon icon="status:retry" class="jobs-retry-icon" />重试
                 </el-button>
@@ -378,7 +410,7 @@ export default {
           </el-table>
         </div>
 
-        <div class="jobs-detail-card" v-if="selectedJob" ref="detailCardRef">
+        <el-dialog v-if="selectedJob" v-model="detailOpen" class="jobs-detail-dialog" width="820px" top="5vh" @closed="clearDetail">
           <div class="jobs-detail-header">
             <span class="jobs-detail-title">任务详情 · {{ shortId(selectedJob.document_id) }}</span>
             <el-button size="small" @click="closeDetail">收起</el-button>
@@ -395,8 +427,9 @@ export default {
             <dt>任务类型</dt><dd>{{ TASK_TYPE_LABEL[selectedJob.task_type] || selectedJob.task_type }}</dd>
             <dt>知识库</dt><dd>{{ libraryName(libs, selectedJob.library_id) }}</dd>
             <dt>状态</dt><dd><el-tag :type="STATUS_TAG[selectedJob.status]" size="small">{{ STATUS_LABEL[selectedJob.status] || selectedJob.status }}</el-tag></dd>
-            <dt>当前阶段</dt><dd>{{ STAGE_LABEL[selectedJob.stage] || selectedJob.stage || '—' }}</dd>
+            <dt>当前阶段</dt><dd>{{ jobStageLabel(selectedJob) }}</dd>
             <dt>原始状态</dt><dd>{{ selectedJob.raw_status }}</dd>
+            <dt>重试能力</dt><dd>{{ retryReasonLabel(selectedJob) }}</dd>
             <template v-if="selectedJob.task_type === 'graph'">
               <dt>构建模式</dt><dd>{{ buildModeLabel(selectedJob.build_mode) }}</dd>
               <dt>抽取进度</dt><dd>{{ selectedJob.progress?.completed || 0 }} / {{ selectedJob.progress?.total || 0 }} Unit（{{ selectedJob.progress?.percent || 0 }}%）</dd>
@@ -421,12 +454,13 @@ export default {
             <dt>创建时间</dt><dd>{{ formatJobTime(selectedJob.created_at) }}</dd>
             <dt>开始时间</dt><dd>{{ formatJobTime(selectedJob.claimed_at) }}</dd>
             <dt>完成时间</dt><dd>{{ formatJobTime(selectedJob.finished_at) }}</dd>
-            <dt>最后错误</dt><dd class="jobs-error-text">{{ selectedJob.last_error || '—' }}</dd>
+            <dt>最后错误</dt><dd class="jobs-error-text">{{ jobErrorText(selectedJob) }}</dd>
+            <dt>原始错误</dt><dd class="jobs-error-text">{{ selectedJob.raw_error || '历史任务未记录错误' }}</dd>
           </dl>
-        </div>
+        </el-dialog>
 
         <div class="jobs-pagination">
-          <span>共 {{ paged.total }} 条</span>
+          <span>当前列表 {{ paged.total }} 条{{ truncated ? '（最多展示前1500条）' : '' }}</span>
           <el-pagination
               v-model:current-page="page" v-model:page-size="pageSize"
               :total="paged.total" :page-sizes="[10, 20, 50]"

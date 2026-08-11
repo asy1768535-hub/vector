@@ -57,7 +57,11 @@ def test_optimization_flags_are_inert_by_default_and_frozen_when_enabled(monkeyp
     monkeypatch.setattr(settings, "graph_extraction_output_budget_enabled", True)
     monkeypatch.setattr(settings, "graph_extraction_max_output_tokens", 3500)
     assert _policy_config_snapshot(candidate_review_policy="manual_review")["center_only"] is True
-    assert _model_config_snapshot()["max_output_tokens"] == 3500
+    model = _model_config_snapshot()
+    assert model["max_output_tokens"] == 3500
+    assert model["batch_prompt_version"] == "eval-batch-v6-compact-coverage-direction-aliases"
+    assert len(model["batch_prompt_hash"]) == 64
+    assert model["schema_routing_version"] == "compact-schema-v3"
 
 
 def test_build_modes_are_frozen_with_bounded_batch_and_output_budgets(monkeypatch):
@@ -268,6 +272,8 @@ def test_ontology_snapshot_matches_the_strict_m4_contract():
         "relation_constraints",
     ]
     assert [row["key"] for row in snapshot["entity_types"]] == ["person", "team"]
+    assert [row["label"] for row in snapshot["entity_types"]] == ["Person", "Team"]
+    assert snapshot["relation_types"][0]["label"] == "Member of"
     assert snapshot["entity_types"][0]["active_attribute_definitions"][0] == {
         "key": "level",
         "value_type": "integer",

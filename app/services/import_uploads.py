@@ -325,10 +325,21 @@ async def cancel_upload(
     await db.flush()
 
 
-async def retry_job(db: AsyncSession, *, job: DocumentImportJob) -> DocumentImportJob:
+async def retry_job(
+    db: AsyncSession,
+    *,
+    job: DocumentImportJob,
+    config: Settings = settings,
+) -> DocumentImportJob:
     if job.status != "failed":
         raise ImportUploadError(
             "job_not_retryable", "import job is not retryable", status_code=409
+        )
+    if job.attempt_count >= config.import_worker_max_attempts:
+        raise ImportUploadError(
+            "attempt_budget_exhausted",
+            "import attempt budget exhausted",
+            status_code=409,
         )
     job.status = "queued"
     job.current_stage = "queued"
@@ -351,6 +362,20 @@ def session_projection(job: DocumentImportJob, config: Settings = settings) -> d
         "upload_offset": job.upload_offset,
         "status": job.status,
         "current_stage": job.current_stage,
+        "retry_target_type": (
+            "import"
+            if job.status == "failed"
+            and job.current_stage != "graph"
+            and job.attempt_count < config.import_worker_max_attempts
+            else None
+        ),
+        "retry_target_id": (
+            job.id
+            if job.status == "failed"
+            and job.current_stage != "graph"
+            and job.attempt_count < config.import_worker_max_attempts
+            else None
+        ),
         "attempt_count": job.attempt_count,
         "last_error": job.last_error,
         "result_operation": job.result_operation,
@@ -366,11 +391,32 @@ def session_projection(job: DocumentImportJob, config: Settings = settings) -> d
     }
 
 
+async def _latest_graph_job(
+    db: AsyncSession,
+    *,
+    revision_id: uuid.UUID,
+) -> GraphExtractionJob | None:
+    return (
+        await db.execute(
+            select(GraphExtractionJob)
+            .where(GraphExtractionJob.document_revision_id == revision_id)
+            .order_by(GraphExtractionJob.created_at.desc())
+            .limit(1)
+        )
+    ).scalars().first()
+
+
 async def job_projection(db: AsyncSession, job: DocumentImportJob) -> dict:
     projection = session_projection(job)
     projection.pop("chunk_bytes")
+    failed_graph_can_recover = (
+        job.status == "failed"
+        and job.current_stage == "graph"
+        and job.graph_extraction_requested
+        and job.document_revision_id is not None
+    )
     if (
-        job.status != "processing"
+        (job.status != "processing" and not failed_graph_can_recover)
         or job.current_stage not in {"embedding", "graph"}
         or job.embedding_job_id is None
     ):
@@ -403,31 +449,53 @@ async def job_projection(db: AsyncSession, job: DocumentImportJob) -> dict:
             finished_at=embedding_job.finished_at,
         )
         return projection
-    graph_job = (
-        await db.execute(
-            select(GraphExtractionJob)
-            .where(
-                GraphExtractionJob.document_revision_id == job.document_revision_id
-            )
-            .order_by(GraphExtractionJob.created_at.desc())
-            .limit(1)
-        )
-    ).scalars().first()
     projection["current_stage"] = "graph"
-    if graph_job is None or graph_job.status in {"queued", "processing"}:
+    graph_job = await _latest_graph_job(db, revision_id=job.document_revision_id)
+    if graph_job is None:
+        # GET/list projections are read-only.  The embedder write path creates
+        # the batch discovery run and document jobs after all revisions are
+        # ready; a projection may only report that coordination state.
+        projection["schema_discovery_state"] = "waiting_schema"
         return projection
-    if graph_job.status in {"succeeded", "partially_succeeded"}:
+    if graph_job.status in {"queued", "processing"}:
+        projection.update(
+            status="processing",
+            last_error=None,
+            retry_target_type=None,
+            retry_target_id=None,
+            finished_at=None,
+        )
+        return projection
+    if graph_job.status == "succeeded":
         projection.update(
             status="succeeded",
             current_stage="completed",
+            last_error=None,
+            retry_target_type=None,
+            retry_target_id=None,
+            finished_at=graph_job.finished_at,
+        )
+    elif graph_job.status == "partially_succeeded":
+        projection.update(
+            status="failed",
+            last_error=graph_job.error_message or "graph extraction partially succeeded",
+            retry_target_type="graph",
+            retry_target_id=graph_job.id,
             finished_at=graph_job.finished_at,
         )
     elif graph_job.status == "superseded":
-        projection.update(status="superseded", current_stage="completed")
+        projection.update(
+            status="superseded",
+            current_stage="completed",
+            retry_target_type=None,
+            retry_target_id=None,
+        )
     else:
         projection.update(
             status="failed",
             last_error=graph_job.error_message or "graph extraction failed",
+            retry_target_type="graph" if graph_job.status == "failed" else None,
+            retry_target_id=graph_job.id if graph_job.status == "failed" else None,
             finished_at=graph_job.finished_at,
         )
     return projection

@@ -3,6 +3,7 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 
 const source = readFileSync(new URL('./src/views/Libraries.js', import.meta.url), 'utf8');
+const apiSource = readFileSync(new URL('./src/api.js', import.meta.url), 'utf8');
 const css = readFileSync(new URL('./style.css', import.meta.url), 'utf8');
 
 // ════════════════════════════════════════════════════════════
@@ -10,6 +11,10 @@ const css = readFileSync(new URL('./style.css', import.meta.url), 'utf8');
 // ════════════════════════════════════════════════════════════
 
 import {
+    canonicalMappingGlobalLabel,
+    canonicalMappingPolicyLabel,
+    canonicalMappingResolvedLabel,
+    canonicalMappingRollbackVerified,
     computeLibraryStats,
     filterLibraries,
     librarySlugFromName,
@@ -59,6 +64,37 @@ test('libraryStatus and srcSummary are safe', () => {
     assert.equal(
         srcSummary({ db_name: 'db', table: 'docs', key_field: 'id', text_column: 'content' }),
         'db.docs · id → content',
+    );
+});
+
+test('canonical mapping presentation preserves backend policy and resolved fields', () => {
+    assert.equal(canonicalMappingPolicyLabel('inherit'), '继承');
+    assert.equal(canonicalMappingPolicyLabel('disabled'), '关闭');
+    assert.equal(canonicalMappingPolicyLabel('enabled'), '开启');
+    assert.equal(canonicalMappingGlobalLabel(false), '全局已关闭');
+    assert.equal(canonicalMappingResolvedLabel(false), '未生效');
+    assert.equal(canonicalMappingResolvedLabel(true), '已生效');
+    const globalOff = {
+        canonical_mapping_shadow_policy: 'enabled',
+        canonical_mapping_shadow_global_enabled: false,
+        canonical_mapping_shadow_resolved: false,
+    };
+    assert.equal(canonicalMappingPolicyLabel(globalOff.canonical_mapping_shadow_policy), '开启');
+    assert.equal(canonicalMappingGlobalLabel(globalOff.canonical_mapping_shadow_global_enabled), '全局已关闭');
+    assert.equal(canonicalMappingResolvedLabel(globalOff.canonical_mapping_shadow_resolved), '未生效');
+    assert.equal(
+        canonicalMappingRollbackVerified({
+            canonical_mapping_shadow_policy: 'disabled',
+            canonical_mapping_shadow_resolved: false,
+        }),
+        true,
+    );
+    assert.equal(
+        canonicalMappingRollbackVerified({
+            canonical_mapping_shadow_policy: 'disabled',
+            canonical_mapping_shadow_resolved: true,
+        }),
+        false,
     );
 });
 
@@ -272,7 +308,7 @@ test('edit dialog exposes the complete administrator configuration', () => {
         'embedding_model', 'embedding_base_url', 'embedding_dim', 'vector_distance',
         'embed_batch_size', 'chunk_size', 'chunk_overlap', 'retrieval_mode',
         'rerank_enabled', 'ocr_enabled', 'docx_table_aware',
-        'source_enrichment_enabled', 'graph_extraction_enabled',
+        'source_enrichment_enabled', 'schema_mode',
     ]) {
         assert.match(editDialog, new RegExp(`edit\\.form\\.${field}`));
     }
@@ -288,21 +324,71 @@ test('edit from enabled to disabled submits source_enrichment_enabled diff', () 
     assert.match(source, /source_enrichment_enabled/);
 });
 
+test('canonical mapping uses the frozen API field with inherit defaults and three states', () => {
+    assert.match(source, /canonical_mapping_shadow_policy:\s*'inherit'/);
+    assert.match(source, /canonical_mapping_shadow_policy:\s*row\.canonical_mapping_shadow_policy \|\| 'inherit'/);
+    assert.match(source, /v-model="create\.form\.canonical_mapping_shadow_policy"/);
+    assert.match(source, /v-model="edit\.form\.canonical_mapping_shadow_policy"/);
+    for (const value of ['inherit', 'disabled', 'enabled']) {
+        assert.match(source, new RegExp(`value="${value}"`));
+    }
+    assert.match(source, /create\.form\.schema_mode !== 'disabled'/);
+    assert.match(source, /edit\.form\.schema_mode !== 'disabled'/);
+    assert.match(source, /仅后台质量评估，不改变当前实体关系，不进入发布/);
+});
+
+test('canonical mapping stays independent from Q&A and raw claim shadow controls', () => {
+    assert.match(source, /graph_assisted_chat_mode/);
+    assert.match(source, /canonical_mapping_shadow_policy/);
+    const canonicalSection = source.slice(source.indexOf('Canonical Mapping'));
+    assert.doesNotMatch(canonicalSection.slice(0, canonicalSection.indexOf('<!-- FAQ dialog -->')), /claim_graph_shadow_policy/);
+});
+
+test('detail and edit show authoritative global and resolved values without deriving them', () => {
+    assert.match(source, /canonical_mapping_shadow_global_enabled/);
+    assert.match(source, /canonical_mapping_shadow_resolved/);
+    assert.match(source, /canonicalMappingPolicyLabel\(edit\.canonicalMapping\.policy\)/);
+    assert.match(source, /canonicalMappingGlobalLabel\(selectedLibrary\.canonical_mapping_shadow_global_enabled\)/);
+    assert.match(source, /canonicalMappingResolvedLabel\(selectedLibrary\.canonical_mapping_shadow_resolved\)/);
+    assert.match(source, /canonicalMappingGlobalLabel\(edit\.canonicalMapping\.globalEnabled\)/);
+    assert.match(source, /canonicalMappingResolvedLabel\(edit\.canonicalMapping\.resolved\)/);
+});
+
+test('rollback patches disabled and verifies an uncached exact-library read before success', () => {
+    assert.match(source, /diff\.canonical_mapping_shadow_policy === 'disabled'/);
+    assert.match(source, /api\.updateLibrary\(edit\.slug, diff\)/);
+    assert.match(source, /const readback = await api\.getLibrary\(edit\.slug\)/);
+    assert.match(source, /canonicalMappingRollbackVerified\(readback\)/);
+    assert.match(source, /Canonical Mapping 影子评估回读校验失败/);
+    assert.match(source, /catch \(e\) \{ ElMessage\.error\(e\.message \|\| String\(e\)\); \}/);
+});
+
+test('library save failures stay on the existing error path', () => {
+    const submitEdit = source.slice(source.indexOf('async function submitEdit'), source.indexOf('async function rebuild'));
+    assert.match(submitEdit, /try \{/);
+    assert.match(submitEdit, /api\.updateLibrary\(edit\.slug, diff\)/);
+    assert.match(submitEdit, /catch \(e\) \{ ElMessage\.error\(e\.message\); \}/);
+});
+
+test('admin library API exposes the exact uncached detail endpoint', () => {
+    assert.match(apiSource, /export const getLibrary = \(slug\) => request\(`\/admin\/libraries\/\$\{slug\}`\);/);
+});
+
 test('detail drawer displays source enrichment enabled or disabled clearly', () => {
     assert.match(source, /function sourceDisplay\(config\)/);
     assert.match(source, /开启（\$\{srcSummary\(config\)\}）/);
     assert.match(source, /sourceDisplay\(selectedLibrary\.source_config\)/);
 });
 
-test('create dialog exposes schema mode and edit keeps graph extraction switch', () => {
+test('create and edit dialogs expose schema mode as the graph extraction policy', () => {
     assert.match(source, /graph_extraction_enabled:\s*false/);
     assert.match(source, /schema_mode:\s*'disabled'/);
     assert.match(source, /v-model="create\.form\.schema_mode"/);
+    assert.match(source, /v-model="edit\.form\.schema_mode"/);
+    assert.match(source, /edit\.form\.graph_extraction_enabled = edit\.form\.schema_mode !== 'disabled'/);
     assert.match(source, /value="disabled"/);
     assert.match(source, /value="explore"/);
     assert.match(source, /value="governed"/);
-    assert.match(source, /v-model="edit\.form\.graph_extraction_enabled"/);
-    assert.match(source, /上传时默认建立知识图谱/);
     assert.match(source, /external_llm_enabled = body\.graph_extraction_enabled/);
     assert.match(source, /graph_extraction_allowed_security_levels = body\.graph_extraction_enabled/);
     assert.match(source, /diff\.graph_extraction_enabled === true/);
@@ -334,10 +420,11 @@ test('graph extraction build mode defaults to standard and is editable', () => {
     assert.match(source, /row\.graph_extraction_build_mode \|\| 'standard'/);
 });
 
-test('graph extraction copy describes automatic publication and later correction', () => {
-    assert.match(source, /系统会自动验证并发布合格事实/);
-    assert.match(source, /使用中发现错误后可在知识治理中修正/);
-    assert.doesNotMatch(source, /抽取结果需审核发布后/);
+test('graph extraction copy separates AI exploration from governed Schema extraction', () => {
+    assert.match(source, /AI 探索用于第一次陌生资料/);
+    assert.match(source, /Schema 治理用于长期约束/);
+    assert.match(source, /激活后/);
+    assert.doesNotMatch(source, /当前图谱抽取器仍要求先导入并激活 Schema/);
 });
 
 console.log('libraries redesign test passed');

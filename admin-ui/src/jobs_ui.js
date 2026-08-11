@@ -30,6 +30,17 @@ export const STAGE_LABEL = {
     completed: '任务完成',
 };
 
+export const RETRY_REASON_LABEL = {
+    supported: '可重试',
+    not_needed: '已成功，无需重试',
+    exhausted: '尝试次数耗尽',
+    unsupported: '当前任务类型暂不支持',
+    cancelled: '已取消',
+    superseded: '已覆盖',
+    unavailable: '当前不可重试',
+    stale: '旧版本或非 production 任务不可重试',
+};
+
 export function formatJobTime(iso) {
     return formatTime(iso);
 }
@@ -83,4 +94,65 @@ export function paginateJobs(jobs, page, pageSize) {
 export function libraryName(libs, libraryId) {
     const lib = (libs || []).find((l) => l.id === libraryId);
     return lib ? `${lib.name} (${lib.slug})` : (libraryId ? shortId(libraryId) : '—');
+}
+
+export function jobErrorText(row) {
+    if (row?.last_error) return row.last_error;
+    if (row?.status !== 'failed') return '—';
+    if (row.task_type === 'graph') return '图谱抽取失败，未记录详细错误';
+    if (row.task_type === 'import') return '文件导入失败，未记录详细错误';
+    if (row.task_type === 'embedding') return '向量化失败，未记录详细错误';
+    return '历史任务未记录错误';
+}
+
+export function jobStageLabel(row) {
+    const stage = row?.stage;
+    if (row?.status === 'failed' && stage === 'finalizing') return '收尾阶段失败';
+    if (row?.status === 'failed' && row?.task_type === 'graph' && stage === 'extracting') return '图谱抽取失败';
+    return STAGE_LABEL[stage] || stage || '—';
+}
+
+export function retryReasonLabel(row) {
+    return RETRY_REASON_LABEL[row?.retry_capability] || row?.retry_reason || '未提供重试信息';
+}
+
+export function retryTargetKey(row) {
+    if (!row?.retry_target_type || !row?.retry_target_id) return null;
+    return `${row.retry_target_type}:${row.retry_target_id}`;
+}
+
+export function isRetrySelectable(row) {
+    return row?.status === 'failed' && row?.retryable === true && !!retryTargetKey(row);
+}
+
+export function uniqueRetryRows(rows) {
+    const seen = new Set();
+    return (rows || []).filter((row) => {
+        if (!isRetrySelectable(row)) return false;
+        const key = retryTargetKey(row);
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+}
+
+export function retryItem(row) {
+    return {
+        task_type: row.retry_target_type,
+        job_id: row.retry_target_id,
+        observed_generation: row.retry_generation ?? row.attempt_count ?? 0,
+    };
+}
+
+export function retryTypeSummary(rows) {
+    const counts = { embedding: 0, graph: 0, import: 0 };
+    uniqueRetryRows(rows).forEach((row) => {
+        counts[row.retry_target_type] = (counts[row.retry_target_type] || 0) + 1;
+    });
+    return `向量 ${counts.embedding || 0} 条、图谱 ${counts.graph || 0} 条、导入 ${counts.import || 0} 条`;
+}
+
+export function statsStatusTotal(stats) {
+    return ['pending', 'processing', 'done', 'failed', 'cancelled', 'superseded']
+        .reduce((sum, key) => sum + Number(stats?.[key] || 0), 0);
 }

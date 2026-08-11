@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -39,6 +39,8 @@ class ChatSource(BaseModel):
     chunk_id: Optional[str] = None
     seq: Optional[int] = None
     score: float = 0.0
+    score_type: Literal["rerank", "vector", "rrf", "legacy"] = "rrf"
+    display_score: Optional[float] = None
     content: str = ""
 
 

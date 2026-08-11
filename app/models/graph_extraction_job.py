@@ -34,12 +34,12 @@ class GraphExtractionJob(Base):
             name="ck_graph_extraction_jobs_execution_mode",
         ),
         CheckConstraint(
-            "status IN ('queued','processing','partially_succeeded','succeeded','failed','cancelled','superseded')",
+            "status IN ('waiting_schema','queued','processing','partially_succeeded','succeeded','failed','cancelled','superseded')",
             name="ck_graph_extraction_jobs_status",
         ),
         CheckConstraint(
             "current_stage IS NULL OR current_stage IN "
-            "('preparing','building_context','extracting','parsing','binding_evidence',"
+            "('waiting_schema','preparing','building_context','extracting','parsing','binding_evidence',"
             "'aggregating','validating','scoring','materializing','finalizing')",
             name="ck_graph_extraction_jobs_current_stage",
         ),
@@ -115,6 +115,11 @@ class GraphExtractionJob(Base):
         ),
         nullable=False,
     )
+    schema_discovery_run_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("schema_discovery_runs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     trigger_type: Mapped[str] = mapped_column(String(32), nullable=False)
     execution_mode: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued", server_default="queued")
@@ -189,3 +194,14 @@ class GraphExtractionJob(Base):
         snapshot = self.model_config_snapshot or {}
         value = snapshot.get("build_mode")
         return value if value in {"fast", "standard", "deep"} else "deep"
+
+    @property
+    def schema_state(self) -> str:
+        if self.status == "waiting_schema":
+            return "waiting_schema"
+        snapshot = self.ontology_snapshot or {}
+        if snapshot.get("schema_state") == "ai_discovery_pending":
+            return "discovering_schema"
+        if snapshot.get("confirmed") is False or (self.model_config_snapshot or {}).get("schema_state") == "ai_draft":
+            return "ai_draft_pending_confirmation"
+        return "confirmed_schema"

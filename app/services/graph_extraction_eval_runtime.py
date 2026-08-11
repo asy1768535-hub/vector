@@ -641,8 +641,8 @@ async def run_batched_eval_workers(
 
     if isinstance(workers, bool) or not isinstance(workers, int) or not 1 <= workers <= 8:
         raise ValueError("workers must be between 1 and 8")
-    if not 2 <= batch_size <= 8:
-        raise ValueError("batch_size must be between 2 and 8")
+    if not 1 <= batch_size <= 8:
+        raise ValueError("batch_size must be between 1 and 8")
     outcomes: Counter[str] = Counter()
     for _wave in range(settings.graph_extraction_worker_max_model_attempts):
         rows = await asyncio.gather(

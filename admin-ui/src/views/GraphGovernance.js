@@ -87,6 +87,17 @@ function statusTag(value) {
     return 'info';
 }
 
+function graphSchemaStateLabel(value) {
+    return {
+        waiting_schema: '等待发现 Schema',
+        discovering_schema: '正在发现 Schema',
+        ai_draft_pending_confirmation: 'AI Schema 待确认',
+        confirmed_schema: '使用已确认 Schema',
+        failed: 'Schema discovery 失败',
+        cancelled: 'Schema discovery 已取消',
+    }[value] || '图谱任务状态未知';
+}
+
 export default {
     components: { GraphExplorer, GraphKnowledgeBrowser },
     setup() {
@@ -183,6 +194,7 @@ export default {
             intentKey: '',
             mutationKind: '',
         });
+        const graphJobState = reactive({ loading: false, data: null, error: null });
         const routeSeq = ref(0);
         const explorerRefreshKey = ref(0);
         const browserSelectedEntityId = ref('');
@@ -319,6 +331,9 @@ export default {
             publications.preview = null;
             publications.intentKey = '';
             publications.mutationKind = '';
+            graphJobState.loading = false;
+            graphJobState.data = null;
+            graphJobState.error = null;
         }
 
         function searchBody(cursor, relation = false) {
@@ -366,6 +381,46 @@ export default {
             } finally {
                 if (seq === contextRequestSeq) writeContext.loading = false;
             }
+        }
+
+        async function loadLatestGraphJob() {
+            const librarySlug = selectedLibrary.value?.slug || '';
+            if (!librarySlug) return;
+            graphJobState.loading = true;
+            graphJobState.error = null;
+            try {
+                const result = await api.listSchemaDiscoveryRuns(librarySlug, { limit: 1, offset: 0 });
+                if (!result || !Array.isArray(result.items)) throw new Error('图谱任务响应无效');
+                const run = result.items[0] || null;
+                if (run?.id) {
+                    const jobs = await api.listGraphExtractions(librarySlug, {
+                        schema_discovery_run_id: run.id,
+                        limit: 200,
+                        offset: 0,
+                    });
+                    graphJobState.data = {
+                        ...run,
+                        document_jobs: Array.isArray(jobs?.items) ? jobs.items : [],
+                    };
+                } else {
+                    graphJobState.data = null;
+                }
+            } catch (error) {
+                graphJobState.error = graphErrorProjection(error);
+                graphJobState.data = null;
+            } finally {
+                graphJobState.loading = false;
+            }
+        }
+
+        function openSchemaDraft() {
+            const run = graphJobState.data;
+            const librarySlug = selectedLibrary.value?.slug || '';
+            if (!librarySlug || !run?.ontology_version_id) return;
+            router.push({
+                path: '/knowledge-governance/schema',
+                query: { library: librarySlug, version: String(run.ontology_version_id) },
+            });
         }
 
         async function loadEntityOptions({ ontologyId = '', typeKey = '', query = '' } = {}) {
@@ -661,6 +716,7 @@ export default {
         }
 
         async function loadCurrentPage() {
+            await loadLatestGraphJob();
             if (scope.tab === 'browse') {
                 await maybeOpenEntityFromRoute();
                 await maybeOpenRelationFromRoute();
@@ -671,6 +727,7 @@ export default {
         }
 
         async function refreshCurrentPage() {
+            await loadLatestGraphJob();
             if (scope.tab === 'browse') {
                 explorerRefreshKey.value += 1;
                 return;
@@ -1686,6 +1743,8 @@ export default {
             reviewQueues,
             mutation,
             publications,
+            graphJobState,
+            openSchemaDraft,
             explorerRefreshKey,
             browserSelectedEntityId,
             publicationActions,
@@ -1746,6 +1805,7 @@ export default {
             graphFactLabel,
             graphReviewLabel,
             graphPublicationLabel,
+            graphSchemaStateLabel,
             graphPropertyRows,
             formatCatalogConfidence,
             formatCatalogTime,
@@ -1798,6 +1858,31 @@ export default {
 
       <el-alert v-if="mutation.error && !mergeDialog.open" class="graph-command-error"
                 :title="mutation.error.message" type="warning" :closable="false" show-icon />
+
+      <el-alert v-if="graphJobState.loading" title="正在读取最近一次 Schema discovery run…"
+                type="info" :closable="false" show-icon />
+      <el-alert v-else-if="graphJobState.error" :title="graphJobState.error.message"
+                type="warning" :closable="false" show-icon />
+      <el-alert v-else-if="graphJobState.data" class="graph-command-error"
+                :type="['failed', 'cancelled'].includes(graphJobState.data.status) ? 'warning' : 'info'"
+                :closable="false" show-icon>
+        <template #title>
+          {{ graphSchemaStateLabel(graphJobState.data.schema_state) }} ·
+          {{ graphJobState.data.status }} · source set {{ graphJobState.data.source_set_key }}
+          · {{ graphJobState.data.source_revision_ids?.length || 0 }} 个 revision
+          <span v-if="graphJobState.data.error_code"> · 失败原因：{{ graphJobState.data.error_code }}</span>
+          <span v-if="graphJobState.data.ontology_snapshot_hash"> · Schema snapshot 已冻结</span>
+          <el-button v-if="graphJobState.data.ontology_version_id"
+                     link type="primary" @click="openSchemaDraft">查看 / 编辑 Schema</el-button>
+        </template>
+      </el-alert>
+      <el-table v-if="graphJobState.data?.document_jobs?.length" :data="graphJobState.data.document_jobs"
+                size="small" class="graph-discovery-document-jobs">
+        <el-table-column prop="document_id" label="文档" min-width="180" />
+        <el-table-column prop="schema_state" label="Schema" min-width="150" />
+        <el-table-column prop="status" label="抽取状态" min-width="120" />
+        <el-table-column prop="error_code" label="失败原因" min-width="160" />
+      </el-table>
 
       <section v-if="scope.tab === 'browse'" class="graph-browser-workspace"
                :class="{ 'has-inspector': relationDetail.open }">

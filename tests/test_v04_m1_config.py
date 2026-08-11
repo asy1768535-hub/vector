@@ -22,10 +22,11 @@ EXPECTED_DEFAULTS = {
     "graph_extraction_temperature": 0.0,
     "graph_extraction_response_format": "json_object",
     "graph_extraction_max_context_chars": 24000,
+    "graph_extraction_context_window_tokens": 8192,
     "graph_extraction_previous_chunks": 1,
     "graph_extraction_next_chunks": 1,
     "graph_extraction_default_build_mode": "standard",
-    "graph_extraction_schema_routing_enabled": False,
+    "graph_extraction_schema_routing_enabled": True,
     "graph_extraction_center_only_enabled": True,
     "graph_extraction_output_budget_enabled": True,
     "graph_extraction_max_output_tokens": 8000,
@@ -228,4 +229,12 @@ def test_valid_local_qwen_graph_extraction_contract_passes(monkeypatch):
 
 def test_valid_graph_extraction_startup_contract_passes(monkeypatch):
     _set_valid_runtime(monkeypatch)
+    assert_graph_extraction_startup_security()
+
+
+def test_batch_size_one_is_a_valid_worker_configuration(monkeypatch):
+    _set_valid_runtime(monkeypatch)
+    from app.main import settings
+
+    monkeypatch.setattr(settings, "graph_extraction_batch_size", 1)
     assert_graph_extraction_startup_security()

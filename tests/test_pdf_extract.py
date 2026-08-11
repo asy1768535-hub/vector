@@ -100,6 +100,10 @@ def test_build_pdf_source_records_page_locations(patch_reader, render_spy):
         assert chunk["location"]["type"] == "page"
         assert chunk["location"]["extraction_mode"] == "native"
         assert source["normalized_text"][chunk["source_start"]:chunk["source_end"]] == chunk["text"]
+        assert "".join(
+            source["normalized_text"][item["start"]:item["end"]]
+            for item in chunk["source_ranges"]
+        ) == chunk["text"]
 
 
 def test_scanned_page_uses_ocr_when_enabled(patch_reader, render_spy):

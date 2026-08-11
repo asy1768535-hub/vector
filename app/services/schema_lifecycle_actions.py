@@ -61,6 +61,8 @@ class SchemaVersionDeletionResult:
 def _clone_status(status: str) -> str:
     if status == _ACTIVE:
         return _DRAFT
+    if status == _DRAFT:
+        return _DRAFT
     if status == _DISABLED:
         return _DISABLED
     raise SchemaLifecycleError(
@@ -75,7 +77,7 @@ def clone_schema_bundle_rows(
     version_no: int,
     description: str | None,
 ) -> SchemaVersionBundle:
-    if source.version.status != _ACTIVE or version_no <= source.version.version_no:
+    if source.version.status not in {_ACTIVE, _DRAFT} or version_no <= source.version.version_no:
         raise SchemaLifecycleError(
             "schema_lifecycle_request_invalid", "Schema clone source is invalid"
         )
@@ -87,6 +89,8 @@ def clone_schema_bundle_rows(
         status=_DRAFT,
         description=description,
         parent_version_id=source.version.id,
+        origin=getattr(source.version, "origin", "user") or "user",
+        confirmed=False,
     )
     entity_ids = {
         row.id: deterministic_schema_child_id(
@@ -313,9 +317,12 @@ async def clone_schema_version(
     source = await load_schema_version_bundle(
         db, library, command.ontology_version_id, for_update=True
     )
-    if source.version.status != _ACTIVE:
+    if source.version.status != _ACTIVE and not (
+        source.version.status == _DRAFT
+        and getattr(source.version, "origin", "user") == "ai_discovery"
+    ):
         raise SchemaLifecycleError(
-            "schema_lifecycle_state_changed", "Schema clone source changed"
+            "schema_lifecycle_state_changed", "Schema clone source is not derivable"
         )
     if schema_version_state_hash(source) != command.expected_state_hash:
         raise SchemaLifecycleError(
@@ -572,6 +579,30 @@ def _require_draft(bundle: SchemaVersionBundle, expected_hash: str) -> None:
     if schema_version_state_hash(bundle) != expected_hash:
         raise SchemaLifecycleError(
             "schema_lifecycle_state_changed", "Schema draft changed"
+        )
+
+
+async def _require_editable_draft(db: AsyncSession, version: OntologyVersion) -> None:
+    """Keep AI drafts immutable while any job may still consume their snapshot."""
+
+    if getattr(version, "origin", "user") != "ai_discovery":
+        return
+    active_job = (
+        await db.execute(
+            select(GraphExtractionJob.id)
+            .where(
+                GraphExtractionJob.ontology_version_id == version.id,
+                GraphExtractionJob.status.in_(
+                    ("waiting_schema", "queued", "processing", "partially_succeeded")
+                ),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if active_job is not None:
+        raise SchemaLifecycleError(
+            "schema_lifecycle_dependency_conflict",
+            "AI Schema draft is frozen while a graph extraction task is running; derive a new version to edit it",
         )
 
 
@@ -903,6 +934,7 @@ async def apply_schema_item_command(
         db, library, command.ontology_version_id, for_update=True
     )
     _require_draft(bundle, command.expected_state_hash)
+    await _require_editable_draft(db, bundle.version)
     if command.action_kind == "create_item":
         await _create_item(db, library, bundle, command)
     else:
@@ -961,29 +993,52 @@ async def activate_schema_version(
         db, library, command.ontology_version_id, for_update=True
     )
     _require_draft(draft, command.expected_state_hash)
-    versions = (
-        await db.execute(
-            select(OntologyVersion)
-            .where(
-                OntologyVersion.library_id == library.id,
-                OntologyVersion.version_key == draft.version.version_key,
-                OntologyVersion.status.in_((_ACTIVE, _DRAFT)),
+    if getattr(draft.version, "origin", "user") == "ai_discovery":
+        versions = (
+            await db.execute(
+                select(OntologyVersion)
+                .where(
+                    OntologyVersion.library_id == library.id,
+                    OntologyVersion.status.in_((_ACTIVE, _DRAFT)),
+                )
+                .order_by(OntologyVersion.id)
+                .with_for_update()
             )
-            .order_by(OntologyVersion.id)
-            .with_for_update()
-        )
-    ).scalars().all()
+        ).scalars().all()
+    else:
+        versions = (
+            await db.execute(
+                select(OntologyVersion)
+                .where(
+                    OntologyVersion.library_id == library.id,
+                    OntologyVersion.version_key == draft.version.version_key,
+                    OntologyVersion.status.in_((_ACTIVE, _DRAFT)),
+                )
+                .order_by(OntologyVersion.id)
+                .with_for_update()
+            )
+        ).scalars().all()
     active_versions = [row for row in versions if row.status == _ACTIVE]
     if len(active_versions) > 1:
         raise SchemaLifecycleError(
             "schema_lifecycle_invalid_draft", "Active Schema identity is ambiguous"
         )
     active = active_versions[0] if active_versions else None
-    if (active.id if active is not None else None) != expected_active_id:
+    active_ids = {row.id for row in active_versions}
+    if getattr(draft.version, "origin", "user") == "ai_discovery":
+        if expected_active_id is not None and expected_active_id not in active_ids:
+            raise SchemaLifecycleError(
+                "schema_lifecycle_state_changed", "Active Schema version changed"
+            )
+    elif (active.id if active is not None else None) != expected_active_id:
         raise SchemaLifecycleError(
             "schema_lifecycle_state_changed", "Active Schema version changed"
         )
-    if active is not None and active.version_key != draft.version.version_key:
+    if (
+        getattr(draft.version, "origin", "user") != "ai_discovery"
+        and active is not None
+        and active.version_key != draft.version.version_key
+    ):
         raise SchemaLifecycleError(
             "schema_lifecycle_invalid_draft", "Schema version family is incompatible"
         )
@@ -993,7 +1048,7 @@ async def activate_schema_version(
             "schema_lifecycle_invalid_draft", "Schema draft validation failed"
         )
 
-    if active is not None:
+    for active in active_versions:
         active.status = _DISABLED
         await db.flush()
     for row in (
@@ -1005,9 +1060,20 @@ async def activate_schema_version(
         if row.status == _DRAFT:
             row.status = _ACTIVE
     draft.version.status = _ACTIVE
+    draft.version.confirmed = True
     draft.version.published_at = datetime.now(timezone.utc)
     await db.flush()
     activated = await load_schema_version_bundle(db, library, draft.version.id)
+    if getattr(draft.version, "origin", "user") == "ai_discovery":
+        from app.services.schema_discovery_runs import (
+            resume_schema_discovery_run_after_confirmation,
+        )
+
+        await resume_schema_discovery_run_after_confirmation(
+            db,
+            library=library,
+            ontology_version_id=draft.version.id,
+        )
     state_hash = schema_version_state_hash(activated)
     action = await _record_action(
         db,

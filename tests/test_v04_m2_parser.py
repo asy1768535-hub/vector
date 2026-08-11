@@ -82,13 +82,13 @@ def test_parser_classifies_malformed_json_without_echoing_input():
     assert len(str(exc.value)) <= 512
 
 
-def test_parser_rejects_duplicate_local_ids():
+def test_parser_repairs_duplicate_local_ids_and_drops_ambiguous_relations():
     payload = _payload()
     payload["entities"][1]["local_id"] = "e1"
-    with pytest.raises(GraphExtractionParseError) as exc:
-        parse_graph_extraction_output(json.dumps(payload, ensure_ascii=False))
-    assert exc.value.parse_status == "invalid_schema"
-    assert "local_id" in str(exc.value)
+    parsed = parse_graph_extraction_output(json.dumps(payload, ensure_ascii=False))
+
+    assert [entity.local_id for entity in parsed.entities] == ["e1", "e1_2"]
+    assert parsed.relations == []
 
 
 @pytest.mark.parametrize("endpoint", ["source_local_id", "target_local_id"])

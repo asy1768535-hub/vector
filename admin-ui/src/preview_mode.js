@@ -30,6 +30,8 @@ const PREVIEW_LIBRARY = Object.freeze({
     name: PREVIEW_PERMISSIONS[0].library_name,
     description: '本地界面预览数据',
     graph_extraction_enabled: true,
+    schema_mode: 'explore',
+    schema_confirmation_policy: 'required',
     graph_extraction_build_mode: 'standard',
     external_llm_enabled: true,
     graph_extraction_allowed_security_levels: ['internal'],
@@ -273,10 +275,14 @@ function previewFixture(parts) {
         return {
             body: {
                 available: true,
+                exploration_available: true,
                 default_requested: true,
                 default_build_mode: 'standard',
                 allowed_security_levels: ['internal'],
                 reasons: [],
+                schema_mode: 'explore',
+                schema_confirmation_policy: 'required',
+                requires_active_schema: false,
             },
         };
     }

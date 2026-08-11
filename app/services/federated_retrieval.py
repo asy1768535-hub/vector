@@ -7,6 +7,7 @@ import uuid
 from dataclasses import replace
 from typing import Any, Sequence
 
+from app.config import settings
 from app.models.user import User
 from app.schemas.dify import DifyRetrievalRequest, RetrievalSetting
 from app.services.federated_retrieval_contracts import (
@@ -22,6 +23,7 @@ from app.services.federated_retrieval_contracts import (
 )
 from app.services.library_compatibility import assess_library_compatibility
 from app.services.library_compatibility_contracts import FEDERATED_RRF_K
+from app.services.evidence_locator_projection import validate_projection
 from app.services.retrieval import run_retrieval
 
 
@@ -78,17 +80,52 @@ def _rewrite_sources(metadata: dict[str, Any]) -> tuple[str, ...]:
 
 
 def _source_projection(metadata: dict[str, Any]) -> FederatedSourceProjection:
-    page = metadata.get("page")
+    locator_projection = (
+        validate_projection(
+            metadata.get("evidence_locator_v1_projection"),
+            expected_identity={
+                "document_id": metadata.get("document_id"),
+                "document_revision_id": metadata.get("document_revision_id"),
+                "document_revision": metadata.get("document_revision"),
+                "document_revision_no": metadata.get("document_revision_no"),
+                "chunk_id": metadata.get("chunk_id"),
+            },
+        )
+        if settings.enable_evidence_locator_read
+        else None
+    )
+    locator_source = (
+        locator_projection.get("source")
+        if isinstance(locator_projection, dict)
+        and isinstance(locator_projection.get("source"), dict)
+        else {}
+    )
+    page_span = locator_source.get("page")
+    page = page_span.get("start") if isinstance(page_span, dict) else metadata.get("page")
     if page is None:
         page = metadata.get("page_no", metadata.get("page_number"))
     return FederatedSourceProjection(
-        document_id=_bounded_identifier(metadata.get("document_id")),
-        document_revision_id=_bounded_identifier(metadata.get("document_revision_id")),
-        document_revision=_bounded_integer(metadata.get("document_revision")),
-        chunk_id=_bounded_identifier(metadata.get("chunk_id")),
+        document_id=_bounded_identifier(
+            (locator_projection or {}).get("document_id") or metadata.get("document_id")
+        ),
+        document_revision_id=_bounded_identifier(
+            (locator_projection or {}).get("document_revision_id")
+            or metadata.get("document_revision_id")
+        ),
+        document_revision=_bounded_integer(
+            (locator_projection or {}).get("revision_no")
+            or metadata.get("document_revision")
+        ),
+        chunk_id=_bounded_identifier(
+            (locator_projection or {}).get("chunk_id") or metadata.get("chunk_id")
+        ),
         seq=_bounded_integer(metadata.get("seq")),
         page=_bounded_integer(page),
-        title_path=_title_path(metadata.get("title_path")),
+        title_path=_title_path(
+            locator_source.get("heading_path")
+            if locator_source.get("heading_path") is not None
+            else metadata.get("title_path")
+        ),
         external_id=_bounded_identifier(metadata.get("external_id")),
         vector_score=_finite_float(metadata.get("vector_score")),
         rerank_score=_finite_float(metadata.get("rerank_score")),

@@ -38,6 +38,7 @@ class PreparedStoredFile:
 class PreparedRevisionFileCapture(PreparedStoredFile):
     document_id: uuid.UUID
     document_revision_id: uuid.UUID
+    file_id: uuid.UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,6 +217,7 @@ def bind_prepared_file_object(
     *,
     document_id: uuid.UUID,
     document_revision_id: uuid.UUID,
+    file_id: uuid.UUID | None = None,
 ) -> PreparedRevisionFileCapture:
     return PreparedRevisionFileCapture(
         library_id=prepared.library_id,
@@ -229,6 +231,7 @@ def bind_prepared_file_object(
         verified_at=prepared.verified_at,
         document_id=document_id,
         document_revision_id=document_revision_id,
+        file_id=file_id,
     )
 
 
@@ -366,6 +369,8 @@ def storage_locator_from_row(row: DocumentRevisionFile) -> StorageLocatorV1:
 def _same_capture_identity(
     row: DocumentRevisionFile, prepared: PreparedRevisionFileCapture
 ) -> bool:
+    if prepared.file_id is not None and row.id != prepared.file_id:
+        return False
     values = prepared_capture_values(prepared)
     fields = (
         "document_revision_id",
@@ -469,7 +474,7 @@ async def persist_revision_file_capture(
             )
         return existing
     row = DocumentRevisionFile(
-        id=uuid.uuid4(),
+        id=prepared.file_id or uuid.uuid4(),
         document_revision_id=prepared.document_revision_id,
         document_id=prepared.document_id,
         library_id=prepared.library_id,

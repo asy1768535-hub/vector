@@ -1,6 +1,8 @@
 """rerank 服务单测：解析/排序/截断/配置判定（纯单元，不连服务）。"""
 from __future__ import annotations
 
+import pytest
+
 from app.services import rerank
 
 
@@ -114,5 +116,121 @@ async def test_rank_candidates_disabled_is_vector_order(monkeypatch):
 
     monkeypatch.setattr(rerank, "rerank", boom)
     order, scores = await rerank.rank_candidates("q", ["a", "b"], top_k=5, enabled=False)
+    assert order == [0, 1]
+    assert scores == {}
+
+
+def test_parse_tei_bare_array_uses_score_and_deduplicates():
+    body = [
+        {"index": 1, "score": 0.72},
+        {"index": 1, "score": 0.71},
+        {"index": 0, "score": 0.86},
+    ]
+    assert rerank._parse_results(body, top_n=2, provider="tei", total=2) == [
+        (0, 0.86),
+        (1, 0.72),
+    ]
+
+
+def test_parse_tei_rejects_invalid_index_and_non_finite_score():
+    with pytest.raises(rerank.RerankError, match="out of range"):
+        rerank._parse_results(
+            [{"index": 2, "score": 0.9}], top_n=2, provider="tei", total=2
+        )
+    with pytest.raises(rerank.RerankError, match="non-finite"):
+        rerank._parse_results(
+            [{"index": 0, "score": float("nan")}],
+            top_n=2,
+            provider="tei",
+            total=2,
+        )
+
+
+async def test_tei_request_uses_texts_and_parses_bare_array(monkeypatch):
+    captured = {}
+
+    class _Response:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return [{"index": 0, "score": 0.86}, {"index": 1, "score": 0.2}]
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            captured.update(url=url, payload=json, headers=headers)
+            return _Response()
+
+    monkeypatch.setattr(rerank.httpx, "AsyncClient", _Client)
+    result = await rerank.rerank(
+        "q",
+        ["a", "b"],
+        top_n=2,
+        model="BAAI/bge-reranker-v2-m3",
+        base_url="http://10.0.10.2:8112/rerank",
+        api_key="",
+        provider="tei",
+    )
+    assert result == [(0, 0.86), (1, 0.2)]
+    assert captured["payload"] == {
+        "query": "q",
+        "texts": ["a", "b"],
+        "return_text": False,
+        "raw_scores": False,
+    }
+    assert "documents" not in captured["payload"]
+    assert captured["headers"] is None
+
+
+async def test_tei_does_not_inherit_embedding_api_key(monkeypatch):
+    from app.config import settings
+
+    captured = {}
+
+    class _Response:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return [{"index": 0, "score": 0.86}]
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            captured["headers"] = headers
+            return _Response()
+
+    monkeypatch.setattr(settings, "rerank_api_key", "")
+    monkeypatch.setattr(settings, "embedding_api_key", "embedding-secret")
+    monkeypatch.setattr(rerank.httpx, "AsyncClient", _Client)
+    await rerank.rerank("q", ["a"], top_n=1, provider="tei", base_url="http://tei/rerank")
+    assert captured["headers"] is None
+
+
+async def test_rank_candidates_falls_back_on_invalid_tei_result(monkeypatch):
+    async def invalid_rerank(*args, **kwargs):
+        raise rerank.RerankError("index out of range")
+
+    monkeypatch.setattr(rerank, "rerank", invalid_rerank)
+    order, scores = await rerank.rank_candidates(
+        "q", ["a", "b"], top_k=2, enabled=True
+    )
     assert order == [0, 1]
     assert scores == {}

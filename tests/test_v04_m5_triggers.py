@@ -202,11 +202,114 @@ def test_upload_configuration_requires_runtime_library_security_and_ontology(mon
 
     assert result == {
         "available": True,
+        "exploration_available": False,
         "default_requested": True,
         "default_build_mode": "standard",
         "allowed_security_levels": ["internal"],
         "reasons": [],
+        "schema_mode": "governed",
+        "schema_confirmation_policy": "required",
+        "requires_active_schema": True,
     }
+
+
+def test_upload_configuration_explore_mode_does_not_require_active_schema(monkeypatch):
+    monkeypatch.setattr(settings, "graph_extraction_enabled", True)
+    monkeypatch.setattr(settings, "graph_extraction_api_key", SecretStr("test-key"))
+    library = SimpleNamespace(
+        id=LIB_ID,
+        graph_extraction_enabled=True,
+        external_llm_enabled=True,
+        graph_extraction_allowed_security_levels=["internal"],
+        schema_mode="explore",
+    )
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_Scalar(None))
+
+    result = asyncio.run(graph_extraction_upload_configuration(db, library))
+
+    assert result["available"] is False
+    assert result["exploration_available"] is True
+    assert result["default_requested"] is True
+    assert result["schema_mode"] == "explore"
+    assert result["requires_active_schema"] is False
+    assert result["reasons"] == ["active_ontology_missing"]
+
+
+def test_explore_upload_with_confirmed_active_schema_starts_new_discovery_run(monkeypatch):
+    monkeypatch.setattr(settings, "graph_extraction_enabled", True)
+    monkeypatch.setattr(settings, "graph_extraction_auto_trigger_enabled", False)
+    monkeypatch.setattr(settings, "graph_extraction_api_key", SecretStr("test-key"))
+    library, document, revision = _scope()
+    library.graph_extraction_enabled = True
+    library.external_llm_enabled = True
+    library.graph_extraction_allowed_security_levels = ["internal"]
+    library.schema_mode = "explore"
+
+    configured = MagicMock()
+    configured.scalars.return_value.first.return_value = SimpleNamespace(
+        version_key="confirmed-v1",
+        status="active",
+        confirmed=True,
+    )
+    config_db = AsyncMock()
+    config_db.execute = AsyncMock(return_value=configured)
+    config = asyncio.run(graph_extraction_upload_configuration(config_db, library))
+    assert config["available"] is True
+    assert config["exploration_available"] is True
+
+    session = TriggerSession(
+        objects={
+            (Library, LIB_ID): library,
+            (Document, DOC_ID): document,
+            (DocumentRevision, REV_ID): revision,
+        }
+    )
+    import_job = SimpleNamespace(batch_id=uuid.uuid4())
+    import_result = MagicMock()
+    import_result.scalars.return_value.first.return_value = import_job
+    session.execute = AsyncMock(return_value=import_result)
+    run = SimpleNamespace(id=uuid.uuid4())
+    job = SimpleNamespace(id=uuid.uuid4(), document_revision_id=REV_ID)
+    with patch(
+        "app.services.graph_extraction_triggers.ensure_schema_discovery_run_for_batch",
+        new=AsyncMock(return_value=(run, [job])),
+    ) as ensure:
+        result = asyncio.run(
+            enqueue_ready_revision_graph_extraction(
+                library_id=LIB_ID,
+                document_id=DOC_ID,
+                revision_id=REV_ID,
+                force=True,
+                session_factory=TriggerFactory(session),
+            )
+        )
+
+    assert result is job
+    assert ensure.await_args.kwargs["batch_id"] == import_job.batch_id
+
+
+def test_upload_configuration_governed_mode_blocks_without_schema(monkeypatch):
+    monkeypatch.setattr(settings, "graph_extraction_enabled", True)
+    monkeypatch.setattr(settings, "graph_extraction_api_key", SecretStr("test-key"))
+    library = SimpleNamespace(
+        id=LIB_ID,
+        graph_extraction_enabled=True,
+        external_llm_enabled=True,
+        graph_extraction_allowed_security_levels=["internal"],
+        schema_mode="governed",
+    )
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_Scalar(None))
+
+    result = asyncio.run(graph_extraction_upload_configuration(db, library))
+
+    assert result["available"] is False
+    assert result["exploration_available"] is False
+    assert result["default_requested"] is True
+    assert result["schema_mode"] == "governed"
+    assert result["requires_active_schema"] is True
+    assert result["reasons"] == ["active_ontology_missing"]
 
 
 def test_upload_configuration_reports_all_blocking_reasons(monkeypatch):
@@ -224,7 +327,10 @@ def test_upload_configuration_reports_all_blocking_reasons(monkeypatch):
     result = asyncio.run(graph_extraction_upload_configuration(db, library))
 
     assert result["available"] is False
+    assert result["exploration_available"] is False
     assert result["default_requested"] is False
+    assert result["schema_mode"] == "disabled"
+    assert result["requires_active_schema"] is False
     assert result["allowed_security_levels"] == []
     assert result["reasons"] == [
         "runtime_disabled",

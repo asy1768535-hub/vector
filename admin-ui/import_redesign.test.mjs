@@ -421,8 +421,11 @@ test('upload area confirms graph extraction configuration before submitting', ()
         'getUploadGraphExtractionConfiguration',
         'graphExtractionSecurityLevel',
         'graphExtractionReady',
+        'graphExplorationMode',
+        'formalGraphExtractionRequested',
+        'graphJobRequested',
         '确认上传并抽取图谱',
-        'graphExtractionRequested: true',
+        'graphJobRequested.value',
         'securityLevel: graphExtractionSecurityLevel.value',
     ]) assert.ok(source.includes(token), `missing graph upload token: ${token}`);
     assert.match(css, /\.import-graph-option\s*\{/);
@@ -433,10 +436,21 @@ test('upload area confirms graph extraction configuration before submitting', ()
 
 test('upload inherits graph extraction default from the selected library', () => {
     assert.match(source, /typeof config\.default_requested !== 'boolean'/);
+    assert.match(source, /typeof config\.exploration_available !== 'boolean'/);
+    assert.match(source, /typeof config\.requires_active_schema !== 'boolean'/);
+    assert.match(source, /!\['disabled', 'explore', 'governed'\]\.includes\(config\.schema_mode\)/);
     assert.match(source, /graphExtractionRequested\.value = config\.default_requested/);
     assert.match(source, /loadGraphExtractionConfiguration\(\{ applyLibraryDefault: true \}\)/);
     assert.match(source, /watch\(graphExtractionRequested,\s*\(requested\)/);
     assert.match(source, /:disabled="graphExtractionConfigLoading"/);
+});
+
+test('AI self-extraction sends graph jobs without requiring Schema activation', () => {
+    assert.match(source, /graphExplorationMode = computed\(\(\) =>\s*graphExtractionConfig\.value\?\.schema_mode === 'explore'\s*\)/);
+    assert.match(source, /graphExtractionConfig\.value\?\.exploration_available === true/);
+    assert.match(source, /graphExtractionConfig\.value\?\.available === true/);
+    assert.match(source, /return graphJobRequested\.value \?/);
+    assert.match(source, /AI 自主抽取/);
 });
 
 test('uploaded files track vectorization and graph extraction progress', () => {
@@ -452,6 +466,17 @@ test('uploaded files track vectorization and graph extraction progress', () => {
     ]) assert.ok(source.includes(token) || apiSource.includes(token), `missing graph progress token: ${token}`);
     assert.match(css, /\.import-graph-progress\s*\{/);
     assert.match(apiSource, /v04\/graph-extractions\/\?/);
+});
+
+test('failed graph construction retries the graph job instead of the completed import', () => {
+    assert.match(source, /it\.importJob\.retry_target_type === 'graph'/);
+    assert.match(source, /it\.importJob\.retry_target_id/);
+    assert.match(source, /api\.retryGraphExtraction\(/);
+    assert.match(apiSource, /graph-extractions\/\$\{jobId\}\/retry/);
+    assert.match(source, /error\?\.body\?\.detail !== 'no_retryable_units'/);
+    assert.match(source, /api\.rerunGraphExtraction\(/);
+    assert.match(source, /retry_target_type !== 'import'/);
+    assert.match(source, /api\.retryImportJob\(/);
 });
 
 test('batch replacement forwards graph extraction upload options', async () => {
@@ -477,9 +502,10 @@ test('replace route query locks library and mode controls', () => {
     assert.ok(source.includes('<el-radio-group v-model="mode" :disabled="routeReplaceActive || batchReplacing">'), 'route replace locks mode switch');
 });
 
-test('upload configuration freezes and displays the library build mode', () => {
+test('upload configuration displays schema policy and freezes the library build mode', () => {
     assert.match(source, /Object\.hasOwn\(BUILD_MODE_LABEL, config\.default_build_mode\)/);
-    assert.match(source, /构建模式：\{\{ buildModeLabel\(graphExtractionConfig\?\.default_build_mode\) \}\}/);
+    assert.match(source, /schemaModeLabel\(graphExtractionConfig\)/);
+    assert.match(source, /抽取策略：\{\{ schemaModeLabel\(graphExtractionConfig\) \}\} · 构建模式：\{\{ buildModeLabel\(graphExtractionConfig\?\.default_build_mode\) \}\}/);
     assert.match(source, /使用\$\{buildModeLabel\(graphExtractionConfig\.value\?\.default_build_mode\)\}模式/);
 });
 

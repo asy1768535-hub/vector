@@ -11,11 +11,14 @@ from sqlalchemy import text
 
 from app.config import BASE_DIR, settings
 from app.db import async_session_factory
+from app.schemas.evidence_locator import EVIDENCE_LOCATOR_CONTRACT_VERSION
 from app.services import selfcheck
+from app.services.evidence_locator_projection import LOCATOR_PROJECTION_VERSION
+from app.services.parser_units import PARSER_UNIT_CONTRACT_VERSION
 
 log = logging.getLogger(__name__)
 router = APIRouter()
-_MIGRATION_HEAD = "0050"
+_MIGRATION_HEAD = "0060"
 
 
 async def _check_db() -> bool:
@@ -95,18 +98,20 @@ async def _check_embedding() -> bool:
         return False
 
 
-async def _check_rerank() -> bool:
-    if not settings.rerank_enabled:
-        return True
+async def _check_rerank() -> str:
     try:
-        state, _ = await asyncio.wait_for(
+        state, message = await asyncio.wait_for(
             selfcheck.probe_rerank(),
             timeout=settings.readiness_dependency_timeout_seconds,
         )
-        return state == "ok"
+        if isinstance(state, bool):
+            return "ok" if state else "fail"
+        if state == "off":
+            return "not_configured" if message == "not configured" else "off"
+        return state
     except Exception:  # noqa: BLE001
         log.warning("rerank readiness check failed", exc_info=True)
-        return False
+        return "fail"
 
 
 async def _check_storage() -> bool:
@@ -140,13 +145,36 @@ def _check_ocr() -> str:
     return "missing" if settings.ocr_enabled else "off"
 
 
-def _payload(components: dict[str, bool]) -> dict[str, object]:
-    failed = sorted(name for name, available in components.items() if not available)
+def _evidence_locator_payload() -> dict[str, object]:
+    """Expose bounded contract versions and rollout state without source data."""
+    return {
+        "locator_contract_version": EVIDENCE_LOCATOR_CONTRACT_VERSION,
+        "parser_unit_contract_version": PARSER_UNIT_CONTRACT_VERSION,
+        "projection_version": LOCATOR_PROJECTION_VERSION,
+        "read_enabled": settings.enable_evidence_locator_read,
+        "projection_enabled": settings.enable_evidence_locator_projection,
+        "write_path_enabled": settings.enable_evidence_write_path,
+    }
+
+
+def _payload(components: dict[str, bool | str]) -> dict[str, object]:
+    failed = sorted(
+        name
+        for name, state in components.items()
+        if state is False or state in {"fail", "not_configured"}
+    )
+
+    def label(state: bool | str) -> str:
+        if state is True:
+            return "ok"
+        if state is False:
+            return "fail"
+        return state
+
     return {
         "status": "ready" if not failed else "not_ready",
         "components": {
-            name: "ok" if available else "fail"
-            for name, available in sorted(components.items())
+            name: label(state) for name, state in sorted(components.items())
         },
         "failure_codes": [f"{name}_unavailable" for name in failed],
     }
@@ -165,7 +193,7 @@ async def readiness(response: Response) -> dict[str, object]:
         initialization_ok,
         qdrant_ok,
         embedding_ok,
-        rerank_ok,
+        rerank_state,
         storage_ok,
     ) = (
         await asyncio.gather(
@@ -185,7 +213,7 @@ async def readiness(response: Response) -> dict[str, object]:
             "initialization": initialization_ok,
             "qdrant": qdrant_ok,
             "embedding": embedding_ok,
-            "rerank": rerank_ok,
+            "rerank": rerank_state,
             "object_storage": storage_ok,
         }
     )
@@ -212,4 +240,5 @@ async def health(response: Response) -> dict[str, object]:
         "initialization": components["initialization"],
         "object_storage": components["object_storage"],
         "failure_codes": payload["failure_codes"],
+        "evidence_locator": _evidence_locator_payload(),
     }
