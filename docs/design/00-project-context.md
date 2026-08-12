@@ -43,7 +43,7 @@ admin-ui/
         ├── Login.js        # 登录页
         ├── Dashboard.js    # 概览 (用户信息 + 服务健康)
         ├── Chat.js         # 智能问答 (三栏 + 流式 SSE + Markdown)
-        ├── Documents.js    # 文档管理 (CRUD + 统计卡片)
+        ├── KnowledgeCatalog.js # 文档与知识资产管理
         ├── Search.js       # 向量检索 (FAQ 快捷标签)
         ├── Import.js       # 文件导入 (队列上传 + 替换模式)
         ├── ApiKeys.js      # API Key 自助管理
@@ -63,7 +63,7 @@ admin-ui/
 | `/login` | Login.js | 游客 (guest) |
 | `/dashboard` | Dashboard.js | 登录即可 |
 | `/chat` | Chat.js | `read` 权限 |
-| `/documents` | Documents.js | `read` 权限 |
+| `/knowledge-assets/catalog` | KnowledgeCatalog.js | `read` 权限 |
 | `/search` | Search.js | `read` 权限 |
 | `/import` | Import.js | `insert` 权限 |
 | `/api-keys` | ApiKeys.js | 登录即可 |

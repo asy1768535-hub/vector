@@ -15,7 +15,7 @@
 
 ```bash
 cd D:/work_space/vectorDatabase
-pip install -r requirements-dev.txt
+pip install -e ".[dev]"
 ```
 
 ## 2. 配置 `.env`

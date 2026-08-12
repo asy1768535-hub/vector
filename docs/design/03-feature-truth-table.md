@@ -18,7 +18,7 @@
 | 知识库 CRUD | ✅ 当前支持 | 超管在库管理页操作 |
 | 文档上传 (多格式) | ✅ 当前支持 | `.txt/.md/.pdf/.docx/.xlsx`, 队列上传 |
 | 替换已有文档 | ✅ 当前支持 | `replace_document_id` 模式 |
-| 文档在线编辑 | ✅ 当前支持 | Documents.js 内联编辑 |
+| 文档在线编辑 | ✅ 当前支持 | KnowledgeCatalog.js 内联编辑 |
 | 原始文件在线预览 | ❌ 本版本不做 | 无文件存储服务 |
 | 向量检索 | ✅ 当前支持 | `/libraries/{slug}/query`, Dense/Hybrid |
 | 检索结果导出 | ❌ 本版本不做 | 无后端支持 |

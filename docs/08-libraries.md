@@ -144,7 +144,7 @@ GET /me/permissions
 → [{"library_slug":"medical","actions":["read","insert"]}, …]
 ```
 
-前端用 slug 直接渲染（见 `admin-ui/src/views/Documents.js:loadLibs()`）。
+前端用 slug 直接渲染（见 `admin-ui/src/views/KnowledgeCatalog.js`）。
 
 ## 库统计
 

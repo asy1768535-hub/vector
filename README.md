@@ -119,7 +119,7 @@ OCR 按库级 `ocr_enabled` 开启（需装 OCR 依赖：`pip install -e ".[ocr]
 
 ```bash
 # 1. 依赖
-pip install -r requirements-dev.txt
+pip install -e ".[dev]"
 
 # 2. 配置（从模板复制，按需填写；切勿提交真实 .env）
 cp .env.example .env

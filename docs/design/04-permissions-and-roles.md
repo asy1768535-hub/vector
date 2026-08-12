@@ -45,7 +45,7 @@
 
 ### 页面内操作级
 
-- Documents.js: `canInsert` / `canDelete` computed
+- KnowledgeCatalog.js: `canInsert` / `canDelete` computed
 - Import.js: 选库逻辑受权限过滤
 - Search.js: 库列表受 `readableLibraries()` 过滤
 
