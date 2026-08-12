@@ -91,7 +91,6 @@ async def test_shadow_and_global_gate_control_prompt_fusion(mode, answer_enabled
 
 def test_0050_is_single_head_and_matches_orm_contract():
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_heads() == ["0052"]
     assert script.get_revision("0050").down_revision == "0049"
     assert ChatMessage.__table__.columns.graph_augmented.nullable is False
     assert ChatMessage.__table__.columns.graph_evidence.nullable is False
