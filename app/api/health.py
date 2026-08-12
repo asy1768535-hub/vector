@@ -6,6 +6,8 @@ import logging
 from pathlib import Path
 
 import httpx
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from fastapi import APIRouter, Response, status
 from sqlalchemy import text
 
@@ -18,7 +20,11 @@ from app.services.parser_units import PARSER_UNIT_CONTRACT_VERSION
 
 log = logging.getLogger(__name__)
 router = APIRouter()
-_MIGRATION_HEAD = "0060"
+
+
+def _migration_heads() -> frozenset[str]:
+    """Load the supported Alembic heads from the checked-out migration graph."""
+    return frozenset(ScriptDirectory.from_config(Config("alembic.ini")).get_heads())
 
 
 async def _check_db() -> bool:
@@ -33,11 +39,17 @@ async def _check_db() -> bool:
 
 async def _check_migrations() -> bool:
     try:
+        heads = _migration_heads()
+        if not heads:
+            return False
         async with async_session_factory() as session:
-            revision = (
-                await session.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one()
-        return revision == _MIGRATION_HEAD
+            revisions = {
+                str(revision)
+                for revision in (
+                    await session.execute(text("SELECT version_num FROM alembic_version"))
+                ).scalars()
+            }
+        return revisions == heads
     except Exception:  # noqa: BLE001
         log.warning("migration readiness check failed", exc_info=True)
         return False

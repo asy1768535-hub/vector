@@ -110,7 +110,6 @@ def test_0048_enables_classification_with_default_taxonomy() -> None:
     assert ")) - 1)::integer" in migration
 
 def test_readiness_payload_contains_only_stable_content_free_codes() -> None:
-    assert health_api._MIGRATION_HEAD == "0058"
     payload = _payload({"database": True, "embedding": False})
     assert payload == {
         "status": "not_ready",
@@ -125,12 +124,12 @@ def test_readiness_payload_contains_only_stable_content_free_codes() -> None:
 
 def test_health_migration_head_matches_alembic_head() -> None:
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_current_head() == health_api._MIGRATION_HEAD
+    assert health_api._migration_heads() == frozenset(script.get_heads())
 
 
 class _FakeMigrationSession:
-    def __init__(self, revision: str | None = None, error: Exception | None = None):
-        self.revision = revision
+    def __init__(self, revisions: list[str] | None = None, error: Exception | None = None):
+        self.revisions = revisions or []
         self.error = error
 
     async def __aenter__(self) -> "_FakeMigrationSession":
@@ -142,27 +141,37 @@ class _FakeMigrationSession:
     async def execute(self, statement: object) -> object:
         if self.error is not None:
             raise self.error
-        return type("Result", (), {"scalar_one": lambda _: self.revision})()
+        return type("Result", (), {"scalars": lambda _: iter(self.revisions)})()
 
 
-@pytest.mark.parametrize("revision", ["0058"])
-def test_check_migrations_accepts_current_head(monkeypatch, revision: str) -> None:
+@pytest.mark.parametrize("revisions", [["0060"]])
+def test_check_migrations_accepts_current_head(monkeypatch, revisions: list[str]) -> None:
+    monkeypatch.setattr(
+        health_api,
+        "_migration_heads",
+        lambda: frozenset({"0060"}),
+    )
     monkeypatch.setattr(
         health_api,
         "async_session_factory",
-        lambda: _FakeMigrationSession(revision=revision),
+        lambda: _FakeMigrationSession(revisions=revisions),
     )
     assert asyncio.run(health_api._check_migrations()) is True
 
 
-@pytest.mark.parametrize("revision", ["0055", "0043", None, ""])
+@pytest.mark.parametrize("revisions", [["0055"], ["0043"], [], ["0060", "0059"]])
 def test_check_migrations_rejects_stale_other_and_empty_heads(
-    monkeypatch, revision: str | None
+    monkeypatch, revisions: list[str]
 ) -> None:
     monkeypatch.setattr(
         health_api,
+        "_migration_heads",
+        lambda: frozenset({"0060"}),
+    )
+    monkeypatch.setattr(
+        health_api,
         "async_session_factory",
-        lambda: _FakeMigrationSession(revision=revision),
+        lambda: _FakeMigrationSession(revisions=revisions),
     )
     assert asyncio.run(health_api._check_migrations()) is False
 
