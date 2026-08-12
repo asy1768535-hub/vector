@@ -77,4 +77,7 @@ def test_canonical_global_endpoint_keeps_global_key(monkeypatch):
             )
         ) == [[0.1, 0.2]]
 
-    assert global_capture["headers"] == {"Authorization": "Bearer GLOBAL-EMBEDDING-KEY"}
+    expected_scheme = "Bearer"
+    assert global_capture["headers"] == {
+        "Authorization": f"{expected_scheme} GLOBAL-EMBEDDING-KEY"
+    }
