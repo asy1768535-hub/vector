@@ -2,7 +2,7 @@
 
 ## 一句话总览
 
-API 进程 + Worker 进程都无状态，可水平扩展；状态全在 PostgreSQL + Qdrant + bge-m3 三个外部服务里。
+API 和已启用的 Worker 进程都无状态，可按能力扩展；权威状态主要在 PostgreSQL，向量在 Qdrant，文档 revision 文件可在本地或配置的 object storage，Embedding / Rerank / OCR / Model provider 按部署配置提供。
 
 > **部署方式**：本项目目前**不提供官方 Dockerfile**，推荐用 **Python 虚拟环境（`.venv`）+ systemd** 托管（见下「进程托管」）。如需容器化，可自行基于该 venv 流程编写 Dockerfile，但非内部试运行的必需项。
 
@@ -35,7 +35,7 @@ After=network.target
 User=vkb
 WorkingDirectory=/opt/vector-kb
 EnvironmentFile=/opt/vector-kb/.env
-ExecStart=/opt/vector-kb/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8100 --workers 4
+ExecStart=/opt/vector-kb/.venv/bin/python -m app.main
 Restart=always
 RestartSec=5
 
@@ -81,13 +81,29 @@ RestartSec=10
 WantedBy=multi-user.target
 ```
 
-启用（生产需 **三类进程**：API + embedding worker + cleanup worker）：
+基础启用（至少 **API + Embedding Worker + Cleanup Worker**）：
 
 ```bash
 systemctl enable --now vector-kb-api
-systemctl enable --now vector-kb-worker@1 vector-kb-worker@2 vector-kb-worker@3
+systemctl enable --now vector-kb-worker@1
 systemctl enable --now vector-kb-cleanup
 ```
+
+文件上传/导入链路还需单独托管：
+
+```bash
+/opt/vector-kb/.venv/bin/python -m app.workers.importer --watch
+```
+
+图谱、知识产物、分类不是同一个通用 worker；按对应 feature gate / rollout 分别托管：
+
+```bash
+/opt/vector-kb/.venv/bin/python -m app.workers.graph_extractor --watch
+/opt/vector-kb/.venv/bin/python -m app.workers.knowledge_artifacts --watch
+/opt/vector-kb/.venv/bin/python -m app.workers.classifications --watch
+```
+
+上面三个能力 worker 只在对应能力启用时启动；Importer、feature workers 应使用与 API/基础 worker 相同的 `WorkingDirectory`、`EnvironmentFile`、重启和日志策略建立独立 systemd unit，不要并入 Embedding Worker unit。
 
 ### Docker（可选）
 
@@ -98,7 +114,7 @@ FROM python:3.13-slim
 WORKDIR /app
 COPY . .
 RUN pip install --no-cache-dir .
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8100"]
+CMD ["python", "-m", "app.main"]
 ```
 
 worker 用同一镜像、覆盖 CMD：
@@ -137,17 +153,19 @@ HTTPS 终止后把 `COOKIE_SECURE=true` 即可。
 # 创建
 createdb -h <host> -U postgres vector_kb
 
-# 应用 schema（当前 head 为 0015）
+# 应用 schema（当前代码 head 为 0060；目标库 current 需另行核对）
 DB_HOST=<host> DB_USER=postgres DB_PASSWORD=… DB_NAME=vector_kb \
   alembic upgrade head
+alembic heads
+alembic current
 ```
 
-> 升级到 v0.1.4：`alembic upgrade head`（含 0009 revision/rebuild_operations、0010 qdrant_cleanup_outbox、0011 service_heartbeats、0013 library_faq_questions、0014 chat_history、0015 hybrid_retrieval；旧 0012 hybrid 已回退，由 0015 幂等收编残留列）。
+> 当前代码 head 为 **`0060`**（2026-08-12 核对）。这里不再使用旧的 v0.1.4 / 0015 部署说明；旧阶段文档保留其历史时点，不能覆盖当前 head。
 > 注意：0009 的活动唯一索引创建前，若库内已有违反唯一性的历史活动行需先清理（见 docs/20 §11.1）。
 
 建议 PG 配置：
 
-- `max_connections >= 200`（每个 worker / API worker 占连接）
+- `max_connections` 按实际 API/worker 副本数和连接池配置核算；不要把固定副本数当作默认值
 - `shared_buffers = 25% RAM`
 - 定期 `VACUUM ANALYZE`，尤其 `embedding_jobs` 表（高频 update）
 
@@ -159,15 +177,15 @@ DB_HOST=<host> DB_USER=postgres DB_PASSWORD=… DB_NAME=vector_kb \
 | `/health` 失败 | 主动探测 | 连续 3 次 fail |
 | `embedding_jobs` pending 堆积 | DB SQL | 持续 > 1000 |
 | `embedding_jobs` failed 增长 | DB SQL | 每 5 分钟新增 > 10 |
-| Worker 进程数 | systemd / docker | < 配置值 |
+| 已启用 Worker 进程 | systemd / docker | 与部署 profile 和队列积压阈值一致 |
 | Qdrant 内存 | Qdrant 自带 metrics | > 80% |
-| bge-m3 延迟 | 自己埋 / `httpx` 加 hook | P95 > 500ms |
+| Embedding provider 延迟 | 自己埋 / `httpx` 加 hook | P95 > 500ms |
 
 ## 备份 & 恢复
 
 > **完整手册见 [docs/27 · 备份恢复与部署演练](27-backup-restore-runbook.md)**，含：PG 备份/恢复、
 > Qdrant snapshot、`.env` 安全保存、「Qdrant 丢失走 rebuild」「PostgreSQL 丢失不可恢复项」、
-> 以及**恢复后验收 checklist**（三类进程 + `/health` + 运行状态页 + 临时文档生命周期冒烟）。
+> 以及**恢复后验收 checklist**（按启用能力启动 API/worker + `/health` + 运行状态页 + 临时文档生命周期冒烟）。
 >
 > 脚本模板：`scripts/backup_pg.ps1`、`scripts/restore_pg.ps1`、`scripts/backup_qdrant.md`
 > （参数走环境变量/命令行，不含真实密钥/路径）。
@@ -196,8 +214,8 @@ Qdrant：用 Qdrant 自带 `snapshots` API，每个 collection 单独；或干�
 ## 横向扩展上限估计（参考）
 
 - 单 API 副本：~500 RPS 普通查询
-- 单 Worker 副本：~50 chunks/s（取决于 bge-m3 服务）
-- bge-m3 服务是检索热路径的瓶颈：把它独立部署 + 横向扩
+- 单 Worker 副本：~50 chunks/s（取决于 embedding provider）
+- Embedding provider 是检索热路径的瓶颈：把它独立部署 + 横向扩
 - Qdrant：单实例可承载几千个 collection、十亿级 points（HNSW 调好）
 
 ## 安全建议

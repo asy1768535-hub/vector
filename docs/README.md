@@ -1,5 +1,13 @@
 # 文档索引
 
+## 当前真相与历史记录
+
+截至 **2026-08-12**，当前代码真相是：`pyproject.toml` package version 为 `0.1.0`；代码迁移 head 为 **`0060`**，参考部署数据库同日 `alembic current` 为 `0060`。向量摄入/检索是核心，代码还包含按 feature gate 或 rollout 控制的图谱、分类、知识产物、Evidence/claim shadow、公开 API/MCP 与组织能力。
+
+部署、架构、worker、schema、测试和内部试运行的当前说明以根目录 README 及 [02](./02-architecture.md)、[11](./11-worker.md)、[14](./14-database-schema.md)、[15](./15-deployment.md)、[16](./16-testing.md)、[22](./22-internal-pilot-checklist.md) 为准。下方“版本说明”中的 `v0.x`、`M*`、旧 head 和旧测试数字是历史设计/验收记录，保留其原始时点，不是当前 package version 或部署 head。
+
+当前 `docs/` 下共有 **63 个 Markdown 文件**（根目录 47 个、子目录 16 个；命令：`Get-ChildItem docs -File -Recurse -Filter *.md`，核对日期 2026-08-12）。本页是分组索引，不再使用旧的“24 篇”数量描述。
+
 > **v0.7 corrective G2.8 UTF-8 evidence correction (2026-07-21):** The initial
 > PowerShell-to-Python qualification encoded the two Chinese public probes incorrectly;
 > its `21c8f3...` output-set SHA is preserved but is not release authority. Direct UTF-8
@@ -105,7 +113,7 @@
 | 08 | [库管理](./08-libraries.md) | 多租户隔离：每库一个 Qdrant collection |
 | 09 | [文档摄入](./09-document-ingest.md) | 切分 / 入队 / 幂等 / 异步 embed |
 | 10 | [检索接口](./10-retrieval-api.md) | Dify external knowledge base spec |
-| 11 | [Embedding Worker](./11-worker.md) | `FOR UPDATE SKIP LOCKED` 队列消费 |
+| 11 | [Worker](./11-worker.md) | Embedding / Cleanup / Importer 及按能力启用的 worker |
 | 12 | [管理后台 UI](./12-admin-ui.md) | 零构建 Vue 3 SPA |
 
 ## 参考资料
@@ -113,7 +121,7 @@
 | # | 文档 | 用途 |
 |---|---|---|
 | 13 | [API 完整参考](./13-api-reference.md) | 所有 endpoint 速查 |
-| 14 | [数据库 Schema](./14-database-schema.md) | 9 业务表 + casbin_rule（迁移至 0010） |
+| 14 | [数据库 Schema](./14-database-schema.md) | 初始表、能力表与当前迁移 head `0060` |
 | 15 | [部署 / 生产清单](./15-deployment.md) | 上线前要检查的项 |
 | 16 | [测试](./16-testing.md) | 跑测试 + 加测试 |
 | 17 | [常见问题](./17-faq.md) | 踩坑速查 |
@@ -128,7 +136,9 @@
 | 21 | [批次 A 实施方案](./21-batch-a-implementation-plan.md) | 一致性实现记录 |
 | 22 | [内部试运行清单](./22-internal-pilot-checklist.md) | 上线门槛 + 六步验收 |
 
-## 版本说明
+## 历史版本与阶段记录（保留原时点）
+
+以下文档用于追溯设计、验收和阶段决策。它们可能出现当时的 package/version 标签、migration head、测试数字或“已实现/未实现”边界；不要将其直接用于当前部署。
 
 | # | 文档 | 主题 |
 |---|---|---|

@@ -1,9 +1,8 @@
-# 22 · 内部试运行上线清单（v0.1.4-internal-pilot）
+# 22 · 内部试运行上线清单（当前代码核对版）
 
-> **范围声明：本版本仅用于「单个部门、内部试运行 1~2 周」，不是全公司正式推广。**
-> v0.1.4 已把 轻量 Hybrid 检索 / Query Rewrite / 站内 Chat 作为**可选能力**落地（均默认关，需在 `.env` 显式开启）；
-> 试运行暴露真实问题后再决定是否启用本地 reranker、复杂文档解析等进一步增强。
-> 这些都**不是上线阻断项**——默认 dense 检索效果已足够开始试用。
+> **范围声明：本清单用于「单个部门、内部试运行 1~2 周」，不是全公司正式推广。**
+> 这是一份部署清单，不是 package version。当前代码核对日期为 **2026-08-12**：`pyproject.toml` version 为 `0.1.0`，Alembic head 为 **`0060`**。历史文档中的 v0.x / M* 标签只表示当时阶段。
+> Hybrid、Query Rewrite、站内 Chat、Rerank、图谱、知识产物、分类和 claim shadow 等能力按 feature gate / rollout 控制；试运行必须以实际 `.env`、provider 自检和 rollout 状态为准。
 
 本清单是交给**部署人员**的一页式核对表。详细原理见 [04 快速开始](./04-quickstart.md)、[15 部署](./15-deployment.md)、[16 测试](./16-testing.md)、[20 一致性](./20-revision-and-deletion-consistency.md)。
 
@@ -11,19 +10,23 @@
 
 | 产物 | 说明 |
 |---|---|
-| 版本标签 `v0.1.4-internal-pilot` | 明确的可部署版本基线 |
+| 部署基线记录 | 记录实际 Git commit、`pyproject.toml` version 和 Alembic `current` 输出；不要使用阶段标签代替版本 |
 | `.env.example` | 无密钥配置模板，复制为 `.env` 后填写 |
 | `scripts/acceptance.py` | 六步闭环验收脚本（见下） |
-| pytest 全绿 | 371 passed / 15 skipped（部分集成用例需 `VECTOR_KB_PG_TEST_DSN` 时才跑）|
+| 测试 | 按 [16 测试](./16-testing.md) 执行带日期的 Python 与 admin-ui Node 验证；不固定历史通过数 |
 
 ## 二、服务器上线门槛（部署人员逐条确认）
 
 - [ ] **1. 服务器专用 `.env`**：由 `.env.example` 复制填写。`DB_PASSWORD` / `JWT_SECRET`(`openssl rand -hex 32`) / `EMBEDDING_API_KEY` / `QDRANT_API_KEY` 现填现管，**绝不进 git**。
-- [ ] **2. 数据库迁移**：`alembic upgrade head`（当前 head = **0015**，含 0009 revision/rebuild_operations、0010 qdrant_cleanup_outbox、0011 service_heartbeats、0013 library_faq_questions、0014 chat_history、0015 hybrid_retrieval；旧 0012 hybrid 已回退，由 0015 幂等收编残留列）。首次迁移注意 0009 活动唯一索引前需清理历史重复活动行（见 docs/20 §11.1）。
-- [ ] **3. 托管三类进程**（systemd 单元见 docs/15）：
-  - API：`uvicorn app.main:app --host 0.0.0.0 --port 8100`
+- [ ] **2. 数据库迁移**：执行 `alembic upgrade head`，当前代码 head = **0060**；升级前后分别记录 `alembic heads` / `alembic current`。不要把旧 acceptance 文档中的 0010/0015 当作当前部署 head。
+- [ ] **3. 托管按能力启用的进程**（systemd 单元见 docs/15）：
+  - API：`python -m app.main`（host/port 由 `.env` 的 `API_HOST` / `API_PORT` 读取）
   - Embedding Worker：`python -m app.workers.embedder --watch`
   - Cleanup Worker：`python -m app.workers.cleanup --watch`
+  - 文件导入：`python -m app.workers.importer --watch`（使用文件上传/导入时）
+  - 图谱：`python -m app.workers.graph_extractor --watch`（启用 `GRAPH_EXTRACTION_ENABLED` 时）
+  - 知识产物：`python -m app.workers.knowledge_artifacts --watch`（启用 `KNOWLEDGE_ARTIFACT_RUNTIME_ENABLED` 时）
+  - 分类：`python -m app.workers.classifications --watch`（启用 `CLASSIFICATION_RUNTIME_ENABLED` 时）
 - [ ] **4. 固定内网地址 + 防火墙 + API Key**：API/PG/Qdrant/embedding 走内网固定地址；不暴露 PG、Qdrant 到公网；Qdrant 设 `QDRANT_API_KEY`；业务方用各自 API Key（明文只显示一次）。
 - [ ] **5. 日志轮转 + 监控 + 备份**：监控指标见 docs/15（5xx 率、`/health`、`embedding_jobs` pending/failed 堆积、Qdrant 内存）；`pg_dump` 定时；Qdrant snapshots 定时。
 - [ ] **6. 实际恢复一次备份演练**：真的 `pg_restore` 一次 + 真的恢复一次 Qdrant snapshot，确认可恢复，而非只配了备份。

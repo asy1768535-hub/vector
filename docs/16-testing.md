@@ -10,22 +10,16 @@ pytest tests/ --cov=app                       # 带覆盖率（需 pytest-cov）
 pytest tests/test_pdf_extract.py -q           # PDF 文字层/扫描页 OCR 逐页逻辑（monkeypatch，不需真实模型）
 ```
 
-## 当前覆盖
+## 当前基线
 
-23 个测试，纯单元，不依赖 DB / Qdrant / bge-m3：
+测试数量随代码变化，本文不把数量写成永久契约。2026-08-12 在文档补丁前的同一代码基线上，使用 `pytest -q` 完成 Python 全量测试；admin-ui 对 `admin-ui/**/*.test.mjs` 逐个执行 `node <test-file>` 完成 standalone Node 测试。本文不记录具体通过数；后续以当次命令输出为准。
 
-| 文件 | 覆盖 |
-|---|---|
-| `test_dify_contract.py` | Dify 请求/响应 schema 严格匹配；最小 / 完整 / 未知字段三档 |
-| `test_casbin_model.py` | RBAC 模型逻辑：直接策略 / 库隔离 / 角色继承 |
-| `test_retrieval_filter.py` | metadata_condition → Qdrant filter 映射，覆盖 `=` / `!=` / `contains` / `in` / null / 未知算子 |
-| `test_splitter.py` | text / markdown / none 三种切分；空输入 |
-| `test_api_key_strategy.py` | bcrypt 哈希 / roundtrip / 唯一性 |
+覆盖面包括 Python 单元/契约测试、PG 集成测试（设置 `VECTOR_KB_PG_TEST_DSN` 时）、图谱/知识产物/分类/claim shadow 等能力测试，以及 `admin-ui` 下逐个执行的 Node 测试。文档链接和当前部署事实用本次文档校验命令单独验证，不依赖数据库连接。
 
 ## 设计原则
 
 1. **不依赖外部服务**。需要 DB 的测试用 SQLite in-memory 或直接 mock；需要 Qdrant 的测试不存在（只测映射逻辑）。
-2. **快**。23 个用例总跑时间 ~17 秒（绝大部分耗时在 bcrypt 的安全 cost factor 上）。
+2. **分层**。无 DSN 时 PG 集成测试应 skip；依赖真实外部 provider 的验收脚本不等同于 pytest 收集结果。
 3. **覆盖契约 / 边界 / 错误**。错误算子被静默跳过；超长 password 报错；空 chunk 返回空数组。
 
 ## 加新测试
@@ -59,7 +53,7 @@ def test_health_returns_200():
 
 ### 加一个需要 DB 的集成测试
 
-推荐用 [pytest-postgresql](https://pytest-postgresql.readthedocs.io/) 起临时 PG，或者用 testcontainers。当前项目还没接，按需添加。
+项目已有 PG 集成测试；运行时显式设置 `VECTOR_KB_PG_TEST_DSN`，只指向可丢弃的临时库，不要读取开发机 `.env` 或生产库。
 
 ## 现有未覆盖的（可以补的）
 
@@ -94,7 +88,7 @@ def test_health_returns_200():
    - 用 `postgres:16` service + **CI 专用账号/密码/库**（`vkci` / `vector_kb_ci`），与开发机 `.env` 无关
    - 显式设置 `VECTOR_KB_PG_TEST_DSN` 及 `DB_*`（仅指向该临时库）
    - `pytest -q tests/test_batch_a_pg_integration.py tests/test_batch_b_pg_integration.py tests/test_heartbeat_pg_integration.py`
-   - 其中 `test_alembic_upgrade_0001_to_0010_builds_schema` 覆盖「空库 → upgrade 到 0010」；`test_heartbeat_pg_integration.py::test_alembic_upgrade_builds_heartbeats_table` 覆盖「空库 → upgrade 到 head（0011），建出 `service_heartbeats` 表 + 唯一约束 + 索引」
+   - 迁移测试以当前代码链和目标 head 为准；部署前/后分别用 `alembic heads` 与 `alembic current` 核对，不再把 0010/0011 当作当前 head。
    - **不**运行依赖真实 Qdrant/Embedding 的 E2E 脚本（`scripts/e2e_*.py`、`scripts/acceptance.py` 等都不是 pytest 用例，不会被收集）
 
 ### 哪些测试不访问真实模型/服务
@@ -110,6 +104,7 @@ def test_health_returns_200():
 ruff check app tests scripts
 pytest -q                              # 不设 DSN 时 PG 测试自动 skip
 python scripts/check_release_safety.py
+# admin-ui：逐个执行 admin-ui/**/*.test.mjs 中的 standalone Node 测试
 # 可选：有一个可丢弃的本地测试库时，跑 PG 集成 + 迁移测试
 #   export VECTOR_KB_PG_TEST_DSN=postgresql+asyncpg://<user>:<pw>@127.0.0.1:5432/<throwaway_db>
 #   再设 DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME 指向同一临时库

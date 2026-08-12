@@ -1,6 +1,17 @@
 # 11 · Worker
 
-> 系统有**两个 worker**：Embedding Worker（本文）+ Cleanup Worker。生产需各起一个常驻进程。
+> 系统按队列和能力拆分为多个 worker 入口。基础部署通常需要 Embedding Worker + Cleanup Worker；文件导入需要 Import Worker；启用图谱、知识产物或分类时，再启动对应能力 worker。是否启动由部署配置和 rollout 决定，不用固定的“两个 worker”或“几个进程”描述当前系统。
+
+| 入口 | 消费/能力 | 启用条件 |
+|---|---|---|
+| `python -m app.workers.embedder --watch` | `embedding_jobs`，写入 Qdrant | 基础摄入/检索链路 |
+| `python -m app.workers.cleanup --watch` | `qdrant_cleanup_outbox`，物理清理 | 基础删除/重建链路 |
+| `python -m app.workers.importer --watch` | `document_import_jobs`，文件导入 | 使用文件上传/导入时 |
+| `python -m app.workers.graph_extractor --watch` | 图谱 extraction units | `GRAPH_EXTRACTION_ENABLED=true` |
+| `python -m app.workers.knowledge_artifacts --watch` | Summary / Outline 等知识产物 | `KNOWLEDGE_ARTIFACT_RUNTIME_ENABLED=true` |
+| `python -m app.workers.classifications --watch` | 文档分类决策 | `CLASSIFICATION_RUNTIME_ENABLED=true` |
+
+这些入口都支持 `--watch` 长跑模式；Embedding、Cleanup、Importer 也支持无 `--watch` 的一次性处理。能力默认关闭或受 rollout 管理时，未启用的 worker 不应作为必需进程启动。
 
 ## Cleanup Worker（#7 删除/重建的 Qdrant 物理清理）
 
@@ -30,7 +41,7 @@ python -m app.workers.embedder --watch &   # 终端 B
 python -m app.workers.embedder --watch &   # 终端 C
 ```
 
-`FOR UPDATE SKIP LOCKED` 保证三个副本不会抢到同一 job。
+`FOR UPDATE SKIP LOCKED` 保证多个副本不会抢到同一 job。
 
 ## 主循环
 
@@ -184,7 +195,7 @@ POST /admin/jobs/{job_id}/retry
 
 ## 运行状态心跳（旁路，docs/26 / 批次 C2）
 
-两个 Worker（与 API 一样）在 `run()` 启动时各起一个**独立的 `heartbeat_loop` asyncio 任务**
+API 和会写运行状态的长驻 worker 在 `run()` 启动时各起一个**独立的 `heartbeat_loop` asyncio 任务**
 （`app/services/heartbeat.py`），每 ~15s 往 `service_heartbeats` upsert 一行，**与主循环迭代解耦**：
 
 - 处理一个 >60s 的长任务、或 degraded `asyncio.sleep` 等待期间，主循环阻塞，但心跳任务并发照常打卡 → 该实例**保持在线**（degraded 时 `metadata.degraded=true`，页面显示「在线但降级」）。
@@ -196,7 +207,7 @@ POST /admin/jobs/{job_id}/retry
 ## 监控
 
 - **「任务监控」页**：`/console/#/jobs`，按状态过滤
-- **「运行状态」页**：`/console/#/operations`，三类进程 online/degraded/offline + 任务/Outbox/重建聚合（docs/26）
+- **「运行状态」页**：`/console/#/operations`，按当前服务类型显示 online/degraded/offline，并聚合任务、Outbox、重建和 publication 状态（见 `docs/26-runtime-observability-design.md`）
 - **直接 SQL**：
 
 ```sql
