@@ -114,10 +114,6 @@ def _table_parser_units(
     return units
 
 
-def _table_to_text(table: Table) -> str:
-    return "\n".join(_table_rows(table))
-
-
 def _paragraph_image_blobs(paragraph: Paragraph) -> list[bytes]:
     """取段落里内嵌图片的字节流（按出现顺序）。无图返回空列表。"""
     blobs: list[bytes] = []
