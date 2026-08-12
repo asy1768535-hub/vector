@@ -137,32 +137,11 @@
 | 31 | [v0.2 Evidence Foundation upgrade summary](./31-upgrade-summary-v0.2-evidence-foundation.md) | Compatibility fields, release scope, and v0.3 evidence handoff |
 | 32 | [v0.4 Graph Extraction evaluation runbook](./32-v0.4-graph-extraction-eval-runbook.md) | Synthetic Eval safety, real DeepSeek runs, immutable artifacts, verification and disposal |
 | 34 | [v0.5 Active Graph Publication operator summary](./34-v0.5-active-graph-publication.md) | Feature gate, lifecycle, API roles, healthy/degraded reads, rollout and rollback |
-| v0.4 Acceptance | [Graph Extraction Pipeline acceptance](./testing/acceptance/v0.4-graph-extraction-pipeline.md) | Exact commits, hashes, metrics, real PostgreSQL/Qdrant gates and release decision |
-| v0.5 Acceptance | [Active Graph Publication acceptance](./testing/acceptance/v0.5-active-graph-publication.md) | Dirty boundary, release gates, compatibility, privacy/scope audit and release decision |
-| v0.6 Acceptance | [Published Graph Retrieval acceptance](./testing/acceptance/v0.6-published-graph-retrieval.md) | Frozen M5 evidence, non-skipped PostgreSQL, compatibility, privacy/scope, rollback and release decision |
-| v0.9 First-Slice Acceptance | [Knowledge Platform first-slice acceptance](./testing/acceptance/v0.9-first-slice.md) | Exact M1-M7 candidate, focused/full regressions, PostgreSQL, browser, privacy, cleanup, and default-off decision |
 | v0.9 MCP | [MCP knowledge adapter](./mcp-knowledge-adapter.md) | Read-only tools/resources over the accepted `/api/v1`, stdio/Streamable HTTP operation, credentials, and rollback |
 | v0.9 External Graph Sync | [External graph fact synchronization](./external-graph-sync.md) | SyncSource policy, entity/relation identity, authority conflicts, tombstones, snapshots, Publication safety, and rollback |
 | v0.9 Deployment | [Supported deployment runbook](./39-v0.9-supported-deployment.md) | Hosted/private initialization, readiness, Organization rollout, backup/restore, upgrade, and rollback |
-| v0.9 Final Acceptance | [Final integration acceptance](./testing/acceptance/v0.9-final.md) | Frozen M1-M11 dependency closure, full gates, real recovery evidence, cleanup, and GO eligibility |
 | v0.3 | [Graph Relation Foundation spec](./superpowers/specs/2026-07-09-v0.3-graph-relation-foundation.md) | Ontology, graph facts, evidence binding, lifecycle, API and acceptance contracts |
-| v0.4 | [Graph Extraction Pipeline Master Plan](./superpowers/plans/2026-07-10-v0.4-graph-extraction-pipeline.md) | M1-M6 boundaries, evidence/schema contracts, safety, evaluation and release gates |
-| v0.5 | [Active Graph Publication Master Plan](./superpowers/plans/2026-07-15-v0.5-active-graph-publication.md) | M1-M6 plan for graph publication schema, manifests, activation, API, reconciliation and acceptance |
-| v0.6 Design | [Published Graph Retrieval Master Design](./superpowers/specs/2026-07-16-v0.6-published-graph-retrieval.md) | Approved Master Design for exact seed resolution, bounded published-graph traversal, Evidence locators and fail-closed reads |
-| v0.6 M1 | [Contract, configuration and completion record](./superpowers/plans/2026-07-16-v0.6-published-graph-retrieval-m1.md) | Accepted strict DTOs, absolute v1 limits, startup validation, no route and no migration |
-| v0.6 M2 | [Snapshot loader, exact resolver and completion record](./superpowers/plans/2026-07-16-v0.6-published-graph-retrieval-m2.md) | Completed healthy membership aggregates, exact seed/type resolution, cross-scope errors, publication fences and PostgreSQL acceptance |
-| v0.6 M3 | [Deterministic bounded traversal and completion record](./superpowers/plans/2026-07-16-v0.6-published-graph-retrieval-m3.md) | Completed direction-aware BFS, stable ordering, atomic truncation, bounded per-hop SQL and PostgreSQL acceptance |
-| v0.6 M4 | [Evidence locator, REST API and completion record](./superpowers/plans/2026-07-16-v0.6-published-graph-retrieval-m4.md) | Completed bounded frozen-support hydration, current-ready locators, strict response assembly, read permission, sanitized errors, timeout and PostgreSQL acceptance |
-| v0.6 M5 | [Evaluation, performance and operations completion record](./superpowers/plans/2026-07-16-v0.6-published-graph-retrieval-m5.md) | Completed calibration, candidate-max policy freeze, three independent post-freeze runs and verified release evidence |
-| v0.6 M6 | [Release acceptance and completion record](./superpowers/plans/2026-07-17-v0.6-published-graph-retrieval-m6.md) | Completed immutable evidence, non-skipped PostgreSQL, inherited compatibility, privacy/scope, rollback and full-suite gates |
-| v0.7 Design | [Publication-Scoped Entity Linking Master Design](./superpowers/specs/2026-07-17-v0.7-publication-scoped-entity-linking.md) | G1 PASSED; single-scope entity-linking contract frozen and G2 feasibility planning authorized, with no evaluation or production implementation approval |
-| v0.7 G2 | [Entity Linking Feasibility Plan](./superpowers/plans/2026-07-17-v0.7-publication-scoped-entity-linking-g2.md) | Corrective G2.1 approved after immutable ordinal-1 NO-GO; scorer-v2, fair benchmark, fresh holdout and new evidence chain authorized |
-| v0.4 M1 | [M1 implementation and completion record](./superpowers/plans/2026-07-10-v0.4-graph-extraction-pipeline-m1.md) | Migration 0021, fail-closed configuration, Library safety controls, heartbeat and real PostgreSQL acceptance |
-| v0.4 M2 | [M2 implementation plan](./superpowers/plans/2026-07-13-v0.4-graph-extraction-pipeline-m2.md) | Evidence-aware Context Builder, strict Parser, Prompt, Provider adapter and fenced Attempt recording |
-| v0.4 M3 | [M3 implementation plan](./superpowers/plans/2026-07-13-v0.4-graph-extraction-pipeline-m3.md) | Candidate/Occurrence staging, exact Evidence binding, provenance and Migration 0022 |
-| v0.4 M4 | [M4 implementation plan](./superpowers/plans/2026-07-13-v0.4-graph-extraction-pipeline-m4.md) | Shared Validator, normalization_v1, deterministic Candidate aggregation, conflicts and confidence routing |
-| v0.4 M5 | [M5 implementation plan](./superpowers/plans/2026-07-14-v0.4-graph-extraction-pipeline-m5.md) | Operational Worker, Retry/Rerun, Materializer, API, triggers, compensation and purge |
-| v0.4 M6 | [M6 implementation and completion record](./superpowers/plans/2026-07-14-v0.4-graph-extraction-pipeline-m6.md) | Real DeepSeek evaluation, frozen release policy, PostgreSQL/compatibility gates and v0.4 acceptance |
+| v0.6 M1 | [Published graph retrieval contract](./superpowers/plans/2026-07-16-v0.6-published-graph-retrieval-m1.md) | Strict DTOs, limits, startup validation and configuration contract |
 
 ---
 
