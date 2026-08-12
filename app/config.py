@@ -103,6 +103,8 @@ class Settings(BaseSettings):
     rerank_model: str = ""
     rerank_api_key: str = ""  # 留空则复用 embedding_api_key（同一家服务商同 key 时省事）
     rerank_candidate_k: int = 50  # 重排前从 Qdrant 召回多少候选
+    rerank_batch_size: int = 32  # provider 单次请求上限；TEI 默认最大 batch=32
+    rerank_min_score: float = 0.05  # rerank 成功时的最低证据分；低于此值拒答
 
     # ---- Hybrid 检索（库级 retrieval_mode=hybrid 时生效；轻量第一版，无外部服务）----
     hybrid_candidate_k: int = 50  # dense / keyword 各召回多少候选参与 RRF
@@ -110,6 +112,7 @@ class Settings(BaseSettings):
     hybrid_keyword_threshold: float = 0.3  # pg_trgm word_similarity 命中门槛（0~1）
     hybrid_keyword_title_boost: float = 1.5  # 文件名/标题命中加权
     hybrid_keyword_external_id_boost: float = 2.0  # 文号/external_id 命中加权（编号类问题更稳）
+    hybrid_min_dense_score: float = 0.55  # hybrid 无 rerank 时的原始 dense 证据门槛
 
     # ---- Query Rewrite（多 query dense 召回；第一版，不接 LLM/Agent/Hybrid）----
     # 关：单 query dense 召回（旧逻辑完全不变）。

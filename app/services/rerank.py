@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import math
+from dataclasses import dataclass
 from collections.abc import Mapping
 from typing import Sequence
 
@@ -17,10 +18,33 @@ from app.config import settings
 log = logging.getLogger(__name__)
 
 _TIMEOUT = httpx.Timeout(connect=5.0, read=60.0, write=30.0, pool=5.0)
+_DEFAULT_BATCH_SIZE = 32
 
 
 class RerankError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class RerankObservation:
+    """Bounded request-local rerank outcome without query or provider payloads."""
+
+    effective: str
+    provider: str
+    candidate_count: int
+    scored_count: int
+    fallback_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RankedCandidates:
+    order: list[int]
+    scores: dict[int, float]
+    observation: RerankObservation
+
+    def __iter__(self):
+        yield self.order
+        yield self.scores
 
 
 def is_configured() -> bool:
@@ -55,30 +79,57 @@ async def rank_candidates(
     top_k: int,
     enabled: bool,
     log_label: str = "",
-) -> tuple[list[int], dict[int, float]]:
-    """召回候选重排 → (order, rerank_scores)。Dify 检索与库内查询共用。
-
-    - enabled=False 或无候选：返回原向量序、空分数（不发请求）。
-    - 重排成功：order 为重排序补满后截到 top_k；rerank_scores 仅含合法且命中的下标。
-    - 重排失败：打 ERROR（带 log_label 区分来源）后回退原向量序（绝不阻断检索）。
-    """
+    disabled_reason: str = "disabled",
+) -> RankedCandidates:
+    """Rerank candidates in bounded batches and expose a safe outcome summary."""
     total = len(contents)
-    order = list(range(total))
-    scores: dict[int, float] = {}
-    if enabled and total:
-        try:
-            ranked = await rerank(query, contents, top_n=top_k)
-            order = fill_order([idx for idx, _ in ranked], total)
-            # 与 fill_order 同口径：合法 + 首次出现优先。重复 index 时 ranked 已按分降序，
-            # 首次即最高分；若用字典推导式会被末项（较低分）覆盖，造成顺序按高分、展示按低分。
-            for idx, sc in ranked:
-                if 0 <= idx < total and idx not in scores:
-                    scores[idx] = sc
-        except Exception as exc:  # noqa: BLE001
-            suffix = f" ({log_label})" if log_label else ""
-            log.error("rerank failed%s, fallback to vector order: %s", suffix, exc)
-            order = list(range(total))
-    return order[:top_k], scores
+    provider = (settings.rerank_provider or "standard").lower()
+    vector_order = list(range(total))[:top_k]
+    if not enabled:
+        return RankedCandidates(
+            vector_order,
+            {},
+            RerankObservation("disabled", provider, total, 0, disabled_reason),
+        )
+    if not total:
+        return RankedCandidates([], {}, RerankObservation("success", provider, 0, 0))
+
+    try:
+        ranked: list[tuple[int, float]] = []
+        batch_size = max(1, min(settings.rerank_batch_size, _DEFAULT_BATCH_SIZE, total))
+        for start in range(0, total, batch_size):
+            batch = contents[start : start + batch_size]
+            batch_ranked = await rerank(query, batch, top_n=len(batch))
+            if not batch_ranked:
+                raise RerankError("empty_result")
+            ranked.extend((start + idx, score) for idx, score in batch_ranked)
+        ranked.sort(key=lambda item: (-item[1], item[0]))
+        deduped: list[tuple[int, float]] = []
+        seen: set[int] = set()
+        for idx, score in ranked:
+            if 0 <= idx < total and idx not in seen:
+                seen.add(idx)
+                deduped.append((idx, score))
+        order = fill_order([idx for idx, _ in deduped], total)[:top_k]
+        scores = {idx: score for idx, score in deduped}
+        return RankedCandidates(
+            order,
+            scores,
+            RerankObservation("success", provider, total, len(scores)),
+        )
+    except Exception as exc:  # noqa: BLE001
+        suffix = f" ({log_label})" if log_label else ""
+        log.error(
+            "rerank failed%s: error_type=%s candidate_count=%s",
+            suffix,
+            type(exc).__name__,
+            total,
+        )
+        return RankedCandidates(
+            vector_order,
+            {},
+            RerankObservation("fallback", provider, total, 0, "provider_error"),
+        )
 
 
 def _parse_results(

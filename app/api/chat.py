@@ -124,13 +124,13 @@ def _rewritten_query(records, query: str) -> str | None:
     return " | ".join(matched)
 
 
-def _build_debug(records, top_k: int) -> dict:
+def _build_debug(records, top_k: int, retrieval_debug: dict | None = None) -> dict:
     matched: list[str] = []
     for r in records:
         for q in (r.metadata or {}).get("matched_queries") or []:
             if q not in matched:
                 matched.append(q)
-    return {
+    debug = {
         "matched_queries": matched,
         "rerank_scores": [(r.metadata or {}).get("rerank_score") for r in records],
         "vector_scores": [(r.metadata or {}).get("vector_score") for r in records],
@@ -138,6 +138,9 @@ def _build_debug(records, top_k: int) -> dict:
         "top_k": top_k,
         "chat_model": settings.chat_model,
     }
+    if retrieval_debug is not None:
+        debug["retrieval"] = retrieval_debug
+    return debug
 
 
 async def _retrieve_for_chat(body: ChatMessageRequest, user: User, db: AsyncSession):
@@ -180,7 +183,7 @@ async def _retrieve_for_chat(body: ChatMessageRequest, user: User, db: AsyncSess
     except Exception as exc:  # noqa: BLE001
         log.exception("chat retrieval failed: slug=%s", lib.slug)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "retrieval failed") from exc
-    return lib, retr.records
+    return lib, retr.records, retr.retrieval_debug
 
 
 async def _resolve_conversation(db: AsyncSession, user: User, body: ChatMessageRequest) -> ChatConversation:
@@ -205,7 +208,7 @@ async def chat_messages(
 ) -> ChatMessageResponse:
     """非流式问答 + 落库。无 conversation_id 自动建会话，有则校验后续聊。"""
     conv = await _resolve_conversation(db, user, body) if body.conversation_id is not None else None
-    lib, records = await _retrieve_for_chat(body, user, db)
+    lib, records, retrieval_debug = await _retrieve_for_chat(body, user, db)
     augmentation = await chat_graph_augmentation.prepare_chat_graph_augmentation(
         db, lib, body.query, records, config=settings,
     )
@@ -216,7 +219,7 @@ async def chat_messages(
     history = await chat_history.recent_turns(db, conv.id, settings.chat_history_max_turns)
     user_msg = await chat_history.save_user_message(db, conv.id, body.query)
 
-    debug = _build_debug(records, body.top_k) if body.show_debug else None
+    debug = _build_debug(records, body.top_k, retrieval_debug) if body.show_debug else None
     rewritten = _rewritten_query(records, body.query)
     t0 = time.monotonic()
     status_val, err, used = "success", None, []
@@ -298,7 +301,7 @@ async def chat_stream(
     会话/用户消息在开流前用请求 session 落库并提交；assistant 消息在流结束后用独立 session 落库。
     """
     conv = await _resolve_conversation(db, user, body) if body.conversation_id is not None else None
-    lib, records = await _retrieve_for_chat(body, user, db)
+    lib, records, retrieval_debug = await _retrieve_for_chat(body, user, db)
     augmentation = await chat_graph_augmentation.prepare_chat_graph_augmentation(
         db, lib, body.query, records, config=settings,
     )
@@ -311,7 +314,7 @@ async def chat_stream(
     await db.commit()                                    # 会话 + user 消息先持久化
 
     conv_id, user_msg_id = conv.id, user_msg.id
-    debug = _build_debug(records, body.top_k) if body.show_debug else None
+    debug = _build_debug(records, body.top_k, retrieval_debug) if body.show_debug else None
     rewritten = _rewritten_query(records, body.query)
     _ctx, used = chat_answer.build_context(answer_records, context_chars) if answer_records else ("", [])
     sources, graph_evidence = _split_used_records(used)

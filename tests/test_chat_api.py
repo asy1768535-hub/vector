@@ -300,6 +300,25 @@ def test_messages_debug_toggle():
     assert r_off.json()["debug"] is None
 
 
+def test_chat_debug_includes_bounded_retrieval_observation():
+    records = [_rec("片段A", md={"rerank_score": 0.8})]
+    retrieval_debug = {
+        "rerank": {
+            "effective": "fallback",
+            "provider": "tei",
+            "candidate_count": 50,
+            "scored_count": 0,
+            "fallback_reason": "provider_error",
+        },
+        "duplicate_suppressed": 2,
+        "evidence": {"status": "insufficient", "reason": "dense_score_below_minimum"},
+    }
+
+    debug = chat_api._build_debug(records, 5, retrieval_debug)
+
+    assert debug["retrieval"] == retrieval_debug
+
+
 def test_messages_llm_failure_returns_502():
     records = [_rec("片段A")]
     _override(mock_user, AsyncMock())

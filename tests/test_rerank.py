@@ -234,3 +234,26 @@ async def test_rank_candidates_falls_back_on_invalid_tei_result(monkeypatch):
     )
     assert order == [0, 1]
     assert scores == {}
+
+
+async def test_rank_candidates_splits_large_pool_and_merges_global_order(monkeypatch):
+    calls = []
+
+    async def fake_rerank(query, docs, *, top_n):
+        calls.append(list(docs))
+        return [(index, 0.1 + int(doc.rsplit("-", 1)[1]) / 1000) for index, doc in enumerate(docs)]
+
+    monkeypatch.setattr(rerank, "rerank", fake_rerank)
+    result = await rerank.rank_candidates(
+        "q", [f"doc-{index}" for index in range(50)], top_k=5, enabled=True
+    )
+    order, scores = result
+
+    assert [len(batch) for batch in calls] == [32, 18]
+    assert order == [49, 48, 47, 46, 45]
+    assert scores[49] == 0.14900000000000002
+    assert result.observation.effective == "success"
+    assert result.observation.provider == rerank.settings.rerank_provider
+    assert result.observation.candidate_count == 50
+    assert result.observation.scored_count == 50
+    assert result.observation.fallback_reason is None
