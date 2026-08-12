@@ -77,6 +77,7 @@ _ENTERPRISE_RELATION_CONSTRAINT_GROUPS = {
     "references": (("policy", "document"), ("policy", "document")),
     "approves": (("person", "position", "department"), ("process",)),
     "owns": (("department",), ("product", "project")),
+    "contains": (("document", "product", "project"), ("document", "process", "product")),
     "related_to": (
         tuple(sorted(_ENTERPRISE_ENTITY_TYPE_KEYS)),
         tuple(sorted(_ENTERPRISE_ENTITY_TYPE_KEYS)),

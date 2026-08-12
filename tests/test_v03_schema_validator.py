@@ -6,6 +6,7 @@ import uuid
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy.sql import operators
 
 
 LIB_ID = uuid.uuid4()
@@ -68,11 +69,14 @@ class FakeDB:
         model = stmt.column_descriptions[0]["entity"]
         rows = [obj for (obj_model, _), obj in self.objects.items() if obj_model is model]
         for criterion in stmt._where_criteria:
-            if criterion.operator is not operator.eq:
-                raise AssertionError(f"unsupported fake criterion: {criterion}")
             column_name = criterion.left.name
             expected = criterion.right.value
-            rows = [row for row in rows if getattr(row, column_name) == expected]
+            if criterion.operator is operator.eq:
+                rows = [row for row in rows if getattr(row, column_name) == expected]
+            elif criterion.operator is operators.in_op:
+                rows = [row for row in rows if getattr(row, column_name) in expected]
+            else:
+                raise AssertionError(f"unsupported fake criterion: {criterion}")
         return FakeResult(rows)
 
     def add(self, obj) -> None:
