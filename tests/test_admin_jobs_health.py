@@ -319,6 +319,19 @@ def test_graph_monitor_exposes_frozen_mode_and_unit_progress():
     }
 
 
+def test_graph_monitor_only_exposes_provider_in_flight_for_processing_jobs():
+    _, _, graph_job = _monitor_pipeline_jobs("processing")
+    graph_job.statistics = {"provider_gate": {"in_flight": 6}}
+
+    processing = _graph_monitor_row(graph_job, title="sample.docx")
+    assert processing.metrics["in_flight"] == 6
+
+    graph_job.status = "succeeded"
+    graph_job.finished_at = datetime.now(timezone.utc)
+    finished = _graph_monitor_row(graph_job, title="sample.docx")
+    assert finished.metrics["in_flight"] is None
+
+
 def test_graph_monitor_exposes_entity_only_quality_statistics():
     _, _, graph_job = _monitor_pipeline_jobs("succeeded")
     graph_job.statistics = {

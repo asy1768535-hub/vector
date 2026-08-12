@@ -190,6 +190,7 @@ def _graph_monitor_row(
     publication = statistics.get("publication")
     publication = publication if isinstance(publication, dict) else {}
     normalized_status = _GRAPH_STATUS.get(job.status, job.status)
+    in_flight = provider_gate.get("in_flight") if normalized_status == "processing" else None
     retryable, retry_capability, retry_reason = _graph_retry_state(
         job,
         latest_production=latest_production,
@@ -234,7 +235,7 @@ def _graph_monitor_row(
             "cache_hits": int(statistics.get("cache_hits") or 0),
             "configured_concurrency": provider_gate.get("configured_concurrency"),
             "effective_concurrency": provider_gate.get("effective_concurrency"),
-            "in_flight": provider_gate.get("in_flight"),
+            "in_flight": in_flight,
             "throttled_count": int(provider_gate.get("throttled_count") or 0),
             "retry_count": int(provider_gate.get("retry_count") or 0),
             "stage_counts": {

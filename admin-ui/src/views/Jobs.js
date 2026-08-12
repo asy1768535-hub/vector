@@ -443,7 +443,12 @@ export default {
                 <dt>图谱变化</dt><dd>{{ publicationDiffLabel(selectedJob.metrics.publication_diff) }}</dd>
               </template>
               <dt>未发布原因</dt><dd>{{ publicationFailureReasonLabel(selectedJob.metrics?.failure_reasons?.publication) }}</dd>
-              <dt>实时并发</dt><dd>配置 {{ selectedJob.metrics?.configured_concurrency ?? '—' }} / 生效 {{ selectedJob.metrics?.effective_concurrency ?? '—' }} / 处理中 {{ selectedJob.metrics?.in_flight ?? 0 }}</dd>
+              <template v-if="selectedJob.status === 'processing'">
+                <dt>实时并发</dt><dd>配置 {{ selectedJob.metrics?.configured_concurrency ?? '—' }} / 生效 {{ selectedJob.metrics?.effective_concurrency ?? '—' }} / 处理中 {{ selectedJob.metrics?.in_flight ?? '—' }}</dd>
+              </template>
+              <template v-else>
+                <dt>并发记录</dt><dd>记录时全局并发 {{ selectedJob.metrics?.in_flight ?? '—' }}</dd>
+              </template>
               <dt>预计剩余</dt><dd>{{ formatEta(selectedJob.metrics?.eta_seconds) }}</dd>
               <dt>缓存命中</dt><dd>{{ selectedJob.metrics?.cache_hits || 0 }}</dd>
               <dt>限流 / 重试</dt><dd>{{ selectedJob.metrics?.throttled_count || 0 }} / {{ selectedJob.metrics?.retry_count || 0 }}</dd>
