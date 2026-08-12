@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -36,6 +37,52 @@ def test_parse_source_config_rejects_non_postgres_dsn_and_bad_key_type():
         S.parse_source_config(_cfg(dsn="http://metadata.internal/db"))
     with pytest.raises(S.SourceConfigError):
         S.parse_source_config(_cfg(key_type="jsonb"))
+
+
+def test_redact_source_config_preserves_diagnostics_without_secrets():
+    config = _cfg(
+        dsn="postgresql://source_user:SOURCE_PASSWORD@db.example/source_db",
+        user="source_user",
+        password="SOURCE_PASSWORD",
+        api_key="SOURCE_API_KEY",
+        nested={"token": "SOURCE_TOKEN", "table": "safe_table"},
+        extra_columns=["court"],
+    )
+
+    redacted = S.redact_source_config(config)
+
+    assert redacted["table"] == "case_full_texts"
+    assert redacted["extra_columns"] == ["court"]
+    assert redacted["dsn"] == "[REDACTED]"
+    assert redacted["user"] == "[REDACTED]"
+    assert redacted["password"] == "[REDACTED]"
+    assert redacted["api_key"] == "[REDACTED]"
+    assert redacted["nested"] == {"token": "[REDACTED]", "table": "safe_table"}
+    assert "SOURCE_PASSWORD" not in repr(redacted)
+    assert "source_user" not in repr(redacted)
+
+
+def test_pool_cache_key_and_runtime_error_do_not_contain_dsn(caplog):
+    dsn = "postgresql://source_user:SOURCE_PASSWORD@db.example/source_db"
+    key = S._pool_cache_key({"dsn": dsn, "db_name": None})
+
+    assert key.startswith("dsn:")
+    assert dsn not in key
+
+    async def run():
+        with patch.object(
+            S,
+            "fetch_source_rows",
+            new=AsyncMock(side_effect=S.SourceEnrichmentRuntimeError("source fetch failed")),
+        ):
+            with caplog.at_level(logging.WARNING, logger=S.log.name):
+                result = await S.enrich_payloads(_cfg(dsn=dsn), [{"case_id": "1"}])
+        return result
+
+    result = asyncio.run(run())
+    assert result.texts == [None]
+    assert dsn not in caplog.text
+    assert "SOURCE_PASSWORD" not in caplog.text
 
 
 def test_coerce_key_rejects_bad_or_out_of_range_integer_values():

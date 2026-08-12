@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 from typing import Sequence
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
@@ -18,6 +19,60 @@ _TIMEOUT = httpx.Timeout(connect=5.0, read=120.0, write=60.0, pool=5.0)
 
 class EmbeddingError(RuntimeError):
     pass
+
+
+class EmbeddingEndpointError(ValueError):
+    """Embedding endpoint is not safe for a library-level override."""
+
+
+def canonical_embedding_endpoint(value: str) -> str:
+    """Return the comparison form used for the global trusted endpoint."""
+    if not isinstance(value, str) or not value.strip():
+        raise EmbeddingEndpointError("embedding endpoint must be a non-empty URL")
+    raw = value.strip()
+    if any(char.isspace() or ord(char) < 0x20 or ord(char) == 0x7F for char in raw):
+        raise EmbeddingEndpointError("embedding endpoint contains invalid whitespace")
+    try:
+        parsed = urlsplit(raw)
+        scheme = parsed.scheme.lower()
+        port = parsed.port
+    except ValueError as exc:
+        raise EmbeddingEndpointError("embedding endpoint URL is invalid") from exc
+    if scheme not in {"http", "https"}:
+        raise EmbeddingEndpointError("embedding endpoint scheme must be http or https")
+    if parsed.username is not None or parsed.password is not None:
+        raise EmbeddingEndpointError("embedding endpoint userinfo is not allowed")
+    if parsed.query or parsed.fragment:
+        raise EmbeddingEndpointError("embedding endpoint query and fragment are not allowed")
+    host = parsed.hostname
+    if not host:
+        raise EmbeddingEndpointError("embedding endpoint host is required")
+    canonical_host = host.rstrip(".").lower()
+    if ":" in canonical_host:
+        canonical_host = f"[{canonical_host}]"
+    if port is None or (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
+        canonical_netloc = canonical_host
+    else:
+        canonical_netloc = f"{canonical_host}:{port}"
+    path = parsed.path or "/"
+    path = path.rstrip("/") or "/"
+    return urlunsplit((scheme, canonical_netloc, path, "", ""))
+
+
+def validate_library_embedding_endpoint(value: str | None) -> str | None:
+    """Allow only the globally configured embedding endpoint as a library override."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise EmbeddingEndpointError("embedding endpoint must be a string")
+    if not value.strip():
+        return value
+    raw = value.strip()
+    candidate = canonical_embedding_endpoint(raw)
+    global_endpoint = canonical_embedding_endpoint(settings.embedding_base_url)
+    if candidate != global_endpoint:
+        raise EmbeddingEndpointError("library embedding endpoint must match the global endpoint")
+    return raw
 
 
 async def embed_texts(
@@ -37,8 +92,16 @@ async def embed_texts(
     if not texts:
         return []
     payload = {"model": model or settings.embedding_model, "input": list(texts)}
-    url = base_url or settings.embedding_base_url
-    key = api_key if api_key is not None else settings.embedding_api_key
+    requested_url = base_url.strip() if isinstance(base_url, str) and base_url.strip() else settings.embedding_base_url
+    try:
+        url = validate_library_embedding_endpoint(requested_url)
+        assert url is not None
+        is_global_endpoint = canonical_embedding_endpoint(url) == canonical_embedding_endpoint(
+            settings.embedding_base_url
+        )
+    except EmbeddingEndpointError as exc:
+        raise EmbeddingError(str(exc)) from exc
+    key = (api_key if api_key is not None else settings.embedding_api_key) if is_global_endpoint else None
     headers = {"Authorization": f"Bearer {key}"} if key else None
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         resp = await client.post(url, json=payload, headers=headers)

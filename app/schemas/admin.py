@@ -17,6 +17,11 @@ from app.services.knowledge_artifact_policy import (
 from app.services.classification_runtime_policy import (
     normalize_classification_security_levels,
 )
+from app.services.embedding import (
+    EmbeddingEndpointError,
+    validate_library_embedding_endpoint,
+)
+from app.services.source_enrichment import redact_source_config
 
 # 库唯一ID：只允许大小写英文字母和下划线（其它一律不允许）。
 # 同时它也是 Dify knowledge_id、URL 路径段、Qdrant collection 名、约定全文源表名，
@@ -143,6 +148,14 @@ class LibraryCreate(BaseModel):
             raise ValueError("库唯一ID 只能包含大小写英文字母和下划线，长度 2-80")
         return v
 
+    @field_validator("embedding_base_url")
+    @classmethod
+    def _validate_embedding_base_url(cls, value):
+        try:
+            return validate_library_embedding_endpoint(value)
+        except EmbeddingEndpointError as exc:
+            raise ValueError(str(exc)) from exc
+
     @model_validator(mode="after")
     def _check_chunk_params(self):
         _validate_chunk_overlap(self)
@@ -253,6 +266,14 @@ class LibraryUpdate(BaseModel):
             raise ValueError("graph extraction opt-in cannot be null")
         return value
 
+    @field_validator("embedding_base_url")
+    @classmethod
+    def _validate_embedding_base_url(cls, value):
+        try:
+            return validate_library_embedding_endpoint(value)
+        except EmbeddingEndpointError as exc:
+            raise ValueError(str(exc)) from exc
+
     @field_validator("graph_extraction_allowed_security_levels", mode="before")
     @classmethod
     def _validate_graph_security_levels(cls, value):
@@ -330,6 +351,12 @@ class LibraryRead(BaseModel):
     retrieval_mode: str = "dense"
     qdrant_collection: str
     source_config: Optional[dict[str, Any]] = None
+
+    @field_validator("source_config", mode="before")
+    @classmethod
+    def _redact_source_config(cls, value):
+        return redact_source_config(value)
+
     graph_extraction_enabled: bool = True
     schema_mode: str = "disabled"
     schema_confirmation_policy: str = "required"

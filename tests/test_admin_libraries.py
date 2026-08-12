@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -84,6 +85,117 @@ def test_library_read_exposes_fail_closed_graph_extraction_defaults():
     assert result.outline_artifact_enabled is False
     assert result.knowledge_artifact_external_model_enabled is False
     assert result.knowledge_artifact_allowed_security_levels == []
+
+
+def _library_with_secret_source_config(slug: str = "secret_source") -> Library:
+    return Library(
+        id=uuid.uuid4(),
+        organization_id=uuid.uuid4(),
+        slug=slug,
+        name="Secret source",
+        embedding_model="bge-m3",
+        embedding_dim=1024,
+        vector_distance="cosine",
+        chunk_size=1000,
+        chunk_overlap=120,
+        retrieval_mode="dense",
+        qdrant_collection=f"lib_{slug}",
+        source_config={
+            "db_name": "vector_kb",
+            "table": "source_docs",
+            "key_field": "doc_id",
+            "key_column": "doc_id",
+            "text_column": "body",
+            "key_type": "bigint",
+            "dsn": "postgresql://source_user:SOURCE_PASSWORD@db.example/source_db",
+            "user": "source_user",
+            "password": "SOURCE_PASSWORD",
+            "token": "SOURCE_TOKEN",
+            "nested": {"api_key": "SOURCE_API_KEY", "label": "kept"},
+        },
+        index_state="ready",
+        created_by=uuid.uuid4(),
+        created_at=datetime(2026, 7, 10, tzinfo=timezone.utc),
+        graph_extraction_enabled=False,
+        external_llm_enabled=False,
+        graph_extraction_allowed_security_levels=[],
+        knowledge_artifact_auto_enabled=False,
+        summary_artifact_enabled=False,
+        outline_artifact_enabled=False,
+        knowledge_artifact_external_model_enabled=False,
+        knowledge_artifact_allowed_security_levels=[],
+        lifecycle_mode="managed",
+    )
+
+
+def test_library_read_redacts_source_config_without_mutating_persisted_model():
+    lib = _library_with_secret_source_config()
+
+    result = LibraryRead.model_validate(lib)
+
+    assert result.source_config["table"] == "source_docs"
+    assert result.source_config["nested"] == {
+        "api_key": "[REDACTED]",
+        "label": "kept",
+    }
+    assert result.source_config["dsn"] == "[REDACTED]"
+    assert result.source_config["user"] == "[REDACTED]"
+    assert result.source_config["password"] == "[REDACTED]"
+    assert result.source_config["token"] == "[REDACTED]"
+    assert lib.source_config["password"] == "SOURCE_PASSWORD"
+
+
+def test_get_and_list_library_responses_redact_source_config():
+    lib = _library_with_secret_source_config()
+    get_row = MagicMock()
+    get_row.scalar_one_or_none.return_value = lib
+    list_rows = MagicMock()
+    list_rows.scalars.return_value.all.return_value = [lib]
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[get_row, list_rows])
+    app.dependency_overrides[current_superuser] = lambda: _superuser()
+    app.dependency_overrides[get_db] = lambda: db
+    try:
+        get_response = TestClient(app).get(f"/admin/libraries/{lib.slug}")
+        list_response = TestClient(app).get("/admin/libraries")
+    finally:
+        app.dependency_overrides.clear()
+
+    for response in (get_response, list_response):
+        assert response.status_code == 200
+        assert "SOURCE_PASSWORD" not in response.text
+        assert "source_user" not in response.text
+        assert "postgresql://" not in response.text
+    assert get_response.json()["source_config"]["table"] == "source_docs"
+    assert list_response.json()[0]["source_config"]["password"] == "[REDACTED]"
+
+
+def test_update_audit_and_response_redact_source_config(caplog):
+    lib = _library_with_secret_source_config()
+    lib.source_config = None
+    row = MagicMock()
+    row.scalar_one_or_none.return_value = lib
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=row)
+    db.add = MagicMock()
+    db.flush = AsyncMock()
+    db.commit = AsyncMock()
+    db.refresh = AsyncMock()
+    body = admin_libraries.LibraryUpdate(
+        source_config=_library_with_secret_source_config().source_config
+    )
+
+    with caplog.at_level(logging.INFO, logger=admin_libraries.audit_log.log.name):
+        result = asyncio.run(
+            admin_libraries.update_library("secret_source", body, _superuser(), db)
+        )
+
+    audit_entry = db.add.call_args.args[0]
+    assert audit_entry.target["source_config"]["password"] == "[REDACTED]"
+    assert LibraryRead.model_validate(result).source_config["dsn"] == "[REDACTED]"
+    assert "SOURCE_PASSWORD" not in caplog.text
+    assert "SOURCE_TOKEN" not in caplog.text
+    assert "postgresql://" not in caplog.text
 
 
 def test_create_library_active_duplicate_name_returns_clear_chinese_409():

@@ -391,7 +391,7 @@ async def update_library(
     if source_config_provided and _has_non_empty_source_config(body.source_config):
         _validate_source_config_or_400(body.source_config)
         lib.source_config = body.source_config
-        changes["source_config"] = body.source_config
+        changes["source_config"] = source_enrichment.redact_source_config(body.source_config)
     elif source_config_provided and body.source_config == {}:
         lib.source_config = None
         changes["source_config"] = None

@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 from typing import Any
@@ -35,6 +36,41 @@ _ALLOWED_KEY_TYPES = {"bigint", "integer", "int", "int4", "int8", "text", "varch
 # 整型 key 的范围边界（防止超界值毒化整个批量 bind）
 _INT4_MIN, _INT4_MAX = -(2**31), 2**31 - 1
 _INT8_MIN, _INT8_MAX = -(2**63), 2**63 - 1
+_REDACTED = "[REDACTED]"
+_SECRET_CONFIG_KEYS = {
+    "access_key",
+    "api_key",
+    "authorization",
+    "credential",
+    "credentials",
+    "dsn",
+    "key",
+    "password",
+    "passwd",
+    "private_key",
+    "secret",
+    "secret_key",
+    "token",
+    "user",
+    "username",
+}
+_SECRET_CONFIG_SUFFIXES = (
+    "_access_key",
+    "_api_key",
+    "_authorization",
+    "_key",
+    "_credential",
+    "_credentials",
+    "_password",
+    "_passwd",
+    "_private_key",
+    "_secret",
+    "_secret_key",
+    "_token",
+    "_user",
+    "_username",
+)
+_NON_SECRET_CONFIG_KEYS = {"key_field", "key_column", "key_type"}
 
 # db_name -> asyncpg.Pool 缓存；按目标库复用连接池
 _pools: dict[str, asyncpg.Pool] = {}
@@ -51,9 +87,42 @@ class SourceEnrichmentRuntimeError(RuntimeError):
     """补全运行期失败（源库不可达 / 超时 / 查询出错）。调用方应优雅降级回退 payload.text。"""
 
 
+def _is_secret_config_key(key: object) -> bool:
+    if not isinstance(key, str):
+        return False
+    normalized = key.strip().casefold().replace("-", "_")
+    return (
+        normalized in _SECRET_CONFIG_KEYS
+        or (
+            normalized.endswith(_SECRET_CONFIG_SUFFIXES)
+            and normalized not in _NON_SECRET_CONFIG_KEYS
+        )
+    )
+
+
+def _looks_like_dsn(value: object) -> bool:
+    return isinstance(value, str) and value.strip().casefold().startswith(
+        ("postgres://", "postgresql://")
+    )
+
+
+def redact_source_config(value: Any) -> Any:
+    """Recursively redact connection credentials while preserving diagnostics."""
+    if isinstance(value, dict):
+        return {
+            key: _REDACTED if _is_secret_config_key(key) else redact_source_config(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_source_config(item) for item in value]
+    if _looks_like_dsn(value):
+        return _REDACTED
+    return value
+
+
 def _validate_ident(value: str, field: str) -> str:
     if not isinstance(value, str) or not _IDENT_RE.match(value):
-        raise SourceConfigError(f"invalid SQL identifier for {field!r}: {value!r}")
+        raise SourceConfigError(f"invalid SQL identifier for {field!r}")
     return value
 
 
@@ -84,7 +153,7 @@ def parse_source_config(cfg: dict[str, Any] | None) -> dict[str, Any] | None:
         raise SourceConfigError("source_config missing key_field/key_column")
     key_column = _validate_ident(cfg.get("key_column") or key_field, "key_column")
     if not isinstance(key_field, str) or not key_field:
-        raise SourceConfigError(f"invalid key_field: {key_field!r}")
+        raise SourceConfigError("invalid key_field")
 
     key_type = (cfg.get("key_type") or "bigint").lower()
     if key_type not in _ALLOWED_KEY_TYPES:
@@ -151,7 +220,11 @@ def conventional_config(slug: str) -> dict[str, Any]:
 
 
 def _pool_cache_key(parsed: dict[str, Any]) -> str:
-    return parsed.get("dsn") or f"db:{parsed['db_name']}"
+    dsn = parsed.get("dsn")
+    if dsn:
+        digest = hashlib.sha256(dsn.encode("utf-8")).hexdigest()[:16]
+        return f"dsn:{digest}"
+    return f"db:{parsed['db_name']}"
 
 
 async def _create_pool(parsed: dict[str, Any]) -> asyncpg.Pool:
@@ -271,7 +344,8 @@ async def fetch_source_rows(
         # 整体预算兜底：连接/排队/查询任何一段挂起都不会拖死请求
         rows = await asyncio.wait_for(_run(), timeout=budget)
     except (asyncio.TimeoutError, OSError, asyncpg.PostgresError) as exc:
-        raise SourceEnrichmentRuntimeError(f"source fetch failed: {exc}") from exc
+        # Driver messages can include the configured DSN; expose only a stable error.
+        raise SourceEnrichmentRuntimeError("source fetch failed") from exc
 
     out: dict[Any, dict[str, Any]] = {}
     for row in rows:
@@ -345,7 +419,7 @@ async def enrich_payloads(
             raise
         log.warning(
             "source enrichment degraded (source DB error); falling back to payload.text. "
-            "db=%s table=%s", parsed.get("db_name") or parsed.get("dsn"), parsed["table"]
+            "source=%s table=%s", _pool_cache_key(parsed), parsed["table"]
         )
         return EnrichmentResult(parsed, [None] * n, [None] * n)
 
