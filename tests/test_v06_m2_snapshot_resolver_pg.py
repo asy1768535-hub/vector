@@ -70,20 +70,20 @@ async def _run_pg_acceptance(dsn: str) -> None:
                 seeds=[{"entity_id": graph.first_entity_id}],
                 relation_type_keys=["member_of"],
             )
-            result = await graph_retrieval.resolve_graph_retrieval_query(
+            result = await graph_retrieval.resolve_and_traverse_graph_retrieval_query(
                 db,
                 library,
                 request,
                 config=retrieval_config,
             )
-            assert result.snapshot.publication_id == publication_id
-            assert result.seeds[0].entity_id == graph.first_entity_id
-            assert result.relation_types[0].key == "member_of"
+            assert result.resolution.snapshot.publication_id == publication_id
+            assert result.resolution.seeds[0].entity_id == graph.first_entity_id
+            assert result.resolution.relation_types[0].key == "member_of"
 
             by_name = await graph_retrieval.resolve_published_seeds(
                 db,
                 library,
-                result.snapshot,
+                result.resolution.snapshot,
                 [GraphRetrievalSeed(canonical_name="  ALICE  ", entity_type_key="person")],
             )
             assert by_name[0].entity_id == graph.first_entity_id

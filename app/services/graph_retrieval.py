@@ -658,35 +658,6 @@ async def assert_graph_snapshot_still_current(
         _fail("graph_publication_invariant_failed")
 
 
-async def resolve_graph_retrieval_query(
-    db: AsyncSession,
-    library: Library,
-    request: GraphRetrievalQueryRequest,
-    *,
-    config: Settings = settings,
-) -> GraphRetrievalResolution:
-    validate_graph_retrieval_request_limits(request, config)
-    snapshot = await load_healthy_graph_snapshot(
-        db,
-        library,
-        request.ontology_version_id,
-        expected_publication_id=request.expected_publication_id,
-    )
-    seeds = await resolve_published_seeds(db, library, snapshot, request.seeds)
-    relation_types = await resolve_relation_type_filters(
-        db,
-        library,
-        snapshot,
-        request.relation_type_keys,
-    )
-    await assert_graph_snapshot_still_current(db, library, snapshot)
-    return GraphRetrievalResolution(
-        snapshot=snapshot,
-        seeds=seeds,
-        relation_types=relation_types,
-    )
-
-
 def _traversed_seed(seed: ResolvedPublishedEntity) -> TraversedPublishedEntity:
     return TraversedPublishedEntity(
         entity_id=seed.entity_id,
@@ -1418,18 +1389,6 @@ async def hydrate_graph_evidence_locators(
     )
 
 
-def _empty_graph_evidence(
-    traversal: PublishedGraphTraversal,
-) -> GraphEvidenceHydration:
-    return GraphEvidenceHydration(
-        facts=tuple(
-            HydratedFactEvidence(fact.item_kind, fact.fact_id, ())
-            for fact in _selected_graph_facts(traversal)
-        ),
-        truncated=False,
-    )
-
-
 def build_graph_retrieval_response(
     result: GraphRetrievalTraversalResolution,
     hydration: GraphEvidenceHydration,
@@ -1557,7 +1516,13 @@ async def execute_graph_retrieval_query(
                 )
             raise
     else:
-        hydration = _empty_graph_evidence(result.traversal)
+        hydration = GraphEvidenceHydration(
+            facts=tuple(
+                HydratedFactEvidence(fact.item_kind, fact.fact_id, ())
+                for fact in _selected_graph_facts(result.traversal)
+            ),
+            truncated=False,
+        )
     response = build_graph_retrieval_response(
         result,
         hydration,
