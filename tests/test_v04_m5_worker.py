@@ -956,6 +956,11 @@ def test_worker_pool_starts_four_controlled_loops_with_unique_ids(monkeypatch):
 
     assert active.await_count == 4
     assert metadata["worker_concurrency"] == 4
+    maintenance_roles = [
+        call.kwargs["maintenance_enabled"] for call in active.await_args_list
+    ]
+    assert maintenance_roles.count(True) == 1
+    assert maintenance_roles.count(False) == 3
     assert len({worker.graph_extraction_worker_id() for _ in range(4)}) == 4
 
 

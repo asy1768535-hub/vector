@@ -1345,6 +1345,7 @@ async def run_graph_extraction_worker(
     watch: bool,
     metadata: dict[str, Any] | None = None,
     session_factory=async_session_factory,
+    maintenance_enabled: bool = True,
 ) -> None:
     worker_id = graph_extraction_worker_id()
     metadata = metadata if metadata is not None else {}
@@ -1357,7 +1358,7 @@ async def run_graph_extraction_worker(
     metadata.setdefault("publication_failed", 0)
     metadata.setdefault("schema_discovery_runs", 0)
     while True:
-        if session_factory is async_session_factory:
+        if maintenance_enabled and session_factory is async_session_factory:
             from app.services.schema_discovery_runs import process_next_schema_discovery_run
 
             discovery_run = await process_next_schema_discovery_run(
@@ -1366,19 +1367,20 @@ async def run_graph_extraction_worker(
             if discovery_run is not None:
                 metadata["schema_discovery_runs"] += 1
                 continue
-        from app.services.graph_extraction_triggers import (
-            compensate_ready_graph_extractions,
-        )
-
-        metadata["compensated"] = await compensate_ready_graph_extractions(
-            session_factory=session_factory,
-        )
-        async with session_factory() as db:
-            recovery = await recover_stale_graph_extraction_units(
-                db,
-                max_attempts=settings.graph_extraction_worker_max_model_attempts,
+        if maintenance_enabled:
+            from app.services.graph_extraction_triggers import (
+                compensate_ready_graph_extractions,
             )
-        metadata["stale_recovered"] = recovery.recovered_unit_count
+
+            metadata["compensated"] = await compensate_ready_graph_extractions(
+                session_factory=session_factory,
+            )
+            async with session_factory() as db:
+                recovery = await recover_stale_graph_extraction_units(
+                    db,
+                    max_attempts=settings.graph_extraction_worker_max_model_attempts,
+                )
+            metadata["stale_recovered"] = recovery.recovered_unit_count
         from app.services.graph_extraction_batch_eval import (
             claim_eval_graph_extraction_batch,
             process_eval_graph_extraction_batch,
@@ -1496,13 +1498,14 @@ async def run_graph_extraction_worker_pool(
     concurrency = settings.graph_extraction_worker_concurrency
     metadata["worker_concurrency"] = concurrency
 
-    async def run_resilient_loop() -> None:
+    async def run_resilient_loop(worker_index: int) -> None:
         while True:
             try:
                 await run_graph_extraction_worker(
                     watch=watch,
                     metadata=metadata,
                     session_factory=session_factory,
+                    maintenance_enabled=worker_index == 0,
                 )
                 return
             except (DBAPIError, OSError):
@@ -1520,5 +1523,5 @@ async def run_graph_extraction_worker_pool(
                 )
 
     await asyncio.gather(
-        *(run_resilient_loop() for _ in range(concurrency))
+        *(run_resilient_loop(worker_index) for worker_index in range(concurrency))
     )
