@@ -116,6 +116,7 @@ export default {
     emits: ['open-entity', 'open-relation'],
     setup(props, { emit }) {
         const range = ref(props.entityPreview ? 'related' : 'panorama');
+        const previewExpanded = ref(false);
         const showIsolated = ref(false);
         const panoramaData = ref(null);
         const graph = reactive({ loading: false, data: null, error: null, partialError: null });
@@ -434,6 +435,7 @@ export default {
 
         return {
             range,
+            previewExpanded,
             showIsolated,
             graph,
             canvasGraph,
@@ -446,10 +448,16 @@ export default {
     },
     template: `
       <section class="graph-explorer"
-               :class="{ 'is-loading': graph.loading, 'is-entity-preview': entityPreview }"
+               :class="{ 'is-loading': graph.loading, 'is-entity-preview': entityPreview,
+                   'is-preview-expanded': entityPreview && previewExpanded }"
                :aria-busy="graph.loading">
         <header class="graph-explorer-toolbar">
           <div class="graph-explorer-range">
+            <el-button v-if="entityPreview" text class="graph-preview-expand-button"
+                       title="Expand graph" aria-label="Expand graph"
+                       @click="previewExpanded = !previewExpanded">
+              <local-icon :icon="previewExpanded ? 'mdi:fullscreen-exit' : 'mdi:fullscreen'"></local-icon>
+            </el-button>
             <span>{{ entityPreview ? '局部关系' : (range === 'panorama' ? '全景' : '关联') }}</span>
             <el-button v-if="!entityPreview && range === 'related'" text
                        @click="changeRange('panorama')">返回全景</el-button>
@@ -479,8 +487,8 @@ export default {
                       :graph="canvasGraph"
                       :selected-id="selectedEntityId"
                       :center-selected="false"
-                      :user-zooming-enabled="!entityPreview"
-                      :constrain-to-viewport="entityPreview"
+                      :user-zooming-enabled="true"
+                      :constrain-to-viewport="false"
                       @open-entity="openEntity"
                       @open-relation="openRelation" />
         <div v-if="graph.loading && graph.data" class="graph-explorer-loading-overlay"

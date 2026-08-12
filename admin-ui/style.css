@@ -1,4 +1,4 @@
-/* =========================================================================
+﻿/* =========================================================================
    向量知识库 · 管理后台 —— 企业主题样式
    CSS 变量驱动，零 CDN
    ========================================================================= */
@@ -5274,9 +5274,9 @@ local-icon { display: inline-block; vertical-align: -0.125em; }
     overscroll-behavior: contain;
 }
 .graph-entity-network {
-    --graph-entity-preview-height: 380px;
     margin: 0 -20px;
-    height: var(--graph-entity-preview-height);
+    height: clamp(360px, 58vh, 680px);
+    min-height: 360px;
     overflow: hidden;
     background: #fbfcfc;
 }
@@ -5297,6 +5297,25 @@ local-icon { display: inline-block; vertical-align: -0.125em; }
 .graph-entity-network .graph-explorer-canvas {
     box-sizing: border-box;
     border: 1px solid #aebbc5;
+}
+.graph-entity-network .graph-explorer.is-preview-expanded {
+    position: fixed;
+    inset: 12px;
+    z-index: 2200;
+    box-sizing: border-box;
+    width: calc(100vw - 24px);
+    height: calc(100vh - 24px);
+    max-height: none;
+    padding: 0 12px 12px;
+    border: 1px solid #aebbc5;
+    background: #fbfcfc;
+    box-shadow: 0 18px 48px rgba(25, 39, 48, .28);
+}
+.graph-entity-network .graph-explorer.is-preview-expanded .graph-explorer-canvas {
+    height: auto;
+    min-height: 0;
+    max-height: none;
+    flex: 1 1 auto;
 }
 .graph-entity-network-empty {
     display: grid;
@@ -6012,9 +6031,15 @@ local-icon { display: inline-block; vertical-align: -0.125em; }
     .graph-entity-dialog { max-width: calc(100vw - 16px); }
     .graph-entity-dialog .el-dialog__body { padding-right: 12px; padding-left: 12px; }
     .graph-entity-network { margin-right: -12px; margin-left: -12px; }
-    .graph-entity-network { --graph-entity-preview-height: 320px; }
     .graph-entity-network .graph-explorer-canvas,
     .graph-entity-network .graph-explorer-state { min-height: 0; }
+    .graph-entity-network .graph-explorer.is-preview-expanded {
+        inset: 6px;
+        width: calc(100vw - 12px);
+        height: calc(100vh - 12px);
+        padding-right: 6px;
+        padding-left: 6px;
+    }
 }
 
 /* v0.9 Schema lifecycle console */

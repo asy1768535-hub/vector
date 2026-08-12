@@ -268,8 +268,8 @@ test('keeps detail previews in a free-moving viewport while the main canvas rema
     assert.doesNotMatch(selectedWatch, /syncRadialGraph/);
     assert.match(selectedWatch, /if \(props\.centerSelected\) focusSelectedRadialNode\(\)/);
     assert.ok(explorer.includes(':center-selected="false"'));
-    assert.ok(explorer.includes(':user-zooming-enabled="!entityPreview"'));
-    assert.ok(explorer.includes(':constrain-to-viewport="entityPreview"'));
+    assert.ok(explorer.includes(':user-zooming-enabled="true"'));
+    assert.ok(explorer.includes(':constrain-to-viewport="false"'));
     assert.match(canvas, /userZoomingEnabled:\s*\{ type: Boolean, default: true \}/);
     assert.match(canvas, /userZoomingEnabled:\s*props\.userZoomingEnabled/);
     const positionBody = canvas.slice(
@@ -281,8 +281,9 @@ test('keeps detail previews in a free-moving viewport while the main canvas rema
     assert.match(positionBody, /graphView\.center\(event\.target\)/);
 });
 
-test('bounds the entity detail graph as a fixed viewport', () => {
-    assert.match(css, /\.graph-entity-network\s*\{[^}]*height:\s*var\(--graph-entity-preview-height\)/s);
+test('keeps the entity detail graph responsive with an explicit expansion mode', () => {
+    assert.match(css, /\.graph-entity-network\s*\{[^}]*height:\s*clamp\(360px, 58vh, 680px\)/s);
+    assert.match(css, /\.graph-entity-network \.graph-explorer\.is-preview-expanded\s*\{[^}]*position:\s*fixed/s);
     assert.match(css, /\.graph-entity-network \.graph-explorer\s*\{[^}]*height:\s*100%/s);
     assert.match(css, /\.graph-entity-network \.graph-explorer-canvas,[\s\S]*?flex:\s*1 1 auto/s);
     assert.match(css, /\.graph-entity-network \.graph-explorer-canvas\s*\{[^}]*border:\s*1px solid #aebbc5/s);

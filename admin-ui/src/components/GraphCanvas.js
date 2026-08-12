@@ -129,8 +129,20 @@ export default {
                         color: '#5A3CC4', 'text-opacity': 1, 'min-zoomed-font-size': 0,
                     },
                 },
+                {
+                    selector: 'node.radial-is-dense.is-neighbor, edge.radial-is-dense.is-related',
+                    style: { 'text-opacity': 0 },
+                },
                 { selector: 'node.is-dimmed', style: { opacity: 0.56, 'text-opacity': 0 } },
                 { selector: 'edge.is-dimmed', style: { opacity: 0.42, 'text-opacity': 0 } },
+                {
+                    selector: 'node.radial-is-dense.is-selected, node.radial-is-dense.is-hovered, node.radial-is-dense.is-dragging',
+                    style: { 'text-opacity': 1, 'min-zoomed-font-size': 0 },
+                },
+                {
+                    selector: 'edge.radial-is-dense.is-hovered, edge.radial-is-dense:selected',
+                    style: { 'text-opacity': 1, 'min-zoomed-font-size': 0 },
+                },
                 {
                     selector: 'node.is-dragging',
                     style: {
@@ -167,7 +179,10 @@ export default {
             if (!graphView) return;
             const persistentId = selectedNodeId || radialPrimaryNodeId;
             const focusId = draggingNodeId || hoveredNodeId || persistentId;
+            const isDense = props.graph.nodes.length >= 20 || props.graph.relations.length >= 25;
             graphView.batch(() => {
+                graphView.nodes().toggleClass('radial-is-dense', isDense);
+                graphView.edges().toggleClass('radial-is-dense', isDense);
                 graphView.elements().removeClass('is-selected is-hovered is-neighbor is-related is-dimmed is-dragging');
                 const focus = focusId ? graphView.getElementById(focusId) : null;
                 if (!focus?.length) return;
@@ -342,6 +357,14 @@ export default {
             graphView.on('mouseout', 'node', (event) => {
                 if (hoveredNodeId === event.target.id()) hoveredNodeId = '';
                 applyGraphFocus();
+                if (cytoscapeHost.value) cytoscapeHost.value.style.cursor = 'grab';
+            });
+            graphView.on('mouseover', 'edge', (event) => {
+                event.target.addClass('is-hovered');
+                if (cytoscapeHost.value) cytoscapeHost.value.style.cursor = 'pointer';
+            });
+            graphView.on('mouseout', 'edge', (event) => {
+                event.target.removeClass('is-hovered');
                 if (cytoscapeHost.value) cytoscapeHost.value.style.cursor = 'grab';
             });
             graphView.on('position', 'node', (event) => {
