@@ -3,11 +3,6 @@ const STATUS_LABELS = {
     blocked_manual: '人工结果保护中',
 };
 
-const STATUS_TAGS = {
-    pending_review: 'warning',
-    blocked_manual: 'danger',
-};
-
 const ROLE_LABELS = {
     primary: '主分类',
     secondary: '辅助分类',
@@ -31,14 +26,6 @@ const REVIEW_STATUSES = new Set(Object.keys(STATUS_LABELS));
 
 function availableIdSet(page) {
     return new Set((page?.available_labels || []).map((label) => String(label?.id || '')));
-}
-
-export function reviewStatusLabel(value) {
-    return STATUS_LABELS[value] || '未知状态';
-}
-
-export function reviewStatusTag(value) {
-    return STATUS_TAGS[value] || 'info';
 }
 
 export function reviewRoleLabel(value) {
@@ -153,14 +140,4 @@ export function classificationReviewErrorMessage(kind) {
         error: '分类审核请求失败，请稍后重试',
     };
     return messages[kind] || messages.error;
-}
-
-export function currentPrimaryDecision(run) {
-    return (run?.effective_decisions || []).find((item) => item?.role === 'primary') || null;
-}
-
-export function currentSecondaryDecisions(run) {
-    return (run?.effective_decisions || [])
-        .filter((item) => item?.role === 'secondary')
-        .sort((left, right) => Number(left?.ordinal || 0) - Number(right?.ordinal || 0));
 }
