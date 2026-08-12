@@ -1,0 +1,52 @@
+{
+  "schema_version": "graph-discovery-gold-standard-v2",
+  "documents": [
+    {"document_key": "overview", "text": "青岩光伏电站项目位于宁夏。华北电力设计院设计青岩光伏电站，远景能源供应逆变器A-01和逆变器A-02。王芳向周强汇报。"},
+    {"document_key": "equipment", "text": "青岩光伏电站包含逆变器A-01、逆变器A-02、升压站、储能舱B-02、组件阵列C-03、集电线路L-01、气象站M-01和监控网关G-01。"},
+    {"document_key": "operations", "text": "智能运维平台监控青岩光伏电站，运维班组负责运行该电站，调度中心调度青岩光伏电站。监控网关G-01连接智能运维平台。"},
+    {"document_key": "governance", "text": "并网批复授权青岩光伏电站，2025年度运维计划适用于青岩光伏电站。设备检修工单WO-77维修逆变器A-01。"},
+    {"document_key": "grid", "text": "组件阵列C-03属于青岩光伏电站，集电线路L-01连接组件阵列C-03和升压站，气象站M-01监测青岩光伏电站，逆变器A-01由远景能源供应。"}
+  ],
+  "gold_entities": [
+    {"gold_id": "site-1", "canonical_name": "青岩光伏电站", "entity_type_key": "photovoltaic_site", "aliases": ["青岩光伏电站项目"]},
+    {"gold_id": "region-1", "canonical_name": "宁夏", "entity_type_key": "region", "aliases": []},
+    {"gold_id": "person-1", "canonical_name": "王芳", "entity_type_key": "person", "aliases": []},
+    {"gold_id": "person-2", "canonical_name": "周强", "entity_type_key": "person", "aliases": []},
+    {"gold_id": "inverter-1", "canonical_name": "逆变器A-01", "entity_type_key": "inverter", "aliases": ["A-01"]},
+    {"gold_id": "substation-1", "canonical_name": "升压站", "entity_type_key": "substation", "aliases": []},
+    {"gold_id": "storage-1", "canonical_name": "储能舱B-02", "entity_type_key": "storage_unit", "aliases": ["B-02"]},
+    {"gold_id": "platform-1", "canonical_name": "智能运维平台", "entity_type_key": "operations_platform", "aliases": []},
+    {"gold_id": "designer-1", "canonical_name": "华北电力设计院", "entity_type_key": "design_firm", "aliases": []},
+    {"gold_id": "supplier-1", "canonical_name": "远景能源", "entity_type_key": "supplier", "aliases": []},
+    {"gold_id": "approval-1", "canonical_name": "并网批复", "entity_type_key": "grid_approval", "aliases": []},
+    {"gold_id": "plan-1", "canonical_name": "2025年度运维计划", "entity_type_key": "maintenance_plan", "aliases": []},
+    {"gold_id": "array-1", "canonical_name": "组件阵列C-03", "entity_type_key": "pv_array", "aliases": ["C-03"]},
+    {"gold_id": "line-1", "canonical_name": "集电线路L-01", "entity_type_key": "collector_line", "aliases": ["L-01"]},
+    {"gold_id": "weather-1", "canonical_name": "气象站M-01", "entity_type_key": "weather_station", "aliases": ["M-01"]},
+    {"gold_id": "team-1", "canonical_name": "运维班组", "entity_type_key": "maintenance_team", "aliases": []},
+    {"gold_id": "dispatch-1", "canonical_name": "调度中心", "entity_type_key": "dispatch_center", "aliases": []},
+    {"gold_id": "gateway-1", "canonical_name": "监控网关G-01", "entity_type_key": "monitoring_gateway", "aliases": ["G-01"]},
+    {"gold_id": "inverter-2", "canonical_name": "逆变器A-02", "entity_type_key": "inverter", "aliases": ["A-02"]},
+    {"gold_id": "work-order-1", "canonical_name": "设备检修工单WO-77", "entity_type_key": "maintenance_work_order", "aliases": ["WO-77"]}
+  ],
+  "gold_relations": [
+    {"source_gold_id": "site-1", "relation_type_key": "located_in", "target_gold_id": "region-1", "directed": true},
+    {"source_gold_id": "person-1", "relation_type_key": "reports_to", "target_gold_id": "person-2", "directed": true},
+    {"source_gold_id": "site-1", "relation_type_key": "contains", "target_gold_id": "inverter-1", "directed": true},
+    {"source_gold_id": "site-1", "relation_type_key": "contains", "target_gold_id": "inverter-2", "directed": true},
+    {"source_gold_id": "site-1", "relation_type_key": "contains", "target_gold_id": "substation-1", "directed": true},
+    {"source_gold_id": "site-1", "relation_type_key": "contains", "target_gold_id": "storage-1", "directed": true},
+    {"source_gold_id": "platform-1", "relation_type_key": "monitors", "target_gold_id": "site-1", "directed": true},
+    {"source_gold_id": "designer-1", "relation_type_key": "designed", "target_gold_id": "site-1", "directed": true},
+    {"source_gold_id": "supplier-1", "relation_type_key": "supplied", "target_gold_id": "inverter-1", "directed": true},
+    {"source_gold_id": "approval-1", "relation_type_key": "authorizes", "target_gold_id": "site-1", "directed": true},
+    {"source_gold_id": "plan-1", "relation_type_key": "applies_to", "target_gold_id": "site-1", "directed": true},
+    {"source_gold_id": "array-1", "relation_type_key": "part_of", "target_gold_id": "site-1", "directed": true},
+    {"source_gold_id": "line-1", "relation_type_key": "connects", "target_gold_id": "array-1", "directed": true},
+    {"source_gold_id": "line-1", "relation_type_key": "connects", "target_gold_id": "substation-1", "directed": true},
+    {"source_gold_id": "weather-1", "relation_type_key": "monitors", "target_gold_id": "site-1", "directed": true},
+    {"source_gold_id": "team-1", "relation_type_key": "operates", "target_gold_id": "site-1", "directed": true},
+    {"source_gold_id": "dispatch-1", "relation_type_key": "dispatches", "target_gold_id": "site-1", "directed": true},
+    {"source_gold_id": "gateway-1", "relation_type_key": "connects", "target_gold_id": "platform-1", "directed": true}
+  ]
+}

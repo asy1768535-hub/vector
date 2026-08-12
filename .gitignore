@@ -52,6 +52,7 @@ storage/document_files/
 /eval/dataset*.jsonl
 !/eval/dataset.example.jsonl
 /eval/report*.md
+/eval/graph_extraction/results/*.json
 
 # 本机工具与含业务数据/绕权限的开发脚本——不入库
 # （.gitignore 不支持行尾注释，patterns 必须独占一行）
