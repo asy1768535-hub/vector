@@ -6,6 +6,7 @@ import * as api from '../api.js';
 import {
     catalogEvidenceParts,
     catalogPageLabel,
+    catalogSourceTypeLabel as sourceTypeLabel,
     catalogTitlePath,
     formatCatalogConfidence,
     formatCatalogTime,
@@ -61,14 +62,6 @@ function normalizedQuery(query) {
         if (query?.[key]) result[key] = String(query[key]);
     }
     return result;
-}
-
-function sourceTypeLabel(value) {
-    return {
-        manual: '人工',
-        imported: '导入',
-        extracted: '模型抽取',
-    }[value] || '未知来源';
 }
 
 function publicationSourceLabel(value) {

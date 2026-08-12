@@ -17,6 +17,12 @@ export const SECURITY_LEVEL_LABEL = {
     secret: '秘密',
 };
 
+export const BUILD_MODE_LABEL = { fast: '快速', standard: '标准', deep: '深度' };
+
+export function buildModeLabel(value) {
+    return BUILD_MODE_LABEL[value] || BUILD_MODE_LABEL.standard;
+}
+
 export function securityLevelLabel(value) {
     const level = String(value || '').trim();
     if (!level) return '未设置';

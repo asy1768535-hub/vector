@@ -9,7 +9,7 @@ import {
     ST_LABEL, ST_TAG, OP_LABEL, OP_TAG,
     validateBatch, fileKey, formatSize, fileTypeIcon,
     MAX_BATCH_SIZE, validateFile, graphJobProgress, graphProgressDetail,
-    securityLevelLabel,
+    securityLevelLabel, BUILD_MODE_LABEL, buildModeLabel,
 } from '../import_ui.js';
 import {
     createImportBatchId,
@@ -35,12 +35,7 @@ const GRAPH_CONFIG_REASON = {
     security_levels_missing: '当前知识库未配置允许的安全级别',
     active_ontology_missing: '当前知识库没有生效中的知识结构（Schema）',
 };
-const BUILD_MODE_LABEL = { fast: '快速', standard: '标准', deep: '深度' };
 const SCHEMA_MODE_LABEL = { disabled: '普通上传', explore: 'AI 探索', governed: 'Schema 治理' };
-
-function buildModeLabel(value) {
-    return BUILD_MODE_LABEL[value] || BUILD_MODE_LABEL.standard;
-}
 
 function schemaModeLabel(config) {
     if (config?.exploration_available) return 'AI 探索';

@@ -2,9 +2,9 @@ import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import * as api from '../api.js';
 import { taskEmpty } from '../illustrations.js';
+import { buildModeLabel } from '../import_ui.js';
 import { STATUS_LABEL, STATUS_TAG, STATUS_ICON, TASK_TYPE_LABEL, STAGE_LABEL, formatJobTime, jobDuration, shortId, filterJobs, paginateJobs, libraryName, jobErrorText, jobStageLabel, retryReasonLabel, statsStatusTotal, retryTargetKey, isRetrySelectable, uniqueRetryRows, retryItem, retryTypeSummary } from '../jobs_ui.js';
 
-const BUILD_MODE_LABEL = { fast: '快速', standard: '标准', deep: '深度' };
 const PUBLICATION_STATUS_LABEL = {
     pending: '等待抽取完成',
     publishing: '自动发布中',
@@ -17,10 +17,6 @@ const PUBLICATION_FAILURE_REASON_LABEL = {
     no_valid_relation: '仅有实体、暂无有效关系',
     job_not_publishable: '任务未满足自动发布条件',
 };
-
-function buildModeLabel(value) {
-    return BUILD_MODE_LABEL[value] || BUILD_MODE_LABEL.standard;
-}
 
 function publicationStatusLabel(value) {
     return PUBLICATION_STATUS_LABEL[value] || '等待抽取完成';
