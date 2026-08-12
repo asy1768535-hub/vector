@@ -64,7 +64,6 @@ const pages = {
     Search: ['searchEmpty', 'src/views/Search.js'],
     Import: ['uploadEmpty', 'src/views/Import.js'],
     ApiKeys: ['dataEmpty', 'apiKeySecurity', 'src/views/ApiKeys.js'],
-    Documents: ['dataEmpty', 'src/views/Documents.js'],
     Libraries: ['dataEmpty', 'src/views/Libraries.js'],
     Users: ['dataEmpty', 'src/views/Users.js'],
     Audit: ['dataEmpty', 'src/views/Audit.js'],
@@ -103,7 +102,7 @@ test('Permissions: dataEmpty renders in el-empty and table #empty', () => {
 });
 
 test('all table #empty slots use illustration-empty-wrapper', () => {
-    const pages = ['Documents', 'Libraries', 'Users', 'Audit', 'ChatLogs', 'Jobs', 'RuntimeStatus', 'ApiKeys', 'Search'];
+    const pages = ['Libraries', 'Users', 'Audit', 'ChatLogs', 'Jobs', 'RuntimeStatus', 'ApiKeys', 'Search'];
     for (const page of pages) {
         const src = readFileSync(join(__dirname, 'src/views', `${page}.js`), 'utf8');
         const tpl = src.slice(src.indexOf('template:'));

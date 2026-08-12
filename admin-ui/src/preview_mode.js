@@ -241,10 +241,6 @@ function previewFixture(parts) {
             },
         };
     }
-    if (method === 'GET' && path === '/admin/jobs') return { body: [] };
-    if (method === 'GET' && path === '/admin/jobs/stats') {
-        return { body: { pending: 0, processing: 0, done: 0, failed: 0, total: 0 } };
-    }
     if (method === 'GET' && path === '/admin/audit-log') return { body: [] };
     if (method === 'GET' && path === '/admin/chat-logs') return { body: [] };
     if (method === 'GET' && path === '/admin/operations/status') {

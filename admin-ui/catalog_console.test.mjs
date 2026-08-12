@@ -25,7 +25,6 @@ import {
     listCatalogDocuments,
     retryCatalogDocumentProcessing,
     setDocumentClassification,
-    removeDocumentClassification,
 } from './src/api.js';
 import { canManageLibrary } from './src/menu_access.js';
 
@@ -280,19 +279,14 @@ test('classification editing uses the document endpoint and effective decision f
     };
     try {
         await setDocumentClassification('contracts', 'doc-1', body);
-        await removeDocumentClassification('contracts', 'doc-1', {
-            expected_effective_decision_set_id: 'decision-set-1',
-        });
     } finally {
         globalThis.fetch = originalFetch;
     }
     assert.deepEqual(requests.map((item) => item.path), [
         '/libraries/contracts/classifications/documents/doc-1',
-        '/libraries/contracts/classifications/documents/doc-1',
     ]);
     assert.equal(requests[0].options.method, 'PUT');
     assert.deepEqual(JSON.parse(requests[0].options.body), body);
-    assert.equal(requests[1].options.method, 'DELETE');
 });
 test('wires a read-gated Catalog route inside the knowledge asset domain', () => {
     assert.match(app, /path:\s*'catalog'/);

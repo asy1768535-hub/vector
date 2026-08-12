@@ -78,14 +78,6 @@ export async function logout() {
     finally { clearCache(); }
 }
 
-export const me = (forceRefresh) => cachedRequest('me', () => request('/users/me'), 30000, forceRefresh);
-export const myPermissions = (forceRefresh) => cachedRequest('myPermissions', () => request('/me/permissions'), 30000, forceRefresh);
-export const listMyOrganizations = (forceRefresh) => cachedRequest(
-    'listMyOrganizations',
-    () => request('/me/organizations'),
-    30000,
-    forceRefresh,
-);
 // 修改自己的资料/密码（复用 fastapi-users PATCH /users/me，不新建更新逻辑）
 export const updateMe = (data) => request('/users/me', jsonBody('PATCH', data));
 // 管理员重置某用户密码（专用端点；password 不混入普通 PATCH）
@@ -322,12 +314,6 @@ export const setDocumentClassification = (slug, documentId, body) =>
         `/libraries/${slug}/classifications/documents/${documentId}`,
         jsonBody('PUT', body),
     );
-export const removeDocumentClassification = (slug, documentId, body) =>
-    request(
-        `/libraries/${slug}/classifications/documents/${documentId}`,
-        jsonBody('DELETE', body),
-    );
-
 // ── v0.8 Organization retrieval diagnostics ────────────────
 export const checkLibraryCompatibility = (body) =>
     request('/me/library-compatibility/check', jsonBody('POST', body));
@@ -425,8 +411,6 @@ export const listGraphGovernanceActions = (
     query.set('offset', String(offset));
     return request(`/libraries/${slug}/graph-governance/actions?${query.toString()}`);
 };
-export const getGraphGovernanceAction = (slug, actionId) =>
-    request(`/libraries/${slug}/graph-governance/actions/${actionId}`);
 export const decideGraphGovernanceAction = (slug, actionId, body) => graphCommand(
     `/libraries/${slug}/graph-governance/actions/${actionId}/decision`,
     body,
@@ -543,8 +527,6 @@ export const getActiveGraphPublication = (slug, ontologyVersionId = '') => {
         : '';
     return request(`/libraries/${slug}/v05/graph-publications/active${query}`);
 };
-export const getGraphPublication = (slug, publicationId) =>
-    request(`/libraries/${slug}/v05/graph-publications/${publicationId}`);
 export const listGraphPublicationItems = (slug, publicationId, params = {}) => {
     const query = new URLSearchParams();
     for (const key of ['item_kind', 'status', 'page', 'page_size']) {
@@ -578,8 +560,6 @@ export const rerunGraphExtraction = (slug, jobId, body) => graphCommand(
 );
 
 // ── Admin: Jobs ──────────────────────────────────────────────
-const _jobsKey = (params) => 'listJobs:' + new URLSearchParams(params).toString();
-export const listJobs = (params = {}, forceRefresh) => cachedRequest(_jobsKey(params), () => request('/admin/jobs?' + new URLSearchParams(params).toString()), 10000, forceRefresh);
 const _monitoredTasksKey = (params) => 'listMonitoredTasks:' + new URLSearchParams(params).toString();
 export const listMonitoredTasks = (params = {}, forceRefresh) => cachedRequest(
     _monitoredTasksKey(params),
@@ -592,7 +572,6 @@ export const retryMonitoredTasks = (items) => request('/admin/jobs/monitor/retry
     method: 'POST',
     body: JSON.stringify({ items }),
 });
-export const jobStats = (forceRefresh) => cachedRequest('jobStats', () => request('/admin/jobs/stats'), 10000, forceRefresh);
 export const monitoredTaskStats = (forceRefresh) => cachedRequest(
     'monitoredTaskStats',
     () => request('/admin/jobs/monitor/stats'),
@@ -710,10 +689,6 @@ const schemaPath = (slug, versionId, suffix = '') => (
 
 export const listSchemaVersions = (slug) => request(`/libraries/${slug}/schema-lifecycle/versions`);
 export const getSchemaVersion = (slug, versionId) => request(schemaPath(slug, versionId));
-export const importSchemaVersion = (slug, body) => request(
-    `/libraries/${slug}/schema-lifecycle/import`,
-    jsonBody('POST', body),
-);
 export const importSchemaFile = (slug, body) => request(
     `/libraries/${slug}/schema-lifecycle/import-file`,
     jsonBody('POST', body),

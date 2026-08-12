@@ -297,15 +297,6 @@ export function visibleSidebarGroups(access) {
     });
 }
 
-export function visibleSidebarDomains(access) {
-    return SIDEBAR_DOMAINS
-        .filter((item) => access?.[item.key])
-        .map((item) => ({
-            ...item,
-            path: firstDomainPath(item.key, access) || item.path,
-        }));
-}
-
 export function defaultRouteForAccess(access) {
     for (const domain of ['knowledgeUse', 'knowledgeAssets', 'knowledgeGovernance']) {
         const path = firstDomainPath(domain, access);

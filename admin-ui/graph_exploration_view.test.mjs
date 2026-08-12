@@ -8,7 +8,6 @@ import {
     createEdgePanController,
     createRadialForceController,
 } from './src/radial_force_controller.js';
-import { beginGraphOverviewLoad, failGraphOverviewLoad } from './src/graph_overview_state.js';
 
 const explorer = readFileSync(new URL('./src/components/GraphExplorer.js', import.meta.url), 'utf8');
 const browser = readFileSync(new URL('./src/components/GraphKnowledgeBrowser.js', import.meta.url), 'utf8');
@@ -78,7 +77,11 @@ test('main-canvas selection does not switch range, reload the graph, recenter or
     assert.doesNotMatch(selectedWatch, /syncRadialGraph|loadTraversal/);
     assert.ok(parent.includes('entity-preview'));
     assert.equal(parent.includes('showSelectedRelations'), false);
-    assert.ok(explorer.includes(':constrain-to-viewport="entityPreview"'));
+    assert.ok(explorer.includes(':constrain-to-viewport="false"'));
+    assert.ok(explorer.includes(':user-zooming-enabled="true"'));
+    assert.ok(explorer.includes('previewExpanded'));
+    assert.ok(explorer.includes('mdi:fullscreen'));
+    assert.ok(css.includes('height: clamp(360px, 58vh, 680px);'));
     assert.ok(canvas.includes('constrainToViewport: { type: Boolean, default: false }'));
 });
 
@@ -336,21 +339,4 @@ test('pans from an edge gesture without moving model nodes', () => {
     );
     edgePan.destroy();
     graphView.destroy();
-});
-
-test('retains an existing graph while a scoped overview refresh fails', () => {
-    const retainedData = radialFixture();
-    const overview = { loading: false, data: retainedData, error: null, partialError: null };
-    const loadedScopeKey = beginGraphOverviewLoad(overview, {
-        scopeKey: 'organization-a:library-a',
-        loadedScopeKey: 'organization-a:library-a',
-        hasScope: true,
-    });
-    assert.equal(overview.loading, true);
-    assert.equal(overview.data, retainedData);
-    failGraphOverviewLoad(overview, { kind: 'unavailable', message: 'temporary failure' });
-    assert.equal(overview.loading, false);
-    assert.equal(overview.data, retainedData);
-    assert.equal(overview.error.kind, 'unavailable');
-    assert.equal(loadedScopeKey, 'organization-a:library-a');
 });

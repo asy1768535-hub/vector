@@ -13,7 +13,6 @@ import {
     legacyRedirectTarget,
     retrievalModeTarget,
     sidebarItems,
-    visibleSidebarDomains,
     visibleSidebarGroups,
 } from './src/domain_navigation.js';
 
@@ -53,11 +52,6 @@ test('sidebar leaf pages follow fine-grained access', () => {
     ]);
     assert.deepEqual(domainTabs('knowledgeGovernance', READER_ACCESS).map((item) => item.key), [
         'knowledgeGraph',
-    ]);
-    assert.deepEqual(visibleSidebarDomains(READER_ACCESS).map((item) => item.key), [
-        'knowledgeUse',
-        'knowledgeAssets',
-        'knowledgeGovernance',
     ]);
     assert.deepEqual(visibleSidebarGroups(READER_ACCESS).map((item) => item.key), [
         'knowledgeUse',

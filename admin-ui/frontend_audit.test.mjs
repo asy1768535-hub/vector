@@ -76,7 +76,6 @@ const navigationSrc = readFileSync(new URL('./src/domain_navigation.js', import.
 const apiSrc = readFileSync(new URL('./src/api.js', import.meta.url), 'utf8');
 const apiKeysSrc = readFileSync(new URL('./src/views/ApiKeys.js', import.meta.url), 'utf8');
 const chatSrc = readFileSync(new URL('./src/views/Chat.js', import.meta.url), 'utf8');
-const docsSrc = readFileSync(new URL('./src/views/Documents.js', import.meta.url), 'utf8');
 const searchSrc = readFileSync(new URL('./src/views/Search.js', import.meta.url), 'utf8');
 const auditSrc = readFileSync(new URL('./src/views/Audit.js', import.meta.url), 'utf8');
 
@@ -121,17 +120,6 @@ test('ApiKeys: expired stat card present', () => {
 test('Users: refresh calls loadUsers(true)', () => {
     const usersSrc = readFileSync(new URL('./src/views/Users.js', import.meta.url), 'utf8');
     assert.ok(usersSrc.includes('loadUsers(true)'), 'users refresh uses forceRefresh');
-});
-
-test('Documents: refresh calls loadDocs(true)', () => {
-    assert.ok(docsSrc.includes('loadDocs(true)'), 'docs refresh uses forceRefresh');
-});
-
-test('Documents: loadLibs calls loadDocs exactly once (no duplicate branch)', () => {
-    const afterLibs = docsSrc.slice(docsSrc.indexOf('async function loadLibs'));
-    const fnBody = afterLibs.slice(0, afterLibs.indexOf('async function loadDocs'));
-    const matches = fnBody.match(/loadDocs\(\)/g) || [];
-    assert.equal(matches.length, 1, `loadLibs calls loadDocs ${matches.length} times, expected 1`);
 });
 
 test('Chat: opens document source details in page', () => {

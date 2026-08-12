@@ -81,7 +81,6 @@ function validLibrary(library) {
         && text(library?.name).length <= 160
     );
 }
-
 function validSnapshotConfidence(value) {
     if (value === null || value === undefined) return true;
     if (typeof value === 'number') return validConfidence(value);
@@ -304,16 +303,6 @@ export function explorationSeedKey(seed) {
     return libraryId && entityId ? `${libraryId}:${entityId}` : '';
 }
 
-export function selectExplorationSeed(current, seed, limit = 4) {
-    const selected = Array.isArray(current) ? [...current] : [];
-    const key = explorationSeedKey(seed);
-    if (!key || !explorationSeedEligible(seed)
-        || selected.length >= Math.min(4, Math.max(1, limit))
-        || selected.some((item) => explorationSeedKey(item) === key)) return selected;
-    selected.push(seed);
-    return selected;
-}
-
 function validPublication(publication, identity) {
     return Boolean(
         text(publication?.id) === text(identity?.publicationId)
@@ -457,86 +446,4 @@ export function graphTraversalSummary(value) {
             : Number.isInteger(value?.evidence_count) ? value.evidence_count : 0,
         truncationLabels,
     };
-}
-
-function sortedNodes(value) {
-    return [...(value?.nodes || [])].sort((left, right) => (
-        left.depth - right.depth
-        || text(left.normalized_name).localeCompare(text(right.normalized_name), 'zh-CN')
-        || text(left.id).localeCompare(text(right.id))
-    ));
-}
-
-export function layoutGraphRadially(value, width, height) {
-    const safeWidth = Math.max(240, Number(width) || 240);
-    const safeHeight = Math.max(220, Number(height) || 220);
-    const centerX = safeWidth / 2;
-    const centerY = safeHeight / 2;
-    const ringBase = Math.max(54, Math.min(safeWidth, safeHeight));
-    const resultNodes = [];
-    const byId = new Map();
-    const nodes = sortedNodes(value);
-    const seedCount = nodes.filter((item) => item.depth === 0).length;
-    const multipleSeeds = seedCount > 1;
-    const radii = multipleSeeds
-        ? { 0: ringBase * 0.13, 1: ringBase * 0.30, 2: ringBase * 0.45 }
-        : { 0: 0, 1: ringBase * 0.24, 2: ringBase * 0.41 };
-    for (const depth of [0, 1, 2]) {
-        const ring = nodes.filter((item) => item.depth === depth);
-        ring.forEach((item, index) => {
-            const angle = depth === 0 && !multipleSeeds
-                ? 0
-                : (-Math.PI / 2) + ((Math.PI * 2 * index) / ring.length);
-            const layoutNode = {
-                id: item.id,
-                depth,
-                label: item.canonical_name,
-                x: centerX + Math.cos(angle) * radii[depth],
-                y: centerY + Math.sin(angle) * radii[depth],
-                radius: depth === 0 ? 20 : 17,
-            };
-            resultNodes.push(layoutNode);
-            byId.set(item.id, layoutNode);
-        });
-    }
-    const relations = [...(value?.relations || [])]
-        .sort((left, right) => text(left.id).localeCompare(text(right.id)))
-        .map((relation) => {
-            const source = byId.get(relation.source_entity_id);
-            const target = byId.get(relation.target_entity_id);
-            return {
-                id: relation.id,
-                direction: relation.relation_type.direction,
-                label: relation.relation_type.label,
-                x1: source.x,
-                y1: source.y,
-                x2: target.x,
-                y2: target.y,
-            };
-        });
-    return { width: safeWidth, height: safeHeight, nodes: resultNodes, relations };
-}
-
-function pointSegmentDistance(x, y, line) {
-    const dx = line.x2 - line.x1;
-    const dy = line.y2 - line.y1;
-    if (dx === 0 && dy === 0) return Math.hypot(x - line.x1, y - line.y1);
-    const ratio = Math.max(0, Math.min(1, (
-        ((x - line.x1) * dx) + ((y - line.y1) * dy)
-    ) / ((dx * dx) + (dy * dy))));
-    return Math.hypot(x - (line.x1 + ratio * dx), y - (line.y1 + ratio * dy));
-}
-
-export function hitTestGraphLayout(layout, x, y) {
-    for (const node of layout?.nodes || []) {
-        if (Math.hypot(x - node.x, y - node.y) <= node.radius + 5) {
-            return { kind: 'node', id: node.id };
-        }
-    }
-    for (const relation of layout?.relations || []) {
-        if (pointSegmentDistance(x, y, relation) <= 7) {
-            return { kind: 'relation', id: relation.id };
-        }
-    }
-    return null;
 }

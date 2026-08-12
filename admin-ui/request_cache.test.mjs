@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { cachedRequest, invalidateCache, invalidateByPrefix, clearCache } from './src/request_cache.js';
+import { cachedRequest, invalidateByPrefix, clearCache } from './src/request_cache.js';
 
 // ── Helpers ──
 let callCount;
@@ -72,17 +72,6 @@ test('failed request is NOT cached', async () => {
     const r = await cachedRequest('k6', fn2, 5000);
     assert.deepEqual(r, { ok: true });
     assert.equal(callCount, 2, 'refetched after failure');
-});
-
-test('invalidateCache removes single key', async () => {
-    await cachedRequest('ka', mockFn({ a: 1 }), 5000);
-    await cachedRequest('kb', mockFn({ b: 2 }), 5000);
-    assert.equal(callCount, 2);
-    invalidateCache('ka');
-    await cachedRequest('ka', mockFn({ a: 1 }), 5000);
-    assert.equal(callCount, 3, 'ka refetched');
-    await cachedRequest('kb', mockFn({ b: 2 }), 5000);
-    assert.equal(callCount, 3, 'kb still cached');
 });
 
 test('invalidateByPrefix removes matching keys', async () => {

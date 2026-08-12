@@ -218,7 +218,7 @@ const JS_FILES = [
     'src/app.js', 'src/api.js', 'src/api_errors.js', 'src/icons.js',
     'src/views/Chat.js', 'src/views/Login.js', 'src/views/Layout.js',
     'src/views/Users.js', 'src/views/Import.js', 'src/views/Dashboard.js',
-    'src/views/Libraries.js', 'src/views/Documents.js', 'src/views/Search.js',
+    'src/views/Libraries.js', 'src/views/Search.js',
     'src/views/ApiKeys.js', 'src/views/Permissions.js', 'src/views/Jobs.js',
     'src/views/RuntimeStatus.js', 'src/views/Audit.js', 'src/views/ChatLogs.js',
     'src/views/import_errors.js',

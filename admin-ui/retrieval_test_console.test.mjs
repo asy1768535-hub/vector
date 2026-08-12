@@ -131,7 +131,6 @@ test('wires Organization auth state, route, menu, and strict APIs', () => {
     assert.match(navigation, /access:\s*'retrievalTest'/);
     assert.match(navigation, /path:\s*APP_PATHS\.retrievalTest/);
     for (const token of [
-        'listMyOrganizations',
         'checkLibraryCompatibility',
         'runOrganizationRetrievalTest',
     ]) assert.ok(api.includes(`export const ${token}`), `missing ${token}`);
