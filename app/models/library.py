@@ -41,10 +41,6 @@ class Library(Base):
             name="ck_lib_claim_graph_shadow_policy",
         ),
         CheckConstraint(
-            "canonical_mapping_shadow_policy IN ('inherit','enabled','disabled')",
-            name="ck_lib_canonical_mapping_shadow_policy",
-        ),
-        CheckConstraint(
             "jsonb_typeof(knowledge_artifact_allowed_security_levels) = 'array'",
             name="ck_lib_knowledge_artifact_security_levels_array",
         ),
@@ -138,9 +134,6 @@ class Library(Base):
         String(16), nullable=False, default="required", server_default="required"
     )
     claim_graph_shadow_policy: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="inherit", server_default="inherit"
-    )
-    canonical_mapping_shadow_policy: Mapped[str] = mapped_column(
         String(16), nullable=False, default="inherit", server_default="inherit"
     )
     graph_extraction_build_mode: Mapped[str] = mapped_column(

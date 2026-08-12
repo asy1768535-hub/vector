@@ -186,7 +186,6 @@ async def create_library(
         schema_mode=body.schema_mode,
         schema_confirmation_policy=body.schema_confirmation_policy,
         claim_graph_shadow_policy=body.claim_graph_shadow_policy,
-        canonical_mapping_shadow_policy=body.canonical_mapping_shadow_policy,
         graph_extraction_build_mode=body.graph_extraction_build_mode,
         external_llm_enabled=body.external_llm_enabled,
         graph_extraction_allowed_security_levels=(
@@ -281,7 +280,6 @@ async def create_library(
                 "schema_mode": lib.schema_mode,
                 "schema_confirmation_policy": lib.schema_confirmation_policy,
                 "claim_graph_shadow_policy": lib.claim_graph_shadow_policy,
-                "canonical_mapping_shadow_policy": lib.canonical_mapping_shadow_policy,
                 "schema_template": body.schema_template,
             },
         )
@@ -431,10 +429,6 @@ async def update_library(
     if "claim_graph_shadow_policy" in body.model_fields_set:
         lib.claim_graph_shadow_policy = body.claim_graph_shadow_policy
         changes["claim_graph_shadow_policy"] = body.claim_graph_shadow_policy
-
-    if "canonical_mapping_shadow_policy" in body.model_fields_set:
-        lib.canonical_mapping_shadow_policy = body.canonical_mapping_shadow_policy
-        changes["canonical_mapping_shadow_policy"] = body.canonical_mapping_shadow_policy
 
     for field in (
         "graph_extraction_enabled",

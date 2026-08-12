@@ -46,7 +46,6 @@ from app.models.extraction_raw_output_attempt import ExtractionRawOutputAttempt
 from app.models.folder import Folder
 from app.models.graph_extraction_job import GraphExtractionJob
 from app.models.graph_extraction_unit import GraphExtractionUnit
-from app.models.canonical_mapping import GraphClaimMapping, GraphMappingAuthoritySnapshot
 from app.models.graph_governance_action import (
     GraphGovernanceAction,
     GraphGovernanceActionItem,
@@ -132,8 +131,6 @@ __all__ = [
     "Folder",
     "GraphExtractionJob",
     "GraphExtractionUnit",
-    "GraphClaimMapping",
-    "GraphMappingAuthoritySnapshot",
     "GraphGovernanceAction",
     "GraphGovernanceActionItem",
     "GraphPublication",

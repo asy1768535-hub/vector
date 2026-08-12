@@ -324,7 +324,6 @@ class Settings(BaseSettings):
     # ---- v0.4 Graph Extraction Pipeline (M1 defaults; fail closed) ----
     graph_extraction_enabled: bool = False
     graph_claim_shadow_enabled: bool = False
-    canonical_mapping_shadow_enabled: bool = False
     graph_extraction_auto_trigger_enabled: bool = False
     graph_extraction_base_url: str = "https://api.deepseek.com/v1"
     graph_extraction_model: str = "deepseek-v4-pro"

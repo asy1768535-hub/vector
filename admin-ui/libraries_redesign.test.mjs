@@ -11,10 +11,6 @@ const css = readFileSync(new URL('./style.css', import.meta.url), 'utf8');
 // ════════════════════════════════════════════════════════════
 
 import {
-    canonicalMappingGlobalLabel,
-    canonicalMappingPolicyLabel,
-    canonicalMappingResolvedLabel,
-    canonicalMappingRollbackVerified,
     computeLibraryStats,
     filterLibraries,
     librarySlugFromName,
@@ -64,37 +60,6 @@ test('libraryStatus and srcSummary are safe', () => {
     assert.equal(
         srcSummary({ db_name: 'db', table: 'docs', key_field: 'id', text_column: 'content' }),
         'db.docs · id → content',
-    );
-});
-
-test('canonical mapping presentation preserves backend policy and resolved fields', () => {
-    assert.equal(canonicalMappingPolicyLabel('inherit'), '继承');
-    assert.equal(canonicalMappingPolicyLabel('disabled'), '关闭');
-    assert.equal(canonicalMappingPolicyLabel('enabled'), '开启');
-    assert.equal(canonicalMappingGlobalLabel(false), '全局已关闭');
-    assert.equal(canonicalMappingResolvedLabel(false), '未生效');
-    assert.equal(canonicalMappingResolvedLabel(true), '已生效');
-    const globalOff = {
-        canonical_mapping_shadow_policy: 'enabled',
-        canonical_mapping_shadow_global_enabled: false,
-        canonical_mapping_shadow_resolved: false,
-    };
-    assert.equal(canonicalMappingPolicyLabel(globalOff.canonical_mapping_shadow_policy), '开启');
-    assert.equal(canonicalMappingGlobalLabel(globalOff.canonical_mapping_shadow_global_enabled), '全局已关闭');
-    assert.equal(canonicalMappingResolvedLabel(globalOff.canonical_mapping_shadow_resolved), '未生效');
-    assert.equal(
-        canonicalMappingRollbackVerified({
-            canonical_mapping_shadow_policy: 'disabled',
-            canonical_mapping_shadow_resolved: false,
-        }),
-        true,
-    );
-    assert.equal(
-        canonicalMappingRollbackVerified({
-            canonical_mapping_shadow_policy: 'disabled',
-            canonical_mapping_shadow_resolved: true,
-        }),
-        false,
     );
 });
 
@@ -322,45 +287,6 @@ test('edit from enabled to disabled submits source_enrichment_enabled diff', () 
     assert.match(source, /for \(const k of Object\.keys\(edit\.form\)\) if \(edit\.form\[k\] !== edit\.initial\[k\]\) diff\[k\] = edit\.form\[k\]/);
     assert.match(source, /api\.updateLibrary\(edit\.slug, diff\)/);
     assert.match(source, /source_enrichment_enabled/);
-});
-
-test('canonical mapping uses the frozen API field with inherit defaults and three states', () => {
-    assert.match(source, /canonical_mapping_shadow_policy:\s*'inherit'/);
-    assert.match(source, /canonical_mapping_shadow_policy:\s*row\.canonical_mapping_shadow_policy \|\| 'inherit'/);
-    assert.match(source, /v-model="create\.form\.canonical_mapping_shadow_policy"/);
-    assert.match(source, /v-model="edit\.form\.canonical_mapping_shadow_policy"/);
-    for (const value of ['inherit', 'disabled', 'enabled']) {
-        assert.match(source, new RegExp(`value="${value}"`));
-    }
-    assert.match(source, /create\.form\.schema_mode !== 'disabled'/);
-    assert.match(source, /edit\.form\.schema_mode !== 'disabled'/);
-    assert.match(source, /仅后台质量评估，不改变当前实体关系，不进入发布/);
-});
-
-test('canonical mapping stays independent from Q&A and raw claim shadow controls', () => {
-    assert.match(source, /graph_assisted_chat_mode/);
-    assert.match(source, /canonical_mapping_shadow_policy/);
-    const canonicalSection = source.slice(source.indexOf('Canonical Mapping'));
-    assert.doesNotMatch(canonicalSection.slice(0, canonicalSection.indexOf('<!-- FAQ dialog -->')), /claim_graph_shadow_policy/);
-});
-
-test('detail and edit show authoritative global and resolved values without deriving them', () => {
-    assert.match(source, /canonical_mapping_shadow_global_enabled/);
-    assert.match(source, /canonical_mapping_shadow_resolved/);
-    assert.match(source, /canonicalMappingPolicyLabel\(edit\.canonicalMapping\.policy\)/);
-    assert.match(source, /canonicalMappingGlobalLabel\(selectedLibrary\.canonical_mapping_shadow_global_enabled\)/);
-    assert.match(source, /canonicalMappingResolvedLabel\(selectedLibrary\.canonical_mapping_shadow_resolved\)/);
-    assert.match(source, /canonicalMappingGlobalLabel\(edit\.canonicalMapping\.globalEnabled\)/);
-    assert.match(source, /canonicalMappingResolvedLabel\(edit\.canonicalMapping\.resolved\)/);
-});
-
-test('rollback patches disabled and verifies an uncached exact-library read before success', () => {
-    assert.match(source, /diff\.canonical_mapping_shadow_policy === 'disabled'/);
-    assert.match(source, /api\.updateLibrary\(edit\.slug, diff\)/);
-    assert.match(source, /const readback = await api\.getLibrary\(edit\.slug\)/);
-    assert.match(source, /canonicalMappingRollbackVerified\(readback\)/);
-    assert.match(source, /Canonical Mapping 影子评估回读校验失败/);
-    assert.match(source, /catch \(e\) \{ ElMessage\.error\(e\.message \|\| String\(e\)\); \}/);
 });
 
 test('library save failures stay on the existing error path', () => {

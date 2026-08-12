@@ -130,9 +130,6 @@ class LibraryCreate(BaseModel):
     claim_graph_shadow_policy: str = Field(
         default="inherit", pattern="^(inherit|enabled|disabled)$"
     )
-    canonical_mapping_shadow_policy: str = Field(
-        default="inherit", pattern="^(inherit|enabled|disabled)$"
-    )
 
     @field_validator("graph_extraction_allowed_security_levels", mode="before")
     @classmethod
@@ -227,9 +224,6 @@ class LibraryUpdate(BaseModel):
         default=None, pattern="^(required|automatic)$"
     )
     claim_graph_shadow_policy: Optional[str] = Field(
-        default=None, pattern="^(inherit|enabled|disabled)$"
-    )
-    canonical_mapping_shadow_policy: Optional[str] = Field(
         default=None, pattern="^(inherit|enabled|disabled)$"
     )
     graph_extraction_build_mode: Optional[str] = Field(
@@ -341,9 +335,6 @@ class LibraryRead(BaseModel):
     schema_confirmation_policy: str = "required"
     claim_graph_shadow_policy: str = "inherit"
     claim_graph_shadow_enabled: bool = False
-    canonical_mapping_shadow_policy: str = "inherit"
-    canonical_mapping_shadow_global_enabled: bool = False
-    canonical_mapping_shadow_resolved: bool = False
     graph_extraction_build_mode: str = "standard"
     graph_assisted_chat_mode: str = "off"
     external_llm_enabled: bool = True
@@ -393,32 +384,12 @@ class LibraryRead(BaseModel):
     def _default_claim_graph_shadow_policy(cls, value):
         return "inherit" if value is None else value
 
-    @field_validator("canonical_mapping_shadow_policy", mode="before")
-    @classmethod
-    def _default_canonical_mapping_shadow_policy(cls, value):
-        return "inherit" if value is None else value
-
     @model_validator(mode="after")
     def _resolve_claim_graph_shadow_enabled(self):
         from app.services.shadow_rollout import resolve_shadow_enabled
 
         self.claim_graph_shadow_enabled = resolve_shadow_enabled(
             policy=self.claim_graph_shadow_policy,
-            graph_extraction_enabled=self.graph_extraction_enabled,
-            external_llm_enabled=self.external_llm_enabled,
-        )
-        return self
-
-    @model_validator(mode="after")
-    def _resolve_canonical_mapping_shadow_enabled(self):
-        from app.config import settings
-        from app.services.canonical_mapping_shadow import resolve_canonical_mapping_shadow
-
-        self.canonical_mapping_shadow_global_enabled = settings.canonical_mapping_shadow_enabled
-        self.canonical_mapping_shadow_resolved = resolve_canonical_mapping_shadow(
-            global_enabled=settings.canonical_mapping_shadow_enabled,
-            policy=self.canonical_mapping_shadow_policy,
-            schema_mode=self.schema_mode,
             graph_extraction_enabled=self.graph_extraction_enabled,
             external_llm_enabled=self.external_llm_enabled,
         )
