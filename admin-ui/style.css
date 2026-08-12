@@ -4571,6 +4571,18 @@ local-icon { display: inline-block; vertical-align: -0.125em; }
     font-weight: 500;
 }
 
+.search-doc-file-copy { min-width: 0; }
+.search-doc-file-ref {
+    display: block;
+    max-width: 100%;
+    margin-top: 2px;
+    overflow: hidden;
+    color: var(--app-text-muted);
+    font-size: 10px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .search-doc-link {
     color: var(--app-accent) !important;
 }

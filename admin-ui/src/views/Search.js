@@ -7,6 +7,7 @@ import { documentTypeIcon, documentDisplayName } from '../documents_ui.js';
 import { searchEmpty } from '../illustrations.js';
 import { csvEscape, downloadCSV } from '../logs_ui.js';
 import { createRequestFence, readProjection } from '../read_state_ui.js';
+import { resultDocumentRef, resultSourceLabel } from '../search_ui.js';
 import RetrievalModeSwitch from '../components/RetrievalModeSwitch.js';
 
 function formatScore(s) {
@@ -140,6 +141,7 @@ export default {
                     const info = resultDocInfo(r);
                     return Object.assign(r, {
                         _docName: documentDisplayName(info),
+                        _docRef: resultDocumentRef(r),
                         _icon: documentTypeIcon(info),
                     });
                 });
@@ -182,8 +184,8 @@ export default {
             if (!results.value.length) return;
             const headers = ['文档名', '来源信息', '命中片段', '相似度', '重排分数'];
             const data = results.value.map((r) => [
-                r._docName,
-                (r.metadata?.page != null) ? `第${r.metadata.page}页` : '',
+                r._docRef ? `${r._docName} (${r._docRef})` : r._docName,
+                resultSourceLabel(r),
                 r.text || '',
                 formatScore(r.similarity),
                 (r.metadata?.rerank_score != null) ? r.metadata.rerank_score.toFixed(4) : '',
@@ -216,6 +218,7 @@ export default {
             libsLoading, libsError, faqLoading, faqError, searchError, searchReadState,
             loadLibs, handleSearch, resetSearch, pickFaq, openDocDetail, exportCSV, searchEmpty,
             formatScore, scoreType, documentTypeIcon, documentDisplayName, resultDocInfo,
+            resultSourceLabel,
         };
     },
     template: `
@@ -295,14 +298,18 @@ export default {
                                      alt="" aria-hidden="true" />
                                 <local-icon v-else class="search-doc-file-icon"
                                             icon="mdi:file-document-outline" />
-                                <span class="search-doc-file-name"
-                                      :title="row._docName">{{ row._docName }}</span>
+                                <div class="search-doc-file-copy">
+                                    <span class="search-doc-file-name"
+                                          :title="row._docName">{{ row._docName }}</span>
+                                    <small v-if="row._docRef" class="search-doc-file-ref"
+                                           :title="row._docRef">{{ row._docRef }}</small>
+                                </div>
                             </div>
                         </template>
                     </el-table-column>
                     <el-table-column label="来源信息" width="110" align="center">
                         <template #default="{row}">
-                            <span>{{ (row.metadata && row.metadata.page != null) ? ('第' + row.metadata.page + '页') : '—' }}</span>
+                            <span :title="resultSourceLabel(row)">{{ resultSourceLabel(row) }}</span>
                         </template>
                     </el-table-column>
                     <el-table-column label="命中片段" min-width="280">
