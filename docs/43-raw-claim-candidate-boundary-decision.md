@@ -21,8 +21,8 @@ raw JSON
   -> existing candidate purge projection
 ```
 
-The helper is
-`app/services/raw_claim_candidate_replay.py`. It calls the real parser,
+The historical helper was
+`app/services/raw_claim_candidate_replay.py`. It called the real parser,
 batch parser, candidate-key helper, and relation aggregation function. It does
 not call ORM staging because `stage_unit_candidate_occurrences` requires a
 Postgres session and a complete job/unit/snapshot graph. The replay therefore
