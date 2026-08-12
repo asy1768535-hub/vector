@@ -1,7 +1,7 @@
 # AI 探索建图功能交接记忆
 
 更新时间：2026-08-05  
-项目目录：`C:\Users\Alice\Desktop\vectorDatabase`
+项目目录：仓库根目录（vectorDatabase）
 
 ## 1. 用户真正要实现的产品逻辑
 
