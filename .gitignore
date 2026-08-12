@@ -43,6 +43,7 @@ storage/document_files/
 
 # Claude Code / 工具生成的本地 brainstorm、preview 状态（含本机绝对路径）
 .superpowers/
+.workbuddy/
 .worktrees/
 .tmp_zip_compare/
 
