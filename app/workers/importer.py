@@ -7,6 +7,7 @@ import logging
 import os
 import shutil
 import socket
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,7 @@ from app.models.library import Library
 from app.schemas.storage import SourceLocatorV1
 from app.services import folders as folders_service
 from app.services import ingest as ingest_service
+from app.services import import_staging_cleanup
 from app.services.import_parsing import ParsedImport, parse_import_file
 from app.services.import_uploads import (
     folder_path_for_job,
@@ -45,6 +47,8 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger(__name__)
+STAGING_CLEANUP_INTERVAL_SECONDS = 60.0
+_last_staging_cleanup_monotonic: float | None = None
 
 
 def _worker_id() -> str:
@@ -145,6 +149,31 @@ async def _mark_failed(job_id: uuid.UUID, error: Exception) -> None:
         job.finished_at = datetime.now(timezone.utc)
         job.last_error = message[:4000]
         await db.commit()
+
+
+async def _maybe_cleanup_staging(db: AsyncSession) -> tuple[int, int]:
+    global _last_staging_cleanup_monotonic
+    current = time.monotonic()
+    if (
+        _last_staging_cleanup_monotonic is not None
+        and current - _last_staging_cleanup_monotonic < STAGING_CLEANUP_INTERVAL_SECONDS
+    ):
+        return 0, 0
+    _last_staging_cleanup_monotonic = current
+    try:
+        result = await import_staging_cleanup.cleanup_staging(db)
+        await db.commit()
+        if result != (0, 0):
+            log.info(
+                "staging cleanup transitioned=%s removed=%s",
+                result[0],
+                result[1],
+            )
+        return result
+    except Exception:  # noqa: BLE001
+        await db.rollback()
+        log.exception("import staging cleanup failed")
+        return 0, 0
 
 
 def _text_hash(parsed: ParsedImport) -> str:
@@ -438,6 +467,7 @@ async def run_once() -> int:
         recovered = await _reset_stale_jobs(db)
         if recovered:
             log.warning("recovered %s stale import jobs", recovered)
+        await _maybe_cleanup_staging(db)
         job_ids = await _claim_jobs(
             db, worker_id, max(1, settings.import_worker_batch_size)
         )

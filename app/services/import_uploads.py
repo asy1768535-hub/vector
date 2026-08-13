@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import BASE_DIR, Settings, settings
@@ -32,6 +32,13 @@ ALLOWED_IMPORT_EXTENSIONS = (
     ".xlsx",
 )
 _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
+
+# Staging is transient; the single-file limit remains in Settings, while this
+# library-wide ceiling stays local so deployments can tune it without a
+# migration or changing the public settings contract.
+STAGING_LIBRARY_MAX_BYTES = 2 * 1024 * 1024 * 1024
+_ACTIVE_STAGING_STATUSES = ("uploading", "queued")
+_ADVISORY_LOCK_PREFIX = "import-staging-quota:"
 
 
 class ImportUploadError(ValueError):
@@ -124,6 +131,81 @@ def _validate_payload(payload: ImportSessionCreate, config: Settings) -> str | N
     return normalize_relative_path(payload.relative_path, payload.file_name)
 
 
+def _staging_advisory_lock_key(library_id: uuid.UUID) -> int:
+    digest = hashlib.sha256(
+        f"{_ADVISORY_LOCK_PREFIX}{library_id}".encode("ascii")
+    ).digest()
+    return int.from_bytes(digest[:8], byteorder="big", signed=True)
+
+
+def _database_dialect_name(db: AsyncSession) -> str | None:
+    try:
+        bind = db.sync_session.get_bind()
+    except (AttributeError, RuntimeError):
+        try:
+            bind = db.get_bind()
+        except (AttributeError, RuntimeError):
+            return None
+    return getattr(getattr(bind, "dialect", None), "name", None)
+
+
+async def _lock_staging_quota(
+    db: AsyncSession,
+    *,
+    library_id: uuid.UUID,
+) -> None:
+    # SQLite/fake sessions used by DB-free tests do not have PostgreSQL's
+    # advisory-lock function. Production uses the real PostgreSQL bind.
+    if _database_dialect_name(db) != "postgresql":
+        return
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(:lock_key)"),
+        {"lock_key": _staging_advisory_lock_key(library_id)},
+    )
+
+
+async def _active_staging_bytes(
+    db: AsyncSession,
+    *,
+    library_id: uuid.UUID,
+) -> int:
+    result = await db.execute(
+        select(func.coalesce(func.sum(DocumentImportJob.size_bytes), 0)).where(
+            DocumentImportJob.library_id == library_id,
+            DocumentImportJob.status.in_(_ACTIVE_STAGING_STATUSES),
+        )
+    )
+    return int(result.scalar_one() or 0)
+
+
+async def _check_staging_quota(
+    db: AsyncSession,
+    *,
+    library_id: uuid.UUID,
+    requested_bytes: int,
+    acquire_lock: bool = True,
+) -> None:
+    if (
+        isinstance(STAGING_LIBRARY_MAX_BYTES, bool)
+        or not isinstance(STAGING_LIBRARY_MAX_BYTES, int)
+        or STAGING_LIBRARY_MAX_BYTES <= 0
+    ):
+        raise ImportUploadError(
+            "staging_quota_unavailable",
+            "import staging quota is unavailable",
+            status_code=503,
+        )
+    if acquire_lock:
+        await _lock_staging_quota(db, library_id=library_id)
+    active_bytes = await _active_staging_bytes(db, library_id=library_id)
+    if active_bytes + requested_bytes > STAGING_LIBRARY_MAX_BYTES:
+        raise ImportUploadError(
+            "staging_quota_exceeded",
+            "import staging byte quota exceeded",
+            status_code=429,
+        )
+
+
 async def create_session(
     db: AsyncSession,
     *,
@@ -133,6 +215,10 @@ async def create_session(
     config: Settings = settings,
 ) -> DocumentImportJob:
     relative_path = _validate_payload(payload, config)
+    # Keep the idempotency lookup inside the same library-scoped transaction
+    # lock as the quota check, so concurrent retries cannot consume quota or
+    # turn an existing upload into a spurious 429.
+    await _lock_staging_quota(db, library_id=library.id)
     existing = (
         await db.execute(
             select(DocumentImportJob).where(
@@ -149,6 +235,13 @@ async def create_session(
     ).scalars().first()
     if existing is not None:
         return existing
+
+    await _check_staging_quota(
+        db,
+        library_id=library.id,
+        requested_bytes=payload.size_bytes,
+        acquire_lock=False,
+    )
 
     batch_count = (
         await db.execute(
