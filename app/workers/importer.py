@@ -9,6 +9,8 @@ import shutil
 import socket
 import time
 import uuid
+from collections.abc import Callable
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,6 +32,7 @@ from app.services import import_staging_cleanup
 from app.services.import_parsing import ParsedImport, parse_import_file
 from app.services.import_uploads import (
     folder_path_for_job,
+    remove_staging_file,
     source_path_for_job,
     staging_path,
 )
@@ -49,6 +52,18 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 STAGING_CLEANUP_INTERVAL_SECONDS = 60.0
 _last_staging_cleanup_monotonic: float | None = None
+
+
+@asynccontextmanager
+async def _import_transaction(
+    db: AsyncSession,
+    staging_key: str,
+    should_remove: Callable[[], bool],
+):
+    async with db.begin():
+        yield
+    if should_remove() and not await remove_staging_file(staging_key):
+        log.warning("failed to remove committed import staging file key=%s", staging_key)
 
 
 def _worker_id() -> str:
@@ -341,7 +356,7 @@ async def _process_claimed_job(job_id: uuid.UUID) -> None:
     await _set_stage(job_id, "chunking")
     remove_staging = False
     async with async_session_factory() as db:
-        async with db.begin():
+        async with _import_transaction(db, job.staging_key, lambda: remove_staging):
             job = (
                 await db.execute(
                     select(DocumentImportJob)
@@ -383,7 +398,6 @@ async def _process_claimed_job(job_id: uuid.UUID) -> None:
                 job.claimed_at = None
                 remove_staging = True
                 await db.flush()
-                await asyncio.to_thread(source.unlink, missing_ok=True)
                 return
 
             if target is None:
@@ -479,8 +493,6 @@ async def _process_claimed_job(job_id: uuid.UUID) -> None:
             if embedding_job is None:
                 job.finished_at = datetime.now(timezone.utc)
             remove_staging = True
-    if remove_staging:
-        await asyncio.to_thread(source.unlink, missing_ok=True)
 
 
 async def run_once() -> int:

@@ -222,8 +222,9 @@ async def cancel_import_session(
             user=user,
             for_update=True,
         )
-        await import_uploads.cancel_upload(db, job=job)
+        staging_key = await import_uploads.cancel_upload(db, job=job)
         await db.commit()
+        await import_uploads.remove_staging_file(staging_key)
     except import_uploads.ImportUploadError as exc:
         await db.rollback()
         _raise_upload_error(exc)

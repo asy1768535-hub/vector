@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
-from sqlalchemy import func, select, text
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import BASE_DIR, Settings, settings
@@ -37,7 +37,8 @@ _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
 # library-wide ceiling stays local so deployments can tune it without a
 # migration or changing the public settings contract.
 STAGING_LIBRARY_MAX_BYTES = 2 * 1024 * 1024 * 1024
-_ACTIVE_STAGING_STATUSES = ("uploading", "queued")
+_RETAINED_STAGING_STATUSES = ("uploading", "queued", "failed")
+_PROCESSING_STAGING_STAGES = ("validating", "parsing", "chunking")
 _ADVISORY_LOCK_PREFIX = "import-staging-quota:"
 
 
@@ -180,7 +181,13 @@ async def _active_staging_bytes(
     result = await db.execute(
         select(func.coalesce(func.sum(DocumentImportJob.size_bytes), 0)).where(
             DocumentImportJob.library_id == library_id,
-            DocumentImportJob.status.in_(_ACTIVE_STAGING_STATUSES),
+            or_(
+                DocumentImportJob.status.in_(_RETAINED_STAGING_STATUSES),
+                and_(
+                    DocumentImportJob.status == "processing",
+                    DocumentImportJob.current_stage.in_(_PROCESSING_STAGING_STAGES),
+                ),
+            ),
         )
     )
     return int(result.scalar_one() or 0)
@@ -286,8 +293,6 @@ async def create_session(
     )
     db.add(job)
     await db.flush()
-    path = staging_path(job.staging_key, config)
-    await asyncio.to_thread(path.touch, exist_ok=False)
     return job
 
 
@@ -414,16 +419,28 @@ async def cancel_upload(
     *,
     job: DocumentImportJob,
     config: Settings = settings,
-) -> None:
+) -> str:
     if job.status not in {"uploading", "failed"}:
         raise ImportUploadError(
             "job_not_cancellable", "import job cannot be cancelled", status_code=409
         )
     job.status = "cancelled"
     job.finished_at = datetime.now(timezone.utc)
-    path = staging_path(job.staging_key, config)
-    await asyncio.to_thread(path.unlink, missing_ok=True)
     await db.flush()
+    return job.staging_key
+
+
+async def remove_staging_file(
+    staging_key: str,
+    config: Settings = settings,
+) -> bool:
+    """Delete a staging file only after its owning transaction has committed."""
+    try:
+        path = staging_path(staging_key, config)
+        await asyncio.to_thread(path.unlink, missing_ok=True)
+    except (ImportUploadError, OSError):
+        return False
+    return True
 
 
 async def retry_job(

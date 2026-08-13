@@ -4,10 +4,12 @@ import asyncio
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from app.config import Settings
+from app.api import import_uploads as import_uploads_api
 from app.services import import_staging_cleanup, import_uploads
 from app.workers import importer
 
@@ -129,7 +131,7 @@ def _job(key: str, *, size: int, status: str = "uploading"):
     )
 
 
-def test_quota_sums_only_active_uploading_and_queued(monkeypatch):
+def test_quota_sums_every_status_that_retains_a_staging_file(monkeypatch):
     monkeypatch.setattr(import_uploads, "STAGING_LIBRARY_MAX_BYTES", 100)
     db = _SqliteDb(_Result(scalar=90))
 
@@ -144,9 +146,14 @@ def test_quota_sums_only_active_uploading_and_queued(monkeypatch):
     compiled = statement.compile(compile_kwargs={"literal_binds": True})
     sql = str(compiled).lower()
     assert "sum(document_import_jobs.size_bytes)" in sql
-    assert "uploading" in sql and "queued" in sql
+    for status in ("uploading", "queued", "processing", "failed"):
+        assert status in sql
+    for stage in ("validating", "parsing", "chunking"):
+        assert stage in sql
+    assert "embedding" not in sql
+    assert "graph" not in sql
     assert "succeeded" not in sql
-    assert "failed" not in sql
+    assert "cancelled" not in sql
 
     with pytest.raises(import_uploads.ImportUploadError) as exc_info:
         asyncio.run(
@@ -158,6 +165,50 @@ def test_quota_sums_only_active_uploading_and_queued(monkeypatch):
         )
     assert exc_info.value.status_code == 429
     assert exc_info.value.code == "staging_quota_exceeded"
+
+
+def test_cancel_upload_defers_file_removal_until_after_commit(tmp_path):
+    config = _config(tmp_path)
+    job = _job(_key(12), size=4)
+    path = tmp_path / job.staging_key
+    path.write_bytes(b"data")
+
+    staging_key = asyncio.run(
+        import_uploads.cancel_upload(_Db(), job=job, config=config)
+    )
+
+    assert staging_key == job.staging_key
+    assert job.status == "cancelled"
+    assert path.exists()
+
+
+def test_cancel_api_commit_failure_never_removes_staging(monkeypatch):
+    job = _job(_key(13), size=4)
+    db = _Db(commit_error=RuntimeError("commit failed"))
+    remove = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        import_uploads_api.import_uploads,
+        "get_owned_job",
+        AsyncMock(return_value=job),
+    )
+    monkeypatch.setattr(
+        import_uploads_api.import_uploads,
+        "cancel_upload",
+        AsyncMock(return_value=job.staging_key),
+    )
+    monkeypatch.setattr(import_uploads_api.import_uploads, "remove_staging_file", remove)
+
+    with pytest.raises(RuntimeError, match="commit failed"):
+        asyncio.run(
+            import_uploads_api.cancel_import_session(
+                job.id,
+                lib=SimpleNamespace(id=LIBRARY_ID),
+                user=SimpleNamespace(id=uuid.uuid4(), is_superuser=True),
+                db=db,
+            )
+        )
+
+    remove.assert_not_awaited()
 
 
 def test_quota_rejection_happens_before_job_is_added(monkeypatch):
@@ -189,6 +240,36 @@ def test_quota_rejection_happens_before_job_is_added(monkeypatch):
         )
     assert exc_info.value.status_code == 429
     assert db.added == []
+
+
+def test_create_session_does_not_leave_a_precommit_staging_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(import_uploads, "STAGING_LIBRARY_MAX_BYTES", 100)
+    config = _config(tmp_path)
+    db = _SqliteDb(_Result(rows=()), _Result(scalar=0), _Result(scalar=0))
+    payload = SimpleNamespace(
+        size_bytes=1,
+        file_name="new.txt",
+        relative_path=None,
+        batch_id=uuid.uuid4(),
+        content_type="text/plain",
+        last_modified_millis=None,
+        external_id=None,
+        replace_document_id=None,
+        security_level=None,
+        graph_extraction_requested=False,
+    )
+
+    job = asyncio.run(
+        import_uploads.create_session(
+            db,
+            library=SimpleNamespace(id=LIBRARY_ID),
+            user=SimpleNamespace(id=uuid.uuid4()),
+            payload=payload,
+            config=config,
+        )
+    )
+
+    assert not (tmp_path / job.staging_key).exists()
 
 
 def test_postgres_quota_uses_transaction_advisory_lock(monkeypatch):
@@ -497,3 +578,59 @@ def test_worker_unlink_failure_does_not_rollback_commit(monkeypatch, caplog):
     assert db.commit_count == 1
     assert db.rollback_count == 0
     assert "staging cleanup unlink failed" in caplog.text
+
+
+def test_import_transaction_removes_only_after_successful_exit(monkeypatch):
+    events = []
+
+    class _Transaction:
+        async def __aenter__(self):
+            events.append("begin")
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            events.append("commit")
+
+    class _TransactionDb:
+        def begin(self):
+            return _Transaction()
+
+    async def remove(key):
+        events.append(("unlink", key))
+        return True
+
+    monkeypatch.setattr(importer, "remove_staging_file", remove)
+    key = _key(14)
+
+    async def run():
+        async with importer._import_transaction(_TransactionDb(), key, lambda: True):
+            events.append("write")
+
+    asyncio.run(run())
+    assert events == ["begin", "write", "commit", ("unlink", key)]
+
+
+def test_import_transaction_failure_never_removes(monkeypatch):
+    remove = AsyncMock(return_value=True)
+
+    class _Transaction:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            raise RuntimeError("commit failed")
+
+    class _TransactionDb:
+        def begin(self):
+            return _Transaction()
+
+    monkeypatch.setattr(importer, "remove_staging_file", remove)
+
+    async def run():
+        async with importer._import_transaction(
+            _TransactionDb(), _key(15), lambda: True,
+        ):
+            pass
+
+    with pytest.raises(RuntimeError, match="commit failed"):
+        asyncio.run(run())
+    remove.assert_not_awaited()
