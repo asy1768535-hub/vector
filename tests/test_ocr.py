@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import sys
+import io
 
 import pytest
+from PIL import Image
 
 from app.services import ocr
 
@@ -87,6 +89,37 @@ def test_ocr_rejects_oversized_decoded_pixels_before_engine(monkeypatch):
     with pytest.raises(ocr.OcrResourceLimitError, match="image pixels"):
         ocr.ocr_image_blocks(b"image")
     assert called is False
+
+
+def test_ocr_header_budget_rejects_before_cv2_decode(monkeypatch):
+    image_bytes = io.BytesIO()
+    Image.new("RGB", (20, 20), "white").save(image_bytes, format="PNG")
+
+    decode_calls = 0
+
+    class _Cv2:
+        IMREAD_COLOR = 1
+
+        @staticmethod
+        def imdecode(_data, _mode):
+            nonlocal decode_calls
+            decode_calls += 1
+            return object()
+
+    class _Numpy:
+        uint8 = object()
+
+        @staticmethod
+        def frombuffer(data, _dtype):
+            return data
+
+    monkeypatch.setitem(sys.modules, "numpy", _Numpy)
+    monkeypatch.setitem(sys.modules, "cv2", _Cv2)
+    monkeypatch.setattr(ocr, "OCR_MAX_IMAGE_PIXELS", 10)
+
+    with pytest.raises(ocr.OcrResourceLimitError, match="image pixels"):
+        ocr.ocr_image_blocks(image_bytes.getvalue())
+    assert decode_calls == 0
 
 
 def test_ocr_rejects_output_text_budget(monkeypatch):

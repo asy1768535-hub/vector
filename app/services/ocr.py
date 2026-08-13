@@ -6,8 +6,10 @@ RapidOCR 未安装时 is_available() 返回 False，调用方据此决定是否�
 """
 from __future__ import annotations
 
+import io
 import logging
 import threading
+import warnings
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -72,9 +74,44 @@ def _image_dimensions(image: Any) -> tuple[int, int] | None:
     return width, height
 
 
+def _check_image_dimensions(dimensions: tuple[int, int] | None) -> None:
+    if dimensions is None:
+        return
+    width, height = dimensions
+    if width > OCR_MAX_IMAGE_WIDTH:
+        _resource_limit("image width")
+    if height > OCR_MAX_IMAGE_HEIGHT:
+        _resource_limit("image height")
+    if width * height > OCR_MAX_IMAGE_PIXELS:
+        _resource_limit("image pixels")
+
+
+def _header_image_dimensions(data: bytes) -> tuple[int, int] | None:
+    """Read image dimensions without decoding the full raster."""
+    try:
+        from PIL import Image as PILImage
+        from PIL import UnidentifiedImageError
+    except ImportError:
+        return None
+
+    try:
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PILImage.DecompressionBombWarning)
+            with PILImage.open(io.BytesIO(data)) as image:
+                dimensions = tuple(int(value) for value in image.size)
+    except (PILImage.DecompressionBombError, PILImage.DecompressionBombWarning):
+        raise OcrResourceLimitError("OCR resource limit exceeded: image pixels") from None
+    except (UnidentifiedImageError, OSError, ValueError):
+        return None
+    return dimensions
+
+
 def ocr_image_blocks(data: bytes) -> list[dict[str, Any]]:
     """Return OCR lines with text, bounding box, and confidence metadata."""
     try:
+        _check_image_dimensions(_header_image_dimensions(data))
+
         import cv2
         import numpy as np
 
@@ -82,14 +119,7 @@ def ocr_image_blocks(data: bytes) -> list[dict[str, Any]]:
         if arr is None:
             return []
         dimensions = _image_dimensions(arr)
-        if dimensions is not None:
-            width, height = dimensions
-            if width > OCR_MAX_IMAGE_WIDTH:
-                _resource_limit("image width")
-            if height > OCR_MAX_IMAGE_HEIGHT:
-                _resource_limit("image height")
-            if width * height > OCR_MAX_IMAGE_PIXELS:
-                _resource_limit("image pixels")
+        _check_image_dimensions(dimensions)
         result, _ = _get_engine()(arr)
         if not result:
             return []
