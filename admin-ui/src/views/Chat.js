@@ -193,18 +193,16 @@ export default {
             hasEarlierMessages.value = false;
         }
 
-        function historyMessage(m) {
-            return {
-                id: m.id,
-                role: m.role === 'assistant' ? 'ai' : 'user',
-                text: m.content + (m.status === 'failed' && m.error_message ? '\n\n*[失败]* ' + m.error_message : ''),
-                sources: m.sources || [],
-                graph_augmented: m.graph_augmented === true,
-                graph_evidence: m.graph_evidence || [],
-                error: m.status === 'failed',
-                time: m.created_at || null,
-            };
-        }
+        const historyMessage = (m) => ({
+            id: m.id,
+            role: m.role === 'assistant' ? 'ai' : 'user',
+            text: m.content + (m.status === 'failed' && m.error_message ? '\n\n*[失败]* ' + m.error_message : ''),
+            sources: m.sources || [],
+            graph_augmented: m.graph_augmented === true,
+            graph_evidence: m.graph_evidence || [],
+            error: m.status === 'failed',
+            time: m.created_at || null,
+        });
 
         async function scrollToBottom() {
             await nextTick();
