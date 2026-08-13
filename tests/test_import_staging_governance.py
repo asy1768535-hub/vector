@@ -232,9 +232,9 @@ def test_cleanup_uses_bounded_queries_and_only_locks_uploading(tmp_path):
     now = import_staging_cleanup.datetime.now(import_staging_cleanup.timezone.utc)
     stale = _job(_key(1), size=3)
     stale.updated_at = now - import_staging_cleanup.timedelta(seconds=120)
-    terminal_key = _key(2)
-    (tmp_path / terminal_key).write_bytes(b"old")
-    db = _Db(_Result(rows=[stale]), _Result(rows=[terminal_key]))
+    stale_path = tmp_path / stale.staging_key
+    stale_path.write_bytes(b"old")
+    db = _Db(_Result(rows=[stale]))
 
     transitioned, removed = asyncio.run(
         import_staging_cleanup.cleanup_staging(
@@ -247,14 +247,104 @@ def test_cleanup_uses_bounded_queries_and_only_locks_uploading(tmp_path):
 
     assert (transitioned, removed) == (1, 1)
     assert stale.status == "cancelled"
-    assert not (tmp_path / terminal_key).exists()
+    assert not stale_path.exists()
+    assert len(db.statements) == 1
     stale_stmt = db.statements[0][0]
-    terminal_stmt = db.statements[1][0]
     assert "LIMIT" in str(stale_stmt.compile()).upper()
     assert stale_stmt._limit_clause.value == 256
     assert stale_stmt._for_update_arg.skip_locked is True
-    assert terminal_stmt._for_update_arg is None
+    sql = str(stale_stmt.compile(compile_kwargs={"literal_binds": True})).lower()
+    assert "uploading" in sql
+    assert "failed" not in sql
     assert "iterdir" not in str(stale_stmt).lower()
+
+
+def test_cleanup_missing_staging_file_is_tolerated(tmp_path):
+    config = _config(tmp_path)
+    now = import_staging_cleanup.datetime.now(import_staging_cleanup.timezone.utc)
+    stale = _job(_key(4), size=3)
+    stale.updated_at = now - import_staging_cleanup.timedelta(seconds=120)
+
+    transitioned, removed = asyncio.run(
+        import_staging_cleanup.cleanup_staging(
+            _Db(_Result(rows=[stale])),
+            config=config,
+            now=now,
+        )
+    )
+
+    assert (transitioned, removed) == (1, 1)
+    assert stale.status == "cancelled"
+
+
+def test_unlink_uses_missing_ok(monkeypatch, tmp_path):
+    calls = {}
+
+    async def to_thread(function, *args, **kwargs):
+        calls["function"] = function
+        calls["missing_ok"] = kwargs["missing_ok"]
+
+    monkeypatch.setattr(import_staging_cleanup.asyncio, "to_thread", to_thread)
+
+    assert asyncio.run(
+        import_staging_cleanup._unlink_staging_key(_key(5), _config(tmp_path))
+    )
+    assert calls["function"].__name__ == "unlink"
+    assert calls["missing_ok"] is True
+
+
+def test_cleanup_rejects_unsafe_staging_key_without_leaving_root(tmp_path):
+    config = _config(tmp_path)
+    now = import_staging_cleanup.datetime.now(import_staging_cleanup.timezone.utc)
+    outside = tmp_path.parent / "outside.upload"
+    outside.write_bytes(b"keep")
+    stale = _job("../outside.upload", size=3)
+    stale.updated_at = now - import_staging_cleanup.timedelta(seconds=120)
+
+    transitioned, removed = asyncio.run(
+        import_staging_cleanup.cleanup_staging(
+            _Db(_Result(rows=[stale])),
+            config=config,
+            now=now,
+        )
+    )
+
+    assert (transitioned, removed) == (1, 0)
+    assert outside.exists()
+
+
+def test_cleanup_defers_failed_and_orphan_terminal_files(tmp_path):
+    config = _config(tmp_path)
+    now = import_staging_cleanup.datetime.now(import_staging_cleanup.timezone.utc)
+    failed_key = _key(6)
+    orphan_key = _key(7)
+    failed_path = tmp_path / failed_key
+    orphan_path = tmp_path / orphan_key
+    failed_path.write_bytes(b"retry")
+    orphan_path.write_bytes(b"orphan")
+    failed = _job(failed_key, size=5, status="failed")
+    failed.updated_at = now - import_staging_cleanup.timedelta(seconds=120)
+
+    db = _Db(_Result(rows=[]))
+    transitioned, removed = asyncio.run(
+        import_staging_cleanup.cleanup_staging(
+            db,
+            config=config,
+            now=now,
+        )
+    )
+
+    assert (transitioned, removed) == (0, 0)
+    assert failed.status == "failed"
+    assert failed_path.exists()
+    assert orphan_path.exists()
+    assert len(db.statements) == 1
+    sql = str(db.statements[0][0].compile(compile_kwargs={"literal_binds": True})).lower()
+    assert "failed" not in sql
+
+    asyncio.run(import_uploads.retry_job(_Db(), job=failed, config=config))
+    assert failed.status == "queued"
+    assert failed_path.exists()
 
 
 def test_cleanup_rejects_batch_over_256_without_query(tmp_path):
@@ -280,7 +370,7 @@ def test_failed_staging_survives_retention_and_can_retry(tmp_path):
         import_staging_cleanup.timezone.utc
     ) - import_staging_cleanup.timedelta(seconds=120)
 
-    db = _SqliteDb(_Result(rows=[]), _Result(rows=[]))
+    db = _SqliteDb(_Result(rows=[]))
     asyncio.run(
         import_staging_cleanup.cleanup_staging(
             db,
@@ -290,7 +380,8 @@ def test_failed_staging_survives_retention_and_can_retry(tmp_path):
             ),
         )
     )
-    terminal_sql = str(db.statements[1][0].compile()).lower()
+    assert len(db.statements) == 1
+    terminal_sql = str(db.statements[0][0].compile()).lower()
     assert "failed" not in terminal_sql
     assert failed_path.exists()
 

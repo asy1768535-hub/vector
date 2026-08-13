@@ -12,8 +12,6 @@ from app.services.import_uploads import ImportUploadError, staging_path
 
 
 MAX_CLEANUP_BATCH = 256
-# Failed imports remain retryable while their original staging file exists.
-_TERMINAL_STATUSES = ("succeeded", "cancelled", "superseded")
 
 
 def _positive_limit(value: object, name: str, *, maximum: int | None = None) -> int:
@@ -53,10 +51,11 @@ async def cleanup_staging(
 ) -> tuple[int, int]:
     """Bounded, database-driven staging retention.
 
-    Orphan files are deliberately left alone: scanning the staging directory
-    is unbounded and cannot be made safe in the importer hot loop. Uploading
-    rows are the only candidates that need a state transition and therefore
-    use SKIP LOCKED; terminal rows only provide bounded file keys.
+    Orphan and crashed terminal files are deliberately left alone: scanning
+    the staging directory is unbounded and cannot be made safe in the importer
+    hot loop. Only stale uploading rows need a state transition, so they are
+    selected with SKIP LOCKED and their bounded set of keys is unlinked after
+    the cancellation is flushed.
     """
     retention_seconds = _positive_limit(
         config.import_staging_retention_seconds,
@@ -94,24 +93,8 @@ async def cleanup_staging(
     if stale_uploads:
         await db.flush()
 
-    terminal_keys = list(
-        (
-            await db.execute(
-                select(DocumentImportJob.staging_key)
-                .where(
-                    DocumentImportJob.status.in_(_TERMINAL_STATUSES),
-                    DocumentImportJob.finished_at.is_not(None),
-                    DocumentImportJob.finished_at < cutoff,
-                )
-                .order_by(DocumentImportJob.finished_at, DocumentImportJob.id)
-                .limit(batch_size)
-            )
-        )
-        .scalars()
-        .all()
-    )
     removed = 0
-    for staging_key in terminal_keys:
-        if await _unlink_staging_key(staging_key, config):
+    for job in stale_uploads:
+        if await _unlink_staging_key(job.staging_key, config):
             removed += 1
     return transitioned, removed
