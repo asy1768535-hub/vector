@@ -523,6 +523,33 @@ def test_import_json_text_budget_returns_stable_413(mock_ingest, client, monkeyp
 
 
 @patch("app.services.ingest.ingest_text", new_callable=AsyncMock)
+def test_import_json_input_bytes_rejects_before_json_loads(mock_ingest, client, monkeypatch):
+    from app.api import documents
+    from app.services import import_parsing
+
+    payload = b'{"title":"secret","text":"private"}'
+    monkeypatch.setattr(import_parsing, "MAX_JSON_INPUT_BYTES", len(payload) - 1)
+    load_calls = 0
+
+    def fail_json_loads(*_args, **_kwargs):
+        nonlocal load_calls
+        load_calls += 1
+        raise AssertionError("json.loads must not run")
+
+    monkeypatch.setattr(documents.json, "loads", fail_json_loads)
+    response = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("large-input.json", payload, "application/json")},
+    )
+
+    assert response.status_code == status.HTTP_413_CONTENT_TOO_LARGE
+    assert import_parsing.RESOURCE_LIMIT_ERROR in response.text
+    assert "secret" not in response.text
+    assert load_calls == 0
+    mock_ingest.assert_not_awaited()
+
+
+@patch("app.services.ingest.ingest_text", new_callable=AsyncMock)
 def test_import_csv_row_and_cell_limits_return_stable_413(mock_ingest, client, monkeypatch):
     from app.services import import_parsing
 

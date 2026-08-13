@@ -374,6 +374,29 @@ def test_json_parser_rejects_depth_and_node_budgets_without_echoing_input(tmp_pa
         parse_import_file(path, _library())
 
 
+def test_json_parser_rejects_input_bytes_before_json_load(tmp_path, monkeypatch):
+    from app.services import import_parsing
+
+    path = tmp_path / "too-large-input.json"
+    payload = b'{"secret":"private"}'
+    path.write_bytes(payload)
+    monkeypatch.setattr(import_parsing, "MAX_JSON_INPUT_BYTES", len(payload) - 1)
+    load_calls = 0
+
+    def fail_json_load(*_args, **_kwargs):
+        nonlocal load_calls
+        load_calls += 1
+        raise AssertionError("json.load must not run")
+
+    monkeypatch.setattr(import_parsing.json, "load", fail_json_load)
+    with pytest.raises(ImportResourceLimitError) as exc_info:
+        parse_import_file(path, _library())
+
+    assert load_calls == 0
+    assert str(exc_info.value) == import_parsing.RESOURCE_LIMIT_ERROR
+    assert "secret" not in str(exc_info.value)
+
+
 def test_json_parser_rejects_normalized_text_budget_without_partial_units(tmp_path, monkeypatch):
     from app.services import import_parsing
 

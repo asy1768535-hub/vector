@@ -1094,6 +1094,7 @@ async def import_file(
 
     if suffix == ".json":
         try:
+            import_parsing.validate_json_input_size(len(content))
             try:
                 data = json.loads(content.decode("utf-8"))
             except RecursionError as exc:

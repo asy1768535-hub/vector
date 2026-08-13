@@ -31,6 +31,7 @@ RESOURCE_LIMIT_ERROR = "import content exceeds parser resource limits"
 # application settings or the chunked staging upload contract.
 MAX_JSON_DEPTH = 64
 MAX_JSON_NODES = 100_000
+MAX_JSON_INPUT_BYTES = 50 * 1024 * 1024
 MAX_CSV_ROWS = 100_000
 MAX_CSV_COLUMNS = 1_024
 MAX_CSV_CELLS = 1_000_000
@@ -60,6 +61,11 @@ def validate_json_resource_budget(value: object) -> None:
             stack.extend((child, depth + 1) for child in node.values())
         elif isinstance(node, list):
             stack.extend((child, depth + 1) for child in node)
+
+
+def validate_json_input_size(size_bytes: int) -> None:
+    if size_bytes > MAX_JSON_INPUT_BYTES:
+        raise ImportResourceLimitError
 
 
 def validate_csv_row_budget(
@@ -271,6 +277,7 @@ def _json_pointer_units(value, *, parser: dict[str, str]) -> list[dict]:
 
 
 def _parse_json(path: Path, library: Library) -> ParsedImport:
+    validate_json_input_size(path.stat().st_size)
     try:
         with path.open("r", encoding="utf-8-sig") as handle:
             value = json.load(handle)
