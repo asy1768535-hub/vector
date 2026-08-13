@@ -45,7 +45,7 @@ from app.schemas.documents import (
     QueryResponse,
 )
 from app.config import settings
-from app.services import embedding, ingest as ingest_service, source_enrichment
+from app.services import embedding, import_parsing, ingest as ingest_service, source_enrichment
 from app.services import cleanup as cleanup_service
 from app.services.metadata_guard import MetadataValidationError
 from app.services import rerank as rerank_svc
@@ -1094,12 +1094,21 @@ async def import_file(
 
     if suffix == ".json":
         try:
-            data = json.loads(content.decode("utf-8"))
+            try:
+                data = json.loads(content.decode("utf-8"))
+            except RecursionError as exc:
+                raise import_parsing.ImportResourceLimitError from exc
+            import_parsing.validate_json_resource_budget(data)
+            normalized_chars = 0
             if isinstance(data, list):
+                import_parsing.validate_fanout_document_count(len(data))
                 for item in data:
                     text = item.get("text")
                     if not text:
                         continue
+                    import_parsing.validate_fanout_document_count(len(documents_to_ingest) + 1)
+                    normalized_chars += len(text)
+                    import_parsing.validate_normalized_text_budget(normalized_chars)
                     documents_to_ingest.append({
                         "text": text,
                         "title": item.get("title") or filename,
@@ -1112,6 +1121,8 @@ async def import_file(
             elif isinstance(data, dict):
                 text = data.get("text")
                 if text:
+                    import_parsing.validate_fanout_document_count(1)
+                    import_parsing.validate_normalized_text_budget(len(text))
                     documents_to_ingest.append({
                         "text": text,
                         "title": data.get("title") or filename,
@@ -1121,6 +1132,11 @@ async def import_file(
                         "chunks": _structured_chunks(text, data.get("splitter", "text"), lib),
                         "source": _source_data(text, filename, suffix),
                     })
+        except import_parsing.ImportResourceLimitError:
+            raise HTTPException(
+                status.HTTP_413_CONTENT_TOO_LARGE,
+                import_parsing.RESOURCE_LIMIT_ERROR,
+            ) from None
         except Exception as e:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid JSON format: {str(e)}")
 
@@ -1128,7 +1144,21 @@ async def import_file(
         try:
             text_stream = io.StringIO(content.decode("utf-8"))
             reader = csv.DictReader(text_stream)
-            for row in reader:
+            total_cells = 0
+            normalized_chars = 0
+            document_count = 0
+            if reader.fieldnames is not None:
+                total_cells = import_parsing.validate_csv_row_budget(
+                    1, reader.fieldnames, total_cells
+                )
+            for row_number, row in enumerate(reader, start=2):
+                row_width = len(reader.fieldnames or ())
+                extra_cells = row.get(None)
+                if isinstance(extra_cells, list):
+                    row_width += len(extra_cells)
+                total_cells = import_parsing.validate_csv_row_budget(
+                    row_number, range(row_width), total_cells
+                )
                 # Find first column matching 'text' or 'content'
                 text_col = next((col for col in reader.fieldnames or [] if col.lower() in ("text", "content")), None)
                 if not text_col and reader.fieldnames:
@@ -1141,6 +1171,10 @@ async def import_file(
                 if not text:
                     continue
 
+                document_count += 1
+                import_parsing.validate_fanout_document_count(document_count)
+                normalized_chars += len(text)
+                import_parsing.validate_normalized_text_budget(normalized_chars)
                 title_col = next((col for col in reader.fieldnames or [] if col.lower() in ("title", "name")), None)
                 title = row.get(title_col) if title_col else filename
 
@@ -1156,6 +1190,11 @@ async def import_file(
                     "chunks": _structured_chunks(text, "text", lib, {"type": "csv_row", "row": reader.line_num}),
                     "source": _source_data(text, filename, suffix),
                 })
+        except import_parsing.ImportResourceLimitError:
+            raise HTTPException(
+                status.HTTP_413_CONTENT_TOO_LARGE,
+                import_parsing.RESOURCE_LIMIT_ERROR,
+            ) from None
         except Exception as e:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid CSV format: {str(e)}")
 

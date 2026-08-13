@@ -479,6 +479,76 @@ def test_import_csv_file(mock_ingest, client):
     assert mock_ingest.call_count == 2
 
 
+@patch("app.services.ingest.ingest_text", new_callable=AsyncMock)
+def test_import_json_fanout_limit_returns_stable_413(mock_ingest, client, monkeypatch):
+    from app.services import import_parsing
+
+    monkeypatch.setattr(import_parsing, "MAX_FANOUT_DOCUMENTS", 1)
+    payload = json.dumps([
+        {"title": "secret one", "text": "private one"},
+        {"title": "secret two", "text": "private two"},
+    ]).encode("utf-8")
+
+    response = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("many.json", payload, "application/json")},
+    )
+
+    assert response.status_code == status.HTTP_413_CONTENT_TOO_LARGE
+    assert response.json()["detail"] == import_parsing.RESOURCE_LIMIT_ERROR
+    assert "secret" not in response.text
+    mock_ingest.assert_not_awaited()
+
+
+@patch("app.services.ingest.ingest_text", new_callable=AsyncMock)
+def test_import_json_text_budget_returns_stable_413(mock_ingest, client, monkeypatch):
+    from app.services import import_parsing
+
+    monkeypatch.setattr(import_parsing, "MAX_NORMALIZED_TEXT_CHARS", 4)
+    response = client.post(
+        "/libraries/testlib/import-file",
+        files={
+            "file": (
+                "large-text.json",
+                json.dumps({"title": "secret", "text": "private text"}).encode("utf-8"),
+                "application/json",
+            )
+        },
+    )
+
+    assert response.status_code == status.HTTP_413_CONTENT_TOO_LARGE
+    assert response.json()["detail"] == import_parsing.RESOURCE_LIMIT_ERROR
+    assert "secret" not in response.text
+    mock_ingest.assert_not_awaited()
+
+
+@patch("app.services.ingest.ingest_text", new_callable=AsyncMock)
+def test_import_csv_row_and_cell_limits_return_stable_413(mock_ingest, client, monkeypatch):
+    from app.services import import_parsing
+
+    monkeypatch.setattr(import_parsing, "MAX_CSV_ROWS", 2)
+    payload = "text,title\nsecret one,one\nsecret two,two\n".encode("utf-8")
+
+    response = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("many.csv", payload, "text/csv")},
+    )
+
+    assert response.status_code == status.HTTP_413_CONTENT_TOO_LARGE
+    assert response.json()["detail"] == import_parsing.RESOURCE_LIMIT_ERROR
+    assert "secret" not in response.text
+    mock_ingest.assert_not_awaited()
+
+    monkeypatch.setattr(import_parsing, "MAX_CSV_ROWS", 100_000)
+    monkeypatch.setattr(import_parsing, "MAX_CSV_CELLS", 2)
+    response = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("wide.csv", payload, "text/csv")},
+    )
+    assert response.status_code == status.HTTP_413_CONTENT_TOO_LARGE
+    assert response.json()["detail"] == import_parsing.RESOURCE_LIMIT_ERROR
+
+
 # ── 3A：API Key（无 cookie）上传闭环 ──────────────────────────────────────
 
 def test_import_file_with_api_key_no_cookie():

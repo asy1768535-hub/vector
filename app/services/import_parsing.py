@@ -25,6 +25,71 @@ class ParsedImport:
     segments: list[dict] = field(default_factory=list)
 
 
+RESOURCE_LIMIT_ERROR = "import content exceeds parser resource limits"
+
+# These limits protect the two structured formats without changing the shared
+# application settings or the chunked staging upload contract.
+MAX_JSON_DEPTH = 64
+MAX_JSON_NODES = 100_000
+MAX_CSV_ROWS = 100_000
+MAX_CSV_COLUMNS = 1_024
+MAX_CSV_CELLS = 1_000_000
+MAX_FANOUT_DOCUMENTS = 1_000
+MAX_NORMALIZED_TEXT_CHARS = 10_000_000
+
+
+class ImportResourceLimitError(ValueError):
+    """Raised when structured input exceeds a parser resource budget."""
+
+    status_code = 413
+
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        super().__init__(RESOURCE_LIMIT_ERROR)
+
+
+def validate_json_resource_budget(value: object) -> None:
+    """Validate JSON shape before building parser units or ingest documents."""
+    stack = [(value, 0)]
+    nodes = 0
+    while stack:
+        node, depth = stack.pop()
+        nodes += 1
+        if depth > MAX_JSON_DEPTH or nodes > MAX_JSON_NODES:
+            raise ImportResourceLimitError
+        if isinstance(node, dict):
+            stack.extend((child, depth + 1) for child in node.values())
+        elif isinstance(node, list):
+            stack.extend((child, depth + 1) for child in node)
+
+
+def validate_csv_row_budget(
+    row_number: int,
+    row: object,
+    total_cells: int,
+) -> int:
+    """Return the new cell count after validating one parsed CSV row."""
+    try:
+        column_count = len(row)  # type: ignore[arg-type]
+    except TypeError as exc:
+        raise ImportResourceLimitError from exc
+    if row_number > MAX_CSV_ROWS or column_count > MAX_CSV_COLUMNS:
+        raise ImportResourceLimitError
+    total_cells += column_count
+    if total_cells > MAX_CSV_CELLS:
+        raise ImportResourceLimitError
+    return total_cells
+
+
+def validate_fanout_document_count(count: int) -> None:
+    if count > MAX_FANOUT_DOCUMENTS:
+        raise ImportResourceLimitError
+
+
+def validate_normalized_text_budget(total_chars: int) -> None:
+    if total_chars > MAX_NORMALIZED_TEXT_CHARS:
+        raise ImportResourceLimitError
+
+
 def _read_utf8(path: Path) -> str:
     parts: list[str] = []
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -77,12 +142,17 @@ def _structured_text(
 def _parse_csv(path: Path, library: Library) -> ParsedImport:
     rows: list[str] = []
     segments: list[dict] = []
+    total_cells = 0
+    normalized_chars = 0
     parser = parser_provenance("python-csv", "v1", {"encoding": "utf-8-sig"})
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.reader(handle)
         for row_number, row in enumerate(reader, start=1):
+            total_cells = validate_csv_row_budget(row_number, row, total_cells)
             line = " | ".join(cell.strip() for cell in row).strip(" |")
             if line:
+                normalized_chars += len(line) + (1 if rows else 0)
+                validate_normalized_text_budget(normalized_chars)
                 rows.append(line)
                 cells: list[dict] = []
                 row_key = f"csv:row:{row_number}"
@@ -201,9 +271,17 @@ def _json_pointer_units(value, *, parser: dict[str, str]) -> list[dict]:
 
 
 def _parse_json(path: Path, library: Library) -> ParsedImport:
-    with path.open("r", encoding="utf-8-sig") as handle:
-        value = json.load(handle)
-    text = json.dumps(value, ensure_ascii=False, indent=2)
+    try:
+        with path.open("r", encoding="utf-8-sig") as handle:
+            value = json.load(handle)
+    except RecursionError as exc:
+        raise ImportResourceLimitError from exc
+    validate_json_resource_budget(value)
+    try:
+        text = json.dumps(value, ensure_ascii=False, indent=2)
+    except RecursionError as exc:
+        raise ImportResourceLimitError from exc
+    validate_normalized_text_budget(len(text))
     parser = parser_provenance("python-json", "v1", {"indent": 2, "ensure_ascii": False})
     segment = {
         "kind": "prose",

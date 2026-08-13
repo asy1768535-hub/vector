@@ -12,7 +12,10 @@ import pytest
 
 from app.services import pdf_extract, splitter, xlsx_extract
 from app.services.docx_extract import extract_docx_segments
-from app.services.import_parsing import parse_import_file
+from app.services.import_parsing import (
+    ImportResourceLimitError,
+    parse_import_file,
+)
 from app.services.parser_units import (
     build_ocr_parser_units,
     build_parser_unit,
@@ -350,6 +353,65 @@ def test_csv_rows_have_exact_normalized_ranges_for_empty_rows_and_quoted_newline
     assert result.segments[1]["structured_units"][0]["source"]["cell"] == {"start": "A3", "end": "A3"}
     assert result.segments[2]["structured_units"][1]["source"]["cell"] == {"start": "B4", "end": "B4"}
     validate_parser_unit_hierarchy(_flatten_segments(result.segments))
+
+
+def test_json_parser_rejects_depth_and_node_budgets_without_echoing_input(tmp_path, monkeypatch):
+    from app.services import import_parsing
+
+    path = tmp_path / "too-deep.json"
+    path.write_text(json.dumps({"secret": {"nested": "value"}}), encoding="utf-8")
+    monkeypatch.setattr(import_parsing, "MAX_JSON_DEPTH", 1)
+
+    with pytest.raises(ImportResourceLimitError) as exc_info:
+        parse_import_file(path, _library())
+
+    assert str(exc_info.value) == import_parsing.RESOURCE_LIMIT_ERROR
+    assert "secret" not in str(exc_info.value)
+
+    monkeypatch.setattr(import_parsing, "MAX_JSON_DEPTH", 64)
+    monkeypatch.setattr(import_parsing, "MAX_JSON_NODES", 2)
+    with pytest.raises(ImportResourceLimitError):
+        parse_import_file(path, _library())
+
+
+def test_json_parser_rejects_normalized_text_budget_without_partial_units(tmp_path, monkeypatch):
+    from app.services import import_parsing
+
+    path = tmp_path / "too-large.json"
+    path.write_text(json.dumps({"secret": "classified value"}), encoding="utf-8")
+    monkeypatch.setattr(import_parsing, "MAX_NORMALIZED_TEXT_CHARS", 8)
+
+    with pytest.raises(ImportResourceLimitError) as exc_info:
+        parse_import_file(path, _library())
+
+    assert str(exc_info.value) == import_parsing.RESOURCE_LIMIT_ERROR
+    assert "classified" not in str(exc_info.value)
+
+
+def test_csv_parser_rejects_row_column_cell_and_text_budgets(tmp_path, monkeypatch):
+    from app.services import import_parsing
+
+    path = tmp_path / "too-wide.csv"
+    path.write_text("a,b,c\nsecret,2,3\n", encoding="utf-8")
+    monkeypatch.setattr(import_parsing, "MAX_CSV_COLUMNS", 2)
+
+    with pytest.raises(ImportResourceLimitError):
+        parse_import_file(path, _library())
+
+    monkeypatch.setattr(import_parsing, "MAX_CSV_COLUMNS", 1024)
+    monkeypatch.setattr(import_parsing, "MAX_CSV_CELLS", 3)
+    with pytest.raises(ImportResourceLimitError):
+        parse_import_file(path, _library())
+
+    monkeypatch.setattr(import_parsing, "MAX_CSV_CELLS", 1_000_000)
+    monkeypatch.setattr(import_parsing, "MAX_CSV_ROWS", 1)
+    with pytest.raises(ImportResourceLimitError):
+        parse_import_file(path, _library())
+
+    monkeypatch.setattr(import_parsing, "MAX_CSV_ROWS", 100_000)
+    monkeypatch.setattr(import_parsing, "MAX_NORMALIZED_TEXT_CHARS", 4)
+    with pytest.raises(ImportResourceLimitError):
+        parse_import_file(path, _library())
 
 
 def test_docx_table_units_form_table_row_cell_tree_and_deduplicate_merged_values():
