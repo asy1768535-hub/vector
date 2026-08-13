@@ -14,7 +14,7 @@ from __future__ import annotations
 import io
 import logging
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -191,23 +191,27 @@ def _render_page_png(data: PdfSource, page_index: int, dpi: int) -> bytes:
         raise PdfExtractError(f"PDF 第 {page_index + 1} 页渲染失败") from None
 
 
-def _page_images(page: object) -> object:
+def _page_images(page: object) -> Iterable[Any]:
     try:
         images = getattr(page, "images", ())
     except Exception:  # noqa: BLE001 - malformed image resources do not block text extraction
-        return (), 0
+        return ()
     if images is None:
-        return (), 0
+        return ()
+    try:
+        iter(images)
+    except Exception:  # noqa: BLE001 - malformed image resources do not block text extraction
+        return ()
     return images
 
 
 def _scan_embedded_images(
-    images: object,
+    images: Iterable[Any],
     totals: list[int],
     on_image: Callable[[bytes], None] | None = None,
 ) -> int:
     try:
-        iterator = iter(images)  # type: ignore[arg-type]
+        iterator = iter(images)
     except Exception:  # noqa: BLE001 - malformed image resources do not block text extraction
         return 0
 

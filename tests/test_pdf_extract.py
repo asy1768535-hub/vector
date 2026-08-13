@@ -161,6 +161,41 @@ def test_native_visual_page_without_image_regions_is_marked_unparsed(monkeypatch
     }
 
 
+def test_broken_images_getter_keeps_pure_text_native(monkeypatch, render_spy):
+    ocr_calls = []
+
+    class Page:
+        def extract_text(self):
+            return "native text with enough characters for the fast path"
+
+        @property
+        def images(self):
+            raise RuntimeError("malformed image resources")
+
+    page = Page()
+    monkeypatch.setattr(
+        pdf_extract,
+        "_open_reader",
+        lambda _data: types.SimpleNamespace(pages=[page]),
+    )
+
+    assert pdf_extract._scan_embedded_images(pdf_extract._page_images(page), [0, 0]) == 0
+    source = build_pdf_source(
+        b"x",
+        chunk_size=80,
+        chunk_overlap=0,
+        **_kw(
+            ocr_enabled=True,
+            ocr=lambda data: ocr_calls.append(data) or "unused",
+        ),
+    )
+
+    assert render_spy == []
+    assert ocr_calls == []
+    assert {chunk["location"]["extraction_mode"] for chunk in source["chunks"]} == {"native"}
+    assert source["segments"][0]["quality"]["visual_content_unparsed"] is False
+
+
 def test_mixed_pdf_keeps_text_and_ocr_in_page_order(patch_reader, render_spy):
     patch_reader(["第一页是文字层的正文内容足够长可直接使用", ""])
     out = extract_pdf_text(b"x", **_kw(ocr_enabled=True, ocr=lambda b: "第二页图片识别文字"))
