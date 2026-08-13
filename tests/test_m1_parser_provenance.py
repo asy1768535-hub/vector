@@ -421,6 +421,21 @@ def test_csv_parser_rejects_row_column_cell_and_text_budgets(tmp_path, monkeypat
     with pytest.raises(ImportResourceLimitError):
         parse_import_file(path, _library())
 
+    monkeypatch.setattr(import_parsing, "MAX_CSV_COLUMNS", 1024)
+    monkeypatch.setattr(import_parsing, "MAX_CSV_CELLS", 3)
+    with pytest.raises(ImportResourceLimitError):
+        parse_import_file(path, _library())
+
+    monkeypatch.setattr(import_parsing, "MAX_CSV_CELLS", 1_000_000)
+    monkeypatch.setattr(import_parsing, "MAX_CSV_ROWS", 1)
+    with pytest.raises(ImportResourceLimitError):
+        parse_import_file(path, _library())
+
+    monkeypatch.setattr(import_parsing, "MAX_CSV_ROWS", 100_000)
+    monkeypatch.setattr(import_parsing, "MAX_NORMALIZED_TEXT_CHARS", 4)
+    with pytest.raises(ImportResourceLimitError):
+        parse_import_file(path, _library())
+
 
 def test_csv_parser_rejects_input_bytes_before_csv_reader(tmp_path, monkeypatch):
     from app.services import import_parsing
@@ -443,21 +458,6 @@ def test_csv_parser_rejects_input_bytes_before_csv_reader(tmp_path, monkeypatch)
     assert reader_calls == 0
     assert str(exc_info.value) == import_parsing.RESOURCE_LIMIT_ERROR
     assert "secret" not in str(exc_info.value)
-
-    monkeypatch.setattr(import_parsing, "MAX_CSV_COLUMNS", 1024)
-    monkeypatch.setattr(import_parsing, "MAX_CSV_CELLS", 3)
-    with pytest.raises(ImportResourceLimitError):
-        parse_import_file(path, _library())
-
-    monkeypatch.setattr(import_parsing, "MAX_CSV_CELLS", 1_000_000)
-    monkeypatch.setattr(import_parsing, "MAX_CSV_ROWS", 1)
-    with pytest.raises(ImportResourceLimitError):
-        parse_import_file(path, _library())
-
-    monkeypatch.setattr(import_parsing, "MAX_CSV_ROWS", 100_000)
-    monkeypatch.setattr(import_parsing, "MAX_NORMALIZED_TEXT_CHARS", 4)
-    with pytest.raises(ImportResourceLimitError):
-        parse_import_file(path, _library())
 
 
 def test_docx_table_units_form_table_row_cell_tree_and_deduplicate_merged_values():
