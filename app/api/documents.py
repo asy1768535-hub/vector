@@ -26,8 +26,9 @@ from app.deps import require_lib
 from app.models.chunk import Chunk
 from app.models.document import Document
 from app.models.document_file import DocumentFile
-from app.models.document_source import DocumentSource
 from app.models.document_revision import DocumentRevision
+from app.models.document_revision_file import DocumentRevisionFile
+from app.models.document_source import DocumentSource
 from app.models.embedding_job import EmbeddingJob
 from app.models.library import Library
 from app.models.user import User
@@ -774,20 +775,46 @@ async def get_document_full_source(
     if doc is None or doc.library_id != lib.id or doc.deleted_at is not None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "document not found")
 
-    source_stmt = select(
-        DocumentSource.revision,
-        DocumentSource.file_name,
-        DocumentSource.file_type,
-        DocumentSource.created_at,
-        DocumentSource.updated_at,
-        func.length(DocumentSource.normalized_text).label("total_chars"),
-        func.substr(
-            DocumentSource.normalized_text,
-            offset + 1,
-            limit,
-        ).label("text_window"),
-    ).where(DocumentSource.document_id == doc.id).limit(1)
-    source_row = (await db.execute(source_stmt)).one_or_none()
+    source_row = None
+    if doc.current_revision_id is not None:
+        revision_stmt = (
+            select(
+                DocumentRevision.revision_no.label("revision"),
+                DocumentRevisionFile.file_name,
+                DocumentRevision.parser_name.label("file_type"),
+                DocumentRevision.created_at,
+                DocumentRevision.updated_at,
+                func.length(DocumentRevision.normalized_text).label("total_chars"),
+                func.substr(DocumentRevision.normalized_text, offset + 1, limit).label(
+                    "text_window"
+                ),
+            )
+            .outerjoin(
+                DocumentRevisionFile,
+                (DocumentRevisionFile.document_revision_id == DocumentRevision.id)
+                & (DocumentRevisionFile.lifecycle_status == "available"),
+            )
+            .where(
+                DocumentRevision.id == doc.current_revision_id,
+                DocumentRevision.document_id == doc.id,
+                DocumentRevision.library_id == lib.id,
+                DocumentRevision.normalized_text.is_not(None),
+            )
+            .limit(1)
+        )
+        source_row = (await db.execute(revision_stmt)).one_or_none()
+
+    if source_row is None:
+        source_stmt = select(
+            DocumentSource.revision,
+            DocumentSource.file_name,
+            DocumentSource.file_type,
+            DocumentSource.created_at,
+            DocumentSource.updated_at,
+            func.length(DocumentSource.normalized_text).label("total_chars"),
+            func.substr(DocumentSource.normalized_text, offset + 1, limit).label("text_window"),
+        ).where(DocumentSource.document_id == doc.id).limit(1)
+        source_row = (await db.execute(source_stmt)).one_or_none()
     if source_row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "该文档需重新导入后才能阅读原文")
 

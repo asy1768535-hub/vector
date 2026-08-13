@@ -1579,6 +1579,52 @@ def test_get_document_full_source_returns_normalized_text():
         app.dependency_overrides.clear()
 
 
+def test_get_document_full_source_prefers_current_revision_text():
+    mock_user.is_superuser = True
+    revision_id = uuid.uuid4()
+    doc = Document(
+        id=uuid.uuid4(),
+        library_id=mock_library.id,
+        title="current.docx",
+        content_hash="h",
+        current_revision=2,
+        current_revision_id=revision_id,
+        status="ready",
+    )
+    now = datetime.now(timezone.utc)
+    db = AsyncMock()
+
+    async def _get(model, ident):
+        return doc if model is Document and ident == doc.id else None
+
+    revision_row = SimpleNamespace(
+        revision=2,
+        file_name="current.docx",
+        file_type="docx",
+        created_at=now,
+        updated_at=now,
+        total_chars=12,
+        text_window="current text",
+    )
+    result = MagicMock()
+    result.one_or_none.return_value = revision_row
+    db.get = _get
+    db.execute = AsyncMock(return_value=result)
+    try:
+        with patch("app.deps.load_active_library", new_callable=AsyncMock) as ml:
+            ml.return_value = mock_library
+            response = _client_with_db(db).get(
+                f"/libraries/testlib/documents/{doc.id}/source/full"
+            )
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["normalized_text"] == "current text"
+        statement = db.execute.await_args.args[0]
+        assert "document_revisions" in str(statement)
+        assert "document_sources" not in str(statement)
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_get_document_full_source_without_snapshot_returns_clear_404():
     mock_user.is_superuser = True
     doc = Document(
