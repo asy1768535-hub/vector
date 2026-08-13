@@ -81,17 +81,30 @@ async def recent_turns(
     stmt = (
         select(ChatMessage)
         .where(ChatMessage.conversation_id == conversation_id)
-        .order_by(ChatMessage.created_at.desc())
-        .limit(max_turns * 2)
+        .order_by(ChatMessage.created_at.asc())
     )
-    rows = list(reversed((await db.execute(stmt)).scalars().all()))
-    out: list[dict] = []
+    rows = list((await db.execute(stmt)).scalars().all())
+    assistants_by_parent = {
+        m.parent_message_id: m
+        for m in rows
+        if (
+            m.role == "assistant"
+            and m.status == "success"
+            and m.parent_message_id is not None
+            and (m.content or "").strip()
+        )
+    }
+    turns: list[list[dict]] = []
     for m in rows:
-        if m.role == "user":
-            out.append({"role": "user", "content": m.content})
-        elif m.role == "assistant" and m.status != "failed" and (m.content or "").strip():
-            out.append({"role": "assistant", "content": m.content})
-    return out
+        if m.role != "user":
+            continue
+        assistant = assistants_by_parent.get(m.id)
+        if assistant is not None:
+            turns.append([
+                {"role": "user", "content": m.content},
+                {"role": "assistant", "content": assistant.content},
+            ])
+    return [message for turn in turns[-max_turns:] for message in turn]
 
 
 async def save_user_message(db: AsyncSession, conversation_id: uuid.UUID, content: str) -> ChatMessage:

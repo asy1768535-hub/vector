@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -51,6 +52,7 @@ from app.services.organization_authorization import (
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/chat", tags=["chat"])
+_CHAT_STREAM_CANCELLED = "chat_stream_cancelled"
 
 
 @router.get("/libraries", response_model=list[ChatLibraryRead])
@@ -323,44 +325,83 @@ async def chat_stream(
     query = body.query
 
     async def _gen():
-        yield _sse({
-            "type": "sources", "conversation_id": str(conv_id), "sources": sources_dump,
-            "graph_augmented": graph_augmented,
-            "graph_evidence": [row.model_dump(mode="json") for row in graph_evidence],
-            "debug": debug,
-        })
         t0 = time.monotonic()
-        if not answer_records:
-            text = "资料中未找到明确依据。"
-            yield _sse({"type": "delta", "text": text})
-            await _persist_assistant(conv_id, parent_id=user_msg_id, content=text, rewritten=rewritten,
-                                     latency_ms=int((time.monotonic() - t0) * 1000), status_val="success",
-                                     error=None, sources=[], graph_augmented=False, graph_evidence=[])
-            yield _sse({"type": "done"})
-            return
         acc = []
+        finalized = False
+        persist_task = None
+
+        async def persist_terminal(*args, **kwargs):
+            nonlocal finalized, persist_task
+            if persist_task is None:
+                persist_task = asyncio.create_task(_persist_assistant(*args, **kwargs))
+            await asyncio.shield(persist_task)
+            finalized = True
+
         try:
-            async for delta in chat_answer.stream_answer(
-                query, answer_records,
-                base_url=settings.chat_base_url, model=settings.chat_model,
-                api_key=settings.chat_api_key, timeout=settings.chat_timeout_seconds,
-                temperature=settings.chat_temperature, max_context_chars=context_chars,
-                history=history,
-            ):
-                acc.append(delta)
-                yield _sse({"type": "delta", "text": delta})
-        except chat_answer.ChatError as exc:
-            await _persist_assistant(conv_id, parent_id=user_msg_id, content="".join(acc), rewritten=rewritten,
-                                     latency_ms=int((time.monotonic() - t0) * 1000), status_val="failed",
-                                     error=str(exc), sources=sources,
-                                     graph_augmented=graph_augmented, graph_evidence=graph_evidence)
-            yield _sse({"type": "error", "message": f"answer generation failed: {exc}"})
-            return
-        await _persist_assistant(conv_id, parent_id=user_msg_id, content="".join(acc), rewritten=rewritten,
-                                 latency_ms=int((time.monotonic() - t0) * 1000), status_val="success",
-                                 error=None, sources=sources,
-                                 graph_augmented=graph_augmented, graph_evidence=graph_evidence)
-        yield _sse({"type": "done"})
+            yield _sse({
+                "type": "sources", "conversation_id": str(conv_id), "sources": sources_dump,
+                "graph_augmented": graph_augmented,
+                "graph_evidence": [row.model_dump(mode="json") for row in graph_evidence],
+                "debug": debug,
+            })
+            if not answer_records:
+                answer_text = "资料中未找到明确依据。"
+                acc.append(answer_text)
+                yield _sse({"type": "delta", "text": answer_text})
+            else:
+                try:
+                    async for delta in chat_answer.stream_answer(
+                        query, answer_records,
+                        base_url=settings.chat_base_url, model=settings.chat_model,
+                        api_key=settings.chat_api_key, timeout=settings.chat_timeout_seconds,
+                        temperature=settings.chat_temperature, max_context_chars=context_chars,
+                        history=history,
+                    ):
+                        acc.append(delta)
+                        yield _sse({"type": "delta", "text": delta})
+                except chat_answer.ChatError as exc:
+                    await persist_terminal(
+                        conv_id, parent_id=user_msg_id, content="".join(acc), rewritten=rewritten,
+                        latency_ms=int((time.monotonic() - t0) * 1000), status_val="failed",
+                        error=str(exc), sources=sources,
+                        graph_augmented=graph_augmented, graph_evidence=graph_evidence,
+                    )
+                    finalized = True
+                    yield _sse({"type": "error", "message": f"answer generation failed: {exc}"})
+                    return
+            await persist_terminal(
+                conv_id, parent_id=user_msg_id, content="".join(acc), rewritten=rewritten,
+                latency_ms=int((time.monotonic() - t0) * 1000), status_val="success",
+                error=None, sources=sources if answer_records else [],
+                graph_augmented=graph_augmented if answer_records else False,
+                graph_evidence=graph_evidence if answer_records else [],
+            )
+            finalized = True
+            yield _sse({"type": "done"})
+        except asyncio.CancelledError:
+            if not finalized:
+                if persist_task is not None:
+                    try:
+                        await asyncio.shield(persist_task)
+                    except BaseException:
+                        log.error("chat stream cancellation persistence failed")
+                    else:
+                        finalized = True
+                if not finalized:
+                    persist_task = asyncio.create_task(_persist_assistant(
+                        conv_id, parent_id=user_msg_id, content="".join(acc), rewritten=rewritten,
+                        latency_ms=int((time.monotonic() - t0) * 1000), status_val="failed",
+                        error=_CHAT_STREAM_CANCELLED, sources=sources if answer_records else [],
+                        graph_augmented=graph_augmented if answer_records else False,
+                        graph_evidence=graph_evidence if answer_records else [],
+                    ))
+                    try:
+                        await asyncio.shield(persist_task)
+                    except BaseException:
+                        log.error("chat stream cancellation persistence failed")
+                    else:
+                        finalized = True
+            raise
 
     return StreamingResponse(
         _gen(),
