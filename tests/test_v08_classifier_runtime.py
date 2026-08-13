@@ -282,6 +282,9 @@ def test_startup_is_default_off_and_dependency_provider_limits_fail_closed():
     validate_classification_runtime_startup(
         _settings(classification_auto_trigger_enabled=True)
     )
+    validate_classification_runtime_startup(
+        _settings(classification_model="deepseek-v4-flash")
+    )
 
 
 def test_job_identity_is_deterministic_strict_and_retry_scoped():
@@ -336,6 +339,19 @@ def test_job_identity_is_deterministic_strict_and_retry_scoped():
             config=_settings(),
         )
     assert bad_hash.value.code == "classification_hash_invalid"
+
+
+def test_flash_provider_identity_is_explicit_and_model_scoped():
+    flash = _settings(classification_model="deepseek-v4-flash")
+    assert classification_provider_name(flash) == "deepseek"
+    with pytest.raises(ClassificationRuntimeError) as invalid:
+        classification_provider_name(
+            _settings(
+                classification_base_url="http://10.0.10.2:8113/v1",
+                classification_model="deepseek-v4-flash",
+            )
+        )
+    assert invalid.value.code == "provider_config_invalid"
 
 
 def test_provider_output_is_strict_and_maps_known_and_unknown_candidates():

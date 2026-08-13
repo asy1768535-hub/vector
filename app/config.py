@@ -656,6 +656,7 @@ def validate_classification_runtime_startup(config: Settings) -> None:
     provider_contract = (config.classification_base_url, config.classification_model)
     if provider_contract not in {
         ("https://api.deepseek.com/v1", "deepseek-v4-pro"),
+        ("https://api.deepseek.com/v1", "deepseek-v4-flash"),
         ("http://10.0.10.2:8113/v1", "qwen3.5-9b"),
     }:
         raise RuntimeError("[security] classification requires an approved provider identity")
