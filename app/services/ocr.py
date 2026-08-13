@@ -15,6 +15,21 @@ log = logging.getLogger(__name__)
 _engine = None
 _lock = threading.Lock()
 
+# Module-local limits keep OCR safety independent from import configuration.
+OCR_MAX_IMAGE_PIXELS = 25_000_000
+OCR_MAX_IMAGE_WIDTH = 10_000
+OCR_MAX_IMAGE_HEIGHT = 10_000
+OCR_MAX_BLOCKS = 4_096
+OCR_MAX_TEXT_CHARS = 200_000
+
+
+class OcrResourceLimitError(ValueError):
+    """Decoded image or OCR output exceeded the local resource budget."""
+
+
+def _resource_limit(name: str) -> None:
+    raise OcrResourceLimitError(f"OCR resource limit exceeded: {name}")
+
 
 def is_available() -> bool:
     """RapidOCR 是否可用（依赖已安装）。"""
@@ -46,6 +61,17 @@ def _box_to_bbox(box: Any) -> list[float] | None:
     return [min(xs), min(ys), max(xs), max(ys)]
 
 
+def _image_dimensions(image: Any) -> tuple[int, int] | None:
+    try:
+        shape = image.shape
+        height, width = int(shape[0]), int(shape[1])
+    except (AttributeError, TypeError, ValueError, IndexError):
+        return None
+    if height <= 0 or width <= 0:
+        return None
+    return width, height
+
+
 def ocr_image_blocks(data: bytes) -> list[dict[str, Any]]:
     """Return OCR lines with text, bounding box, and confidence metadata."""
     try:
@@ -55,14 +81,34 @@ def ocr_image_blocks(data: bytes) -> list[dict[str, Any]]:
         arr = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
         if arr is None:
             return []
+        dimensions = _image_dimensions(arr)
+        if dimensions is not None:
+            width, height = dimensions
+            if width > OCR_MAX_IMAGE_WIDTH:
+                _resource_limit("image width")
+            if height > OCR_MAX_IMAGE_HEIGHT:
+                _resource_limit("image height")
+            if width * height > OCR_MAX_IMAGE_PIXELS:
+                _resource_limit("image pixels")
         result, _ = _get_engine()(arr)
         if not result:
             return []
+        try:
+            if len(result) > OCR_MAX_BLOCKS:
+                _resource_limit("output blocks")
+        except TypeError:
+            pass
         blocks = []
-        for box, text, score in result:
+        text_chars = 0
+        for index, (box, text, score) in enumerate(result):
+            if index >= OCR_MAX_BLOCKS:
+                _resource_limit("output blocks")
             value = str(text).strip()
             if not value:
                 continue
+            text_chars += len(value)
+            if text_chars > OCR_MAX_TEXT_CHARS:
+                _resource_limit("output text")
             try:
                 confidence = float(score)
             except (TypeError, ValueError):
@@ -76,6 +122,8 @@ def ocr_image_blocks(data: bytes) -> list[dict[str, Any]]:
                 }
             )
         return blocks
+    except OcrResourceLimitError:
+        raise
     except Exception as exc:  # noqa: BLE001
         log.warning("ocr_image_blocks failed: %s", exc)
         return []

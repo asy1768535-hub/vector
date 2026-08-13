@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import sys
 
+import pytest
+
 from app.services import ocr
 
 
@@ -50,3 +52,66 @@ def test_ocr_image_blocks_preserves_bbox_and_confidence(monkeypatch):
             "parser": "rapidocr",
         }
     ]
+
+
+def test_ocr_rejects_oversized_decoded_pixels_before_engine(monkeypatch):
+    class _Image:
+        shape = (200, 300, 3)
+
+    class _Numpy:
+        uint8 = object()
+
+        @staticmethod
+        def frombuffer(data, _dtype):
+            return data
+
+    class _Cv2:
+        IMREAD_COLOR = 1
+
+        @staticmethod
+        def imdecode(data, _mode):
+            return _Image()
+
+    called = False
+
+    def engine():
+        nonlocal called
+        called = True
+        return object()
+
+    monkeypatch.setitem(sys.modules, "numpy", _Numpy)
+    monkeypatch.setitem(sys.modules, "cv2", _Cv2)
+    monkeypatch.setattr(ocr, "OCR_MAX_IMAGE_PIXELS", 10)
+    monkeypatch.setattr(ocr, "_get_engine", engine)
+
+    with pytest.raises(ocr.OcrResourceLimitError, match="image pixels"):
+        ocr.ocr_image_blocks(b"image")
+    assert called is False
+
+
+def test_ocr_rejects_output_text_budget(monkeypatch):
+    class _Numpy:
+        uint8 = object()
+
+        @staticmethod
+        def frombuffer(data, _dtype):
+            return data
+
+    class _Cv2:
+        IMREAD_COLOR = 1
+
+        @staticmethod
+        def imdecode(data, _mode):
+            return object()
+
+    class _Engine:
+        def __call__(self, _image):
+            return [([], "too long", 0.9)], None
+
+    monkeypatch.setitem(sys.modules, "numpy", _Numpy)
+    monkeypatch.setitem(sys.modules, "cv2", _Cv2)
+    monkeypatch.setattr(ocr, "OCR_MAX_TEXT_CHARS", 3)
+    monkeypatch.setattr(ocr, "_get_engine", lambda: _Engine())
+
+    with pytest.raises(ocr.OcrResourceLimitError, match="output text"):
+        ocr.ocr_image_blocks(b"image")

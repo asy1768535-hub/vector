@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import io
 import re
+import zipfile
 from typing import Any
 from pathlib import Path
 from typing import Callable, Optional
@@ -32,9 +33,114 @@ from app.services.parser_units import (
     ocr_result_text_and_blocks,
     parser_provenance,
 )
+from app.services.ocr import OcrResourceLimitError
 
 _HEADING_NUM = re.compile(r"^\d+(\.\d+)*\s+\S")
 _LEVEL_CN = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6}
+
+# Module-local limits keep parser safety independent from import/staging settings.
+DOCX_MAX_ZIP_ENTRIES = 4096
+DOCX_MAX_ZIP_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
+DOCX_MAX_ZIP_ENTRY_BYTES = 64 * 1024 * 1024
+DOCX_MAX_ZIP_COMPRESSION_RATIO = 100.0
+DOCX_MAX_IMAGES = 128
+DOCX_MAX_IMAGE_BYTES = 128 * 1024 * 1024
+DOCX_MAX_SEGMENTS = 10_000
+DOCX_MAX_STRUCTURED_UNITS = 100_000
+DOCX_MAX_TABLES = 1_000
+DOCX_MAX_TABLE_ROWS = 100_000
+DOCX_MAX_TABLE_CELLS = 1_000_000
+
+
+class DocxResourceLimitError(ValueError):
+    """DOCX parser resource budget was exceeded."""
+
+
+def _resource_limit(name: str) -> None:
+    raise DocxResourceLimitError(f"DOCX resource limit exceeded: {name}")
+
+
+def _preflight_docx(data: bytes | Path) -> None:
+    """Inspect ZIP metadata before python-docx opens or expands the document."""
+    source = data if isinstance(data, Path) else io.BytesIO(data)
+    try:
+        with zipfile.ZipFile(source) as archive:
+            infos = archive.infolist()
+            if len(infos) > DOCX_MAX_ZIP_ENTRIES:
+                _resource_limit("zip entries")
+
+            total_uncompressed = 0
+            image_count = 0
+            image_bytes = 0
+            for info in infos:
+                uncompressed = max(0, int(info.file_size))
+                compressed = max(0, int(info.compress_size))
+                total_uncompressed += uncompressed
+                if total_uncompressed > DOCX_MAX_ZIP_UNCOMPRESSED_BYTES:
+                    _resource_limit("zip uncompressed bytes")
+                if uncompressed > DOCX_MAX_ZIP_ENTRY_BYTES:
+                    _resource_limit("zip entry bytes")
+                ratio = float("inf") if uncompressed and not compressed else (
+                    uncompressed / compressed if compressed else 1.0
+                )
+                if ratio > DOCX_MAX_ZIP_COMPRESSION_RATIO:
+                    _resource_limit("zip compression ratio")
+
+                name = info.filename.replace("\\", "/").lower()
+                if name.startswith("word/media/") and not info.is_dir():
+                    image_count += 1
+                    image_bytes += uncompressed
+                    if image_count > DOCX_MAX_IMAGES:
+                        _resource_limit("embedded image count")
+                    if image_bytes > DOCX_MAX_IMAGE_BYTES:
+                        _resource_limit("embedded image bytes")
+    except (OSError, zipfile.BadZipFile):
+        # Let python-docx preserve its existing malformed-document error path.
+        return
+
+
+class _DocxBudget:
+    def __init__(self) -> None:
+        self.segments = 0
+        self.units = 0
+        self.tables = 0
+        self.table_rows = 0
+        self.table_cells = 0
+        self.images = 0
+        self.image_bytes = 0
+
+    def add_segment(self) -> None:
+        self.segments += 1
+        if self.segments > DOCX_MAX_SEGMENTS:
+            _resource_limit("segments")
+
+    def add_units(self, count: int = 1) -> None:
+        self.units += count
+        if self.units > DOCX_MAX_STRUCTURED_UNITS:
+            _resource_limit("structured units")
+
+    def add_table(self) -> None:
+        self.tables += 1
+        if self.tables > DOCX_MAX_TABLES:
+            _resource_limit("tables")
+
+    def add_table_row(self) -> None:
+        self.table_rows += 1
+        if self.table_rows > DOCX_MAX_TABLE_ROWS:
+            _resource_limit("table rows")
+
+    def add_table_cell(self) -> None:
+        self.table_cells += 1
+        if self.table_cells > DOCX_MAX_TABLE_CELLS:
+            _resource_limit("table cells")
+
+    def add_image(self, size: int) -> None:
+        self.images += 1
+        self.image_bytes += max(0, size)
+        if self.images > DOCX_MAX_IMAGES:
+            _resource_limit("embedded image count")
+        if self.image_bytes > DOCX_MAX_IMAGE_BYTES:
+            _resource_limit("embedded image bytes")
 
 
 def _iter_block_items(parent):
@@ -47,11 +153,17 @@ def _iter_block_items(parent):
             yield Table(child, parent)
 
 
-def _table_row_cells(table: Table) -> list[tuple[int, list[tuple[int, str]], str]]:
+def _table_row_cells(
+    table: Table, *, budget: _DocxBudget | None = None
+) -> list[tuple[int, list[tuple[int, str]], str]]:
     records: list[tuple[int, list[tuple[int, str]], str]] = []
     for row_number, row in enumerate(table.rows, start=1):
+        if budget:
+            budget.add_table_row()
         dedup: list[tuple[int, str]] = []
         for column, cell in enumerate(row.cells, start=1):
+            if budget:
+                budget.add_table_cell()
             value = cell.text.strip()
             if not dedup or dedup[-1][1] != value:
                 dedup.append((column, value))
@@ -72,15 +184,20 @@ def _table_parser_units(
     table_key: str,
     table_index: int,
     parser: dict[str, str],
+    records: list[tuple[int, list[tuple[int, str]], str]] | None = None,
+    budget: _DocxBudget | None = None,
 ) -> list[dict]:
     table_source = {"table": {"index": max(0, table_index - 1)}}
     units: list[dict] = []
-    for row_number, cells, line in _table_row_cells(table):
+    row_records = records if records is not None else _table_row_cells(table, budget=budget)
+    for row_number, cells, line in row_records:
         row_key = f"{table_key}:row:{row_number}"
         row_source = {
             **table_source,
             "row": {"start": row_number, "end": row_number},
         }
+        if budget:
+            budget.add_units()
         row_unit = build_parser_unit(
             source_kind="docx",
             unit_kind="row",
@@ -93,6 +210,8 @@ def _table_parser_units(
         row_unit["text"] = line
         units.append(row_unit)
         for column, value in cells:
+            if budget:
+                budget.add_units()
             cell_name = f"{excel_column_name(column)}{row_number}"
             cell_key = f"{row_key}:cell:{cell_name}"
             cell_unit = build_parser_unit(
@@ -114,18 +233,16 @@ def _table_parser_units(
     return units
 
 
-def _paragraph_image_blobs(paragraph: Paragraph) -> list[bytes]:
+def _paragraph_image_blobs(paragraph: Paragraph):
     """取段落里内嵌图片的字节流（按出现顺序）。无图返回空列表。"""
-    blobs: list[bytes] = []
     for blip in paragraph._p.findall(".//" + qn("a:blip")):
         rid = blip.get(qn("r:embed"))
         if not rid:
             continue
         try:
-            blobs.append(paragraph.part.related_parts[rid].blob)
+            yield paragraph.part.related_parts[rid].blob
         except KeyError:
             continue
-    return blobs
 
 
 def _heading_info(paragraph: Paragraph) -> Optional[tuple[str, int]]:
@@ -151,7 +268,9 @@ def extract_docx_segments(
     data: bytes | Path, ocr: Optional[Callable[[bytes], Any]] = None
 ) -> list[dict]:
     """按文档顺序抽成 prose/table segment 列表，并维护章节路径。"""
+    _preflight_docx(data)
     doc = Document(data if isinstance(data, Path) else io.BytesIO(data))
+    budget = _DocxBudget()
     segs: list[dict] = []
     heading_stack: list[str] = []          # heading_stack[i] = 第 i+1 级标题
     prose_buf: list[str] = []
@@ -192,6 +311,8 @@ def extract_docx_segments(
                     "native_text_present": prose_has_native_text,
                     "ocr_blocks": list(prose_ocr_blocks),
                 }
+                budget.add_segment()
+                budget.add_units()
                 segment = {
                     "kind": "prose",
                     "heading": cur_heading(),
@@ -217,6 +338,7 @@ def extract_docx_segments(
                     },
                 )
                 if prose_ocr_blocks:
+                    budget.add_units(len(prose_ocr_blocks))
                     segment["structured_units"] = build_ocr_parser_units(
                         prose_ocr_blocks,
                         source_kind="docx",
@@ -254,8 +376,11 @@ def extract_docx_segments(
                 prose_has_native_text = True
             if ocr is not None:
                 for blob in _paragraph_image_blobs(block):
+                    budget.add_image(len(blob))
                     try:
                         ot, blocks = ocr_result_text_and_blocks(ocr(blob))
+                    except OcrResourceLimitError:
+                        raise
                     except Exception:  # noqa: BLE001
                         ot, blocks = "", []
                     if ot and ot.strip():
@@ -265,9 +390,13 @@ def extract_docx_segments(
         else:  # Table
             caption = prose_buf[-1] if prose_buf else cur_heading()
             flush_prose()
-            rows = _table_rows(block)
+            budget.add_table()
+            records = _table_row_cells(block, budget=budget)
+            rows = [line for _row_number, _cells, line in records]
             if rows:
                 table_index += 1
+                budget.add_segment()
+                budget.add_units()
                 location = {"type": "table", "table_index": table_index, "heading": cur_heading()}
                 segment = {
                     "kind": "table", "heading": cur_heading(),
@@ -292,6 +421,8 @@ def extract_docx_segments(
                     table_key=segment["unit_key"],
                     table_index=table_index,
                     parser=parser,
+                    records=records,
+                    budget=budget,
                 )
                 segs.append(segment)
     flush_prose()
