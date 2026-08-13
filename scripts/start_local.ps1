@@ -38,18 +38,28 @@ function Write-OK { param($msg) Write-Host "  OK: $msg" -ForegroundColor Green }
 function Write-Warn { param($msg) Write-Host "  WARN: $msg" -ForegroundColor Yellow }
 function Write-Fail { param($msg) Write-Host "  FAIL: $msg" -ForegroundColor Red }
 
-function Test-ProcessAlive($pidFile) {
-    if (-not (Test-Path $pidFile)) { return $false }
-    $procId = (Get-Content $pidFile -Raw).Trim()
+function Test-ProjectProcess($procId, $module) {
     try {
-        $p = Get-Process -Id $procId -ErrorAction Stop
-        return (-not $p.HasExited)
+        $process = Get-CimInstance Win32_Process -Filter "ProcessId = $procId" -ErrorAction Stop
+        $command = [string]$process.CommandLine
+        return ($command -like "*$venvPython*" -and $command -match "(?i)(^|\s)-m\s+$([regex]::Escape($module))(\s|$)")
     } catch { return $false }
 }
 
-function Stop-ProcessByPidFile($pidFile, $name) {
+function Test-ProcessAlive($pidFile, $module) {
+    if (-not (Test-Path $pidFile)) { return $false }
+    $procId = (Get-Content $pidFile -Raw).Trim()
+    return (Test-ProjectProcess $procId $module)
+}
+
+function Stop-ProcessByPidFile($pidFile, $name, $module) {
     if (-not (Test-Path $pidFile)) { return }
     $procId = (Get-Content $pidFile -Raw).Trim()
+    if (-not (Test-ProjectProcess $procId $module)) {
+        Write-Warn "Ignoring stale $name PID file (PID $procId identity mismatch)"
+        Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
+        return
+    }
     try {
         $p = Get-Process -Id $procId -ErrorAction Stop
         if (-not $p.HasExited) {
@@ -119,6 +129,10 @@ if ($portCheck) {
     $existingPid = ($portCheck -split '\s+')[-1]
     if ($Force) {
         Write-Warn "Port $apiPort occupied by PID $existingPid, Force mode: attempting stop"
+        if (-not (Test-ProjectProcess $existingPid "app.main")) {
+            Write-Fail "Port $apiPort belongs to a process outside this project (PID $existingPid)"
+            exit 1
+        }
         try { Stop-Process -Id $existingPid -Force; Start-Sleep -Seconds 2 } catch { }
     } else {
         Write-Warn "Port $apiPort occupied by PID $existingPid. Run stop_local.ps1 first, or use -Force"
@@ -128,13 +142,13 @@ if ($portCheck) {
 # ── Force cleanup ─────────────────────────────────────────
 if ($Force) {
     Write-Step "Force mode: stopping existing instances"
-    Stop-ProcessByPidFile (Join-Path $pidDir "api.pid") "API"
-    Stop-ProcessByPidFile (Join-Path $pidDir "importer.pid") "Import Worker"
-    Stop-ProcessByPidFile (Join-Path $pidDir "embedder.pid") "Embedder Worker"
-    Stop-ProcessByPidFile (Join-Path $pidDir "graph_extractor.pid") "Graph Extractor"
-    Stop-ProcessByPidFile (Join-Path $pidDir "knowledge_artifacts.pid") "Knowledge Artifact Worker"
-    Stop-ProcessByPidFile (Join-Path $pidDir "classifications.pid") "Classification Worker"
-    Stop-ProcessByPidFile (Join-Path $pidDir "cleanup.pid") "Cleanup Worker"
+    Stop-ProcessByPidFile (Join-Path $pidDir "api.pid") "API" "app.main"
+    Stop-ProcessByPidFile (Join-Path $pidDir "importer.pid") "Import Worker" "app.workers.importer"
+    Stop-ProcessByPidFile (Join-Path $pidDir "embedder.pid") "Embedder Worker" "app.workers.embedder"
+    Stop-ProcessByPidFile (Join-Path $pidDir "graph_extractor.pid") "Graph Extractor" "app.workers.graph_extractor"
+    Stop-ProcessByPidFile (Join-Path $pidDir "knowledge_artifacts.pid") "Knowledge Artifact Worker" "app.workers.knowledge_artifacts"
+    Stop-ProcessByPidFile (Join-Path $pidDir "classifications.pid") "Classification Worker" "app.workers.classifications"
+    Stop-ProcessByPidFile (Join-Path $pidDir "cleanup.pid") "Cleanup Worker" "app.workers.cleanup"
 }
 
 # ── Create log dir ────────────────────────────────────────
@@ -144,7 +158,7 @@ New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 Write-Step "2/7 Starting API (python -m app.main)"
 
 $apiPidFile = Join-Path $pidDir "api.pid"
-if (Test-ProcessAlive $apiPidFile) {
+if (Test-ProcessAlive $apiPidFile "app.main") {
     Write-Warn "API already running (PID $(Get-Content $apiPidFile)), skipping"
 } else {
     $proc = Start-Process -FilePath $venvPython `
@@ -172,7 +186,7 @@ if (Test-ProcessAlive $apiPidFile) {
 Write-Step "3/7 Starting Import Worker (python -m app.workers.importer --watch)"
 
 $importPidFile = Join-Path $pidDir "importer.pid"
-if (Test-ProcessAlive $importPidFile) {
+if (Test-ProcessAlive $importPidFile "app.workers.importer") {
     Write-Warn "Import Worker already running (PID $(Get-Content $importPidFile)), skipping"
 } else {
     $proc = Start-Process -FilePath $venvPython `
@@ -188,7 +202,7 @@ if (Test-ProcessAlive $importPidFile) {
 Write-Step "4/7 Starting Embedder Worker (python -m app.workers.embedder --watch)"
 
 $embedPidFile = Join-Path $pidDir "embedder.pid"
-if (Test-ProcessAlive $embedPidFile) {
+if (Test-ProcessAlive $embedPidFile "app.workers.embedder") {
     Write-Warn "Embedder Worker already running (PID $(Get-Content $embedPidFile)), skipping"
 } else {
     $proc = Start-Process -FilePath $venvPython `
@@ -205,7 +219,7 @@ if (Test-ProcessAlive $embedPidFile) {
 Write-Step "5/7 Starting Cleanup Worker (python -m app.workers.cleanup --watch)"
 
 $cleanPidFile = Join-Path $pidDir "cleanup.pid"
-if (Test-ProcessAlive $cleanPidFile) {
+if (Test-ProcessAlive $cleanPidFile "app.workers.cleanup") {
     Write-Warn "Cleanup Worker already running (PID $(Get-Content $cleanPidFile)), skipping"
 } else {
     $proc = Start-Process -FilePath $venvPython `
@@ -224,7 +238,7 @@ Write-Step "6/7 Starting Graph Extraction Worker"
 $graphPidFile = Join-Path $pidDir "graph_extractor.pid"
 if (-not $graphExtractionEnabled) {
     Write-OK "Graph Extractor disabled; not started"
-} elseif (Test-ProcessAlive $graphPidFile) {
+} elseif (Test-ProcessAlive $graphPidFile "app.workers.graph_extractor") {
     Write-Warn "Graph Extractor already running (PID $(Get-Content $graphPidFile)), skipping"
 } else {
     $proc = Start-Process -FilePath $venvPython `
@@ -243,7 +257,7 @@ Write-Step "7/7 Starting Knowledge Artifact Worker"
 $artifactPidFile = Join-Path $pidDir "knowledge_artifacts.pid"
 if (-not $knowledgeArtifactEnabled) {
     Write-OK "Knowledge Artifact Worker disabled; not started"
-} elseif (Test-ProcessAlive $artifactPidFile) {
+} elseif (Test-ProcessAlive $artifactPidFile "app.workers.knowledge_artifacts") {
     Write-Warn "Knowledge Artifact Worker already running (PID $(Get-Content $artifactPidFile)), skipping"
 } else {
     $proc = Start-Process -FilePath $venvPython `
@@ -264,7 +278,7 @@ Write-Step "Starting Classification Worker"
 $classificationPidFile = Join-Path $pidDir "classifications.pid"
 if (-not $classificationEnabled) {
     Write-OK "Classification Worker disabled; not started"
-} elseif (Test-ProcessAlive $classificationPidFile) {
+} elseif (Test-ProcessAlive $classificationPidFile "app.workers.classifications") {
     Write-Warn "Classification Worker already running (PID $(Get-Content $classificationPidFile)), skipping"
 } else {
     $proc = Start-Process -FilePath $venvPython `
