@@ -161,19 +161,41 @@ async def _maybe_cleanup_staging(db: AsyncSession) -> tuple[int, int]:
         return 0, 0
     _last_staging_cleanup_monotonic = current
     try:
-        result = await import_staging_cleanup.cleanup_staging(db)
+        transitioned, staging_keys = await import_staging_cleanup.cleanup_staging(db)
         await db.commit()
-        if result != (0, 0):
-            log.info(
-                "staging cleanup transitioned=%s removed=%s",
-                result[0],
-                result[1],
-            )
-        return result
     except Exception:  # noqa: BLE001
         await db.rollback()
         log.exception("import staging cleanup failed")
         return 0, 0
+
+    removed = 0
+    for staging_key in staging_keys:
+        try:
+            unlink_result = await import_staging_cleanup._unlink_staging_key(
+                staging_key,
+                settings,
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("staging cleanup unlink failed key=%s", staging_key)
+            continue
+        if unlink_result == "removed":
+            removed += 1
+        elif unlink_result == "missing":
+            log.info("staging cleanup file already missing key=%s", staging_key)
+        else:
+            log.warning(
+                "staging cleanup unlink failed key=%s result=%s",
+                staging_key,
+                unlink_result,
+            )
+    if transitioned or staging_keys:
+        log.info(
+            "staging cleanup transitioned=%s removed=%s attempted=%s",
+            transitioned,
+            removed,
+            len(staging_keys),
+        )
+    return transitioned, removed
 
 
 def _text_hash(parsed: ParsedImport) -> str:
