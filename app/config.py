@@ -188,8 +188,10 @@ class Settings(BaseSettings):
     classification_decision_enabled: bool = False
 
     # ---- 文件导入 ----
-    # /import-file 单次上传字节上限（默认 50MiB），超出 413，避免一次性 read 打爆内存。
-    max_import_file_bytes: int = 500 * 1024 * 1024
+    # 旧同步 /import-file 单次上传字节上限（默认 50MiB），超出 413。
+    max_import_file_bytes: int = 50 * 1024 * 1024
+    # 分块 staging/import-session 总量上限独立于旧同步接口，保留大文件导入能力。
+    import_staging_max_file_bytes: int = 500 * 1024 * 1024
     import_upload_chunk_bytes: int = 8 * 1024 * 1024
     import_selection_max_files: int = 1000
     import_upload_file_concurrency: int = 2
@@ -199,6 +201,17 @@ class Settings(BaseSettings):
     import_worker_max_attempts: int = 5
     import_staging_dir: str = "storage/import_staging"
     import_staging_retention_seconds: int = 24 * 60 * 60
+    # XLSX ZIP 元数据和流式解析上限。
+    xlsx_max_zip_entries: int = 4096
+    xlsx_max_zip_compressed_bytes: int = 500 * 1024 * 1024
+    xlsx_max_zip_uncompressed_bytes: int = 256 * 1024 * 1024
+    xlsx_max_zip_entry_bytes: int = 128 * 1024 * 1024
+    xlsx_max_zip_compression_ratio: int = 100
+    xlsx_max_sheets: int = 100
+    xlsx_max_rows: int = 100_000
+    xlsx_max_cells: int = 1_000_000
+    xlsx_max_cell_text_chars: int = 32_768
+    xlsx_max_text_chars: int = 10_000_000
     # 原始上传文件持久化目录（相对路径基于仓库根目录）。
     document_files_dir: str = "storage/document_files"
     revision_file_storage_enabled: bool = False

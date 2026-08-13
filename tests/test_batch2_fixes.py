@@ -120,6 +120,24 @@ def test_import_oversize_returns_413(client, monkeypatch):
     assert resp.status_code == status.HTTP_413_CONTENT_TOO_LARGE
 
 
+def test_sync_and_staging_import_limits_are_separate():
+    from app.config import Settings
+    from app.schemas.documents import ImportSessionCreate
+    from app.services import import_uploads
+
+    config = Settings(_env_file=None)
+    assert config.max_import_file_bytes == 50 * 1024 * 1024
+    assert config.import_staging_max_file_bytes == 500 * 1024 * 1024
+    assert import_uploads.import_configuration(config)["max_file_bytes"] == 500 * 1024 * 1024
+
+    payload = ImportSessionCreate(
+        batch_id="00000000-0000-0000-0000-000000000001",
+        file_name="large.txt",
+        size_bytes=400 * 1024 * 1024,
+    )
+    assert import_uploads._validate_payload(payload, config) is None
+
+
 def test_read_capped_aborts_without_reading_whole_file():
     """直接测 _read_capped：超限即抛，且读取的字节不超过 limit+一个分块。"""
     import asyncio

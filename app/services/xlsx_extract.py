@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import io
+import zipfile
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
+from app.config import settings
 from app.services.parser_units import (
     build_parser_unit,
     excel_column_name,
@@ -17,8 +19,69 @@ from app.services.parser_units import (
 )
 
 
+class XlsxLimitError(ValueError):
+    """Raised when an XLSX exceeds a configured resource limit."""
+
+
+def _open_binary_source(data: bytes | Path):
+    return data.open("rb") if isinstance(data, Path) else io.BytesIO(data)
+
+
+def _validate_xlsx_archive(data: bytes | Path) -> None:
+    try:
+        with _open_binary_source(data) as source, zipfile.ZipFile(source) as archive:
+            infos = archive.infolist()
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+        raise ValueError("invalid XLSX archive") from exc
+
+    if len(infos) > settings.xlsx_max_zip_entries:
+        raise XlsxLimitError("XLSX archive exceeds the entry limit")
+
+    compressed_total = 0
+    uncompressed_total = 0
+    for info in infos:
+        compressed_size = info.compress_size
+        uncompressed_size = info.file_size
+        if compressed_size < 0 or uncompressed_size < 0:
+            raise ValueError("invalid XLSX archive metadata")
+        compressed_total += compressed_size
+        uncompressed_total += uncompressed_size
+        if compressed_total > settings.xlsx_max_zip_compressed_bytes:
+            raise XlsxLimitError("XLSX archive exceeds the compressed-size limit")
+        if uncompressed_total > settings.xlsx_max_zip_uncompressed_bytes:
+            raise XlsxLimitError("XLSX archive exceeds the uncompressed-size limit")
+        if uncompressed_size > settings.xlsx_max_zip_entry_bytes:
+            raise XlsxLimitError("XLSX archive entry exceeds the size limit")
+        if uncompressed_size and (
+            not compressed_size
+            or uncompressed_size / compressed_size > settings.xlsx_max_zip_compression_ratio
+        ):
+            raise XlsxLimitError("XLSX archive entry exceeds the compression-ratio limit")
+
+
+def _cell_text(value: Any) -> str:
+    return "" if value is None else str(value)
+
+
+def _check_cell_text(value: Any, total_text_chars: int) -> int:
+    text = _cell_text(value)
+    if len(text) > settings.xlsx_max_cell_text_chars:
+        raise XlsxLimitError("XLSX cell text exceeds the length limit")
+    total_text_chars += len(text)
+    if total_text_chars > settings.xlsx_max_text_chars:
+        raise XlsxLimitError("XLSX cell text exceeds the total text limit")
+    return total_text_chars
+
+
+def _row_to_numbered_line(cells: tuple[Any, ...]) -> str:
+    vals = [_cell_text(cell).strip() for cell in cells]
+    while vals and vals[-1] == "":
+        vals.pop()
+    return " | ".join(vals).strip(" |")
+
+
 def _rows_to_numbered_lines(rows) -> list[tuple[int, str]]:
-    """二维单元格 → [(row_number, 'a | b | c'), ...]，去行尾空单元格、跳过空行。"""
+    """二维单元格 → [(row_number, 'a | b | c')]，去行尾空单元格、跳过空行。"""
     out: list[tuple[int, str]] = []
     for row_number, cells in rows:
         vals = [("" if c is None else str(c)).strip() for c in cells]
@@ -28,6 +91,44 @@ def _rows_to_numbered_lines(rows) -> list[tuple[int, str]]:
         if line:
             out.append((row_number, line))
     return out
+
+
+def _cell_units_for_row(
+    sheet_name: str,
+    row_number: int,
+    cells: tuple[Any, ...],
+    *,
+    source_kind: str,
+    parser: dict[str, str],
+    parent_key: str,
+    formula_cells: tuple[Any, ...] = (),
+    ordinal_start: int = 0,
+) -> list[dict]:
+    units: list[dict] = []
+    for column, value in enumerate(cells, start=1):
+        formula_value = formula_cells[column - 1] if column <= len(formula_cells) else None
+        formula = formula_value if isinstance(formula_value, str) and formula_value.startswith("=") else None
+        if value is None and formula is None:
+            continue
+        cell_name = f"{excel_column_name(column)}{row_number}"
+        unit = build_parser_unit(
+            source_kind=source_kind,
+            unit_kind="cell",
+            ordinal=ordinal_start + len(units),
+            unit_key=f"{parent_key}:cell:{cell_name}",
+            parser=parser,
+            source={
+                "sheet": {"name": sheet_name},
+                "row": {"start": row_number, "end": row_number},
+                "column": {"start": column, "end": column},
+                "cell": {"start": cell_name, "end": cell_name},
+            },
+            parent_key=parent_key,
+        )
+        unit["value"] = value
+        unit["formula"] = formula
+        units.append(unit)
+    return units
 
 
 def _cell_units(
@@ -95,43 +196,85 @@ def _seg(
     }
 
 
+def _validate_sheet_dimensions(worksheets) -> None:
+    for worksheet in worksheets:
+        max_row = worksheet.max_row or 0
+        max_column = worksheet.max_column or 0
+        if max_row > settings.xlsx_max_rows:
+            raise XlsxLimitError("XLSX worksheet exceeds the row limit")
+        if max_row and max_column and max_row * max_column > settings.xlsx_max_cells:
+            raise XlsxLimitError("XLSX worksheet exceeds the cell limit")
+
+
 def _read_xlsx(data: bytes | Path) -> list[dict]:
+    _validate_xlsx_archive(data)
     import openpyxl
 
     def open_source():
-        return data.open("rb") if isinstance(data, Path) else io.BytesIO(data)
+        return _open_binary_source(data)
 
     with ExitStack() as stack:
         source = stack.enter_context(open_source())
         formula_source = stack.enter_context(open_source())
-        wb = openpyxl.load_workbook(source, read_only=True, data_only=True)
+        wb = openpyxl.load_workbook(source, read_only=True, data_only=True, keep_links=False)
         stack.callback(wb.close)
         formula_wb = openpyxl.load_workbook(
-            formula_source, read_only=True, data_only=False
+            formula_source, read_only=True, data_only=False, keep_links=False
         )
         stack.callback(formula_wb.close)
+        if len(wb.worksheets) > settings.xlsx_max_sheets:
+            raise XlsxLimitError("XLSX workbook exceeds the sheet limit")
+        if len(formula_wb.worksheets) > settings.xlsx_max_sheets:
+            raise XlsxLimitError("XLSX workbook exceeds the sheet limit")
+        _validate_sheet_dimensions(wb.worksheets)
+        _validate_sheet_dimensions(formula_wb.worksheets)
+
         segs: list[dict] = []
         parser = parser_provenance("openpyxl", "v1", {"data_only": True})
+        total_rows = 0
+        total_cells = 0
+        total_text_chars = 0
         for ordinal, (ws, formula_ws) in enumerate(zip(wb.worksheets, formula_wb.worksheets, strict=True)):
-            data_rows = list(ws.iter_rows(values_only=True))
-            formula_rows = list(formula_ws.iter_rows(values_only=True))
-            rows = _rows_to_numbered_lines(enumerate(data_rows, start=1))
-            if rows:
+            numbered_rows: list[tuple[int, str]] = []
+            structured_units: list[dict] = []
+            for row_number, (data_cells, formula_cells) in enumerate(
+                zip(ws.iter_rows(values_only=True), formula_ws.iter_rows(values_only=True), strict=True),
+                start=1,
+            ):
+                total_rows += 1
+                if total_rows > settings.xlsx_max_rows:
+                    raise XlsxLimitError("XLSX workbook exceeds the row limit")
+                total_cells += max(len(data_cells), len(formula_cells))
+                if total_cells > settings.xlsx_max_cells:
+                    raise XlsxLimitError("XLSX workbook exceeds the cell limit")
+                for value in data_cells:
+                    total_text_chars = _check_cell_text(value, total_text_chars)
+                for value in formula_cells:
+                    total_text_chars = _check_cell_text(value, total_text_chars)
+                line = _row_to_numbered_line(data_cells)
+                if line:
+                    numbered_rows.append((row_number, line))
+                structured_units.extend(
+                    _cell_units_for_row(
+                        ws.title,
+                        row_number,
+                        data_cells,
+                        source_kind="xlsx",
+                        parser=parser,
+                        parent_key=f"xlsx:sheet:{ordinal}",
+                        formula_cells=formula_cells,
+                        ordinal_start=len(structured_units),
+                    )
+                )
+            if numbered_rows:
                 segs.append(
                     _seg(
                         ws.title,
-                        rows,
+                        numbered_rows,
                         ordinal=ordinal,
                         source_kind="xlsx",
                         parser=parser,
-                        structured_units=_cell_units(
-                            ws.title,
-                            data_rows,
-                            source_kind="xlsx",
-                            parser=parser,
-                            parent_key=f"xlsx:sheet:{ordinal}",
-                            formula_rows=formula_rows,
-                        ),
+                        structured_units=structured_units,
                     )
                 )
         return segs

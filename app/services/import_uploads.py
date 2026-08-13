@@ -43,7 +43,7 @@ class ImportUploadError(ValueError):
 
 def import_configuration(config: Settings = settings) -> dict:
     return {
-        "max_file_bytes": config.max_import_file_bytes,
+        "max_file_bytes": config.import_staging_max_file_bytes,
         "chunk_bytes": config.import_upload_chunk_bytes,
         "max_files_per_selection": config.import_selection_max_files,
         "upload_concurrency": config.import_upload_file_concurrency,
@@ -115,10 +115,10 @@ def _validate_payload(payload: ImportSessionCreate, config: Settings) -> str | N
             f"unsupported file type: {suffix or '(none)'}",
             status_code=415,
         )
-    if payload.size_bytes > config.max_import_file_bytes:
+    if payload.size_bytes > config.import_staging_max_file_bytes:
         raise ImportUploadError(
             "file_too_large",
-            f"file exceeds {config.max_import_file_bytes} bytes",
+            f"file exceeds {config.import_staging_max_file_bytes} bytes",
             status_code=413,
         )
     return normalize_relative_path(payload.relative_path, payload.file_name)

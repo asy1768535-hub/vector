@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -34,6 +35,10 @@ def _library(**overrides):
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def test_background_import_parser_remains_synchronous():
+    assert inspect.iscoroutinefunction(parse_import_file) is False
 
 
 class _Scalars:

@@ -5,6 +5,7 @@ import csv
 import hashlib
 import re
 import io
+import asyncio
 import json
 import logging
 import uuid
@@ -1233,10 +1234,10 @@ async def import_file(
     elif suffix == ".xlsx":
         # 电子表格：每个工作表按表格感知切分入库
         try:
-            from app.services.xlsx_extract import extract_xlsx_segments
+            from app.services import xlsx_extract
             from app.services.splitter import build_structured_source_from_segments
 
-            segs = extract_xlsx_segments(content)
+            segs = await asyncio.to_thread(xlsx_extract.extract_xlsx_segments, content)
             source = build_structured_source_from_segments(
                 segs, chunk_size=lib.chunk_size, chunk_overlap=lib.chunk_overlap
             )
@@ -1251,8 +1252,13 @@ async def import_file(
             })
         except HTTPException:
             raise
-        except Exception as e:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid spreadsheet: {str(e)}")
+        except xlsx_extract.XlsxLimitError:
+            raise HTTPException(
+                status.HTTP_413_CONTENT_TOO_LARGE,
+                "spreadsheet exceeds parser safety limits",
+            ) from None
+        except Exception:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid spreadsheet format") from None
 
     else:
         # 纯文本类（.txt/.md/.markdown）——已被白名单限定，不会再误吞未知二进制

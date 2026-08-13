@@ -381,9 +381,15 @@ def test_import_xlsx_passes_table_aware_chunks(mock_ingest, client):
 
     files = {"file": ("台账.xlsx", buf.getvalue(),
                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
-    response = client.post("/libraries/testlib/import-file", files=files)
+    from app.services import xlsx_extract
+
+    with patch("app.api.documents.asyncio.to_thread", new_callable=AsyncMock) as offload:
+        offload.side_effect = lambda func, *args, **kwargs: func(*args, **kwargs)
+        response = client.post("/libraries/testlib/import-file", files=files)
 
     assert response.status_code == status.HTTP_201_CREATED
+    offload.assert_awaited_once()
+    assert offload.await_args.args[0] is xlsx_extract.extract_xlsx_segments
     mock_ingest.assert_called_once()
     kwargs = mock_ingest.call_args[1]
     chunks = kwargs.get("chunks")
@@ -398,6 +404,34 @@ def test_import_xlsx_passes_table_aware_chunks(mock_ingest, client):
     assert "【章节】技术选型" in joined                     # 工作表名作上下文（caption==heading 不重复）
     assert "类别 | 方案" in joined                          # 首行作表头
     assert "数据库 | MySQL" in joined and "缓存 | Redis" in joined
+
+
+@patch("app.services.xlsx_extract.extract_xlsx_segments")
+def test_import_xlsx_limit_returns_413_without_echoing_parser_details(mock_extract, client):
+    from app.services.xlsx_extract import XlsxLimitError
+
+    mock_extract.side_effect = XlsxLimitError("secret-cell-content")
+    response = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("limited.xlsx", b"fixture", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+
+    assert response.status_code == status.HTTP_413_CONTENT_TOO_LARGE
+    assert response.json()["detail"] == "spreadsheet exceeds parser safety limits"
+    assert "secret-cell-content" not in response.text
+
+
+@patch("app.services.xlsx_extract.extract_xlsx_segments")
+def test_import_xlsx_parse_error_is_clear_without_echoing_exception(mock_extract, client):
+    mock_extract.side_effect = ValueError("secret-cell-content")
+    response = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("invalid.xlsx", b"fixture", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert response.json()["detail"] == "Invalid spreadsheet format"
+    assert "secret-cell-content" not in response.text
 
 @patch("app.services.ingest.ingest_text", new_callable=AsyncMock)
 def test_import_json_file_list(mock_ingest, client):
