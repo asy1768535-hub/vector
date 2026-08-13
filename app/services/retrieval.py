@@ -571,6 +571,11 @@ async def run_retrieval(
         rr_score = rerank_scores.get(i)
         # final_score：有 rerank_score 用之（rerank 成功命中），否则 base（dense=vector / hybrid=rrf）
         final_score = rr_score if rr_score is not None else base_score
+        if (
+            rerank_observation.effective == "success"
+            and (rr_score is None or rr_score < settings.rerank_min_score)
+        ):
+            continue
         # threshold（Dify score_threshold，0~1 相似度语义）只在分数可比时套用：
         # dense 的 vector/rerank 分、hybrid 的 rerank 分都是 0~1；hybrid 未重排时 final=rrf（量级~1/k，
         # 与 0~1 阈值不可比）→ 跳过 threshold，避免一刀切清空（任务 §8：不破坏 threshold 语义）。
