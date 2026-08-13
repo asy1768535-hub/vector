@@ -64,9 +64,34 @@ class _PgBind:
         name = "postgresql"
 
 
+class _SqliteBind:
+    class dialect:
+        name = "sqlite"
+
+
+class _UnknownBind:
+    class dialect:
+        name = "mysql"
+
+
+class _SqliteDb(_Db):
+    def get_bind(self):
+        return _SqliteBind()
+
+
 class _PgDb(_Db):
     def get_bind(self):
         return _PgBind()
+
+
+class _UnknownDb(_Db):
+    def get_bind(self):
+        return _UnknownBind()
+
+
+class _NoDialectDb(_Db):
+    def get_bind(self):
+        raise AttributeError("test fake has no dialect")
 
 
 def _config(tmp_path: Path, **overrides) -> Settings:
@@ -88,6 +113,8 @@ def _job(key: str, *, size: int, status: str = "uploading"):
         staging_key=key,
         size_bytes=size,
         status=status,
+        attempt_count=0,
+        current_stage="uploading",
         finished_at=None,
         updated_at=None,
         library_id=LIBRARY_ID,
@@ -96,7 +123,7 @@ def _job(key: str, *, size: int, status: str = "uploading"):
 
 def test_quota_sums_only_active_uploading_and_queued(monkeypatch):
     monkeypatch.setattr(import_uploads, "STAGING_LIBRARY_MAX_BYTES", 100)
-    db = _Db(_Result(scalar=90))
+    db = _SqliteDb(_Result(scalar=90))
 
     asyncio.run(
         import_uploads._check_staging_quota(
@@ -116,7 +143,7 @@ def test_quota_sums_only_active_uploading_and_queued(monkeypatch):
     with pytest.raises(import_uploads.ImportUploadError) as exc_info:
         asyncio.run(
             import_uploads._check_staging_quota(
-                _Db(_Result(scalar=90)),
+                _SqliteDb(_Result(scalar=90)),
                 library_id=LIBRARY_ID,
                 requested_bytes=11,
             )
@@ -127,7 +154,7 @@ def test_quota_sums_only_active_uploading_and_queued(monkeypatch):
 
 def test_quota_rejection_happens_before_job_is_added(monkeypatch):
     monkeypatch.setattr(import_uploads, "STAGING_LIBRARY_MAX_BYTES", 10)
-    db = _Db(_Result(rows=()), _Result(scalar=10))
+    db = _SqliteDb(_Result(rows=()), _Result(scalar=10))
     payload = SimpleNamespace(
         size_bytes=1,
         file_name="new.txt",
@@ -172,6 +199,34 @@ def test_postgres_quota_uses_transaction_advisory_lock(monkeypatch):
     assert db.statements[0][1]["lock_key"] == import_uploads._staging_advisory_lock_key(LIBRARY_ID)
 
 
+def test_missing_dialect_still_emits_advisory_sql_for_fakes(monkeypatch):
+    monkeypatch.setattr(import_uploads, "STAGING_LIBRARY_MAX_BYTES", 100)
+    db = _NoDialectDb(_Result(scalar=0), _Result(scalar=0))
+
+    asyncio.run(
+        import_uploads._check_staging_quota(
+            db,
+            library_id=LIBRARY_ID,
+            requested_bytes=1,
+        )
+    )
+    assert "pg_advisory_xact_lock" in str(db.statements[0][0]).lower()
+
+
+def test_unknown_production_dialect_fails_closed(monkeypatch):
+    monkeypatch.setattr(import_uploads, "STAGING_LIBRARY_MAX_BYTES", 100)
+    with pytest.raises(import_uploads.ImportUploadError) as exc_info:
+        asyncio.run(
+            import_uploads._check_staging_quota(
+                _UnknownDb(),
+                library_id=LIBRARY_ID,
+                requested_bytes=1,
+            )
+        )
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.code == "staging_quota_unavailable"
+
+
 def test_cleanup_uses_bounded_queries_and_only_locks_uploading(tmp_path):
     config = _config(tmp_path)
     now = import_staging_cleanup.datetime.now(import_staging_cleanup.timezone.utc)
@@ -213,6 +268,36 @@ def test_cleanup_rejects_batch_over_256_without_query(tmp_path):
             )
         )
     assert db.statements == []
+
+
+def test_failed_staging_survives_retention_and_can_retry(tmp_path):
+    config = _config(tmp_path)
+    failed_key = _key(3)
+    failed_path = tmp_path / failed_key
+    failed_path.write_bytes(b"abc")
+    failed_job = _job(failed_key, size=3, status="failed")
+    failed_job.finished_at = import_staging_cleanup.datetime.now(
+        import_staging_cleanup.timezone.utc
+    ) - import_staging_cleanup.timedelta(seconds=120)
+
+    db = _SqliteDb(_Result(rows=[]), _Result(rows=[]))
+    asyncio.run(
+        import_staging_cleanup.cleanup_staging(
+            db,
+            config=config,
+            now=import_staging_cleanup.datetime.now(
+                import_staging_cleanup.timezone.utc
+            ),
+        )
+    )
+    terminal_sql = str(db.statements[1][0].compile()).lower()
+    assert "failed" not in terminal_sql
+    assert failed_path.exists()
+
+    asyncio.run(import_uploads.retry_job(_Db(), job=failed_job, config=config))
+    assert failed_job.status == "queued"
+    assert failed_job.current_stage == "queued"
+    assert failed_path.exists()
 
 
 def test_worker_cleanup_is_monotonic_throttled(monkeypatch):

@@ -154,10 +154,18 @@ async def _lock_staging_quota(
     *,
     library_id: uuid.UUID,
 ) -> None:
-    # SQLite/fake sessions used by DB-free tests do not have PostgreSQL's
-    # advisory-lock function. Production uses the real PostgreSQL bind.
-    if _database_dialect_name(db) != "postgresql":
+    dialect = _database_dialect_name(db)
+    # SQLite is only a DB-free/unit-test escape hatch. A missing dialect is
+    # retained for lightweight fakes, which can still assert the SQL call;
+    # every identified non-PostgreSQL deployment fails closed.
+    if dialect == "sqlite":
         return
+    if dialect not in {None, "postgresql"}:
+        raise ImportUploadError(
+            "staging_quota_unavailable",
+            "import staging quota requires PostgreSQL",
+            status_code=503,
+        )
     await db.execute(
         text("SELECT pg_advisory_xact_lock(:lock_key)"),
         {"lock_key": _staging_advisory_lock_key(library_id)},

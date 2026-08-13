@@ -12,7 +12,8 @@ from app.services.import_uploads import ImportUploadError, staging_path
 
 
 MAX_CLEANUP_BATCH = 256
-_TERMINAL_STATUSES = ("succeeded", "failed", "cancelled", "superseded")
+# Failed imports remain retryable while their original staging file exists.
+_TERMINAL_STATUSES = ("succeeded", "cancelled", "superseded")
 
 
 def _positive_limit(value: object, name: str, *, maximum: int | None = None) -> int:
