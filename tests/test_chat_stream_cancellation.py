@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
 import app.api.chat as chat_api
 from app.models.user import User
@@ -205,29 +206,11 @@ async def test_stream_chat_error_persists_failed_and_emits_error():
     assert save_assistant.await_args.kwargs["error_message"] == "provider detail"
 
 
-async def test_recent_turns_excludes_unpaired_cancelled_user():
-    paired_user_id = uuid.uuid4()
-    cancelled_user_id = uuid.uuid4()
-    rows = [
-        SimpleNamespace(
-            id=paired_user_id, role="user", content="keep", parent_message_id=None,
-            status=None,
-        ),
-        SimpleNamespace(
-            id=cancelled_user_id, role="user", content="drop", parent_message_id=None,
-            status=None,
-        ),
-        SimpleNamespace(
-            id=uuid.uuid4(), role="assistant", content="answer", parent_message_id=paired_user_id,
-            status="success",
-        ),
-        SimpleNamespace(
-            id=uuid.uuid4(), role="assistant", content="", parent_message_id=cancelled_user_id,
-            status="failed",
-        ),
-    ]
+async def test_recent_turns_flattens_database_pairs_chronologically():
+    paired_user = SimpleNamespace(id=uuid.uuid4(), content="keep")
+    paired_assistant = SimpleNamespace(content="answer")
     result = MagicMock()
-    result.scalars.return_value.all.return_value = rows
+    result.all.return_value = [(paired_user, paired_assistant)]
     db = AsyncMock()
     db.execute = AsyncMock(return_value=result)
 
@@ -237,3 +220,101 @@ async def test_recent_turns_excludes_unpaired_cancelled_user():
         {"role": "user", "content": "keep"},
         {"role": "assistant", "content": "answer"},
     ]
+
+
+async def test_recent_turns_limits_recent_valid_pairs_around_orphans_and_failures():
+    conversation_id = uuid.uuid4()
+    other_conversation_id = uuid.uuid4()
+    messages = []
+    valid_pairs = []
+
+    def add_message(*, role, content, conversation=conversation_id, status=None, parent=None):
+        message = SimpleNamespace(
+            id=uuid.uuid4(), conversation_id=conversation, role=role, content=content,
+            status=status, parent_message_id=parent, created_at=len(messages),
+        )
+        messages.append(message)
+        return message
+
+    for index in range(12):
+        user = add_message(role="user", content=f"question-{index}")
+        orphan = add_message(role="user", content=f"orphan-{index}")
+        add_message(
+            role="assistant", content="failed answer", status="failed", parent=orphan.id,
+        )
+        add_message(
+            role="assistant", content=" \t", status="success", parent=user.id,
+        )
+        failed_assistant = messages[-2]
+        add_message(
+            role="assistant", content="wrong parent", status="success", parent=failed_assistant.id,
+        )
+        answer = add_message(
+            role="assistant", content=f"answer-{index}", status="success", parent=user.id,
+        )
+        valid_pairs.append((user, answer))
+
+    other_user = add_message(
+        role="user", content="other conversation", conversation=other_conversation_id,
+    )
+    add_message(
+        role="assistant", content="cross-conversation", status="success", parent=other_user.id,
+    )
+    for index in range(30):
+        orphan = add_message(role="user", content=f"late-orphan-{index}")
+        add_message(
+            role="assistant", content="late failure", status="failed", parent=orphan.id,
+        )
+
+    class _Result:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def all(self):
+            return self.rows
+
+    class _FakeDb:
+        statement = None
+
+        async def execute(self, statement):
+            self.statement = statement
+            pairs = [
+                (user, assistant)
+                for user in messages
+                if user.conversation_id == conversation_id and user.role == "user"
+                for assistant in messages
+                if (
+                    assistant.conversation_id == conversation_id
+                    and assistant.role == "assistant"
+                    and assistant.status == "success"
+                    and (assistant.content or "").strip()
+                    and assistant.parent_message_id == user.id
+                )
+            ]
+            pairs.sort(key=lambda pair: pair[0].created_at, reverse=True)
+            return _Result(pairs[:3])
+
+    db = _FakeDb()
+
+    history = await recent_turns(db, conversation_id, max_turns=3)
+
+    assert history == [
+        {"role": "user", "content": "question-9"},
+        {"role": "assistant", "content": "answer-9"},
+        {"role": "user", "content": "question-10"},
+        {"role": "assistant", "content": "answer-10"},
+        {"role": "user", "content": "question-11"},
+        {"role": "assistant", "content": "answer-11"},
+    ]
+    assert [pair[0].content for pair in valid_pairs[-3:]] == [
+        "question-9", "question-10", "question-11",
+    ]
+    statement = db.statement
+    compiled = statement.compile(
+        dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True},
+    )
+    sql = compiled.string.lower()
+    assert "limit" in sql
+    assert "status" in sql and "success" in sql
+    assert "trim" in sql
+    assert "parent_message_id" in sql

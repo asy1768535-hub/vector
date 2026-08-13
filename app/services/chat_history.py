@@ -6,8 +6,9 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 from sqlalchemy.sql import func
 
 from app.models.chat_history import ChatConversation, ChatMessage, ChatMessageSource
@@ -78,33 +79,34 @@ async def recent_turns(
     """
     if max_turns <= 0:
         return []
+    assistant = aliased(ChatMessage)
     stmt = (
-        select(ChatMessage)
-        .where(ChatMessage.conversation_id == conversation_id)
-        .order_by(ChatMessage.created_at.asc())
-    )
-    rows = list((await db.execute(stmt)).scalars().all())
-    assistants_by_parent = {
-        m.parent_message_id: m
-        for m in rows
-        if (
-            m.role == "assistant"
-            and m.status == "success"
-            and m.parent_message_id is not None
-            and (m.content or "").strip()
+        select(ChatMessage, assistant)
+        .join(
+            assistant,
+            and_(
+                assistant.parent_message_id == ChatMessage.id,
+                assistant.conversation_id == conversation_id,
+                assistant.role == "assistant",
+                assistant.status == "success",
+                func.trim(assistant.content) != "",
+            ),
         )
-    }
-    turns: list[list[dict]] = []
-    for m in rows:
-        if m.role != "user":
-            continue
-        assistant = assistants_by_parent.get(m.id)
-        if assistant is not None:
-            turns.append([
-                {"role": "user", "content": m.content},
-                {"role": "assistant", "content": assistant.content},
-            ])
-    return [message for turn in turns[-max_turns:] for message in turn]
+        .where(
+            ChatMessage.conversation_id == conversation_id,
+            ChatMessage.role == "user",
+        )
+        .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
+        .limit(max_turns)
+    )
+    pairs = list((await db.execute(stmt)).all())
+    out: list[dict] = []
+    for user, assistant in reversed(pairs):
+        out.extend([
+            {"role": "user", "content": user.content},
+            {"role": "assistant", "content": assistant.content},
+        ])
+    return out
 
 
 async def save_user_message(db: AsyncSession, conversation_id: uuid.UUID, content: str) -> ChatMessage:
