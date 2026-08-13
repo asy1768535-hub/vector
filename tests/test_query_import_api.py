@@ -6,10 +6,12 @@ import hashlib
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 from fastapi import status
+from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.exc import IntegrityError
 
 from app.main import app
@@ -1475,16 +1477,51 @@ def test_get_document_full_source_returns_normalized_text():
         created_at=now,
         updated_at=now,
     )
+    projection_rows = iter([
+        SimpleNamespace(
+            revision=source.revision,
+            file_name=source.file_name,
+            file_type=source.file_type,
+            created_at=source.created_at,
+            updated_at=source.updated_at,
+            total_chars=len(source_text),
+            text_window=source_text,
+        ),
+        SimpleNamespace(
+            revision=source.revision,
+            file_name=source.file_name,
+            file_type=source.file_type,
+            created_at=source.created_at,
+            updated_at=source.updated_at,
+            total_chars=len(source_text),
+            text_window="\n第二行 ",
+        ),
+        SimpleNamespace(
+            revision=source.revision,
+            file_name=source.file_name,
+            file_type=source.file_type,
+            created_at=source.created_at,
+            updated_at=source.updated_at,
+            total_chars=len(source_text),
+            text_window="",
+        ),
+    ])
+    source_statements = []
     db = AsyncMock()
 
     async def _get(model, ident):
         if model is Document:
             return doc
-        if model is DocumentSource:
-            return source
         return None
 
+    async def _execute(stmt):
+        source_statements.append(stmt)
+        result = MagicMock()
+        result.one_or_none.return_value = next(projection_rows)
+        return result
+
     db.get = _get
+    db.execute = _execute
     try:
         with patch("app.deps.load_active_library", new_callable=AsyncMock) as ml:
             ml.return_value = mock_library
@@ -1525,6 +1562,19 @@ def test_get_document_full_source_returns_normalized_text():
                 f"/libraries/testlib/documents/{doc.id}/source/full?limit=100001"
             )
             assert too_large.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+            assert len(source_statements) == 3
+            for dialect in (postgresql.dialect(), sqlite.dialect()):
+                for statement in source_statements:
+                    compiled = statement.compile(
+                        dialect=dialect, compile_kwargs={"literal_binds": True},
+                    )
+                    sql = compiled.string.lower()
+                    assert "length(" in sql
+                    assert "substr(" in sql
+                    assert all(
+                        getattr(column, "name", None) != "normalized_text"
+                        for column in statement.selected_columns
+                    )
     finally:
         app.dependency_overrides.clear()
 
@@ -1544,11 +1594,16 @@ def test_get_document_full_source_without_snapshot_returns_clear_404():
     async def _get(model, ident):
         if model is Document:
             return doc
-        if model is DocumentSource:
-            return None
         return None
 
     db.get = _get
+
+    async def _execute(_statement):
+        result = MagicMock()
+        result.one_or_none.return_value = None
+        return result
+
+    db.execute = _execute
     try:
         with patch("app.deps.load_active_library", new_callable=AsyncMock) as ml:
             ml.return_value = mock_library

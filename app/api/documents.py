@@ -774,27 +774,39 @@ async def get_document_full_source(
     if doc is None or doc.library_id != lib.id or doc.deleted_at is not None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "document not found")
 
-    source = await db.get(DocumentSource, document_id)
-    if source is None:
+    source_stmt = select(
+        DocumentSource.revision,
+        DocumentSource.file_name,
+        DocumentSource.file_type,
+        DocumentSource.created_at,
+        DocumentSource.updated_at,
+        func.length(DocumentSource.normalized_text).label("total_chars"),
+        func.substr(
+            DocumentSource.normalized_text,
+            offset + 1,
+            limit,
+        ).label("text_window"),
+    ).where(DocumentSource.document_id == doc.id).limit(1)
+    source_row = (await db.execute(source_stmt)).one_or_none()
+    if source_row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "该文档需重新导入后才能阅读原文")
 
-    text = source.normalized_text or ""
-    total_chars = len(text)
+    total_chars = int(source_row.total_chars or 0)
     window_end = min(offset + limit, total_chars)
-    window = text if offset == 0 and window_end == total_chars else text[offset:window_end]
+    window = source_row.text_window or ""
     return DocumentFullSourceResponse(
         document_id=doc.id,
-        document_title=doc.title or source.file_name,
-        file_name=source.file_name,
-        file_type=source.file_type,
-        revision=source.revision,
+        document_title=doc.title or source_row.file_name,
+        file_name=source_row.file_name,
+        file_type=source_row.file_type,
+        revision=source_row.revision,
         normalized_text=window,
         text_length=total_chars,
         total_chars=total_chars,
         offset=offset,
         truncated=offset != 0 or window_end < total_chars,
-        created_at=source.created_at,
-        updated_at=source.updated_at,
+        created_at=source_row.created_at,
+        updated_at=source_row.updated_at,
     )
 
 
