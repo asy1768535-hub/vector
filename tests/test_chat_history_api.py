@@ -130,14 +130,19 @@ def test_history_messages_preserve_source_display_score_semantics():
     )
     _override(AsyncMock())
     with patch.object(chat_api.chat_history, "get_conversation", new=AsyncMock(return_value=conv)), \
-         patch.object(chat_api.chat_history, "get_conversation_messages", new=AsyncMock(return_value=[(message, [source])])):
-        response = TestClient(app).get(f"/chat/conversations/{conv.id}/messages")
+         patch.object(chat_api.chat_history, "get_conversation_messages", new=AsyncMock(return_value=[(message, [source])])) as get_messages:
+        before = uuid.uuid4()
+        response = TestClient(app).get(
+            f"/chat/conversations/{conv.id}/messages?limit=7&before={before}"
+        )
 
     assert response.status_code == 200
     restored = response.json()[0]["sources"][0]
     assert restored["score"] == 0.0164
     assert restored["score_type"] == "vector"
     assert restored["display_score"] == 0.724
+    assert get_messages.await_args.kwargs["limit"] == 7
+    assert get_messages.await_args.kwargs["before"] == before
 
 
 def test_get_other_users_conversation_messages_403():

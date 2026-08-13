@@ -1465,12 +1465,13 @@ def test_get_document_full_source_returns_normalized_text():
         status="ready",
     )
     now = datetime.now(timezone.utc)
+    source_text = "第一行\n第二行 needle"
     source = DocumentSource(
         document_id=doc.id,
         revision=3,
         file_name="full-source.txt",
         file_type="txt",
-        normalized_text="第一行\n第二行 needle",
+        normalized_text=source_text,
         created_at=now,
         updated_at=now,
     )
@@ -1495,8 +1496,35 @@ def test_get_document_full_source_returns_normalized_text():
             assert data["file_name"] == "full-source.txt"
             assert data["file_type"] == "txt"
             assert data["revision"] == 3
-            assert data["normalized_text"] == "第一行\n第二行 needle"
-            assert data["text_length"] == len("第一行\n第二行 needle")
+            assert data["normalized_text"] == source_text
+            assert data["text_length"] == len(source_text)
+            assert data["total_chars"] == len(source_text)
+            assert data["offset"] == 0
+            assert data["truncated"] is False
+
+            window = _client_with_db(db).get(
+                f"/libraries/testlib/documents/{doc.id}/source/full?offset=3&limit=5"
+            )
+            assert window.status_code == status.HTTP_200_OK
+            window_data = window.json()
+            assert window_data["normalized_text"] == "\n第二行 "
+            assert window_data["text_length"] == len(source_text)
+            assert window_data["total_chars"] == len(source_text)
+            assert window_data["offset"] == 3
+            assert window_data["truncated"] is True
+
+            end = _client_with_db(db).get(
+                f"/libraries/testlib/documents/{doc.id}/source/full"
+                f"?offset={len(source_text)}&limit=5"
+            )
+            assert end.status_code == status.HTTP_200_OK
+            assert end.json()["normalized_text"] == ""
+            assert end.json()["truncated"] is True
+
+            too_large = _client_with_db(db).get(
+                f"/libraries/testlib/documents/{doc.id}/source/full?limit=100001"
+            )
+            assert too_large.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
     finally:
         app.dependency_overrides.clear()
 

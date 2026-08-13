@@ -14,7 +14,7 @@ from app.models.user import User
 from app.schemas.chat import ChatMessageRequest
 from app.schemas.dify import DifyRecord
 from app.services.chat_answer import ChatError
-from app.services.chat_history import recent_turns
+from app.services.chat_history import get_conversation_messages, recent_turns
 
 
 USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
@@ -204,6 +204,95 @@ async def test_stream_chat_error_persists_failed_and_emits_error():
     save_assistant.assert_awaited_once()
     assert save_assistant.await_args.kwargs["status"] == "failed"
     assert save_assistant.await_args.kwargs["error_message"] == "provider detail"
+
+
+async def test_stream_output_limit_closes_provider_and_persists_fixed_failure():
+    class _ClosableProvider:
+        def __init__(self):
+            self.closed = False
+            self._yielded = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._yielded:
+                raise StopAsyncIteration
+            self._yielded = True
+            return "x" * (chat_api.chat_answer.CHAT_OUTPUT_MAX_CHARS + 1)
+
+        async def aclose(self):
+            self.closed = True
+
+    provider = _ClosableProvider()
+
+    def stream_fn(*args, **kwargs):
+        return provider
+
+    stack, response, save_assistant, _ = await _open_stream(stream_fn)
+    try:
+        chunks = await _consume(response)
+    finally:
+        stack.close()
+
+    assert provider.closed is True
+    assert any(chat_api._CHAT_OUTPUT_LIMIT_EXCEEDED in chunk for chunk in chunks)
+    assert not any('"type": "done"' in chunk for chunk in chunks)
+    save_assistant.assert_awaited_once()
+    assert save_assistant.await_args.kwargs["content"] == ""
+    assert save_assistant.await_args.kwargs["status"] == "failed"
+    assert save_assistant.await_args.kwargs["error_message"] == chat_api._CHAT_OUTPUT_LIMIT_EXCEEDED
+
+
+async def test_conversation_messages_query_has_sql_limit():
+    class _Result:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return []
+
+    class _Db:
+        def __init__(self):
+            self.statement = None
+
+        async def execute(self, statement):
+            self.statement = statement
+            return _Result()
+
+    db = _Db()
+    assert await get_conversation_messages(db, uuid.uuid4(), limit=700) == []
+    sql = db.statement.compile(
+        dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True},
+    ).string.lower()
+    assert "limit 500" in sql
+
+
+async def test_conversation_messages_before_cursor_is_in_sql():
+    class _Result:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return []
+
+    class _Db:
+        def __init__(self):
+            self.statement = None
+
+        async def execute(self, statement):
+            self.statement = statement
+            return _Result()
+
+    db = _Db()
+    cursor = uuid.uuid4()
+    assert await get_conversation_messages(db, uuid.uuid4(), limit=2, before=cursor) == []
+    sql = db.statement.compile(
+        dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True},
+    ).string.lower()
+    assert "created_at" in sql
+    assert "limit 2" in sql
+    assert str(cursor) in sql
 
 
 async def test_recent_turns_flattens_database_pairs_chronologically():

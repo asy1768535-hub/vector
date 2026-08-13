@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import and_, select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql import func
@@ -15,6 +15,8 @@ from app.models.chat_history import ChatConversation, ChatMessage, ChatMessageSo
 from app.schemas.chat import ChatGraphEvidence, ChatLogRow, ChatSource
 
 _TITLE_MAX = 28
+CONVERSATION_MESSAGES_DEFAULT_LIMIT = 200
+CONVERSATION_MESSAGES_MAX_LIMIT = 500
 
 
 def title_from_query(query: str) -> str:
@@ -166,14 +168,36 @@ async def _sources_by_message(db: AsyncSession, message_ids: list[uuid.UUID]) ->
 
 
 async def get_conversation_messages(
-    db: AsyncSession, conversation_id: uuid.UUID,
+    db: AsyncSession,
+    conversation_id: uuid.UUID,
+    *,
+    limit: int = CONVERSATION_MESSAGES_DEFAULT_LIMIT,
+    before: uuid.UUID | None = None,
 ) -> list[tuple[ChatMessage, list[ChatMessageSource]]]:
-    """会话全部消息（恢复历史用），按时间升序；assistant 带上其 sources。"""
-    msgs = list((await db.execute(
-        select(ChatMessage)
-        .where(ChatMessage.conversation_id == conversation_id)
-        .order_by(ChatMessage.created_at.asc())
-    )).scalars().all())
+    """返回最近的有界消息，恢复顺序仍为时间升序；assistant 带上其 sources。"""
+    if limit <= 0:
+        return []
+    stmt = select(ChatMessage).where(
+        ChatMessage.conversation_id == conversation_id,
+    )
+    if before is not None:
+        cursor_created_at = select(ChatMessage.created_at).where(
+            ChatMessage.conversation_id == conversation_id,
+            ChatMessage.id == before,
+        ).scalar_subquery()
+        stmt = stmt.where(or_(
+            ChatMessage.created_at < cursor_created_at,
+            and_(
+                ChatMessage.created_at == cursor_created_at,
+                ChatMessage.id < before,
+            ),
+        ))
+    stmt = stmt.order_by(
+        ChatMessage.created_at.desc(),
+        ChatMessage.id.desc(),
+    ).limit(min(limit, CONVERSATION_MESSAGES_MAX_LIMIT))
+    msgs = list((await db.execute(stmt)).scalars().all())
+    msgs.reverse()
     src_map = await _sources_by_message(db, [m.id for m in msgs])
     return [(m, src_map.get(m.id, [])) for m in msgs]
 

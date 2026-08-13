@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
@@ -53,6 +54,7 @@ from app.services.organization_authorization import (
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/chat", tags=["chat"])
 _CHAT_STREAM_CANCELLED = "chat_stream_cancelled"
+_CHAT_OUTPUT_LIMIT_EXCEEDED = chat_answer.CHAT_OUTPUT_LIMIT_EXCEEDED
 
 
 @router.get("/libraries", response_model=list[ChatLibraryRead])
@@ -327,8 +329,25 @@ async def chat_stream(
     async def _gen():
         t0 = time.monotonic()
         acc = []
+        answer_length = 0
         finalized = False
         persist_task = None
+        provider = None
+
+        async def close_provider() -> None:
+            nonlocal provider
+            current = provider
+            provider = None
+            close = getattr(current, "aclose", None)
+            if not callable(close):
+                return
+            try:
+                await close()
+            except asyncio.CancelledError:
+                provider = current
+                raise
+            except Exception:
+                log.error("chat stream provider close failed")
 
         async def persist_terminal(*args, **kwargs):
             nonlocal finalized, persist_task
@@ -350,16 +369,21 @@ async def chat_stream(
                 yield _sse({"type": "delta", "text": answer_text})
             else:
                 try:
-                    async for delta in chat_answer.stream_answer(
+                    provider = chat_answer.stream_answer(
                         query, answer_records,
                         base_url=settings.chat_base_url, model=settings.chat_model,
                         api_key=settings.chat_api_key, timeout=settings.chat_timeout_seconds,
                         temperature=settings.chat_temperature, max_context_chars=context_chars,
                         history=history,
-                    ):
+                    )
+                    async for delta in provider:
+                        answer_length += len(delta)
+                        if answer_length > chat_answer.CHAT_OUTPUT_MAX_CHARS:
+                            raise chat_answer.ChatError(_CHAT_OUTPUT_LIMIT_EXCEEDED)
                         acc.append(delta)
                         yield _sse({"type": "delta", "text": delta})
                 except chat_answer.ChatError as exc:
+                    await close_provider()
                     await persist_terminal(
                         conv_id, parent_id=user_msg_id, content="".join(acc), rewritten=rewritten,
                         latency_ms=int((time.monotonic() - t0) * 1000), status_val="failed",
@@ -369,6 +393,8 @@ async def chat_stream(
                     finalized = True
                     yield _sse({"type": "error", "message": f"answer generation failed: {exc}"})
                     return
+                finally:
+                    await close_provider()
             await persist_terminal(
                 conv_id, parent_id=user_msg_id, content="".join(acc), rewritten=rewritten,
                 latency_ms=int((time.monotonic() - t0) * 1000), status_val="success",
@@ -379,6 +405,11 @@ async def chat_stream(
             finalized = True
             yield _sse({"type": "done"})
         except asyncio.CancelledError:
+            if provider is not None:
+                try:
+                    await close_provider()
+                except BaseException:
+                    log.error("chat stream provider close failed")
             if not finalized:
                 if persist_task is not None:
                     try:
@@ -430,11 +461,19 @@ async def list_conversations(
 @router.get("/conversations/{conversation_id}/messages", response_model=list[ChatHistoryMessage])
 async def conversation_messages(
     conversation_id: str,
+    limit: int = Query(
+        default=chat_history.CONVERSATION_MESSAGES_DEFAULT_LIMIT,
+        ge=1,
+        le=chat_history.CONVERSATION_MESSAGES_MAX_LIMIT,
+    ),
+    before: uuid.UUID | None = Query(default=None),
     user: User = Depends(current_active_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[ChatHistoryMessage]:
     conv = await _owned_conversation(db, user, conversation_id)
-    pairs = await chat_history.get_conversation_messages(db, conv.id)
+    pairs = await chat_history.get_conversation_messages(
+        db, conv.id, limit=limit, before=before,
+    )
     out: list[ChatHistoryMessage] = []
     for m, srcs in pairs:
         out.append(ChatHistoryMessage(

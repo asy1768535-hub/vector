@@ -101,6 +101,9 @@ class DocumentFullSourceResponse(BaseModel):
     revision: int
     normalized_text: str
     text_length: int
+    total_chars: int = 0
+    offset: int = 0
+    truncated: bool = False
     created_at: datetime
     updated_at: datetime
 

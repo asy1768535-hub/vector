@@ -65,6 +65,7 @@ from app.services.revision_files import (
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/libraries/{slug}", tags=["documents"])
 SOURCE_CONTEXT_CHARS = 3000
+SOURCE_FULL_MAX_CHARS = 100_000
 
 # #13：导入文件后缀白名单（小写）。不在表内 → 415。
 _SUPPORTED_IMPORT_SUFFIXES = {
@@ -764,6 +765,8 @@ async def get_document_source(
 @router.get("/documents/{document_id}/source/full", response_model=DocumentFullSourceResponse)
 async def get_document_full_source(
     document_id: uuid.UUID,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=SOURCE_FULL_MAX_CHARS, ge=1, le=SOURCE_FULL_MAX_CHARS),
     lib: Library = Depends(require_lib("read")),
     db: AsyncSession = Depends(get_db),
 ) -> DocumentFullSourceResponse:
@@ -776,14 +779,20 @@ async def get_document_full_source(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "该文档需重新导入后才能阅读原文")
 
     text = source.normalized_text or ""
+    total_chars = len(text)
+    window_end = min(offset + limit, total_chars)
+    window = text if offset == 0 and window_end == total_chars else text[offset:window_end]
     return DocumentFullSourceResponse(
         document_id=doc.id,
         document_title=doc.title or source.file_name,
         file_name=source.file_name,
         file_type=source.file_type,
         revision=source.revision,
-        normalized_text=text,
-        text_length=len(text),
+        normalized_text=window,
+        text_length=total_chars,
+        total_chars=total_chars,
+        offset=offset,
+        truncated=offset != 0 or window_end < total_chars,
         created_at=source.created_at,
         updated_at=source.updated_at,
     )
