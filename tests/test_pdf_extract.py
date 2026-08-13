@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import types
+import sys
 
 import pytest
 
@@ -13,6 +14,7 @@ from app.services import pdf_extract
 from app.services.pdf_extract import (
     PdfExtractError,
     PdfOcrUnavailableError,
+    PdfResourceLimitError,
     build_pdf_source,
     extract_pdf_text,
 )
@@ -253,3 +255,198 @@ def test_corrupt_pdf_is_clear_error(monkeypatch, render_spy):
         extract_pdf_text(b"x", **_kw())
     # 错误消息不泄漏内部细节
     assert "secret" not in str(ei.value)
+
+
+def test_page_limit_rejects_before_accessing_any_page(monkeypatch):
+    accesses = []
+
+    class Pages:
+        def __len__(self):
+            return pdf_extract.PDF_MAX_PAGES + 1
+
+        def __iter__(self):
+            raise AssertionError("page iteration must not happen")
+
+        def __getitem__(self, index):
+            accesses.append(index)
+            raise AssertionError("page access must not happen")
+
+    monkeypatch.setattr(
+        pdf_extract,
+        "_open_reader",
+        lambda _data: types.SimpleNamespace(pages=Pages()),
+    )
+
+    with pytest.raises(PdfResourceLimitError, match="page count") as exc_info:
+        extract_pdf_text(b"secret input", **_kw())
+
+    assert accesses == []
+    assert "secret input" not in str(exc_info.value)
+
+
+def test_page_limit_bounds_iteration_when_page_count_is_unavailable(monkeypatch):
+    yielded = []
+
+    class Pages:
+        def __iter__(self):
+            for index in range(pdf_extract.PDF_MAX_PAGES + 2):
+                yielded.append(index)
+                yield types.SimpleNamespace(
+                    extract_text=lambda: "page text with enough characters"
+                )
+
+    monkeypatch.setattr(pdf_extract, "PDF_MAX_PAGES", 2)
+    monkeypatch.setattr(
+        pdf_extract,
+        "_open_reader",
+        lambda _data: types.SimpleNamespace(pages=Pages()),
+    )
+
+    with pytest.raises(PdfResourceLimitError, match="page count"):
+        extract_pdf_text(b"x", **_kw())
+
+    assert yielded == [0, 1, 2]
+
+
+def test_embedded_images_per_page_limit_is_enforced(monkeypatch):
+    monkeypatch.setattr(pdf_extract, "PDF_MAX_EMBEDDED_IMAGES_PER_PAGE", 1)
+    page = types.SimpleNamespace(
+        extract_text=lambda: "native text with enough characters",
+        images=[types.SimpleNamespace(data=b"a"), types.SimpleNamespace(data=b"b")],
+    )
+    monkeypatch.setattr(
+        pdf_extract,
+        "_open_reader",
+        lambda _data: types.SimpleNamespace(pages=[page]),
+    )
+
+    with pytest.raises(PdfResourceLimitError, match="embedded image count"):
+        extract_pdf_text(b"x", **_kw())
+
+
+def test_embedded_images_total_limit_is_enforced(monkeypatch):
+    monkeypatch.setattr(pdf_extract, "PDF_MAX_EMBEDDED_IMAGES", 1)
+    pages = [
+        types.SimpleNamespace(
+            extract_text=lambda: "native text with enough characters",
+            images=[types.SimpleNamespace(data=b"a")],
+        ),
+        types.SimpleNamespace(
+            extract_text=lambda: "native text with enough characters",
+            images=[types.SimpleNamespace(data=b"b")],
+        ),
+    ]
+    monkeypatch.setattr(
+        pdf_extract,
+        "_open_reader",
+        lambda _data: types.SimpleNamespace(pages=pages),
+    )
+
+    with pytest.raises(PdfResourceLimitError, match="embedded image count"):
+        extract_pdf_text(b"x", **_kw())
+
+
+def test_embedded_image_bytes_limit_is_enforced(monkeypatch):
+    monkeypatch.setattr(pdf_extract, "PDF_MAX_EMBEDDED_IMAGE_BYTES", 3)
+    page = types.SimpleNamespace(
+        extract_text=lambda: "native text with enough characters",
+        images=[types.SimpleNamespace(data=b"abcd")],
+    )
+    monkeypatch.setattr(
+        pdf_extract,
+        "_open_reader",
+        lambda _data: types.SimpleNamespace(pages=[page]),
+    )
+
+    with pytest.raises(PdfResourceLimitError, match="embedded image bytes"):
+        extract_pdf_text(b"x", **_kw())
+
+
+def test_render_pixel_limit_rejects_before_render(monkeypatch):
+    monkeypatch.setattr(pdf_extract, "PDF_MAX_RENDER_PIXELS", 100)
+    render_calls = []
+    page = types.SimpleNamespace(
+        extract_text=lambda: "",
+        mediabox=types.SimpleNamespace(width=11, height=11),
+    )
+    monkeypatch.setattr(
+        pdf_extract,
+        "_open_reader",
+        lambda _data: types.SimpleNamespace(pages=[page]),
+    )
+    monkeypatch.setattr(
+        pdf_extract,
+        "_render_page_png",
+        lambda *args, **kwargs: render_calls.append((args, kwargs)) or b"png",
+    )
+
+    with pytest.raises(PdfResourceLimitError, match="rendered pixels"):
+        extract_pdf_text(
+            b"x",
+            **_kw(ocr_enabled=True, ocr=lambda _data: "text", render_dpi=72),
+        )
+
+    assert render_calls == []
+
+
+def test_rendered_png_bytes_limit_is_enforced(monkeypatch):
+    monkeypatch.setattr(pdf_extract, "PDF_MAX_RENDERED_PNG_BYTES", 3)
+
+    class Image:
+        def save(self, output, format):
+            output.write(b"toolong")
+
+    class Bitmap:
+        def to_pil(self):
+            return Image()
+
+    class Page:
+        def get_size(self):
+            return 72, 72
+
+        def render(self, *, scale):
+            return Bitmap()
+
+    class Document:
+        def __getitem__(self, index):
+            return Page()
+
+        def close(self):
+            pass
+
+    monkeypatch.setitem(
+        sys.modules,
+        "pypdfium2",
+        types.SimpleNamespace(PdfDocument=lambda _data: Document()),
+    )
+
+    with pytest.raises(PdfResourceLimitError, match="rendered image bytes"):
+        pdf_extract._render_page_png(
+            b"x",
+            0,
+            72,
+        )
+
+
+def test_pdf_resource_limits_allow_normal_page_and_image_path(monkeypatch):
+    image_ocr_calls = []
+    page = types.SimpleNamespace(
+        extract_text=lambda: "native text with enough characters",
+        images=[types.SimpleNamespace(data=b"embedded image")],
+    )
+    monkeypatch.setattr(
+        pdf_extract,
+        "_open_reader",
+        lambda _data: types.SimpleNamespace(pages=[page]),
+    )
+
+    result = extract_pdf_text(
+        b"x",
+        **_kw(
+            ocr_enabled=True,
+            ocr=lambda data: image_ocr_calls.append(data) or "image text",
+        ),
+    )
+
+    assert image_ocr_calls == [b"embedded image"]
+    assert "image text" in result

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 import logging
+import math
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -29,9 +30,21 @@ from app.services.parser_units import (
 log = logging.getLogger(__name__)
 PdfSource = bytes | Path
 
+# Module-local budgets keep PDF parsing safe without expanding the import/config API.
+PDF_MAX_PAGES = 500
+PDF_MAX_EMBEDDED_IMAGES_PER_PAGE = 32
+PDF_MAX_EMBEDDED_IMAGES = 512
+PDF_MAX_EMBEDDED_IMAGE_BYTES = 64 * 1024 * 1024
+PDF_MAX_RENDER_PIXELS = 25_000_000
+PDF_MAX_RENDERED_PNG_BYTES = 16 * 1024 * 1024
+
 
 class PdfExtractError(ValueError):
     """PDF 提取失败（损坏/加密/无可提取文本/超限等），调用方映射为 400。"""
+
+
+class PdfResourceLimitError(PdfExtractError):
+    """PDF 资源预算超限，错误消息不包含输入内容。"""
 
 
 class PdfOcrUnavailableError(PdfExtractError):
@@ -43,13 +56,10 @@ def _meaningful_char_count(text: str) -> int:
     return len("".join(text.split()))
 
 
-def _page_has_visual_content(page: object) -> bool:
+def _page_has_visual_content(page: object, *, embedded_image_count: int | None = None) -> bool:
     """Return whether pypdf exposes an image or XObject on the page."""
-    try:
-        if bool(getattr(page, "images", ())):
-            return True
-    except Exception:  # noqa: BLE001 - malformed page resources must not block text extraction
-        pass
+    if embedded_image_count is None or embedded_image_count > 0:
+        return True
     try:
         resources = page.get("/Resources")
         return bool(resources and resources.get("/XObject"))
@@ -60,6 +70,79 @@ def _page_has_visual_content(page: object) -> bool:
 def _open_reader(data: PdfSource):
     """打开 PDF（独立函数便于测试 monkeypatch）。"""
     return pypdf.PdfReader(data if isinstance(data, Path) else io.BytesIO(data))
+
+
+def _resource_limit(kind: str) -> None:
+    messages = {
+        "page_count": "PDF resource limit exceeded: page count",
+        "embedded_image_count": "PDF resource limit exceeded: embedded image count",
+        "embedded_image_bytes": "PDF resource limit exceeded: embedded image bytes",
+        "page_dimensions": "PDF resource limit exceeded: page dimensions",
+        "render_pixels": "PDF resource limit exceeded: rendered pixels",
+        "rendered_png_bytes": "PDF resource limit exceeded: rendered image bytes",
+    }
+    raise PdfResourceLimitError(messages.get(kind, "PDF resource limit exceeded"))
+
+
+def _page_dimensions_points(page: object) -> tuple[float, float] | None:
+    for box_name in ("mediabox", "cropbox"):
+        try:
+            box = getattr(page, box_name)
+            width = abs(float(box.width))
+            height = abs(float(box.height))
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(width) and math.isfinite(height) and width > 0 and height > 0:
+            return width, height
+    return None
+
+
+def _check_render_budget(
+    page_dimensions: tuple[float, float] | None,
+    dpi: int,
+) -> None:
+    if page_dimensions is None:
+        _resource_limit("page_dimensions")
+    if (
+        not isinstance(dpi, (int, float))
+        or isinstance(dpi, bool)
+        or not math.isfinite(dpi)
+        or dpi <= 0
+    ):
+        _resource_limit("page_dimensions")
+    try:
+        width_points, height_points = page_dimensions
+    except (TypeError, ValueError):
+        _resource_limit("page_dimensions")
+    try:
+        dimensions_valid = (
+            math.isfinite(width_points)
+            and math.isfinite(height_points)
+            and width_points > 0
+            and height_points > 0
+        )
+    except (TypeError, ValueError, OverflowError):
+        dimensions_valid = False
+    if not dimensions_valid:
+        _resource_limit("page_dimensions")
+    try:
+        width_pixels = math.ceil(width_points * dpi / 72.0)
+        height_pixels = math.ceil(height_points * dpi / 72.0)
+    except (OverflowError, ValueError):
+        _resource_limit("render_pixels")
+    if (
+        width_pixels <= 0
+        or height_pixels <= 0
+        or width_pixels * height_pixels > PDF_MAX_RENDER_PIXELS
+    ):
+        _resource_limit("render_pixels")
+
+
+class _BoundedBytesIO(io.BytesIO):
+    def write(self, data: bytes) -> int:
+        if self.tell() + len(data) > PDF_MAX_RENDERED_PNG_BYTES:
+            _resource_limit("rendered_png_bytes")
+        return super().write(data)
 
 
 def _render_page_png(data: PdfSource, page_index: int, dpi: int) -> bytes:
@@ -79,9 +162,20 @@ def _render_page_png(data: PdfSource, page_index: int, dpi: int) -> bytes:
         pdf = pdfium.PdfDocument(str(data) if isinstance(data, Path) else data)
         try:
             page = pdf[page_index]
+            get_size = getattr(page, "get_size", None)
+            if not callable(get_size):
+                _resource_limit("page_dimensions")
+            try:
+                dimensions = tuple(float(value) for value in get_size())
+            except (TypeError, ValueError):
+                _resource_limit("page_dimensions")
+            if len(dimensions) != 2:
+                _resource_limit("page_dimensions")
+            page_dimensions = (dimensions[0], dimensions[1])
+            _check_render_budget(page_dimensions, dpi)
             bitmap = page.render(scale=dpi / 72.0)
             pil_image = bitmap.to_pil()
-            buf = io.BytesIO()
+            buf = _BoundedBytesIO()
             pil_image.save(buf, format="PNG")
             return buf.getvalue()
         finally:
@@ -91,8 +185,111 @@ def _render_page_png(data: PdfSource, page_index: int, dpi: int) -> bytes:
         raise PdfOcrUnavailableError(
             "PDF 渲染依赖未安装（pypdfium2/Pillow）；请执行 pip install -e \".[ocr]\""
         ) from None
+    except PdfResourceLimitError:
+        raise
     except Exception:  # noqa: BLE001  渲染失败转用户可读错误（消息不含内部栈/正文）
         raise PdfExtractError(f"PDF 第 {page_index + 1} 页渲染失败") from None
+
+
+def _page_images(page: object) -> object:
+    try:
+        images = getattr(page, "images", ())
+    except Exception:  # noqa: BLE001 - malformed image resources do not block text extraction
+        return (), 0
+    if images is None:
+        return (), 0
+    return images
+
+
+def _scan_embedded_images(
+    images: object,
+    totals: list[int],
+    on_image: Callable[[bytes], None] | None = None,
+) -> int:
+    try:
+        iterator = iter(images)  # type: ignore[arg-type]
+    except Exception:  # noqa: BLE001 - malformed image resources do not block text extraction
+        return 0
+
+    seen_on_page = 0
+    while True:
+        try:
+            image = next(iterator)
+        except StopIteration:
+            return seen_on_page
+        except Exception:  # noqa: BLE001 - malformed image resources do not block text extraction
+            return seen_on_page
+        seen_on_page += 1
+        if seen_on_page > PDF_MAX_EMBEDDED_IMAGES_PER_PAGE:
+            _resource_limit("embedded_image_count")
+        if totals[0] >= PDF_MAX_EMBEDDED_IMAGES:
+            _resource_limit("embedded_image_count")
+        totals[0] += 1
+        try:
+            image_data = getattr(image, "data", None)
+        except Exception:  # noqa: BLE001 - malformed image resources do not block text extraction
+            return seen_on_page
+        if not isinstance(image_data, bytes) or not image_data:
+            continue
+        if len(image_data) > PDF_MAX_EMBEDDED_IMAGE_BYTES - totals[1]:
+            _resource_limit("embedded_image_bytes")
+        totals[1] += len(image_data)
+        if on_image is not None:
+            on_image(image_data)
+
+
+def _reader_page_items(reader: object) -> object:
+    try:
+        pages = getattr(reader, "pages")
+    except Exception:  # noqa: BLE001 - do not expose parser internals
+        raise PdfExtractError("PDF 解析失败（文件可能损坏或加密）") from None
+
+    page_count = None
+    try:
+        root = getattr(reader, "root_object")
+        page_tree = root.get("/Pages")
+        if page_tree is not None and hasattr(page_tree, "get_object"):
+            page_tree = page_tree.get_object()
+        count = page_tree.get("/Count") if page_tree is not None else None
+        if count is not None:
+            page_count = int(count)
+    except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+        page_count = None
+
+    if page_count is None:
+        try:
+            page_count = len(pages)  # type: ignore[arg-type]
+        except (TypeError, AttributeError):
+            page_count = None
+
+    if page_count is None:
+        def bounded_items():
+            try:
+                iterator = iter(pages)
+                for index, page in enumerate(iterator):
+                    if index >= PDF_MAX_PAGES:
+                        _resource_limit("page_count")
+                    yield index, page
+            except PdfResourceLimitError:
+                raise
+            except Exception:  # noqa: BLE001 - do not expose parser internals
+                raise PdfExtractError("PDF 解析失败（文件可能损坏或加密）") from None
+
+        return bounded_items()
+
+    if page_count < 0:
+        raise PdfExtractError("PDF 解析失败（文件可能损坏或加密）")
+    if page_count > PDF_MAX_PAGES:
+        _resource_limit("page_count")
+
+    def indexed_items():
+        for index in range(page_count):
+            try:
+                yield index, pages[index]  # type: ignore[index]
+            except Exception:  # noqa: BLE001 - do not expose parser internals
+                raise PdfExtractError("PDF 解析失败（文件可能损坏或加密）") from None
+
+    return indexed_items()
 
 
 def _extract_pdf_parts(
@@ -106,52 +303,64 @@ def _extract_pdf_parts(
 ) -> str:
     try:
         reader = _open_reader(data)
-        pages = list(reader.pages)
+        page_items = _reader_page_items(reader)
+    except PdfResourceLimitError:
+        raise
     except Exception:  # noqa: BLE001  —— 不向外暴露内部细节（可能含路径/正文）
         raise PdfExtractError("PDF 解析失败（文件可能损坏或加密）") from None
 
     parts: list[tuple[int, str, str, list[dict[str, Any]]]] = []
     ocr_pages_used = 0
+    image_totals = [0, 0]
 
-    for idx, page in enumerate(pages):
+    for idx, page in page_items:
         try:
             text = (page.extract_text() or "").strip()
         except Exception:  # noqa: BLE001  单页抽取失败按图片页处理，不连累整份
             text = ""
 
         meaningful_chars = _meaningful_char_count(text)
-        embedded_images: list[bytes] = []
-        try:
-            embedded_images = [
-                image.data
-                for image in getattr(page, "images", ())
-                if isinstance(getattr(image, "data", None), bytes)
-                and image.data
-            ]
-        except Exception:  # noqa: BLE001 - malformed image resources do not block text extraction
-            embedded_images = []
+        image_values = _page_images(page)
+        image_texts: list[str] = []
+        ocr_blocks: list[dict[str, Any]] = []
+        embedded_ocr_started = False
 
-        has_visual_content = _page_has_visual_content(page)
-        if meaningful_chars >= min_text_chars and not has_visual_content:
-            parts.append((idx, text, "native", []))
-            continue
+        def ocr_embedded_image(image_data: bytes) -> None:
+            nonlocal embedded_ocr_started, ocr_pages_used
+            if not embedded_ocr_started:
+                if ocr_pages_used >= max_ocr_pages:
+                    raise PdfExtractError(
+                        f"PDF visual OCR pages exceed limit {max_ocr_pages}; processing stopped"
+                    )
+                ocr_pages_used += 1
+                embedded_ocr_started = True
+            value, blocks = ocr_result_text_and_blocks(ocr(image_data))  # type: ignore[misc]
+            if value and _meaningful_char_count(value) > 0:
+                image_texts.append(value)
+                ocr_blocks.extend(blocks)
+
+        should_try_embedded_ocr = (
+            meaningful_chars >= min_text_chars
+            and ocr_enabled
+            and ocr is not None
+        )
+        image_count = _scan_embedded_images(
+            image_values,
+            image_totals,
+            ocr_embedded_image if should_try_embedded_ocr else None,
+        )
+        has_visual_content = _page_has_visual_content(
+            page,
+            embedded_image_count=image_count,
+        )
 
         if meaningful_chars >= min_text_chars:
-            if not ocr_enabled or ocr is None or not embedded_images:
+            if not has_visual_content:
+                parts.append((idx, text, "native", []))
+                continue
+            if not embedded_ocr_started:
                 parts.append((idx, text, "native_visual_unparsed", []))
                 continue
-            if ocr_pages_used >= max_ocr_pages:
-                raise PdfExtractError(
-                    f"PDF visual OCR pages exceed limit {max_ocr_pages}; processing stopped"
-                )
-            ocr_pages_used += 1
-            image_texts: list[str] = []
-            ocr_blocks: list[dict[str, Any]] = []
-            for image_data in embedded_images:
-                value, blocks = ocr_result_text_and_blocks(ocr(image_data))
-                if value and _meaningful_char_count(value) > 0:
-                    image_texts.append(value)
-                    ocr_blocks.extend(blocks)
             merged = "\n".join([text, *image_texts])
             parts.append(
                 (
@@ -178,6 +387,9 @@ def _extract_pdf_parts(
                 f"PDF 需 OCR 的扫描页超过上限 {max_ocr_pages} 页，已停止处理"
             )
 
+        page_dimensions = _page_dimensions_points(page)
+        if page_dimensions is not None:
+            _check_render_budget(page_dimensions, render_dpi)
         png = _render_page_png(data, idx, render_dpi)
         ocr_pages_used += 1
         ocr_text, ocr_blocks = ocr_result_text_and_blocks(ocr(png))
