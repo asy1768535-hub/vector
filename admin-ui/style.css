@@ -1807,6 +1807,12 @@ local-icon { display: inline-block; vertical-align: -0.125em; }
     background: #fafbfb;
 }
 
+.chat-load-earlier {
+    display: flex;
+    justify-content: center;
+    margin-bottom: 16px;
+}
+
 .chat-empty {
     display: flex;
     flex-direction: column;

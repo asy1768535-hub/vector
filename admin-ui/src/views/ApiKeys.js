@@ -467,7 +467,7 @@ searchKb("你的问题", 5).then((results) => {
                     <h4>8. 来源定位 / 原文 / 原文件接口</h4>
                     <ul class="api-keys-doc-list">
                         <li><code>GET /libraries/{slug}/documents/{document_id}/source?chunk_id={chunk_id}</code>：查看命中切片在原文中的位置/窗口。</li>
-                        <li><code>GET /libraries/{slug}/documents/{document_id}/source/full</code>：查看该文档完整归一化原文。</li>
+                        <li><code>GET /libraries/{slug}/documents/{document_id}/source/full?offset=0&amp;limit=100000</code>：分页读取该文档的归一化原文。</li>
                         <li><code>GET /libraries/{slug}/documents/{document_id}/file</code>：下载原始文件。</li>
                     </ul>
                     <p class="api-keys-doc-note">这里的 <code>{slug}</code> 与 <code>LIBRARY_ID</code> 是同一个含义：知识库 slug / 库唯一ID。</p>

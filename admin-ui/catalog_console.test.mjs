@@ -22,6 +22,7 @@ import {
 } from './src/catalog_ui.js';
 import {
     getCatalogDocumentProcessing,
+    getDocumentFullSource,
     listCatalogDocuments,
     retryCatalogDocumentProcessing,
     setDocumentClassification,
@@ -360,6 +361,35 @@ test('document detail shows content directly and only surfaces processing failur
     assert.ok(!view.includes('<h3>知识能力</h3>'));
     assert.ok(!view.includes('<h3>文档处理</h3>'));
     assert.ok(!view.includes('catalog-capability-grid'));
+});
+
+test('full source API sends bounded window parameters', async () => {
+    const originalFetch = globalThis.fetch;
+    let requestedPath = '';
+    globalThis.fetch = async (path) => {
+        requestedPath = String(path);
+        return new Response(JSON.stringify({ normalized_text: 'page' }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+        });
+    };
+    try {
+        await getDocumentFullSource('contracts', 'doc-1', { offset: 100000, limit: 100000 });
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+    assert.equal(
+        requestedPath,
+        '/libraries/contracts/documents/doc-1/source/full?offset=100000&limit=100000',
+    );
+});
+
+test('full source reader exposes bounded progress, explicit loading, and stale response fence', () => {
+    assert.match(view, /sourceRequestSeq/);
+    assert.match(view, /Array\.from\(String\(data\.normalized_text \|\| ''\)\)\.length/);
+    assert.match(view, /已加载 \{\{ sourceReader\.nextOffset \}\}/);
+    assert.match(view, /搜索已加载内容/);
+    assert.match(view, /@click="loadMoreSource"/);
 });
 
 test('pending classifications are reviewed inside the catalog document detail', () => {

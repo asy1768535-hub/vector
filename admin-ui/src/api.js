@@ -214,8 +214,10 @@ export const listSchemaDiscoveryRuns = (slug, params = {}) =>
 export const listDocumentJobs = (slug, documentId, forceRefresh) => cachedRequest(`listDocumentJobs:${slug}:${documentId}`, () => request(`/libraries/${slug}/documents/${documentId}/jobs`), 15000, forceRefresh);
 export const getDocumentSource = (slug, documentId, chunkId) =>
     request(`/libraries/${slug}/documents/${documentId}/source?` + new URLSearchParams({ chunk_id: chunkId }).toString());
-export const getDocumentFullSource = (slug, documentId) =>
-    request(`/libraries/${slug}/documents/${documentId}/source/full`);
+export const getDocumentFullSource = (slug, documentId, params = {}) => {
+    const query = new URLSearchParams(params).toString();
+    return request(`/libraries/${slug}/documents/${documentId}/source/full${query ? `?${query}` : ''}`);
+};
 export const getChatGraphContext = (slug, chunkId) =>
     request(`/libraries/${slug}/chat/graph-context?` + new URLSearchParams({ chunk_id: chunkId }).toString());
 export async function downloadDocumentFile(slug, documentId) {
@@ -593,7 +595,10 @@ export const listChatLibraries = (forceRefresh) => cachedRequest('listChatLibrar
 
 // 会话历史
 export const listChatConversations = (includeArchived = false, forceRefresh) => cachedRequest(`listChatConversations:${includeArchived ? '1' : '0'}`, () => request('/chat/conversations' + (includeArchived ? '?include_archived=true' : '')), 15000, forceRefresh);
-export const getChatConversationMessages = (id) => request(`/chat/conversations/${id}/messages`); // not cached — real-time
+export const getChatConversationMessages = (id, params = {}) => {
+    const query = new URLSearchParams(params).toString();
+    return request(`/chat/conversations/${id}/messages${query ? `?${query}` : ''}`);
+}; // not cached — real-time
 export const archiveChatConversation = (id) =>
     request(`/chat/conversations/${id}/archive`, { method: 'POST' });
 export const deleteChatConversation = (id) =>

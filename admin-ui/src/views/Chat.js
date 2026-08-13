@@ -72,6 +72,8 @@ export default {
         const conversations = ref([]);
         const currentConvId = ref(null);
         const messages = ref([]);
+        const loadingEarlierMessages = ref(false);
+        const hasEarlierMessages = ref(false);
         const input = ref('');
         const loading = ref(false);
         const chatDisabled = ref(false);
@@ -95,6 +97,7 @@ export default {
         const expandedGraphEntityIdList = computed(() => [...expandedGraphEntityIds.value]);
         let sourceLocationRequestSeq = 0;
         let citationGraphRequestSeq = 0;
+        let conversationRequestSeq = 0;
         let _abortController = null;
 
         const _queue = createStreamQueue();
@@ -168,20 +171,39 @@ export default {
         }
 
         function onLibChange() {
+            conversationRequestSeq += 1;
+            loadingEarlierMessages.value = false;
             saveChatLibrary(currentSlug.value);
             _cleanupStream();
             closeAndInvalidateSourceDialog();
             closeAndInvalidateCitationGraph();
             currentConvId.value = null;
             messages.value = [];
+            hasEarlierMessages.value = false;
         }
 
         function newChat() {
+            conversationRequestSeq += 1;
+            loadingEarlierMessages.value = false;
             _cleanupStream();
             closeAndInvalidateSourceDialog();
             closeAndInvalidateCitationGraph();
             currentConvId.value = null;
             messages.value = [];
+            hasEarlierMessages.value = false;
+        }
+
+        function historyMessage(m) {
+            return {
+                id: m.id,
+                role: m.role === 'assistant' ? 'ai' : 'user',
+                text: m.content + (m.status === 'failed' && m.error_message ? '\n\n*[失败]* ' + m.error_message : ''),
+                sources: m.sources || [],
+                graph_augmented: m.graph_augmented === true,
+                graph_evidence: m.graph_evidence || [],
+                error: m.status === 'failed',
+                time: m.created_at || null,
+            };
         }
 
         async function scrollToBottom() {
@@ -192,6 +214,7 @@ export default {
 
         async function selectConversation(conv) {
             if (conv.id === currentConvId.value) return;
+            const seq = ++conversationRequestSeq;
             _cleanupStream();
             closeAndInvalidateSourceDialog();
             closeAndInvalidateCitationGraph();
@@ -199,19 +222,42 @@ export default {
             saveChatLibrary(currentSlug.value);
             currentConvId.value = conv.id;
             messages.value = [];
+            loadingEarlierMessages.value = false;
+            hasEarlierMessages.value = false;
             try {
-                const hist = await api.getChatConversationMessages(conv.id);
-                messages.value = hist.map((m) => ({
-                    role: m.role === 'assistant' ? 'ai' : 'user',
-                    text: m.content + (m.status === 'failed' && m.error_message ? '\n\n*[失败]* ' + m.error_message : ''),
-                    sources: m.sources || [],
-                    graph_augmented: m.graph_augmented === true,
-                    graph_evidence: m.graph_evidence || [],
-                    error: m.status === 'failed',
-                    time: m.created_at || null,
-                }));
+                const hist = await api.getChatConversationMessages(conv.id, { limit: 200 });
+                if (seq !== conversationRequestSeq || currentConvId.value !== conv.id) return;
+                messages.value = hist.map(historyMessage);
+                hasEarlierMessages.value = hist.length === 200;
                 scrollToBottom();
-            } catch (e) { ElMessage.error(e.message); }
+            } catch (e) {
+                if (seq === conversationRequestSeq) ElMessage.error(e.message);
+            }
+        }
+
+        async function loadEarlierMessages() {
+            const before = messages.value[0]?.id;
+            if (!currentConvId.value || !before || loadingEarlierMessages.value) return;
+            const seq = conversationRequestSeq;
+            const conversationId = currentConvId.value;
+            const el = streamRef.value;
+            const previousHeight = el?.scrollHeight || 0;
+            loadingEarlierMessages.value = true;
+            try {
+                const hist = await api.getChatConversationMessages(
+                    conversationId,
+                    { limit: 200, before },
+                );
+                if (seq !== conversationRequestSeq || currentConvId.value !== conversationId) return;
+                messages.value = [...hist.map(historyMessage), ...messages.value];
+                hasEarlierMessages.value = hist.length === 200;
+                await nextTick();
+                if (el) el.scrollTop += el.scrollHeight - previousHeight;
+            } catch (e) {
+                if (seq === conversationRequestSeq) ElMessage.error(e.message || '加载更早消息失败');
+            } finally {
+                if (seq === conversationRequestSeq) loadingEarlierMessages.value = false;
+            }
         }
 
         async function archiveConv(conv) {
@@ -595,8 +641,9 @@ export default {
 
         return {
             libs, currentSlug, conversations, convsForLib, currentConvId, messages, input,
+            loadingEarlierMessages, hasEarlierMessages,
             loading, chatDisabled, streamRef, mobileHistoryOpen, topK,
-            onLibChange, newChat, selectConversation, archiveConv, deleteConv, send, copyAnswer,
+            onLibChange, newChat, selectConversation, loadEarlierMessages, archiveConv, deleteConv, send, copyAnswer,
             copySourceText, openCitationChunk, handleCitationClick, handleCitationKeydown,
             openDocDetail, loadLibs, chatWelcome, recalledChunkDialog, sourceLocationDialog,
             citationGraphDialog, openCitationGraph, closeAndInvalidateCitationGraph,
@@ -669,12 +716,15 @@ export default {
 
             <!-- Messages -->
             <div ref="streamRef" class="chat-messages">
+                <div v-if="hasEarlierMessages" class="chat-load-earlier">
+                    <el-button text :loading="loadingEarlierMessages" @click="loadEarlierMessages">加载更早消息</el-button>
+                </div>
                 <div v-if="!messages.length" class="chat-empty">
                     <img :src="chatWelcome" class="illustration-chat-welcome" alt="" aria-hidden="true" />
                     <div class="chat-empty-title">智能知识问答</div>
                     <div class="chat-empty-desc">基于知识库内容，AI 将检索相关资料并生成答案</div>
                 </div>
-                <div v-for="(m, i) in messages" :key="i" class="chat-message-row"
+                <div v-for="(m, i) in messages" :key="m.id || i" class="chat-message-row"
                      :class="m.role === 'user' ? 'chat-message--user' : 'chat-message--ai'">
                     <div v-if="m.role === 'ai'" class="chat-avatar chat-avatar--ai">AI</div>
 

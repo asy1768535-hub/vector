@@ -168,10 +168,12 @@ export default {
         const sourceReader = reactive({
             open: false,
             loading: false,
+            loadingMore: false,
             row: null,
             data: null,
             error: '',
             keyword: '',
+            nextOffset: 0,
         });
         const dialog = reactive({
             open: false,
@@ -189,6 +191,7 @@ export default {
         let processingRequestSeq = 0;
         let processingMutationSeq = 0;
         let classificationReviewSeq = 0;
+        let sourceRequestSeq = 0;
         let routeReady = false;
 
         const documentId = computed(() => String(route.query.document || route.query.open || ''));
@@ -869,20 +872,69 @@ export default {
 
         async function openFullSource(row) {
             if (!selectedSlug.value || !row) return;
+            const seq = ++sourceRequestSeq;
             sourceReader.open = true;
             sourceReader.loading = true;
+            sourceReader.loadingMore = false;
             sourceReader.row = row;
             sourceReader.data = null;
             sourceReader.error = '';
             sourceReader.keyword = '';
+            sourceReader.nextOffset = 0;
             try {
-                sourceReader.data = await api.getDocumentFullSource(selectedSlug.value, documentIdOf(row));
+                const data = await api.getDocumentFullSource(
+                    selectedSlug.value,
+                    documentIdOf(row),
+                    { offset: 0, limit: 100000 },
+                );
+                if (seq !== sourceRequestSeq || !sourceReader.open) return;
+                sourceReader.data = data;
+                sourceReader.nextOffset = Number(data.offset || 0)
+                    + Array.from(String(data.normalized_text || '')).length;
             } catch (e) {
+                if (seq !== sourceRequestSeq || !sourceReader.open) return;
                 sourceReader.error = e.status === 404
                     ? '该文档缺少原文快照，请重新导入后再阅读。'
                     : (e.message || '加载原文失败');
             } finally {
-                sourceReader.loading = false;
+                if (seq === sourceRequestSeq) sourceReader.loading = false;
+            }
+        }
+
+        async function loadMoreSource() {
+            if (
+                !selectedSlug.value
+                || !sourceReader.row
+                || !sourceReader.data
+                || sourceReader.loadingMore
+                || sourceReader.nextOffset >= Number(sourceReader.data.total_chars || 0)
+            ) return;
+            const seq = sourceRequestSeq;
+            sourceReader.loadingMore = true;
+            try {
+                const data = await api.getDocumentFullSource(
+                    selectedSlug.value,
+                    documentIdOf(sourceReader.row),
+                    { offset: sourceReader.nextOffset, limit: 100000 },
+                );
+                if (seq !== sourceRequestSeq || !sourceReader.open) return;
+                const nextText = String(data.normalized_text || '');
+                if (!nextText) {
+                    ElMessage.warning('服务端未返回更多原文');
+                    return;
+                }
+                sourceReader.data = {
+                    ...data,
+                    offset: 0,
+                    normalized_text: sourceText.value + nextText,
+                    truncated: sourceReader.nextOffset + Array.from(nextText).length
+                        < Number(data.total_chars || 0),
+                };
+                sourceReader.nextOffset += Array.from(nextText).length;
+            } catch (e) {
+                if (seq === sourceRequestSeq) ElMessage.error(e.message || '加载更多原文失败');
+            } finally {
+                if (seq === sourceRequestSeq) sourceReader.loadingMore = false;
             }
         }
 
@@ -906,11 +958,14 @@ export default {
         }
 
         function closeFullSource() {
+            sourceRequestSeq += 1;
             sourceReader.open = false;
             sourceReader.loading = false;
+            sourceReader.loadingMore = false;
             sourceReader.data = null;
             sourceReader.error = '';
             sourceReader.keyword = '';
+            sourceReader.nextOffset = 0;
         }
 
         async function applyFilters() {
@@ -1081,7 +1136,7 @@ export default {
             openDocument, backToList, refreshCurrent, openEvidence, closeEvidence,
             openFileImport, openIngest, openEdit, openReplaceImport, submitIngest,
             deleteDocument, handleRowCommand,
-            openFullSource, downloadOriginalFile, closeFullSource,
+            openFullSource, loadMoreSource, downloadOriginalFile, closeFullSource,
             loadProcessing, retryProcessing,
             startEditingClassification, resetClassificationEditor, saveClassification,
             startEditingClassificationReview, submitClassificationReview,
@@ -1576,14 +1631,17 @@ export default {
               <span>{{ sourceReader.data.file_name || sourceReader.data.document_title || sourceReader.row?.title || '文档' }}</span>
               <span v-if="sourceReader.data.file_type">{{ sourceReader.data.file_type }}</span>
               <span>v{{ sourceReader.data.revision || sourceReader.row?.revision_no || 0 }}</span>
-              <span>{{ sourceReader.data.text_length || sourceText.length }} 字</span>
+              <span>已加载 {{ sourceReader.nextOffset }} / {{ sourceReader.data.total_chars || sourceReader.data.text_length || sourceReader.nextOffset }} 字</span>
             </div>
             <div class="documents-source-toolbar">
-              <el-input v-model="sourceReader.keyword" clearable placeholder="搜索原文关键词" />
-              <span class="documents-source-match-count">{{ sourceReader.keyword ? ('匹配 ' + sourceMatchCount + ' 处') : '输入关键词后高亮匹配' }}</span>
+              <el-input v-model="sourceReader.keyword" clearable placeholder="搜索已加载内容" />
+              <span class="documents-source-match-count">{{ sourceReader.keyword ? ('已加载内容匹配 ' + sourceMatchCount + ' 处') : '输入关键词后高亮匹配' }}</span>
             </div>
             <el-empty v-if="!sourceText" description="原文快照为空" />
             <pre v-else class="documents-source-text"><template v-for="(part, pi) in highlightedSourceParts" :key="pi"><mark v-if="part.match">{{ part.text }}</mark><span v-else>{{ part.text }}</span></template></pre>
+            <div v-if="sourceReader.nextOffset < Number(sourceReader.data.total_chars || 0)" class="documents-source-more">
+              <el-button :loading="sourceReader.loadingMore" @click="loadMoreSource">加载更多</el-button>
+            </div>
           </template>
           <el-empty v-else description="暂无原文内容" />
         </template>

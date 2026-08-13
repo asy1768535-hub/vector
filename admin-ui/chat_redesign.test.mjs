@@ -32,6 +32,14 @@ test('allows top_k selector and refresh; rejects forbidden features', () => {
     }
 });
 
+test('conversation history is paged and can load earlier messages without jumping', () => {
+    for (const token of [
+        'loadEarlierMessages', 'hasEarlierMessages', 'loadingEarlierMessages',
+        'before', 'previousHeight', 'chat-load-earlier', '加载更早消息',
+    ]) assert.ok(chat.includes(token), `missing paged history behavior: ${token}`);
+    assert.match(css, /\.chat-load-earlier\s*\{/);
+});
+
 test('remembers a valid library and keeps common chat actions available', () => {
     assert.ok(chat.includes('LAST_CHAT_LIBRARY_KEY'));
     assert.ok(chat.includes('savedChatLibrary()'));
