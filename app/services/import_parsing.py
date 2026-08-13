@@ -32,6 +32,7 @@ RESOURCE_LIMIT_ERROR = "import content exceeds parser resource limits"
 MAX_JSON_DEPTH = 64
 MAX_JSON_NODES = 100_000
 MAX_JSON_INPUT_BYTES = 50 * 1024 * 1024
+MAX_CSV_INPUT_BYTES = 50 * 1024 * 1024
 MAX_CSV_ROWS = 100_000
 MAX_CSV_COLUMNS = 1_024
 MAX_CSV_CELLS = 1_000_000
@@ -65,6 +66,11 @@ def validate_json_resource_budget(value: object) -> None:
 
 def validate_json_input_size(size_bytes: int) -> None:
     if size_bytes > MAX_JSON_INPUT_BYTES:
+        raise ImportResourceLimitError
+
+
+def validate_csv_input_size(size_bytes: int) -> None:
+    if size_bytes > MAX_CSV_INPUT_BYTES:
         raise ImportResourceLimitError
 
 
@@ -146,6 +152,7 @@ def _structured_text(
 
 
 def _parse_csv(path: Path, library: Library) -> ParsedImport:
+    validate_csv_input_size(path.stat().st_size)
     rows: list[str] = []
     segments: list[dict] = []
     total_cells = 0

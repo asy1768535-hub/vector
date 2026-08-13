@@ -421,6 +421,29 @@ def test_csv_parser_rejects_row_column_cell_and_text_budgets(tmp_path, monkeypat
     with pytest.raises(ImportResourceLimitError):
         parse_import_file(path, _library())
 
+
+def test_csv_parser_rejects_input_bytes_before_csv_reader(tmp_path, monkeypatch):
+    from app.services import import_parsing
+
+    path = tmp_path / "too-large-input.csv"
+    payload = b"text\nsecret private value\n"
+    path.write_bytes(payload)
+    monkeypatch.setattr(import_parsing, "MAX_CSV_INPUT_BYTES", len(payload) - 1)
+    reader_calls = 0
+
+    def fail_csv_reader(*_args, **_kwargs):
+        nonlocal reader_calls
+        reader_calls += 1
+        raise AssertionError("csv.reader must not run")
+
+    monkeypatch.setattr(import_parsing.csv, "reader", fail_csv_reader)
+    with pytest.raises(ImportResourceLimitError) as exc_info:
+        parse_import_file(path, _library())
+
+    assert reader_calls == 0
+    assert str(exc_info.value) == import_parsing.RESOURCE_LIMIT_ERROR
+    assert "secret" not in str(exc_info.value)
+
     monkeypatch.setattr(import_parsing, "MAX_CSV_COLUMNS", 1024)
     monkeypatch.setattr(import_parsing, "MAX_CSV_CELLS", 3)
     with pytest.raises(ImportResourceLimitError):
