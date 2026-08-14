@@ -48,6 +48,8 @@ def test_stop_script_does_not_kill_process_referenced_by_stale_pid(
         [
             "powershell.exe",
             "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
             "-File",
             str(scripts / "stop_local.ps1"),
         ],
