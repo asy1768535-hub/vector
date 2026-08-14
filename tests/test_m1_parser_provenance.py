@@ -340,7 +340,7 @@ def test_csv_rows_have_exact_normalized_ranges_for_empty_rows_and_quoted_newline
 
     result = parse_import_file(csv_path, _library())
 
-    assert result.normalized_text == "name | value\nA\r\n1 | two\nB | three"
+    assert result.normalized_text == "name | value\nA\n1 | two\nB | three"
     assert [segment["parser_unit"]["unit_key"] for segment in result.segments] == [
         "csv:row:1",
         "csv:row:3",

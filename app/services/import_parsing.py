@@ -162,7 +162,8 @@ def _parse_csv(path: Path, library: Library) -> ParsedImport:
         reader = csv.reader(handle)
         for row_number, row in enumerate(reader, start=1):
             total_cells = validate_csv_row_budget(row_number, row, total_cells)
-            line = " | ".join(cell.strip() for cell in row).strip(" |")
+            row = [cell.strip().replace("\r\n", "\n").replace("\r", "\n") for cell in row]
+            line = " | ".join(row).strip(" |")
             if line:
                 normalized_chars += len(line) + (1 if rows else 0)
                 validate_normalized_text_budget(normalized_chars)
@@ -170,7 +171,7 @@ def _parse_csv(path: Path, library: Library) -> ParsedImport:
                 cells: list[dict] = []
                 row_key = f"csv:row:{row_number}"
                 for column, cell in enumerate(row, start=1):
-                    if not cell.strip():
+                    if not cell:
                         continue
                     cells.append({
                         **build_parser_unit(
@@ -190,7 +191,7 @@ def _parse_csv(path: Path, library: Library) -> ParsedImport:
                                 },
                             },
                         ),
-                        "value": cell.strip(),
+                        "value": cell,
                     })
                 segment = {
                     "kind": "prose",
