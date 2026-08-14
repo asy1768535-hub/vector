@@ -73,8 +73,9 @@ export default {
                     icon: SERVICE_ICON[s.service_type] || null,
                     tagType: STATUS_TAG[s.status] || 'info',
                     statusText: STATUS_TEXT[s.status] || s.status,
-                    onlineInstances: s.online_instances != null ? s.online_instances : '—',
-                    knownInstances: s.known_instances != null ? s.known_instances : '—',
+                    instances: s.online_instances != null && s.known_instances != null
+                        ? `${s.online_instances} / ${s.known_instances}`
+                        : '—',
                     lastSeenAt: latest && latest.last_seen_at ? formatOperationTime(latest.last_seen_at) : '—',
                     lastSeenRel: latest ? relTime(latest.seconds_since_last_seen) : '—',
                     hostname: latest ? latest.hostname : '—',
@@ -182,8 +183,8 @@ export default {
                 <el-tag :type="row.tagType" size="small" effect="light">{{ row.statusText }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="在线实例数" width="120" align="center">
-              <template #default="{row}">{{ row.onlineInstances }}</template>
+            <el-table-column label="在线 / 已知实例" width="140" align="center">
+              <template #default="{row}">{{ row.instances }}</template>
             </el-table-column>
             <el-table-column label="最后心跳" min-width="180">
               <template #default="{row}">
