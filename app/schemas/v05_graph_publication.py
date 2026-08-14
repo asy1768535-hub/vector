@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -121,6 +121,7 @@ class GraphPublicationItemRead(BaseModel):
     support_evidence_ids: list[uuid.UUID]
     support_counts: dict[str, int]
     source_job_ids: list[uuid.UUID]
+    fact_snapshot: dict[str, Any]
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

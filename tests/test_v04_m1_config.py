@@ -10,6 +10,10 @@ from app.main import assert_graph_extraction_startup_security
 
 
 EXPECTED_DEFAULTS = {
+    "db_pool_size": 2,
+    "db_max_overflow": 8,
+    "db_pool_timeout_seconds": 30,
+    "db_pool_recycle_seconds": 900,
     "graph_extraction_enabled": False,
     "graph_extraction_auto_trigger_enabled": False,
     "graph_extraction_base_url": "https://api.deepseek.com/v1",
@@ -18,8 +22,19 @@ EXPECTED_DEFAULTS = {
     "graph_extraction_temperature": 0.0,
     "graph_extraction_response_format": "json_object",
     "graph_extraction_max_context_chars": 24000,
+    "graph_extraction_context_window_tokens": 8192,
     "graph_extraction_previous_chunks": 1,
     "graph_extraction_next_chunks": 1,
+    "graph_extraction_default_build_mode": "standard",
+    "graph_extraction_schema_routing_enabled": True,
+    "graph_extraction_center_only_enabled": True,
+    "graph_extraction_output_budget_enabled": True,
+    "graph_extraction_max_output_tokens": 8000,
+    "graph_extraction_batch_size": 8,
+    "graph_extraction_worker_concurrency": 6,
+    "graph_extraction_provider_max_concurrency": 4,
+    "graph_extraction_provider_max_retries": 2,
+    "graph_extraction_provider_backoff_base_seconds": 1.0,
     "graph_extraction_prompt_version": "v1",
     "graph_extraction_extractor_version": "v1",
     "graph_extraction_output_parser_version": "v1",
@@ -133,6 +148,33 @@ def test_startup_rejects_timeout_at_or_above_lease(monkeypatch):
         assert_graph_extraction_startup_security()
 
 
+@pytest.mark.parametrize("value", [0, 255, 32769])
+def test_startup_rejects_unbounded_graph_output_budget(monkeypatch, value):
+    _set_valid_runtime(monkeypatch)
+    from app.main import settings
+
+    monkeypatch.setattr(settings, "graph_extraction_max_output_tokens", value)
+    with pytest.raises(RuntimeError, match="output token budget"):
+        assert_graph_extraction_startup_security()
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "message"),
+    [
+        ("graph_extraction_provider_max_concurrency", 0, "Provider concurrency"),
+        ("graph_extraction_provider_max_retries", 6, "Provider retries"),
+        ("graph_extraction_provider_backoff_base_seconds", 0, "Provider backoff"),
+    ],
+)
+def test_startup_rejects_invalid_provider_limits(monkeypatch, name, value, message):
+    _set_valid_runtime(monkeypatch)
+    from app.main import settings
+
+    monkeypatch.setattr(settings, name, value)
+    with pytest.raises(RuntimeError, match=message):
+        assert_graph_extraction_startup_security()
+
+
 def test_startup_requires_graph_key_only_when_auto_trigger_is_enabled(monkeypatch):
     _set_valid_runtime(monkeypatch)
     from app.main import settings
@@ -157,18 +199,42 @@ def test_startup_requires_graph_key_only_when_auto_trigger_is_enabled(monkeypatc
         ("graph_extraction_model", "qwen-plus"),
     ],
 )
-def test_startup_rejects_retired_provider_when_extraction_is_enabled(
-    monkeypatch, name, value
-):
+def test_startup_rejects_retired_provider_when_extraction_is_enabled(monkeypatch, name, value):
     _set_valid_runtime(monkeypatch)
     from app.main import settings
 
     monkeypatch.setattr(settings, "graph_extraction_enabled", True)
     monkeypatch.setattr(settings, name, value)
-    with pytest.raises(RuntimeError, match="DeepSeek"):
+    with pytest.raises(RuntimeError, match="approved frozen"):
         assert_graph_extraction_startup_security()
+
+
+def test_valid_local_qwen_graph_extraction_contract_passes(monkeypatch):
+    _set_valid_runtime(monkeypatch)
+    from app.main import settings
+
+    monkeypatch.setattr(settings, "graph_extraction_enabled", True)
+    monkeypatch.setattr(
+        settings,
+        "graph_extraction_base_url",
+        "http://10.0.10.2:8113/v1",
+    )
+    monkeypatch.setattr(
+        settings,
+        "graph_extraction_model",
+        "qwen3.5-9b",
+    )
+    assert_graph_extraction_startup_security()
 
 
 def test_valid_graph_extraction_startup_contract_passes(monkeypatch):
     _set_valid_runtime(monkeypatch)
+    assert_graph_extraction_startup_security()
+
+
+def test_batch_size_one_is_a_valid_worker_configuration(monkeypatch):
+    _set_valid_runtime(monkeypatch)
+    from app.main import settings
+
+    monkeypatch.setattr(settings, "graph_extraction_batch_size", 1)
     assert_graph_extraction_startup_security()

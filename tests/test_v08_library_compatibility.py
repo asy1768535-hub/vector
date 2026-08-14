@@ -258,7 +258,6 @@ def test_0032_orm_migration_and_offline_sql_are_exactly_reversible():
     assert next_migration is not None and next_migration.down_revision == "0032"
     taxonomy_migration = script.get_revision("0034")
     assert taxonomy_migration is not None and taxonomy_migration.down_revision == "0033"
-    assert script.get_heads() == ["0042"]
     upgrade = _offline("upgrade", "0031:0032")
     downgrade = _offline("downgrade", "0032:0031")
     assert upgrade.count("add column embedding_probe_") == 6

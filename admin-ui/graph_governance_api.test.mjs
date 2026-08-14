@@ -14,11 +14,10 @@ import {
     disableGraphRelation,
     getActiveGraphPublication,
     getGraphEntity,
-    getGraphGovernanceAction,
     getGraphGovernanceContext,
-    getGraphPublication,
     getGraphRelation,
     listGraphGovernanceActions,
+    listGraphPublicationItems,
     listGraphPublications,
     mergeGraphEntities,
     planGraphGovernancePublication,
@@ -146,7 +145,6 @@ test('governance clients preserve exact command fences and discard caller extras
             offset: 40,
             ignored: 'no',
         });
-        await getGraphGovernanceAction('legal-a', ACTION);
         await submitGraphEntity('legal-a', command);
         await submitGraphRelation('legal-a', command);
         await correctGraphEntity('legal-a', ENTITY, command);
@@ -185,15 +183,14 @@ test('governance clients preserve exact command fences and discard caller extras
         calls[1].url,
         '/libraries/legal-a/graph-governance/actions?status=pending_review&status=approved&limit=20&offset=40',
     );
-    assert.equal(calls[2].url, `/libraries/legal-a/graph-governance/actions/${ACTION}`);
-    assert.deepEqual(body(calls[3]), {
+    assert.deepEqual(body(calls[2]), {
         ontology_version_id: ONTOLOGY,
         entity_type_id: TYPE,
         canonical_name: 'Acme',
         properties: { country: 'CN' },
         idempotency_key: 'intent-1',
     });
-    assert.deepEqual(body(calls[4]), {
+    assert.deepEqual(body(calls[3]), {
         ontology_version_id: ONTOLOGY,
         relation_type_id: TYPE,
         source_entity_id: ENTITY,
@@ -201,47 +198,47 @@ test('governance clients preserve exact command fences and discard caller extras
         properties: { country: 'CN' },
         idempotency_key: 'intent-1',
     });
-    assert.deepEqual(body(calls[5]), {
+    assert.deepEqual(body(calls[4]), {
         expected_state_hash: HASH,
         canonical_name: 'Acme',
         properties: { country: 'CN' },
         idempotency_key: 'intent-1',
     });
-    assert.deepEqual(body(calls[6]), {
+    assert.deepEqual(body(calls[5]), {
         expected_state_hash: HASH,
         source_entity_id: ENTITY,
         target_entity_id: ENTITY_2,
         properties: { country: 'CN' },
         idempotency_key: 'intent-1',
     });
-    assert.deepEqual(body(calls[7]), {
+    assert.deepEqual(body(calls[6]), {
         expected_entity_state_hash: HASH,
         alias: 'Acme Group',
         idempotency_key: 'intent-1',
     });
-    assert.deepEqual(body(calls[8]), {
+    assert.deepEqual(body(calls[7]), {
         expected_status: 'pending_review',
         decision: 'approve',
         reason_code: 'verified',
     });
-    assert.deepEqual(body(calls[9]), {
+    assert.deepEqual(body(calls[8]), {
         expected_status: 'pending_review',
         reason_code: 'verified',
     });
-    assert.deepEqual(body(calls[10]), {
+    assert.deepEqual(body(calls[9]), {
         expected_state_hash: HASH,
         decision: 'approve',
         reason_code: 'verified',
         idempotency_key: 'intent-1',
     });
-    for (const call of calls.slice(11, 16)) {
+    for (const call of calls.slice(10, 15)) {
         assert.deepEqual(body(call), {
             expected_state_hash: HASH,
             reason_code: 'verified',
             idempotency_key: 'intent-1',
         });
     }
-    assert.deepEqual(body(calls[16]), {
+    assert.deepEqual(body(calls[15]), {
         ontology_version_id: ONTOLOGY,
         survivor_entity_id: ENTITY,
         loser_entity_id: ENTITY_2,
@@ -251,15 +248,15 @@ test('governance clients preserve exact command fences and discard caller extras
         resolutions: [],
         idempotency_key: 'intent-1',
     });
-    assert.deepEqual(body(calls[17]), {
+    assert.deepEqual(body(calls[16]), {
         ontology_version_id: ONTOLOGY,
         action_ids: [ACTION],
         expected_parent_publication_id: null,
         dry_run: true,
         idempotency_key: 'intent-1',
     });
-    assert.equal(calls[18].url, `/libraries/legal-a/v04/graph-extractions/${JOB}/rerun`);
-    assert.deepEqual(body(calls[18]), { client_idempotency_key: 'rerun-001' });
+    assert.equal(calls[17].url, `/libraries/legal-a/v04/graph-extractions/${JOB}/rerun`);
+    assert.deepEqual(body(calls[17]), { client_idempotency_key: 'rerun-001' });
 });
 
 test('Publication clients use current v0.5 routes and strict bodies', async () => {
@@ -273,7 +270,6 @@ test('Publication clients use current v0.5 routes and strict bodies', async () =
             storage_key: 'must-not-leak',
         });
         await getActiveGraphPublication('legal-a', ONTOLOGY);
-        await getGraphPublication('legal-a', PUBLICATION);
         await activateGraphPublication('legal-a', PUBLICATION, {
             idempotency_key: 'activate-1',
             expected_manifest_hash: HASH,
@@ -299,14 +295,32 @@ test('Publication clients use current v0.5 routes and strict bodies', async () =
         calls[1].url,
         `/libraries/legal-a/v05/graph-publications/active?ontology_version_id=${ONTOLOGY}`,
     );
-    assert.equal(calls[2].url, `/libraries/legal-a/v05/graph-publications/${PUBLICATION}`);
-    assert.deepEqual(body(calls[3]), {
+    assert.deepEqual(body(calls[2]), {
         idempotency_key: 'activate-1',
         expected_manifest_hash: HASH,
     });
-    assert.deepEqual(body(calls[4]), {
+    assert.deepEqual(body(calls[3]), {
         idempotency_key: 'cancel-1',
         reason_code: 'operator_cancelled',
     });
-    assert.deepEqual(body(calls[5]), { idempotency_key: 'rollback-1', dry_run: true });
+    assert.deepEqual(body(calls[4]), { idempotency_key: 'rollback-1', dry_run: true });
+});
+
+test('Publication item client keeps the frozen snapshot query scoped', async () => {
+    const calls = await captureRequests(async () => {
+        await listGraphPublicationItems('legal-a', PUBLICATION, {
+            item_kind: 'entity',
+            status: 'active',
+            page: 2,
+            page_size: 500,
+            fact_snapshot: 'must-not-leak',
+        });
+    });
+
+    assert.equal(
+        calls[0].url,
+        `/libraries/legal-a/v05/graph-publications/${PUBLICATION}/items?item_kind=entity&status=active&page=2&page_size=500`,
+    );
+    assert.equal(calls[0].options.credentials, 'include');
+    assert.equal(calls[0].options.body, undefined);
 });

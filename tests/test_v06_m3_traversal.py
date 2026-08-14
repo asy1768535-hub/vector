@@ -168,6 +168,7 @@ def test_m3_hop_sql_is_scoped_bounded_and_private(direction):
         )
     ).lower()
     for required in (
+        "as materialized",
         "graph_publication_items",
         "knowledge_relations",
         "relation_types",

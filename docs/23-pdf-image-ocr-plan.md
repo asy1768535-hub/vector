@@ -39,7 +39,6 @@
 - 修改：`app/api/documents.py`，PDF 分支调用新服务并映射错误。
 - 修改：`app/config.py`，增加 PDF OCR 安全参数。
 - 修改：`pyproject.toml`，OCR extra 增加 `pypdfium2` 与 Pillow。
-- 修改：`requirements.txt`，更新 OCR 可选安装说明。
 - 修改：`.env.example`，增加 PDF OCR 参数示例。
 - 修改：`admin-ui/src/views/Libraries.js`，把 OCR 说明从“DOCX 图片”改成“DOCX 图片和 PDF 扫描页”。
 - 新建：`tests/test_pdf_extract.py`。
@@ -158,7 +157,7 @@ ocr = [
 ### 任务 1：依赖与配置
 
 - [x] 在 `pyproject.toml` 的 `ocr` extra 添加 `pypdfium2`、`Pillow>=10`。
-- [x] 在 `requirements.txt` 注释中说明 PDF OCR 也由 `pip install -e ".[ocr]"` 安装。
+- [x] 在 `pyproject.toml` 中说明 PDF OCR 由 `pip install -e ".[ocr]"` 安装。
 - [x] 在 `app/config.py` 添加三个 `pdf_ocr_*` 配置。
 - [x] 在 `.env.example` 添加：
 

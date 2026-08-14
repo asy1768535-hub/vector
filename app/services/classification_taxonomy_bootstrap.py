@@ -18,7 +18,7 @@ from app.models.document_revision import DocumentRevision
 from app.models.library import Library
 from app.services import audit_log
 from app.services.classification_runtime_contracts import (
-    CLASSIFICATION_PROVIDER_NAME,
+    classification_provider_name,
     canonical_sha256,
 )
 from app.services.classification_taxonomies import lock_classification_admin_scope
@@ -703,7 +703,7 @@ async def prepare_llm_taxonomy_bootstrap(
         idempotency_key=idempotency_key,
         status="processing",
         warning_items=[],
-        model_provider=CLASSIFICATION_PROVIDER_NAME,
+        model_provider=classification_provider_name(config),
         model_name=config.classification_model,
         model_config_hash=model_hash,
         prompt_version=config.classification_taxonomy_bootstrap_prompt_version,

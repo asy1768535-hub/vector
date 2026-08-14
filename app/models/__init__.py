@@ -28,6 +28,7 @@ from app.models.document_revision import DocumentRevision
 from app.models.document_revision_file import DocumentRevisionFile
 from app.models.document_source import DocumentSource
 from app.models.document import Document
+from app.models.document_import_job import DocumentImportJob
 from app.models.embedding_job import EmbeddingJob
 from app.models.entity import Entity
 from app.models.entity_alias import EntityAlias
@@ -79,7 +80,10 @@ from app.models.revision_purge_operation import RevisionPurgeOperation
 from app.models.relation_evidence import RelationEvidence
 from app.models.relation_type import RelationType
 from app.models.relation_type_constraint import RelationTypeConstraint
+from app.models.raw_claim import GraphRawClaim, GraphRawClaimOccurrence
+from app.models.claim_decision import GraphClaimDecision
 from app.models.schema_lifecycle_action import SchemaLifecycleAction
+from app.models.schema_discovery_run import SchemaDiscoveryRun
 from app.models.service_heartbeat import ServiceHeartbeat
 from app.models.sync_source import SyncSource
 from app.models.user import User
@@ -106,6 +110,7 @@ __all__ = [
     "ChunkEvidence",
     "CleanupOutbox",
     "Document",
+    "DocumentImportJob",
     "DocumentBlock",
     "DocumentFile",
     "DocumentRevision",
@@ -146,6 +151,7 @@ __all__ = [
     "LibraryFAQQuestion",
     "MigrationBackfillState",
     "OntologyVersion",
+    "SchemaDiscoveryRun",
     "Organization",
     "OrganizationCapabilityRollout",
     "OrganizationMembership",
@@ -158,6 +164,9 @@ __all__ = [
     "RelationEvidence",
     "RelationType",
     "RelationTypeConstraint",
+    "GraphRawClaim",
+    "GraphRawClaimOccurrence",
+    "GraphClaimDecision",
     "SchemaLifecycleAction",
     "ServiceHeartbeat",
     "SyncSource",

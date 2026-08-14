@@ -16,6 +16,8 @@ async def create_relation(
     db: AsyncSession,
     library: Library,
     payload: GraphRelationCreate,
+    *,
+    allow_draft_ontology: bool = False,
 ) -> KnowledgeRelation:
     validation = await graph_schema_validator.validate_relation_write(
         db,
@@ -28,6 +30,7 @@ async def create_relation(
         source_type=payload.source_type,
         confidence=payload.confidence,
         schema_boundary_clear=payload.schema_boundary_clear,
+        allow_draft_ontology=allow_draft_ontology,
     )
     if payload.status == GRAPH_FACT_STATUS_ACTIVE:
         if validation.relation_type.requires_evidence and validation.active_evidence_count < 1:

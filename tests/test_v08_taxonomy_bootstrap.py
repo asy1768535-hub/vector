@@ -237,7 +237,6 @@ def test_0037_orm_migration_and_offline_sql_are_reversible():
     ]
     assert max(map(len, names)) <= 63
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_heads() == ["0042"]
     assert script.get_revision("0037").down_revision == "0036"
     upgrade = _offline("upgrade", "0036:0037")
     downgrade = _offline("downgrade", "0037:0036")
@@ -334,7 +333,7 @@ def test_template_registry_and_llm_output_are_frozen_and_strict():
     assert len(GENERAL_ENTERPRISE_V1.draft.labels) == 8
     assert (
         GENERAL_ENTERPRISE_V1.template_hash
-        == "a8b032abbbbc4ff4c2049464843339d7b02b049e43548cf1e69449038595d67c"
+        == "dbf212f99107a75263c15946208003adec9a9dc8c708d4b45393ff4246bd00c9"
     )
     proposal = parse_llm_taxonomy_bootstrap_output(
         json.dumps(

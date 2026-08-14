@@ -67,6 +67,9 @@ def test_local_scripts_manage_graph_extractor_without_printing_secrets():
     assert "graph_extractor.pid" in start
     assert "graph_extractor.pid" in stop
     assert "graph_extractor.pid" in status
+    for process_script in (start, stop):
+        assert "taskkill.exe" in process_script
+        assert "/T /F" in process_script
     for text in (start, stop, status):
         assert "GRAPH_EXTRACTION_API_KEY" not in text
         assert "CHAT_API_KEY" not in text

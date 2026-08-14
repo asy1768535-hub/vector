@@ -1,4 +1,5 @@
 """集中配置：pydantic-settings 从 .env 加载，启动时类型校验。"""
+
 from __future__ import annotations
 
 import hashlib
@@ -66,6 +67,10 @@ class Settings(BaseSettings):
     db_user: str = "postgres"
     db_password: str = ""
     db_name: str = "vector_kb"
+    db_pool_size: int = Field(default=2, ge=1, le=20)
+    db_max_overflow: int = Field(default=8, ge=0, le=40)
+    db_pool_timeout_seconds: int = Field(default=30, ge=1, le=300)
+    db_pool_recycle_seconds: int = Field(default=900, ge=60, le=86_400)
 
     @property
     def db_dsn_async(self) -> str:
@@ -96,45 +101,49 @@ class Settings(BaseSettings):
     rerank_enabled: bool = False
     rerank_base_url: str = ""
     rerank_model: str = ""
-    rerank_api_key: str = ""        # 留空则复用 embedding_api_key（同一家服务商同 key 时省事）
-    rerank_candidate_k: int = 50   # 重排前从 Qdrant 召回多少候选
+    rerank_api_key: str = ""  # 留空则复用 embedding_api_key（同一家服务商同 key 时省事）
+    rerank_candidate_k: int = 50  # 重排前从 Qdrant 召回多少候选
+    rerank_batch_size: int = 32  # provider 单次请求上限；TEI 默认最大 batch=32
+    rerank_min_score: float = 0.05  # rerank 成功时的最低证据分；低于此值拒答
 
     # ---- Hybrid 检索（库级 retrieval_mode=hybrid 时生效；轻量第一版，无外部服务）----
-    hybrid_candidate_k: int = 50            # dense / keyword 各召回多少候选参与 RRF
-    hybrid_rrf_k: int = 60                  # RRF 平滑常数：score = Σ 1/(k+rank)，60 为业界常用默认
-    hybrid_keyword_threshold: float = 0.3   # pg_trgm word_similarity 命中门槛（0~1）
-    hybrid_keyword_title_boost: float = 1.5      # 文件名/标题命中加权
+    hybrid_candidate_k: int = 50  # dense / keyword 各召回多少候选参与 RRF
+    hybrid_rrf_k: int = 60  # RRF 平滑常数：score = Σ 1/(k+rank)，60 为业界常用默认
+    hybrid_keyword_threshold: float = 0.3  # pg_trgm word_similarity 命中门槛（0~1）
+    hybrid_keyword_title_boost: float = 1.5  # 文件名/标题命中加权
     hybrid_keyword_external_id_boost: float = 2.0  # 文号/external_id 命中加权（编号类问题更稳）
+    hybrid_min_dense_score: float = 0.55  # hybrid 无 rerank 时的原始 dense 证据门槛
 
     # ---- Query Rewrite（多 query dense 召回；第一版，不接 LLM/Agent/Hybrid）----
     # 关：单 query dense 召回（旧逻辑完全不变）。
     # 开：normalize + 同义词/简称扩展出多个 query，分别 embedding+召回，按 chunk_id 合并去重，
     #     再走现有 visibility / source_enrichment / rerank / threshold 流程。
     query_rewrite_enabled: bool = False
-    query_rewrite_max_queries: int = 4               # 扩展后最多用几个 query（含原始；规则+LLM 合并后的硬上限）
+    query_rewrite_max_queries: int = 4  # 扩展后最多用几个 query（含原始；规则+LLM 合并后的硬上限）
     query_rewrite_synonyms_path: str = "config/query_synonyms.json"  # 同义词/简称词典
 
     # ---- LLM Query Rewrite（可选；只生成检索 query，绝不回答/接 Agent/工具）----
     # 开启后：调 OpenAI 兼容 chat 接口把问题改写成多个检索 query，与规则 rewrite 合并。
     # 失败/超时/非法 JSON 一律退回规则 rewrite，绝不阻断检索。
     query_rewrite_llm_enabled: bool = False
-    query_rewrite_llm_base_url: str = ""             # 如 http://host:8000/v1 或 .../v1/chat/completions
+    query_rewrite_llm_base_url: str = ""  # 如 http://host:8000/v1 或 .../v1/chat/completions
     query_rewrite_llm_model: str = ""
-    query_rewrite_llm_api_key: str = ""              # 本地服务可留空
+    query_rewrite_llm_api_key: str = ""  # 本地服务可留空
     query_rewrite_llm_timeout_seconds: float = 8.0
-    query_rewrite_llm_max_queries: int = 4           # LLM 单次最多产出几个 query
+    query_rewrite_llm_max_queries: int = 4  # LLM 单次最多产出几个 query
 
     # ---- Chat 用户端（轻量问答 v1；默认关；OpenAI 兼容 chat 接口；只生成答案，不接 Agent/工具）----
     # 关闭时 /chat/messages 返回 503。base_url 支持 .../v1 或完整 .../chat/completions；本地模型可不填 key。
     chat_enabled: bool = False
     chat_base_url: str = ""
     chat_model: str = ""
-    chat_api_key: str = ""                            # 本地模型可留空（不发 Authorization 头）
+    chat_api_key: str = ""  # 本地模型可留空（不发 Authorization 头）
     chat_timeout_seconds: float = 30.0
-    chat_max_context_chars: int = 12000              # 拼进 prompt 的资料上限，超出截断
+    chat_max_context_chars: int = 12000  # 拼进 prompt 的资料上限，超出截断
     chat_temperature: float = 0.2
     # 多轮上下文：带入最近 N 轮历史帮助理解追问（仅理解，不作事实依据）。0=不带历史。
     chat_history_max_turns: int = 5
+    chat_graph_answer_enabled: bool = False
 
     # ---- OCR（图片/扫描件抽文字；默认关，按库 ocr_enabled 覆盖；需装 rapidocr_onnxruntime）----
     ocr_enabled: bool = False
@@ -179,8 +188,30 @@ class Settings(BaseSettings):
     classification_decision_enabled: bool = False
 
     # ---- 文件导入 ----
-    # /import-file 单次上传字节上限（默认 50MiB），超出 413，避免一次性 read 打爆内存。
+    # 旧同步 /import-file 单次上传字节上限（默认 50MiB），超出 413。
     max_import_file_bytes: int = 50 * 1024 * 1024
+    # 分块 staging/import-session 总量上限独立于旧同步接口，保留大文件导入能力。
+    import_staging_max_file_bytes: int = 500 * 1024 * 1024
+    import_upload_chunk_bytes: int = 8 * 1024 * 1024
+    import_selection_max_files: int = 1000
+    import_upload_file_concurrency: int = 2
+    import_worker_batch_size: int = 1
+    import_worker_poll_seconds: float = 1.0
+    import_worker_stale_seconds: int = 3600
+    import_worker_max_attempts: int = 5
+    import_staging_dir: str = "storage/import_staging"
+    import_staging_retention_seconds: int = 24 * 60 * 60
+    # XLSX ZIP 元数据和流式解析上限。
+    xlsx_max_zip_entries: int = 4096
+    xlsx_max_zip_compressed_bytes: int = 500 * 1024 * 1024
+    xlsx_max_zip_uncompressed_bytes: int = 256 * 1024 * 1024
+    xlsx_max_zip_entry_bytes: int = 128 * 1024 * 1024
+    xlsx_max_zip_compression_ratio: int = 100
+    xlsx_max_sheets: int = 100
+    xlsx_max_rows: int = 100_000
+    xlsx_max_cells: int = 1_000_000
+    xlsx_max_cell_text_chars: int = 32_768
+    xlsx_max_text_chars: int = 10_000_000
     # 原始上传文件持久化目录（相对路径基于仓库根目录）。
     document_files_dir: str = "storage/document_files"
     revision_file_storage_enabled: bool = False
@@ -191,7 +222,7 @@ class Settings(BaseSettings):
     document_storage_access_key: SecretStr = SecretStr("")
     document_storage_secret_key: SecretStr = SecretStr("")
     document_storage_region: str = ""
-    document_storage_max_read_bytes: int = 50 * 1024 * 1024
+    document_storage_max_read_bytes: int = 500 * 1024 * 1024
     document_storage_signed_url_seconds: int = 300
     revision_retention_enabled: bool = False
     revision_retention_batch_size: int = 50
@@ -209,12 +240,12 @@ class Settings(BaseSettings):
     revision_coordinated_purge_impact_sample: int = 50
 
     # ---- 检索可见性过滤（#6 批次 A，revision 维度）----
-    retrieval_consistency_filter: bool = True   # 总开关；关掉则不回查 PG（灰度/回滚用）
-    visibility_overfetch_factor: int = 3        # 初始 overfetch 倍数（相对 top_k / 召回数）
-    visibility_overfetch_max: int = 200         # 单次召回上限
-    visibility_refetch_max_rounds: int = 2      # 过滤后不足时的补召回轮数上限（2~3）
-    visibility_total_candidate_cap: int = 500   # 累计候选硬上限
-    visibility_latency_budget_ms: int = 800     # 检索补召回的延迟预算（毫秒）
+    retrieval_consistency_filter: bool = True  # 总开关；关掉则不回查 PG（灰度/回滚用）
+    visibility_overfetch_factor: int = 3  # 初始 overfetch 倍数（相对 top_k / 召回数）
+    visibility_overfetch_max: int = 200  # 单次召回上限
+    visibility_refetch_max_rounds: int = 2  # 过滤后不足时的补召回轮数上限（2~3）
+    visibility_total_candidate_cap: int = 500  # 累计候选硬上限
+    visibility_latency_budget_ms: int = 800  # 检索补召回的延迟预算（毫秒）
     # worker 写 Qdrant 的有界超时（秒）——锁内只做一次，禁止长退避
     qdrant_upsert_timeout_seconds: float = 30.0
 
@@ -230,17 +261,17 @@ class Settings(BaseSettings):
     worker_reconcile_seconds: int = 30
 
     # ---- Cleanup Worker（#7：Qdrant 物理清理 outbox 消费）----
-    cleanup_worker_batch: int = 16              # 单轮抢多少条 outbox
-    cleanup_worker_poll_seconds: float = 2.0    # 空闲轮询间隔
-    cleanup_worker_max_attempts: int = 10       # 超过即标 failed（死信）
-    cleanup_backoff_base_seconds: float = 5.0   # 指数退避基数
+    cleanup_worker_batch: int = 16  # 单轮抢多少条 outbox
+    cleanup_worker_poll_seconds: float = 2.0  # 空闲轮询间隔
+    cleanup_worker_max_attempts: int = 10  # 超过即标 failed（死信）
+    cleanup_backoff_base_seconds: float = 5.0  # 指数退避基数
     cleanup_backoff_max_seconds: float = 900.0  # 退避上限（15min）
-    cleanup_stale_seconds: int = 600            # processing 超时重置为 pending
+    cleanup_stale_seconds: int = 600  # processing 超时重置为 pending
 
     # ---- Heartbeat / 运行状态监控（docs/26）----
-    heartbeat_interval_seconds: int = 15     # 各进程心跳写入间隔
-    heartbeat_offline_seconds: int = 60      # 超过该秒数未更新即判离线
-    heartbeat_prune_seconds: int = 3600      # 超过该秒数未更新即清理过期心跳行
+    heartbeat_interval_seconds: int = 15  # 各进程心跳写入间隔
+    heartbeat_offline_seconds: int = 60  # 超过该秒数未更新即判离线
+    heartbeat_prune_seconds: int = 3600  # 超过该秒数未更新即清理过期心跳行
 
     # ---- Chunking defaults ----
     default_chunk_size: int = 1000
@@ -292,6 +323,8 @@ class Settings(BaseSettings):
 
     # ---- v0.2 Evidence Foundation feature flags ----
     enable_evidence_write_path: bool = False
+    enable_evidence_locator_read: bool = True
+    enable_evidence_locator_projection: bool = True
     enable_revision_id_worker: bool = False
     enable_revision_id_visibility: bool = False
     enable_sync_source_api: bool = False
@@ -303,6 +336,7 @@ class Settings(BaseSettings):
 
     # ---- v0.4 Graph Extraction Pipeline (M1 defaults; fail closed) ----
     graph_extraction_enabled: bool = False
+    graph_claim_shadow_enabled: bool = False
     graph_extraction_auto_trigger_enabled: bool = False
     graph_extraction_base_url: str = "https://api.deepseek.com/v1"
     graph_extraction_model: str = "deepseek-v4-pro"
@@ -311,8 +345,15 @@ class Settings(BaseSettings):
     graph_extraction_temperature: float = 0.0
     graph_extraction_response_format: str = "json_object"
     graph_extraction_max_context_chars: int = 24_000
+    graph_extraction_context_window_tokens: int = 8_192
     graph_extraction_previous_chunks: int = 1
     graph_extraction_next_chunks: int = 1
+    graph_extraction_default_build_mode: str = "standard"
+    graph_extraction_schema_routing_enabled: bool = True
+    graph_extraction_cache_enabled: bool = False
+    graph_extraction_center_only_enabled: bool = True
+    graph_extraction_output_budget_enabled: bool = True
+    graph_extraction_max_output_tokens: int = 8_000
 
     graph_extraction_prompt_version: str = "v1"
     graph_extraction_extractor_version: str = "v1"
@@ -335,6 +376,11 @@ class Settings(BaseSettings):
     graph_extraction_unit_lease_seconds: int = 180
     graph_extraction_unit_lease_renew_seconds: int = 30
     graph_extraction_worker_max_model_attempts: int = 3
+    graph_extraction_batch_size: int = 8
+    graph_extraction_worker_concurrency: int = 6
+    graph_extraction_provider_max_concurrency: int = 4
+    graph_extraction_provider_max_retries: int = 2
+    graph_extraction_provider_backoff_base_seconds: float = 1.0
 
     graph_extraction_context_retention_days: int = 30
     graph_extraction_raw_output_retention_days: int = 30
@@ -352,7 +398,7 @@ class Settings(BaseSettings):
     knowledge_artifact_model_max_source_chars: int = 24_000
     knowledge_artifact_summary_extractor_version: str = "summary-extractor-v1"
     knowledge_artifact_outline_extractor_version: str = "outline-extractor-v1"
-    knowledge_artifact_prompt_version: str = "summary-prompt-v1"
+    knowledge_artifact_prompt_version: str = "summary-prompt-v2"
     knowledge_artifact_worker_poll_seconds: float = 3.0
     knowledge_artifact_worker_lease_seconds: int = 180
     knowledge_artifact_worker_renew_seconds: int = 30
@@ -366,9 +412,9 @@ class Settings(BaseSettings):
     classification_model: str = "deepseek-v4-pro"
     classification_api_key: SecretStr = SecretStr("")
     classification_provider_timeout_seconds: float = 120.0
-    classification_model_max_source_chars: int = 24_000
+    classification_model_max_source_chars: int = 8_000
     classification_classifier_version: str = "document-classifier-v1"
-    classification_prompt_version: str = "classification-prompt-v1"
+    classification_prompt_version: str = "classification-prompt-v3"
     classification_worker_poll_seconds: float = 3.0
     classification_worker_lease_seconds: int = 180
     classification_worker_renew_seconds: int = 30
@@ -461,20 +507,14 @@ def validate_graph_extraction_startup(config: Settings) -> None:
         "normalization": config.graph_extraction_weight_normalization,
     }
     if any(value < 0 or value > 1 for value in weights.values()):
-        raise RuntimeError(
-            "[security] graph extraction confidence weight must be within [0, 1]"
-        )
+        raise RuntimeError("[security] graph extraction confidence weight must be within [0, 1]")
     if not math.isclose(math.fsum(weights.values()), 1.0, rel_tol=0.0, abs_tol=1e-9):
-        raise RuntimeError(
-            "[security] graph extraction confidence weights must sum to 1.0"
-        )
+        raise RuntimeError("[security] graph extraction confidence weights must sum to 1.0")
 
     lease = config.graph_extraction_unit_lease_seconds
     renew = config.graph_extraction_unit_lease_renew_seconds
     if renew >= lease / 2:
-        raise RuntimeError(
-            "[security] graph extraction lease renew must be less than half the lease"
-        )
+        raise RuntimeError("[security] graph extraction lease renew must be less than half the lease")
 
     retention_values = (
         config.graph_extraction_context_retention_days,
@@ -485,35 +525,56 @@ def validate_graph_extraction_startup(config: Settings) -> None:
         raise RuntimeError("[security] graph extraction retention days must be positive")
 
     if config.graph_extraction_timeout_seconds >= lease:
-        raise RuntimeError(
-            "[security] graph extraction provider timeout must be below the Unit lease"
+        raise RuntimeError("[security] graph extraction provider timeout must be below the Unit lease")
+    if not 1 <= config.graph_extraction_batch_size <= 8:
+        raise RuntimeError("[security] graph extraction batch size must be within 1..8")
+    if not 1 <= config.graph_extraction_worker_concurrency <= 8:
+        raise RuntimeError("[security] graph extraction worker concurrency must be within 1..8")
+    if not 512 <= config.graph_extraction_context_window_tokens <= 32_768:
+        raise RuntimeError("[security] graph extraction context window must be within 512..32768 tokens")
+
+    if not 1 <= config.graph_extraction_provider_max_concurrency <= 8:
+        raise RuntimeError("[security] graph extraction Provider concurrency must be within 1..8")
+    if not 0 <= config.graph_extraction_provider_max_retries <= 5:
+        raise RuntimeError("[security] graph extraction Provider retries must be within 0..5")
+    if config.graph_extraction_provider_backoff_base_seconds <= 0:
+        raise RuntimeError("[security] graph extraction Provider backoff must be positive")
+    if config.graph_extraction_default_build_mode not in {"fast", "standard", "deep"}:
+        raise RuntimeError("[security] graph extraction default build mode must be fast, standard, or deep")
+
+    output_budget = config.graph_extraction_max_output_tokens
+    if (
+        isinstance(output_budget, bool)
+        or not isinstance(output_budget, int)
+        or not 256 <= output_budget <= 32_768
+    ):
+        raise RuntimeError("[security] graph extraction output token budget must be within [256, 32768]")
+
+    if config.graph_extraction_enabled:
+        from app.services.graph_extraction_provider import (
+            graph_extraction_provider_name,
         )
 
-    if config.graph_extraction_enabled and (
-        config.graph_extraction_base_url != "https://api.deepseek.com/v1"
-        or config.graph_extraction_model != "deepseek-v4-pro"
-    ):
-        raise RuntimeError(
-            "[security] graph extraction requires the frozen official DeepSeek "
-            "provider configuration"
-        )
+        try:
+            graph_extraction_provider_name(
+                base_url=config.graph_extraction_base_url,
+                model=config.graph_extraction_model,
+            )
+        except ValueError as exc:
+            raise RuntimeError(
+                "[security] graph extraction requires an approved frozen provider configuration"
+            ) from exc
 
     if (
         config.graph_extraction_auto_trigger_enabled
         and not config.graph_extraction_api_key.get_secret_value().strip()
     ):
-        raise RuntimeError(
-            "[security] GRAPH_EXTRACTION_API_KEY is required when auto trigger is enabled"
-        )
+        raise RuntimeError("[security] GRAPH_EXTRACTION_API_KEY is required when auto trigger is enabled")
 
 
 def validate_knowledge_artifact_startup(config: Settings) -> None:
-    if config.knowledge_artifact_auto_trigger_enabled and not (
-        config.knowledge_artifact_runtime_enabled
-    ):
-        raise RuntimeError(
-            "[security] knowledge artifact auto trigger requires the runtime"
-        )
+    if config.knowledge_artifact_auto_trigger_enabled and not (config.knowledge_artifact_runtime_enabled):
+        raise RuntimeError("[security] knowledge artifact auto trigger requires the runtime")
 
     positive_values = (
         config.knowledge_artifact_provider_timeout_seconds,
@@ -526,44 +587,26 @@ def validate_knowledge_artifact_startup(config: Settings) -> None:
     )
     if any(not math.isfinite(value) or value <= 0 for value in positive_values):
         raise RuntimeError("[security] knowledge artifact runtime limits must be positive")
-    if (
-        config.knowledge_artifact_short_summary_max_chars
-        > config.knowledge_artifact_model_max_source_chars
-    ):
-        raise RuntimeError(
-            "[security] short Summary limit must not exceed model source limit"
-        )
+    if config.knowledge_artifact_short_summary_max_chars > config.knowledge_artifact_model_max_source_chars:
+        raise RuntimeError("[security] short Summary limit must not exceed model source limit")
     lease = config.knowledge_artifact_worker_lease_seconds
     if config.knowledge_artifact_worker_renew_seconds >= lease / 2:
-        raise RuntimeError(
-            "[security] knowledge artifact lease renew must be less than half the lease"
-        )
+        raise RuntimeError("[security] knowledge artifact lease renew must be less than half the lease")
     if config.knowledge_artifact_provider_timeout_seconds >= lease:
-        raise RuntimeError(
-            "[security] knowledge artifact provider timeout must be below the lease"
-        )
+        raise RuntimeError("[security] knowledge artifact provider timeout must be below the lease")
     version_values = (
         config.knowledge_artifact_summary_extractor_version,
         config.knowledge_artifact_outline_extractor_version,
         config.knowledge_artifact_prompt_version,
     )
     if any(not value.strip() or len(value) > 64 for value in version_values):
-        raise RuntimeError(
-            "[security] knowledge artifact versions must be nonblank and bounded"
-        )
+        raise RuntimeError("[security] knowledge artifact versions must be nonblank and bounded")
     if not config.knowledge_artifact_external_model_enabled:
         return
-    if (
-        config.knowledge_artifact_base_url != "https://api.deepseek.com/v1"
-        or config.knowledge_artifact_model != "deepseek-v4-pro"
-    ):
-        raise RuntimeError(
-            "[security] knowledge artifact model requires the approved DeepSeek identity"
-        )
-    if not config.knowledge_artifact_api_key.get_secret_value().strip():
-        raise RuntimeError(
-            "[security] KNOWLEDGE_ARTIFACT_API_KEY is required for model generation"
-        )
+    if not config.graph_extraction_base_url.strip() or not config.graph_extraction_model.strip():
+        raise RuntimeError("[security] knowledge artifact model endpoint and model are required")
+    if not config.graph_extraction_api_key.get_secret_value().strip():
+        raise RuntimeError("[security] GRAPH_EXTRACTION_API_KEY is required for Summary generation")
 
 
 def validate_classification_runtime_startup(config: Settings) -> None:
@@ -573,23 +616,17 @@ def validate_classification_runtime_startup(config: Settings) -> None:
         and config.organization_authorization_enabled
     ):
         raise RuntimeError(
-            "[security] classification runtime requires decisions, taxonomy, and "
-            "Organization authorization"
+            "[security] classification runtime requires decisions, taxonomy, and Organization authorization"
         )
     if config.classification_auto_trigger_enabled and not (
-        config.classification_runtime_enabled
-        and config.classification_external_model_enabled
+        config.classification_runtime_enabled and config.classification_external_model_enabled
     ):
-        raise RuntimeError(
-            "[security] classification auto trigger requires runtime and model"
-        )
+        raise RuntimeError("[security] classification auto trigger requires runtime and model")
     if config.classification_external_model_enabled and not (
-        config.classification_runtime_enabled
-        or config.classification_taxonomy_bootstrap_llm_enabled
+        config.classification_runtime_enabled or config.classification_taxonomy_bootstrap_llm_enabled
     ):
         raise RuntimeError(
-            "[security] classification external model requires classifier runtime "
-            "or taxonomy bootstrap LLM"
+            "[security] classification external model requires classifier runtime or taxonomy bootstrap LLM"
         )
     positive_values = (
         config.classification_provider_timeout_seconds,
@@ -602,57 +639,42 @@ def validate_classification_runtime_startup(config: Settings) -> None:
     if any(not math.isfinite(value) or value <= 0 for value in positive_values):
         raise RuntimeError("[security] classification runtime limits must be positive")
     if not 1_000 <= config.classification_model_max_source_chars <= 100_000:
-        raise RuntimeError(
-            "[security] classification source limit must be within 1000..100000"
-        )
+        raise RuntimeError("[security] classification source limit must be within 1000..100000")
     lease = config.classification_worker_lease_seconds
     if config.classification_worker_renew_seconds >= lease / 2:
-        raise RuntimeError(
-            "[security] classification lease renew must be less than half the lease"
-        )
+        raise RuntimeError("[security] classification lease renew must be less than half the lease")
     if config.classification_provider_timeout_seconds >= lease:
-        raise RuntimeError(
-            "[security] classification provider timeout must be below the lease"
-        )
+        raise RuntimeError("[security] classification provider timeout must be below the lease")
     versions = (
         config.classification_classifier_version,
         config.classification_prompt_version,
     )
     if any(not value.strip() or len(value) > 64 for value in versions):
-        raise RuntimeError(
-            "[security] classification versions must be nonblank and bounded"
-        )
+        raise RuntimeError("[security] classification versions must be nonblank and bounded")
     if not config.classification_external_model_enabled:
         return
-    if (
-        config.classification_base_url != "https://api.deepseek.com/v1"
-        or config.classification_model != "deepseek-v4-pro"
-    ):
-        raise RuntimeError(
-            "[security] classification requires the approved DeepSeek identity"
-        )
+    provider_contract = (config.classification_base_url, config.classification_model)
+    if provider_contract not in {
+        ("https://api.deepseek.com/v1", "deepseek-v4-pro"),
+        ("https://api.deepseek.com/v1", "deepseek-v4-flash"),
+        ("http://10.0.10.2:8113/v1", "qwen3.5-9b"),
+    }:
+        raise RuntimeError("[security] classification requires an approved provider identity")
     if not config.classification_api_key.get_secret_value().strip():
-        raise RuntimeError(
-            "[security] CLASSIFICATION_API_KEY is required for classification"
-        )
+        raise RuntimeError("[security] CLASSIFICATION_API_KEY is required for classification")
 
 
 def validate_classification_taxonomy_bootstrap_startup(config: Settings) -> None:
     if config.classification_taxonomy_bootstrap_enabled and not (
-        config.organization_authorization_enabled
-        and config.classification_taxonomy_enabled
+        config.organization_authorization_enabled and config.classification_taxonomy_enabled
     ):
         raise RuntimeError(
-            "[security] taxonomy bootstrap requires Organization authorization "
-            "and classification taxonomy"
+            "[security] taxonomy bootstrap requires Organization authorization and classification taxonomy"
         )
     if config.classification_taxonomy_bootstrap_llm_enabled and not (
-        config.classification_taxonomy_bootstrap_enabled
-        and config.classification_external_model_enabled
+        config.classification_taxonomy_bootstrap_enabled and config.classification_external_model_enabled
     ):
-        raise RuntimeError(
-            "[security] taxonomy bootstrap LLM requires bootstrap and the approved model"
-        )
+        raise RuntimeError("[security] taxonomy bootstrap LLM requires bootstrap and the approved model")
     values = (
         config.classification_taxonomy_bootstrap_max_samples,
         config.classification_taxonomy_bootstrap_max_source_chars,
@@ -663,13 +685,9 @@ def validate_classification_taxonomy_bootstrap_startup(config: Settings) -> None
     if not 1 <= config.classification_taxonomy_bootstrap_max_samples <= 20:
         raise RuntimeError("[security] taxonomy bootstrap sample limit must be within 1..20")
     if not 1_000 <= config.classification_taxonomy_bootstrap_max_source_chars <= 100_000:
-        raise RuntimeError(
-            "[security] taxonomy bootstrap source limit must be within 1000..100000"
-        )
+        raise RuntimeError("[security] taxonomy bootstrap source limit must be within 1000..100000")
     if not 1 <= config.classification_taxonomy_bootstrap_attempt_seconds <= 900:
-        raise RuntimeError(
-            "[security] taxonomy bootstrap attempt lifetime must be within 1..900 seconds"
-        )
+        raise RuntimeError("[security] taxonomy bootstrap attempt lifetime must be within 1..900 seconds")
     if (
         config.classification_taxonomy_bootstrap_llm_enabled
         and config.classification_provider_timeout_seconds
@@ -686,9 +704,7 @@ def validate_classification_taxonomy_bootstrap_startup(config: Settings) -> None
 
 def validate_knowledge_catalog_startup(config: Settings) -> None:
     if config.knowledge_catalog_enabled and not config.organization_authorization_enabled:
-        raise RuntimeError(
-            "[security] knowledge Catalog requires Organization authorization"
-        )
+        raise RuntimeError("[security] knowledge Catalog requires Organization authorization")
     values = (
         config.knowledge_catalog_max_entity_cards,
         config.knowledge_catalog_max_relation_cards,
@@ -706,23 +722,19 @@ def validate_knowledge_catalog_startup(config: Settings) -> None:
 
 def validate_graph_catalog_startup(config: Settings) -> None:
     if config.graph_catalog_enabled and not (
-        config.organization_authorization_enabled
-        and config.cross_library_compatibility_enabled
+        config.organization_authorization_enabled and config.cross_library_compatibility_enabled
     ):
         raise RuntimeError(
-            "[security] graph Catalog requires Organization authorization "
-            "and cross-Library compatibility"
+            "[security] graph Catalog requires Organization authorization and cross-Library compatibility"
         )
 
 
 def validate_graph_governance_startup(config: Settings) -> None:
     if config.graph_governance_enabled and not (
-        config.organization_authorization_enabled
-        and config.graph_publication_enabled
+        config.organization_authorization_enabled and config.graph_publication_enabled
     ):
         raise RuntimeError(
-            "[security] graph governance requires Organization authorization "
-            "and graph publication"
+            "[security] graph governance requires Organization authorization and graph publication"
         )
 
 
@@ -740,16 +752,12 @@ def validate_external_graph_sync_startup(config: Settings) -> None:
     if not 1 <= config.external_graph_sync_max_batch_items <= 100:
         raise RuntimeError("[security] external graph sync batch limit must be within 1..100")
     if not 1024 <= config.external_graph_sync_max_item_bytes <= 65536:
-        raise RuntimeError(
-            "[security] external graph sync item bytes must be within 1024..65536"
-        )
+        raise RuntimeError("[security] external graph sync item bytes must be within 1024..65536")
 
 
 def validate_schema_lifecycle_startup(config: Settings) -> None:
     if config.schema_lifecycle_enabled and not config.organization_authorization_enabled:
-        raise RuntimeError(
-            "[security] Schema lifecycle requires Organization authorization"
-        )
+        raise RuntimeError("[security] Schema lifecycle requires Organization authorization")
 
 
 def validate_public_api_v1_startup(config: Settings) -> None:
@@ -777,60 +785,36 @@ def validate_public_api_operations_startup(config: Settings) -> None:
         config.public_api_api_key_requests_per_minute,
     )
     if any(value < 1 or value > 1_000_000 for value in rate_limits):
-        raise RuntimeError(
-            "[security] Public API request limits must be within 1..1000000"
-        )
+        raise RuntimeError("[security] Public API request limits must be within 1..1000000")
     concurrent_limits = (
         config.public_api_organization_concurrent_answers,
         config.public_api_api_key_concurrent_answers,
     )
     if any(value < 1 or value > 10_000 for value in concurrent_limits):
-        raise RuntimeError(
-            "[security] Public API concurrent answer limits must be within 1..10000"
-        )
+        raise RuntimeError("[security] Public API concurrent answer limits must be within 1..10000")
     if not 1 <= config.public_api_answer_max_seconds <= 3_600:
-        raise RuntimeError(
-            "[security] Public API answer timeout must be within 1..3600 seconds"
-        )
-    if not (
-        config.public_api_answer_max_seconds + 30
-        <= config.public_api_answer_lease_seconds
-        <= 7_200
-    ):
+        raise RuntimeError("[security] Public API answer timeout must be within 1..3600 seconds")
+    if not (config.public_api_answer_max_seconds + 30 <= config.public_api_answer_lease_seconds <= 7_200):
         raise RuntimeError(
             "[security] Public API answer lease must exceed the timeout by at least 30 "
             "seconds and be at most 7200 seconds"
         )
     if not 1 <= config.public_api_request_retention_days <= 3_650:
-        raise RuntimeError(
-            "[security] Public API request retention must be within 1..3650 days"
-        )
+        raise RuntimeError("[security] Public API request retention must be within 1..3650 days")
     if not 1 <= config.public_api_cleanup_batch_size <= 10_000:
-        raise RuntimeError(
-            "[security] Public API cleanup batch size must be within 1..10000"
-        )
+        raise RuntimeError("[security] Public API cleanup batch size must be within 1..10000")
     if not 60 <= config.public_api_cleanup_interval_seconds <= 86_400:
-        raise RuntimeError(
-            "[security] Public API cleanup interval must be within 60..86400 seconds"
-        )
+        raise RuntimeError("[security] Public API cleanup interval must be within 60..86400 seconds")
     if config.public_api_operations_enabled and not (
         config.public_api_v1_enabled and config.organization_authorization_enabled
     ):
         raise RuntimeError(
-            "[security] Public API operations require Public API v1 and Organization "
-            "authorization"
+            "[security] Public API operations require Public API v1 and Organization authorization"
         )
     if config.public_api_limits_enabled and not config.public_api_operations_enabled:
-        raise RuntimeError(
-            "[security] Public API limits require Public API operations"
-        )
-    if (
-        config.public_api_limit_private_organizations
-        and not config.public_api_limits_enabled
-    ):
-        raise RuntimeError(
-            "[security] Private Organization limits require Public API limits"
-        )
+        raise RuntimeError("[security] Public API limits require Public API operations")
+    if config.public_api_limit_private_organizations and not config.public_api_limits_enabled:
+        raise RuntimeError("[security] Private Organization limits require Public API limits")
 
 
 def validate_supported_deployment_startup(config: Settings) -> None:
@@ -876,9 +860,7 @@ def validate_revision_file_storage_startup(config: Settings) -> None:
     if config.document_storage_max_read_bytes <= 0:
         raise RuntimeError("[security] document storage read limit must be positive")
     if not 30 <= config.document_storage_signed_url_seconds <= 3_600:
-        raise RuntimeError(
-            "[security] document storage signed URL lifetime must be within 30..3600 seconds"
-        )
+        raise RuntimeError("[security] document storage signed URL lifetime must be within 30..3600 seconds")
     if not re.fullmatch(
         r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}",
         config.document_storage_endpoint_ref,
@@ -887,9 +869,7 @@ def validate_revision_file_storage_startup(config: Settings) -> None:
     if config.document_storage_provider not in {"local", "minio", "oss"}:
         raise RuntimeError("[security] document storage provider is unsupported")
     if not config.enable_evidence_write_path:
-        raise RuntimeError(
-            "[security] revision file storage requires the evidence Revision write path"
-        )
+        raise RuntimeError("[security] revision file storage requires the evidence Revision write path")
     if config.document_storage_provider == "local":
         if not config.document_files_dir.strip():
             raise RuntimeError("[security] local document storage root is required")
@@ -907,9 +887,7 @@ def validate_revision_file_storage_startup(config: Settings) -> None:
         raise RuntimeError("[security] remote document storage endpoint is invalid")
     if config.document_storage_provider == "oss" and parsed.scheme != "https":
         raise RuntimeError("[security] OSS document storage requires HTTPS")
-    if not re.fullmatch(
-        r"[A-Za-z0-9][A-Za-z0-9._-]{0,254}", config.document_storage_bucket
-    ):
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,254}", config.document_storage_bucket):
         raise RuntimeError("[security] remote document storage bucket is invalid")
     if not config.document_storage_access_key.get_secret_value().strip() or not (
         config.document_storage_secret_key.get_secret_value().strip()
@@ -917,47 +895,31 @@ def validate_revision_file_storage_startup(config: Settings) -> None:
         raise RuntimeError("[security] remote document storage credentials are required")
     dependency = "minio" if config.document_storage_provider == "minio" else "oss2"
     if importlib.util.find_spec(dependency) is None:
-        raise RuntimeError(
-            f"[security] document storage optional dependency '{dependency}' is required"
-        )
+        raise RuntimeError(f"[security] document storage optional dependency '{dependency}' is required")
 
 
 def validate_revision_retention_startup(config: Settings) -> None:
     if not config.revision_retention_enabled:
         return
     if not 1 <= config.revision_retention_batch_size <= 500:
-        raise RuntimeError(
-            "[security] revision retention batch size must be within 1..500"
-        )
+        raise RuntimeError("[security] revision retention batch size must be within 1..500")
     if not 1 <= config.revision_retention_impact_evidence_sample <= 100:
-        raise RuntimeError(
-            "[security] revision retention Evidence sample must be within 1..100"
-        )
+        raise RuntimeError("[security] revision retention Evidence sample must be within 1..100")
 
 
 def validate_revision_cleanup_startup(config: Settings) -> None:
     if not config.revision_cleanup_enabled:
         return
     if not config.revision_retention_enabled:
-        raise RuntimeError(
-            "[security] revision cleanup requires retention governance"
-        )
+        raise RuntimeError("[security] revision cleanup requires retention governance")
     if not config.revision_file_storage_enabled:
-        raise RuntimeError(
-            "[security] revision cleanup requires revision file storage"
-        )
+        raise RuntimeError("[security] revision cleanup requires revision file storage")
     if not 1 <= config.revision_cleanup_batch_size <= 100:
-        raise RuntimeError(
-            "[security] revision cleanup batch size must be within 1..100"
-        )
+        raise RuntimeError("[security] revision cleanup batch size must be within 1..100")
     if not 30 <= config.revision_cleanup_lease_seconds <= 3_600:
-        raise RuntimeError(
-            "[security] revision cleanup lease must be within 30..3600 seconds"
-        )
+        raise RuntimeError("[security] revision cleanup lease must be within 30..3600 seconds")
     if not 1 <= config.revision_cleanup_max_attempts <= 100:
-        raise RuntimeError(
-            "[security] revision cleanup max attempts must be within 1..100"
-        )
+        raise RuntimeError("[security] revision cleanup max attempts must be within 1..100")
 
 
 def validate_revision_coordinated_purge_startup(config: Settings) -> None:
@@ -975,29 +937,17 @@ def validate_revision_coordinated_purge_startup(config: Settings) -> None:
             "revision file storage, and revision cleanup"
         )
     if not 1 <= config.revision_coordinated_purge_batch_size <= 100:
-        raise RuntimeError(
-            "[security] coordinated purge batch size must be within 1..100"
-        )
+        raise RuntimeError("[security] coordinated purge batch size must be within 1..100")
     if not 30 <= config.revision_coordinated_purge_lease_seconds <= 3_600:
-        raise RuntimeError(
-            "[security] coordinated purge lease must be within 30..3600 seconds"
-        )
+        raise RuntimeError("[security] coordinated purge lease must be within 30..3600 seconds")
     if not 1 <= config.revision_coordinated_purge_max_attempts <= 100:
-        raise RuntimeError(
-            "[security] coordinated purge max attempts must be within 1..100"
-        )
+        raise RuntimeError("[security] coordinated purge max attempts must be within 1..100")
     if not 1 <= config.revision_coordinated_purge_max_evidence <= 100_000:
-        raise RuntimeError(
-            "[security] coordinated purge Evidence limit must be within 1..100000"
-        )
+        raise RuntimeError("[security] coordinated purge Evidence limit must be within 1..100000")
     if not 1 <= config.revision_coordinated_purge_max_affected_items <= 10_000:
-        raise RuntimeError(
-            "[security] coordinated purge item limit must be within 1..10000"
-        )
+        raise RuntimeError("[security] coordinated purge item limit must be within 1..10000")
     if not 1 <= config.revision_coordinated_purge_impact_sample <= 100:
-        raise RuntimeError(
-            "[security] coordinated purge impact sample must be within 1..100"
-        )
+        raise RuntimeError("[security] coordinated purge impact sample must be within 1..100")
 
 
 def validate_graph_publication_startup(config: Settings) -> None:
@@ -1006,9 +956,7 @@ def validate_graph_publication_startup(config: Settings) -> None:
         config.graph_publication_extracted_relation_min_confidence,
     )
     if any(value < 0 or value > 1 for value in confidence_values):
-        raise RuntimeError(
-            "[security] graph publication confidence threshold must be within [0, 1]"
-        )
+        raise RuntimeError("[security] graph publication confidence threshold must be within [0, 1]")
     if config.graph_publication_max_items_per_run <= 0:
         raise RuntimeError("[security] graph publication max item limit must be positive")
     if not config.graph_publication_policy_version.strip():
@@ -1030,9 +978,7 @@ def validate_graph_retrieval_startup(config: Settings) -> None:
     )
     for label, value, absolute_cap in limits:
         if value <= 0 or value > absolute_cap:
-            raise RuntimeError(
-                f"[security] graph retrieval {label} must be within [1, {absolute_cap}]"
-            )
+            raise RuntimeError(f"[security] graph retrieval {label} must be within [1, {absolute_cap}]")
     if config.graph_retrieval_max_nodes < config.graph_retrieval_max_seeds:
         raise RuntimeError("[security] graph retrieval max nodes must cover every seed")
     if (
@@ -1060,17 +1006,13 @@ def validate_entity_linking_startup(config: Settings) -> None:
     if config.entity_linking_max_candidates != 10:
         raise RuntimeError("[security] entity linking max candidates must be 10")
     if config.entity_linking_max_publication_entities != 10_000:
-        raise RuntimeError(
-            "[security] entity linking max publication entities must be 10000"
-        )
+        raise RuntimeError("[security] entity linking max publication entities must be 10000")
     if (
         not math.isfinite(config.entity_linking_timeout_seconds)
         or config.entity_linking_timeout_seconds <= 0
         or config.entity_linking_timeout_seconds > 2.0
     ):
-        raise RuntimeError(
-            "[security] entity linking timeout must be within (0, 2.0] seconds"
-        )
+        raise RuntimeError("[security] entity linking timeout must be within (0, 2.0] seconds")
     if not config.entity_linking_enabled:
         return
     if not _SHA256_RE.fullmatch(config.entity_linking_policy_sha256):
@@ -1100,10 +1042,8 @@ def validate_entity_linking_startup(config: Settings) -> None:
     if any(isinstance(value, bool) or not isinstance(value, int) for value in approved.values()):
         raise RuntimeError("[security] entity linking policy thresholds are invalid")
     if (
-        approved["min_score_micros"]
-        not in {850_000, 880_000, 900_000, 920_000, 950_000}
-        or approved["min_margin_micros"]
-        not in {80_000, 100_000, 120_000, 150_000, 200_000}
+        approved["min_score_micros"] not in {850_000, 880_000, 900_000, 920_000, 950_000}
+        or approved["min_margin_micros"] not in {80_000, 100_000, 120_000, 150_000, 200_000}
         or approved["candidate_floor_micros"] != 500_000
         or approved["max_candidates"] != 10
         or approved["min_score_micros"] != config.entity_linking_min_score_micros
@@ -1113,29 +1053,20 @@ def validate_entity_linking_startup(config: Settings) -> None:
 
 
 def validate_organization_authorization_startup(config: Settings) -> None:
-    if (
-        config.organization_authorization_enabled
-        and config.allow_public_registration
-    ):
+    if config.organization_authorization_enabled and config.allow_public_registration:
         raise RuntimeError(
             "[security] Organization authorization requires public registration to be disabled"
         )
 
 
 def validate_library_compatibility_startup(config: Settings) -> None:
-    if (
-        config.cross_library_compatibility_enabled
-        and not config.organization_authorization_enabled
-    ):
-        raise RuntimeError(
-            "[security] Cross-Library compatibility requires Organization authorization"
-        )
+    if config.cross_library_compatibility_enabled and not config.organization_authorization_enabled:
+        raise RuntimeError("[security] Cross-Library compatibility requires Organization authorization")
 
 
 def validate_federated_retrieval_startup(config: Settings) -> None:
     if config.federated_retrieval_enabled and not (
-        config.organization_authorization_enabled
-        and config.cross_library_compatibility_enabled
+        config.organization_authorization_enabled and config.cross_library_compatibility_enabled
     ):
         raise RuntimeError(
             "[security] Federated retrieval requires Organization authorization "
@@ -1145,8 +1076,7 @@ def validate_federated_retrieval_startup(config: Settings) -> None:
 
 def validate_personal_library_scopes_startup(config: Settings) -> None:
     if config.personal_library_scopes_enabled and not (
-        config.organization_authorization_enabled
-        and config.cross_library_compatibility_enabled
+        config.organization_authorization_enabled and config.cross_library_compatibility_enabled
     ):
         raise RuntimeError(
             "[security] Personal Library scopes require Organization authorization "
@@ -1155,19 +1085,13 @@ def validate_personal_library_scopes_startup(config: Settings) -> None:
 
 
 def validate_classification_taxonomy_startup(config: Settings) -> None:
-    if (
-        config.classification_taxonomy_enabled
-        and not config.organization_authorization_enabled
-    ):
-        raise RuntimeError(
-            "[security] Classification taxonomy requires Organization authorization"
-        )
+    if config.classification_taxonomy_enabled and not config.organization_authorization_enabled:
+        raise RuntimeError("[security] Classification taxonomy requires Organization authorization")
 
 
 def validate_classification_decision_startup(config: Settings) -> None:
     if config.classification_decision_enabled and not (
-        config.organization_authorization_enabled
-        and config.classification_taxonomy_enabled
+        config.organization_authorization_enabled and config.classification_taxonomy_enabled
     ):
         raise RuntimeError(
             "[security] Classification decisions require Organization authorization "

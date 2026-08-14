@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass
@@ -9,11 +10,29 @@ from typing import Any, Literal
 
 import httpx
 
+from app.services.token_budget import estimate_chat_request_tokens
+
+
+log = logging.getLogger(__name__)
+
 
 ProviderErrorCategory = Literal["timeout", "network_error", "http_error"]
 DEEPSEEK_PROVIDER_NAME = "deepseek"
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 DEEPSEEK_MODEL_NAME = "deepseek-v4-pro"
+DEEPSEEK_MODEL_NAMES = frozenset({DEEPSEEK_MODEL_NAME, "deepseek-v4-flash"})
+LOCAL_PROVIDER_NAME = "openai-compatible"
+LOCAL_BASE_URL = "http://10.0.10.2:8113/v1"
+LOCAL_MODEL_NAME = "qwen3.5-9b"
+
+
+def graph_extraction_provider_name(*, base_url: str, model: str) -> str:
+    contract = (base_url, model)
+    if base_url == DEEPSEEK_BASE_URL and model in DEEPSEEK_MODEL_NAMES:
+        return DEEPSEEK_PROVIDER_NAME
+    if contract == (LOCAL_BASE_URL, LOCAL_MODEL_NAME):
+        return LOCAL_PROVIDER_NAME
+    raise ValueError("unsupported graph extraction provider contract")
 
 
 def _canonical_json(value: Any) -> str:
@@ -44,6 +63,33 @@ def _endpoint(base_url: str) -> str:
     return url
 
 
+def request_preview(
+    messages: list[dict[str, str]],
+    *,
+    max_output_tokens: int | None,
+) -> dict[str, Any]:
+    """Return a development-safe request preview without document contents."""
+
+    return {
+        "messages": [
+            {
+                "role": message.get("role"),
+                "content_chars": len(message.get("content", "")),
+                "content_sha256": hashlib.sha256(
+                    message.get("content", "").encode("utf-8")
+                ).hexdigest(),
+            }
+            for message in messages
+        ],
+        "max_output_tokens": max_output_tokens,
+        "estimated_request_tokens": estimate_chat_request_tokens(
+            messages,
+            response_format={"type": "json_object"},
+            reserved_output_tokens=max_output_tokens or 0,
+        ),
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderResponse:
     content: str
@@ -72,6 +118,8 @@ class GraphExtractionProviderError(RuntimeError):
 
 
 class OpenAICompatibleGraphExtractor:
+    supports_concept_inventory = True
+
     def __init__(
         self,
         *,
@@ -79,24 +127,67 @@ class OpenAICompatibleGraphExtractor:
         model: str,
         api_key: str,
         timeout_seconds: float = 120.0,
+        max_output_tokens: int | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
+        if max_output_tokens is not None and (
+            isinstance(max_output_tokens, bool)
+            or not isinstance(max_output_tokens, int)
+            or max_output_tokens < 1
+        ):
+            raise ValueError("max_output_tokens must be a positive integer or None")
         self._endpoint = _endpoint(base_url)
         self._model = model
         self._api_key = api_key
         self._timeout_seconds = timeout_seconds
+        self._max_output_tokens = max_output_tokens
         self._transport = transport
 
-    async def extract(self, messages: list[dict[str, str]]) -> ProviderResponse:
+    def with_output_budget(self, max_output_tokens: int) -> "OpenAICompatibleGraphExtractor":
+        clone = object.__new__(type(self))
+        clone._endpoint = self._endpoint
+        clone._model = self._model
+        clone._api_key = self._api_key
+        clone._timeout_seconds = self._timeout_seconds
+        clone._max_output_tokens = max_output_tokens
+        clone._transport = self._transport
+        return clone
+
+    async def _extract_once(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        include_response_format: bool,
+    ) -> ProviderResponse:
         payload: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
             "temperature": 0,
             "stream": False,
-            "response_format": {"type": "json_object"},
         }
+        if include_response_format:
+            payload["response_format"] = {"type": "json_object"}
+        if "qwen" in self._model.lower():
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
+        if self._model.lower() == "deepseek-v4-flash":
+            payload["thinking"] = {"type": "disabled"}
+        if self._max_output_tokens is not None:
+            payload["max_tokens"] = self._max_output_tokens
         request_hash = _payload_hash(payload)
         started = time.perf_counter()
+        log.info(
+            "graph provider request endpoint=%s model=%s input_tokens=%s output_budget=%s response_format=%s",
+            self._endpoint,
+            self._model,
+            request_preview(messages, max_output_tokens=0)["estimated_request_tokens"],
+            self._max_output_tokens,
+            include_response_format,
+        )
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug(
+                "graph provider redacted request preview=%s",
+                request_preview(messages, max_output_tokens=self._max_output_tokens),
+            )
         try:
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(self._timeout_seconds),
@@ -109,6 +200,12 @@ class OpenAICompatibleGraphExtractor:
                 )
         except httpx.TimeoutException as exc:
             latency_ms = round((time.perf_counter() - started) * 1000)
+            log.warning(
+                "graph provider timeout endpoint=%s model=%s latency_ms=%s",
+                self._endpoint,
+                self._model,
+                latency_ms,
+            )
             raise GraphExtractionProviderError(
                 "timeout",
                 "graph extraction provider timed out",
@@ -116,6 +213,12 @@ class OpenAICompatibleGraphExtractor:
             ) from exc
         except httpx.RequestError as exc:
             latency_ms = round((time.perf_counter() - started) * 1000)
+            log.warning(
+                "graph provider network error endpoint=%s model=%s latency_ms=%s",
+                self._endpoint,
+                self._model,
+                latency_ms,
+            )
             raise GraphExtractionProviderError(
                 "network_error",
                 "graph extraction provider network request failed",
@@ -125,6 +228,13 @@ class OpenAICompatibleGraphExtractor:
         latency_ms = round((time.perf_counter() - started) * 1000)
         if not response.is_success:
             body = _sanitize_text(response.text, secret=self._api_key, limit=900)
+            log.warning(
+                "graph provider response endpoint=%s model=%s status=%s latency_ms=%s",
+                self._endpoint,
+                self._model,
+                response.status_code,
+                latency_ms,
+            )
             raise GraphExtractionProviderError(
                 "http_error",
                 f"graph extraction provider returned HTTP {response.status_code}: {body}",
@@ -149,6 +259,15 @@ class OpenAICompatibleGraphExtractor:
                 status_code=response.status_code,
             ) from exc
 
+        log.info(
+            "graph provider response endpoint=%s model=%s status=%s input_tokens=%s output_tokens=%s latency_ms=%s",
+            self._endpoint,
+            self._model,
+            response.status_code,
+            _optional_int(usage.get("prompt_tokens")),
+            _optional_int(usage.get("completion_tokens")),
+            latency_ms,
+        )
         return ProviderResponse(
             content=_sanitize_text(content, secret=self._api_key, limit=1_000_000),
             provider_request_id=_sanitize_text(
@@ -167,6 +286,23 @@ class OpenAICompatibleGraphExtractor:
             )
             or None,
         )
+
+    async def extract(self, messages: list[dict[str, str]]) -> ProviderResponse:
+        try:
+            return await self._extract_once(messages, include_response_format=True)
+        except GraphExtractionProviderError as exc:
+            message = str(exc).casefold()
+            if exc.status_code not in {400, 404, 422} or not any(
+                marker in message
+                for marker in ("response_format", "json_object", "structured output")
+            ):
+                raise
+            log.warning(
+                "graph provider response_format unsupported; retrying without it endpoint=%s model=%s",
+                self._endpoint,
+                self._model,
+            )
+            return await self._extract_once(messages, include_response_format=False)
 
 
 class MockGraphExtractor:

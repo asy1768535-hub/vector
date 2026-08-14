@@ -28,6 +28,12 @@ class _ModelSummaryResponse(BaseModel):
     summary: str = Field(min_length=1, max_length=16_000)
 
 
+class _ModelOutlineResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    items: list[OutlineItemV1] = Field(min_length=1, max_length=256)
+
+
 def _normalized_text(value: str) -> str:
     return _WHITESPACE.sub(" ", value).strip()
 
@@ -118,13 +124,46 @@ def parse_model_summary(
         ) from None
 
 
+def parse_model_outline(content: str) -> OutlinePayloadV1:
+    try:
+        raw = json.loads(content)
+    except (TypeError, json.JSONDecodeError):
+        raise KnowledgeArtifactGenerationError(
+            "invalid_provider_json", "outline provider returned invalid JSON"
+        ) from None
+    try:
+        parsed = _ModelOutlineResponse.model_validate(raw)
+        return OutlinePayloadV1(generation_mode="model", items=parsed.items)
+    except ValidationError:
+        raise KnowledgeArtifactGenerationError(
+            "invalid_provider_payload", "outline provider output violates the contract"
+        ) from None
+
+
 def summary_messages(source_text: str) -> list[dict[str, str]]:
     return [
         {
             "role": "system",
             "content": (
-                "Return one JSON object with exactly one field named summary. "
-                "Summarize only the supplied source and do not add unsupported facts."
+                "你是中文文档摘要助手。只返回一个 JSON 对象，且只能有 summary 一个字段。"
+                "请提炼文档的目的、范围、核心内容和结论，通常控制在 300 到 500 个汉字；"
+                "短文可相应缩短。不要逐段照抄原文，不要添加原文没有的事实。"
+            ),
+        },
+        {"role": "user", "content": source_text},
+    ]
+
+
+def outline_messages(source_text: str) -> list[dict[str, str]]:
+    return [
+        {
+            "role": "system",
+            "content": (
+                "你是中文文档大纲助手。只返回一个 JSON 对象，且只能有 items 一个字段。"
+                "items 是章节数组，每项只能包含 level、title、path；level 为 1 到 6，"
+                "path 是从一级章节到当前章节的标题数组，最后一项必须等于 title。"
+                "请根据正文提炼真实章节结构，合并重复标题，不要把文件名当作章节，"
+                "不要添加正文没有的内容，通常不超过 30 项。"
             ),
         },
         {"role": "user", "content": source_text},

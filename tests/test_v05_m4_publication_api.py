@@ -540,7 +540,7 @@ def test_rollback_dry_run_uses_admin_scope_and_persists_nothing(monkeypatch):
     db.commit.assert_not_awaited()
 
 
-def test_item_response_contains_safe_job_ids_but_no_fact_or_evidence_payload(monkeypatch):
+def test_item_response_contains_safe_frozen_snapshot_but_no_raw_fact_payload(monkeypatch):
     db = AsyncMock()
     view = PublicationItemView(item=_item(), source_job_ids=(JOB_ID,))
     try:
@@ -562,15 +562,14 @@ def test_item_response_contains_safe_job_ids_but_no_fact_or_evidence_payload(mon
     item = response.json()["items"][0]
     assert item["source_job_ids"] == [str(JOB_ID)]
     assert item["entity_id"] == str(ENTITY_ID)
+    assert item["fact_snapshot"]["canonical_name"] == "must-not-leak"
     for forbidden in (
-        "fact_snapshot",
-        "canonical_name",
         "properties",
         "quote_text",
         "evidence_text_snapshot",
         "source_span",
     ):
-        assert forbidden not in item
+        assert forbidden not in item["fact_snapshot"]
 
 
 def test_page_size_is_capped_at_500_before_query(monkeypatch):

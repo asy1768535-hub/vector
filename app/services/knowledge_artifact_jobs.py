@@ -121,11 +121,7 @@ async def _enqueue_knowledge_artifact_job_result(
         auto_trigger=auto_trigger,
         config=config,
     )
-    source = (
-        await load_artifact_source_text(db, revision=revision)
-        if artifact_type == "summary"
-        else ""
-    )
+    source = await load_artifact_source_text(db, revision=revision)
     spec = select_generation_spec(
         library=library,
         revision=revision,
@@ -225,11 +221,7 @@ async def retry_knowledge_artifact_job(
         fail_artifact_runtime(
             "scope_mismatch", "retry source Job is outside the requested scope"
         )
-    source = (
-        await load_artifact_source_text(db, revision=revision)
-        if source_job.artifact_type == "summary"
-        else ""
-    )
+    source = await load_artifact_source_text(db, revision=revision)
     spec = select_generation_spec(
         library=library,
         revision=revision,

@@ -6,6 +6,7 @@ import * as api from '../api.js';
 import {
     catalogEvidenceParts,
     catalogPageLabel,
+    catalogSourceTypeLabel as sourceTypeLabel,
     catalogTitlePath,
     formatCatalogConfidence,
     formatCatalogTime,
@@ -20,6 +21,7 @@ import {
     graphEntityPageMatches,
     graphErrorProjection,
     graphEvidenceMatches,
+    graphEntityTypeLabel,
     graphFactLabel,
     graphGovernanceContextMatches,
     graphLibraryCapabilities,
@@ -42,6 +44,7 @@ import {
 } from '../graph_governance_ui.js';
 import { store } from '../store.js';
 import GraphExplorer from '../components/GraphExplorer.js';
+import GraphKnowledgeBrowser from '../components/GraphKnowledgeBrowser.js';
 
 const MALFORMED_ERROR = {
     kind: 'malformed',
@@ -61,14 +64,6 @@ function normalizedQuery(query) {
     return result;
 }
 
-function sourceTypeLabel(value) {
-    return {
-        manual: '人工',
-        imported: '导入',
-        extracted: '模型抽取',
-    }[value] || '未知来源';
-}
-
 function publicationSourceLabel(value) {
     return {
         initial_seed: '初始发布',
@@ -85,13 +80,24 @@ function statusTag(value) {
     return 'info';
 }
 
+function graphSchemaStateLabel(value) {
+    return {
+        waiting_schema: '等待发现 Schema',
+        discovering_schema: '正在发现 Schema',
+        ai_draft_pending_confirmation: 'AI Schema 待确认',
+        confirmed_schema: '使用已确认 Schema',
+        failed: 'Schema discovery 失败',
+        cancelled: 'Schema discovery 已取消',
+    }[value] || '图谱任务状态未知';
+}
+
 export default {
-    components: { GraphExplorer },
+    components: { GraphExplorer, GraphKnowledgeBrowser },
     setup() {
         const route = useRoute();
         const router = useRouter();
         const scope = reactive({
-            tab: 'entities',
+            tab: 'browse',
             organizationId: '',
             librarySlugs: [],
             entityId: '',
@@ -181,8 +187,10 @@ export default {
             intentKey: '',
             mutationKind: '',
         });
+        const graphJobState = reactive({ loading: false, data: null, error: null });
         const routeSeq = ref(0);
         const explorerRefreshKey = ref(0);
+        const browserSelectedEntityId = ref('');
         let entityRequestSeq = 0;
         let relationRequestSeq = 0;
         let entityDetailRequestSeq = 0;
@@ -202,6 +210,7 @@ export default {
         const selectedOrganization = computed(() => organizations.value.find(
             (item) => item.id === scope.organizationId,
         ) || null);
+        const showOrganizationSelector = computed(() => organizations.value.length > 1);
         const availableLibraries = computed(() => selectedOrganization.value?.libraries || []);
         const hasManagement = computed(() => organizations.value.some(
             (item) => item.libraries.some((library) => library.manage),
@@ -242,7 +251,7 @@ export default {
         const workspaceLoading = computed(() => {
             if (scope.tab === 'review') return reviewQueues.loading;
             if (scope.tab === 'publications') return publications.loading;
-            if (scope.tab === 'explore') return false;
+            if (scope.tab === 'browse') return false;
             return pageState.value.loading;
         });
 
@@ -315,6 +324,9 @@ export default {
             publications.preview = null;
             publications.intentKey = '';
             publications.mutationKind = '';
+            graphJobState.loading = false;
+            graphJobState.data = null;
+            graphJobState.error = null;
         }
 
         function searchBody(cursor, relation = false) {
@@ -362,6 +374,46 @@ export default {
             } finally {
                 if (seq === contextRequestSeq) writeContext.loading = false;
             }
+        }
+
+        async function loadLatestGraphJob() {
+            const librarySlug = selectedLibrary.value?.slug || '';
+            if (!librarySlug) return;
+            graphJobState.loading = true;
+            graphJobState.error = null;
+            try {
+                const result = await api.listSchemaDiscoveryRuns(librarySlug, { limit: 1, offset: 0 });
+                if (!result || !Array.isArray(result.items)) throw new Error('图谱任务响应无效');
+                const run = result.items[0] || null;
+                if (run?.id) {
+                    const jobs = await api.listGraphExtractions(librarySlug, {
+                        schema_discovery_run_id: run.id,
+                        limit: 200,
+                        offset: 0,
+                    });
+                    graphJobState.data = {
+                        ...run,
+                        document_jobs: Array.isArray(jobs?.items) ? jobs.items : [],
+                    };
+                } else {
+                    graphJobState.data = null;
+                }
+            } catch (error) {
+                graphJobState.error = graphErrorProjection(error);
+                graphJobState.data = null;
+            } finally {
+                graphJobState.loading = false;
+            }
+        }
+
+        function openSchemaDraft() {
+            const run = graphJobState.data;
+            const librarySlug = selectedLibrary.value?.slug || '';
+            if (!librarySlug || !run?.ontology_version_id) return;
+            router.push({
+                path: '/knowledge-governance/schema',
+                query: { library: librarySlug, version: String(run.ontology_version_id) },
+            });
         }
 
         async function loadEntityOptions({ ontologyId = '', typeKey = '', query = '' } = {}) {
@@ -657,14 +709,19 @@ export default {
         }
 
         async function loadCurrentPage() {
-            if (scope.tab === 'entities') await loadEntities();
+            await loadLatestGraphJob();
+            if (scope.tab === 'browse') {
+                await maybeOpenEntityFromRoute();
+                await maybeOpenRelationFromRoute();
+            } else if (scope.tab === 'entities') await loadEntities();
             else if (scope.tab === 'relations') await loadRelations();
             else if (scope.tab === 'review') await loadReviewQueues();
             else if (scope.tab === 'publications') await loadPublicationWorkspace();
         }
 
         async function refreshCurrentPage() {
-            if (scope.tab === 'explore') {
+            await loadLatestGraphJob();
+            if (scope.tab === 'browse') {
                 explorerRefreshKey.value += 1;
                 return;
             }
@@ -675,19 +732,29 @@ export default {
             const seq = ++routeSeq.value;
             const next = resolveGraphScope(route.query, store.permissions, store.organizations);
             const previousIdentity = scopeIdentity();
+            const previousEntityId = scope.entityId;
+            const previousRelationId = scope.relationId;
             Object.assign(scope, next);
+            if (scope.entityId) browserSelectedEntityId.value = scope.entityId;
             const canonical = graphRouteQuery(scope);
-            if (previousIdentity !== scopeIdentity()) {
+            const workspaceChanged = previousIdentity !== scopeIdentity();
+            if (workspaceChanged) {
                 entityRequestSeq += 1;
                 relationRequestSeq += 1;
                 resetCursors();
                 invalidateDetails();
+                browserSelectedEntityId.value = scope.entityId;
             }
             if (!sameValues(normalizedQuery(route.query), normalizedQuery(canonical))) {
-                await router.replace({ path: '/knowledge-graph', query: canonical });
+                await router.replace({
+                    path: '/knowledge-governance/graph',
+                    query: canonical,
+                });
                 return;
             }
             if (seq !== routeSeq.value) return;
+            if (!workspaceChanged && ((previousEntityId && !scope.entityId)
+                || (previousRelationId && !scope.relationId))) return;
             await loadCurrentPage();
         }
 
@@ -704,7 +771,10 @@ export default {
         });
 
         function navigate(next) {
-            router.push({ path: '/knowledge-graph', query: graphRouteQuery(next) });
+            router.push({
+                path: '/knowledge-governance/graph',
+                query: graphRouteQuery(next),
+            });
         }
 
         function changeTab(tab) {
@@ -731,6 +801,18 @@ export default {
                 libraries: (librarySlugs || []).join(','),
             }, store.permissions, store.organizations);
             navigate(next);
+        }
+
+        function selectBrowserEntity(row) {
+            const entityId = String(row?.id || '');
+            if (!entityId) return;
+            browserSelectedEntityId.value = entityId;
+        }
+
+        async function editBrowserEntity(data) {
+            if (!data?.entity) return;
+            Object.assign(entityDetail, { open: false, loading: false, data, error: null });
+            await openEntityCorrection();
         }
 
         async function applyFilters() {
@@ -783,6 +865,8 @@ export default {
                 ontologyVersionId: row.ontology_version_id || '',
                 scopeKey: scopeIdentity(),
             };
+            relationDetailRequestSeq += 1;
+            Object.assign(relationDetail, { open: false, loading: false, data: null, error: null });
             entityDetail.open = true;
             entityDetail.loading = true;
             entityDetail.data = null;
@@ -799,7 +883,9 @@ export default {
                     return;
                 }
                 entityDetail.data = data;
-                if (updateRoute && scope.tab === 'entities' && route.query.entity !== identity.entityId) {
+                if (scope.tab === 'browse') browserSelectedEntityId.value = identity.entityId;
+                if (updateRoute && ['browse', 'entities'].includes(scope.tab)
+                    && route.query.entity !== identity.entityId) {
                     navigate({ ...scope, entityId: identity.entityId, relationId: '' });
                 }
             } catch (error) {
@@ -821,6 +907,8 @@ export default {
                 ontologyVersionId: row.ontology_version_id || '',
                 scopeKey: scopeIdentity(),
             };
+            entityDetailRequestSeq += 1;
+            Object.assign(entityDetail, { open: false, loading: false, data: null, error: null });
             relationDetail.open = true;
             relationDetail.loading = true;
             relationDetail.data = null;
@@ -850,13 +938,20 @@ export default {
 
         function closeEntityDetail() {
             entityDetailRequestSeq += 1;
+            entityDetail.open = false;
             entityDetail.data = null;
             entityDetail.error = null;
-            if (scope.entityId) navigate({ ...scope, entityId: '' });
+            if (scope.entityId) {
+                router.replace({
+                    path: '/knowledge-governance/graph',
+                    query: graphRouteQuery({ ...scope, entityId: '' }),
+                });
+            }
         }
 
         function closeRelationDetail() {
             relationDetailRequestSeq += 1;
+            relationDetail.open = false;
             relationDetail.data = null;
             relationDetail.error = null;
             if (scope.relationId) navigate({ ...scope, relationId: '' });
@@ -908,7 +1003,7 @@ export default {
         function openCatalogDocument(document, librarySlug) {
             if (!document?.document_id || !librarySlug) return;
             router.push({
-                path: '/catalog',
+                path: '/knowledge-assets/catalog',
                 query: { library: librarySlug, document: String(document.document_id) },
             });
         }
@@ -920,17 +1015,12 @@ export default {
 
         function openRelatedRelation(row) {
             if (!row?.id || !row?.library?.slug) return;
-            const next = resolveGraphScope({
-                tab: 'relations',
-                organization: scope.organizationId,
-                libraries: row.library.slug,
-                relation: row.id,
-            }, store.permissions, store.organizations);
-            navigate(next);
+            loadRelationDetail(row);
         }
 
         async function refreshGovernanceSurfaces() {
             await loadCurrentPage();
+            if (scope.tab === 'browse') explorerRefreshKey.value += 1;
             if (scope.tab === 'review') return;
             if (entityDetail.open && entityDetail.data?.entity) {
                 await loadEntityDetail(entityDetail.data.entity, false);
@@ -984,11 +1074,20 @@ export default {
             }
         }
 
-        async function openFactDialog(kind) {
+        async function openFactDialog(kind, endpoints = {}) {
             if (!canWrite.value) return;
             const context = await loadWriteContext();
-            if (!context?.ontology_versions?.length) return;
-            const ontology = context.ontology_versions[0];
+            if (!context) {
+                ElMessage.warning(writeContext.error?.message || '暂时无法读取当前知识库的 Schema，请刷新后重试');
+                return;
+            }
+            if (!context.ontology_versions?.length) {
+                ElMessage.warning('当前知识库还没有可编辑的 Schema，请先在 Schema 管理中启用实体和关系类型');
+                return;
+            }
+            const ontology = context.ontology_versions.find(
+                (item) => String(item.id) === String(endpoints.ontologyVersionId || ''),
+            ) || context.ontology_versions[0];
             Object.assign(factDialog, {
                 open: true,
                 kind,
@@ -997,8 +1096,8 @@ export default {
                     ? ontology.entity_types[0]?.id
                     : ontology.relation_types[0]?.id) || ''),
                 canonicalName: '',
-                sourceEntityId: '',
-                targetEntityId: '',
+                sourceEntityId: String(endpoints.sourceEntityId || ''),
+                targetEntityId: String(endpoints.targetEntityId || ''),
                 idempotencyKey: createGraphIntentKey(`${kind}-create`),
             });
             mutation.error = null;
@@ -1609,6 +1708,7 @@ export default {
             scope,
             filters,
             organizations,
+            showOrganizationSelector,
             availableLibraries,
             hasManagement,
             selectedLibrary,
@@ -1636,12 +1736,17 @@ export default {
             reviewQueues,
             mutation,
             publications,
+            graphJobState,
+            openSchemaDraft,
             explorerRefreshKey,
+            browserSelectedEntityId,
             publicationActions,
             activePublication,
             changeTab,
             changeOrganization,
             changeLibraries,
+            selectBrowserEntity,
+            editBrowserEntity,
             applyFilters,
             clearFilters,
             nextPage,
@@ -1689,9 +1794,11 @@ export default {
             sourceTypeLabel,
             publicationSourceLabel,
             statusTag,
+            graphEntityTypeLabel,
             graphFactLabel,
             graphReviewLabel,
             graphPublicationLabel,
+            graphSchemaStateLabel,
             graphPropertyRows,
             formatCatalogConfidence,
             formatCatalogTime,
@@ -1701,63 +1808,92 @@ export default {
         };
     },
     template: `
-    <div class="graph-workspace">
+    <div class="graph-workspace"
+         :class="{ 'has-inspector': scope.tab === 'browse' && relationDetail.open }">
       <header class="graph-header">
-        <div class="graph-create-actions">
-          <el-button v-if="canWrite && scope.tab === 'entities'" type="primary"
-                     :disabled="mutation.loading" @click="openFactDialog('entity')">
-            <local-icon icon="mdi:plus"></local-icon>新增实体
-          </el-button>
-          <el-button v-if="canWrite && scope.tab === 'relations'" type="primary"
-                     :disabled="mutation.loading" @click="openFactDialog('relation')">
-            <local-icon icon="mdi:plus"></local-icon>新增关系
-          </el-button>
-        </div>
         <div class="graph-heading">
           <div class="graph-heading-icon"><local-icon icon="carbon:chart-relationship"></local-icon></div>
           <div><h2>知识图谱</h2><p>实体、关系与原文证据</p></div>
         </div>
-        <el-button :loading="workspaceLoading" title="刷新当前页面" @click="refreshCurrentPage">
-          <local-icon icon="status:retry"></local-icon><span>刷新</span>
+        <div class="graph-scope-inline" :class="{ 'is-single-organization': !showOrganizationSelector }">
+          <label v-if="showOrganizationSelector" class="graph-scope-control graph-organization-control">
+            <span>组织</span>
+            <el-select :model-value="scope.organizationId" class="graph-organization-select"
+                       @change="changeOrganization">
+              <el-option v-for="item in organizations" :key="item.id"
+                         :label="item.name" :value="item.id" />
+            </el-select>
+          </label>
+          <label class="graph-scope-control graph-library-select">
+            <span>知识库</span>
+            <el-select :model-value="scope.librarySlugs" multiple :multiple-limit="20"
+                       collapse-tags collapse-tags-tooltip @change="changeLibraries">
+              <el-option v-for="item in availableLibraries" :key="item.slug"
+                         :label="item.name" :value="item.slug">
+                <span>{{ item.name }}</span><small>{{ item.slug }}</small>
+              </el-option>
+            </el-select>
+          </label>
+          <div class="graph-scope-count">
+            <strong>{{ scope.librarySlugs.length }}</strong><span>个知识库</span>
+          </div>
+        </div>
+        <el-button class="app-refresh-button" :loading="workspaceLoading"
+                   title="刷新当前页面" @click="refreshCurrentPage">
+          <span class="app-refresh-icon" aria-hidden="true"></span><span>刷新</span>
         </el-button>
       </header>
 
-      <section class="graph-scope-band">
-        <label class="graph-field">
-          <span>组织</span>
-          <el-select :model-value="scope.organizationId" class="graph-organization-select"
-                     @change="changeOrganization">
-            <el-option v-for="item in organizations" :key="item.id"
-                       :label="item.name" :value="item.id" />
-          </el-select>
-        </label>
-        <label class="graph-field graph-library-field">
-          <span>知识库范围</span>
-          <el-select :model-value="scope.librarySlugs" multiple :multiple-limit="20"
-                     collapse-tags collapse-tags-tooltip @change="changeLibraries">
-            <el-option v-for="item in availableLibraries" :key="item.slug"
-                       :label="item.name" :value="item.slug">
-              <span>{{ item.name }}</span><small>{{ item.slug }}</small>
-            </el-option>
-          </el-select>
-        </label>
-        <div class="graph-scope-count">
-          <strong>{{ scope.librarySlugs.length }}</strong><span>个知识库</span>
-        </div>
-      </section>
-
       <el-tabs :model-value="scope.tab" class="graph-tabs" @tab-change="changeTab">
-        <el-tab-pane label="实体" name="entities" />
-        <el-tab-pane label="关系" name="relations" />
-        <el-tab-pane label="待审核" name="review" :disabled="!hasManagement" />
-        <el-tab-pane label="发布" name="publications" :disabled="!hasManagement" />
-        <el-tab-pane label="图谱探查" name="explore" />
+        <el-tab-pane label="图谱" name="browse" />
+        <el-tab-pane label="发布记录" name="publications" :disabled="!hasManagement" />
       </el-tabs>
 
       <el-alert v-if="mutation.error && !mergeDialog.open" class="graph-command-error"
                 :title="mutation.error.message" type="warning" :closable="false" show-icon />
 
-      <template v-if="scope.tab === 'entities' || scope.tab === 'relations'">
+      <el-alert v-if="graphJobState.loading" title="正在读取最近一次 Schema discovery run…"
+                type="info" :closable="false" show-icon />
+      <el-alert v-else-if="graphJobState.error" :title="graphJobState.error.message"
+                type="warning" :closable="false" show-icon />
+      <el-alert v-else-if="graphJobState.data" class="graph-command-error"
+                :type="['failed', 'cancelled'].includes(graphJobState.data.status) ? 'warning' : 'info'"
+                :closable="false" show-icon>
+        <template #title>
+          {{ graphSchemaStateLabel(graphJobState.data.schema_state) }} ·
+          {{ graphJobState.data.status }} · source set {{ graphJobState.data.source_set_key }}
+          · {{ graphJobState.data.source_revision_ids?.length || 0 }} 个 revision
+          <span v-if="graphJobState.data.error_code"> · 失败原因：{{ graphJobState.data.error_code }}</span>
+          <span v-if="graphJobState.data.ontology_snapshot_hash"> · Schema snapshot 已冻结</span>
+          <el-button v-if="graphJobState.data.ontology_version_id"
+                     link type="primary" @click="openSchemaDraft">查看 / 编辑 Schema</el-button>
+        </template>
+      </el-alert>
+      <el-table v-if="graphJobState.data?.document_jobs?.length" :data="graphJobState.data.document_jobs"
+                size="small" class="graph-discovery-document-jobs">
+        <el-table-column prop="document_id" label="文档" min-width="180" />
+        <el-table-column prop="schema_state" label="Schema" min-width="150" />
+        <el-table-column prop="status" label="抽取状态" min-width="120" />
+        <el-table-column prop="error_code" label="失败原因" min-width="160" />
+      </el-table>
+
+      <section v-if="scope.tab === 'browse'" class="graph-browser-workspace"
+               :class="{ 'has-inspector': relationDetail.open }">
+        <graph-knowledge-browser :organization-id="scope.organizationId"
+                                 :library-slugs="scope.librarySlugs"
+                                 :selected-entity-id="browserSelectedEntityId"
+                                 :selected-entity="entityDetail.data?.entity || null"
+                                 :inspector-open="relationDetail.open"
+                                 :refresh-key="explorerRefreshKey"
+                                 :can-write="canWrite"
+                                 @select-entity="selectBrowserEntity"
+                                 @create-entity="openFactDialog('entity')"
+                                 @create-relation="openFactDialog('relation', $event)"
+                                 @open-entity="loadEntityDetail($event, false)"
+                                 @open-relation="loadRelationDetail" />
+      </section>
+
+      <template v-else-if="scope.tab === 'entities' || scope.tab === 'relations'">
         <section class="graph-filter-band">
           <el-input v-model="filters.query" clearable maxlength="160"
                     placeholder="搜索名称或关系" @keyup.enter="applyFilters">
@@ -1832,7 +1968,7 @@ export default {
                 </template>
               </el-table-column>
               <el-table-column label="类型" min-width="150">
-                <template #default="cell"><span>{{ cell.row.entity_type.label }}</span><small class="graph-cell-sub">{{ cell.row.entity_type.key }}</small></template>
+                <template #default="cell"><span>{{ graphEntityTypeLabel(cell.row.entity_type) }}</span><small class="graph-cell-sub">{{ cell.row.entity_type.key }}</small></template>
               </el-table-column>
               <el-table-column label="知识库" min-width="150">
                 <template #default="cell"><span>{{ cell.row.library.name }}</span><small class="graph-cell-sub">{{ cell.row.library.slug }}</small></template>
@@ -1905,15 +2041,6 @@ export default {
           </div>
         </section>
       </template>
-
-      <section v-else-if="scope.tab === 'explore'" class="graph-exploration-workspace">
-        <graph-explorer :organization-id="scope.organizationId"
-                        :library-slugs="scope.librarySlugs"
-                        :refresh-key="explorerRefreshKey"
-                        @open-entity="loadEntityDetail"
-                        @open-relation="loadRelationDetail"
-                        @open-evidence="openEvidence" />
-      </section>
 
       <section v-else-if="scope.tab === 'review'" class="graph-review-workspace">
         <el-alert v-if="reviewQueues.error" :title="reviewQueues.error.message"
@@ -1991,8 +2118,10 @@ export default {
               {{ graphPublicationLabel(activePublication.status) }}
             </el-tag>
           </div>
-          <el-button :loading="publications.loading" :disabled="!!publications.mutationKind"
-                     @click="loadPublicationWorkspace">刷新发布状态</el-button>
+          <el-button class="app-refresh-button" :loading="publications.loading"
+                     :disabled="!!publications.mutationKind" @click="loadPublicationWorkspace">
+            <span class="app-refresh-icon" aria-hidden="true"></span>刷新发布状态
+          </el-button>
         </div>
 
         <el-alert v-if="!publications.loading && !publications.enabled" class="graph-publication-alert"
@@ -2095,8 +2224,9 @@ export default {
         <strong>暂无记录</strong>
       </section>
 
-      <el-drawer v-model="entityDetail.open" class="graph-detail-drawer" size="720px"
-                 title="实体详情" @closed="closeEntityDetail">
+      <el-dialog v-model="entityDetail.open" class="graph-entity-dialog"
+                 width="min(980px, calc(100vw - 32px))" title="实体详情"
+                 destroy-on-close @closed="closeEntityDetail">
         <div v-if="entityDetail.loading" class="graph-detail-loading">正在加载实体...</div>
         <div v-else-if="entityDetail.error" class="graph-state"><strong>{{ entityDetail.error.message }}</strong></div>
         <template v-else-if="entityDetail.data">
@@ -2111,7 +2241,7 @@ export default {
               <el-button v-if="canManage && entityDetail.data.entity.status === 'active'"
                          @click="openMergeDialog">合并</el-button>
             </div>
-            <div class="graph-detail-title"><div><h3>{{ entityDetail.data.entity.canonical_name }}</h3><span>{{ entityDetail.data.entity.entity_type.label }}</span></div>
+            <div class="graph-detail-title"><div><h3>{{ entityDetail.data.entity.canonical_name }}</h3><span>{{ graphEntityTypeLabel(entityDetail.data.entity.entity_type) }}</span></div>
               <div class="graph-tag-stack"><el-tag :type="statusTag(entityDetail.data.entity.status)">{{ graphFactLabel(entityDetail.data.entity.status) }}</el-tag><el-tag effect="plain">{{ graphPublicationLabel(entityDetail.data.entity.publication_state) }}</el-tag></div>
             </div>
             <dl class="graph-identity-grid">
@@ -2120,6 +2250,19 @@ export default {
               <div><dt>来源</dt><dd>{{ sourceTypeLabel(entityDetail.data.entity.source_type) }}</dd></div>
               <div><dt>可信度</dt><dd>{{ formatCatalogConfidence(entityDetail.data.entity.confidence) }}</dd></div>
             </dl>
+          </section>
+          <section class="graph-entity-network">
+            <graph-explorer v-if="entityDetail.data.relation_count > 0"
+                            entity-preview
+                            :organization-id="scope.organizationId"
+                            :library-slugs="[entityDetail.data.entity.library.slug]"
+                            :selected-entity-id="entityDetail.data.entity.id"
+                            :selected-seed="entityDetail.data.entity"
+                            :refresh-key="explorerRefreshKey"
+                            @open-entity="loadEntityDetail($event)" />
+            <div v-else class="graph-inline-empty graph-entity-network-empty">
+              该实体暂无关系，无法显示局部关系图
+            </div>
           </section>
           <section class="graph-detail-section">
             <div class="graph-section-heading"><h4>属性</h4><span>{{ graphPropertyRows(entityDetail.data.properties).length }} 项</span></div>
@@ -2180,10 +2323,24 @@ export default {
             </dl>
           </section>
         </template>
-      </el-drawer>
+      </el-dialog>
 
-      <el-drawer v-model="relationDetail.open" class="graph-detail-drawer" size="720px"
-                 title="关系详情" @closed="closeRelationDetail">
+      <component :is="scope.tab === 'browse' ? 'aside' : 'el-drawer'"
+                 v-if="scope.tab !== 'browse' || relationDetail.open"
+                 :class="scope.tab === 'browse' ? 'graph-detail-inspector' : 'graph-detail-drawer'"
+                 v-bind="scope.tab === 'browse' ? {} : {
+                   modelValue: relationDetail.open,
+                   size: 'min(720px, calc(100vw - 380px))',
+                   title: '关系详情',
+                 }"
+                 @update:model-value="relationDetail.open = $event"
+                 @closed="closeRelationDetail">
+        <header v-if="scope.tab === 'browse'" class="graph-detail-inspector-header">
+          <h2>关系详情</h2>
+          <el-button circle title="关闭详情" aria-label="关闭详情" @click="closeRelationDetail">
+            <local-icon icon="mdi:close"></local-icon>
+          </el-button>
+        </header>
         <div v-if="relationDetail.loading" class="graph-detail-loading">正在加载关系...</div>
         <div v-else-if="relationDetail.error" class="graph-state"><strong>{{ relationDetail.error.message }}</strong></div>
         <template v-else-if="relationDetail.data">
@@ -2247,7 +2404,7 @@ export default {
             </dl>
           </section>
         </template>
-      </el-drawer>
+      </component>
 
       <el-dialog v-model="factDialog.open" class="graph-command-dialog" width="560px"
                  :title="factDialog.kind === 'entity' ? '新增实体' : '新增关系'">

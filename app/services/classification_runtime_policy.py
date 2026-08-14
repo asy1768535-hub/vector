@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from app.config import Settings, settings
 from app.services.classification_runtime_contracts import (
-    CLASSIFICATION_PROVIDER_BASE_URL,
-    CLASSIFICATION_PROVIDER_MODEL,
+    classification_provider_name,
     fail_classification_runtime,
 )
 
@@ -95,7 +94,8 @@ def validate_classification_scope(
             "revision_not_ready",
             "current document Revision must be ready",
         )
-    if not getattr(library, "external_llm_enabled", False):
+    provider_name = classification_provider_name(config)
+    if provider_name == "deepseek" and not getattr(library, "external_llm_enabled", False):
         fail_classification_runtime(
             "library_external_llm_disabled",
             "Library external LLM access is disabled",
@@ -122,14 +122,7 @@ def validate_classification_scope(
             "security_level_denied",
             "Revision security level is not allowed",
         )
-    if (
-        config.classification_base_url != CLASSIFICATION_PROVIDER_BASE_URL
-        or config.classification_model != CLASSIFICATION_PROVIDER_MODEL
-    ):
-        fail_classification_runtime(
-            "provider_config_invalid",
-            "classification provider identity is not approved",
-        )
+    classification_provider_name(config)
     if not config.classification_api_key.get_secret_value().strip():
         fail_classification_runtime(
             "provider_credential_missing",

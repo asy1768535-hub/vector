@@ -47,6 +47,50 @@ def _validation_summary(exc: ValidationError) -> str:
     return "invalid extraction schema: " + "; ".join(parts)
 
 
+def _dedupe_entity_local_ids(decoded):
+    if not isinstance(decoded, dict) or not isinstance(decoded.get("entities"), list):
+        return decoded
+    entities = decoded["entities"]
+    seen: set[str] = set()
+    duplicate_ids: set[str] = set()
+    changed = False
+    for entity in entities:
+        if not isinstance(entity, dict):
+            continue
+        local_id = entity.get("local_id")
+        if not isinstance(local_id, str) or not local_id:
+            continue
+        if local_id not in seen:
+            seen.add(local_id)
+            continue
+        duplicate_ids.add(local_id)
+        suffix = 2
+        while True:
+            candidate = f"{local_id[:120]}_{suffix}"
+            if candidate not in seen:
+                break
+            suffix += 1
+        entity["local_id"] = candidate
+        seen.add(candidate)
+        changed = True
+    if not changed:
+        return decoded
+    relations = decoded.get("relations")
+    if isinstance(relations, list):
+        decoded["relations"] = [
+            relation
+            for relation in relations
+            if not (
+                isinstance(relation, dict)
+                and (
+                    relation.get("source_local_id") in duplicate_ids
+                    or relation.get("target_local_id") in duplicate_ids
+                )
+            )
+        ]
+    return decoded
+
+
 def parse_graph_extraction_output(raw_content: str) -> GraphExtractionPayload:
     value = _unwrap_outer_fence(raw_content)
     try:
@@ -58,7 +102,9 @@ def parse_graph_extraction_output(raw_content: str) -> GraphExtractionPayload:
         ) from exc
 
     try:
-        return GraphExtractionPayload.model_validate(decoded)
+        return GraphExtractionPayload.model_validate(
+            _dedupe_entity_local_ids(decoded)
+        )
     except ValidationError as exc:
         raise GraphExtractionParseError(
             "invalid_schema",

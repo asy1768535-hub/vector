@@ -21,6 +21,26 @@ class Library(Base):
         CheckConstraint("index_state IN ('ready','rebuilding','failed')", name="ck_lib_index_state"),
         CheckConstraint("retrieval_mode IN ('dense','hybrid')", name="ck_lib_retrieval_mode"),
         CheckConstraint(
+            "graph_extraction_build_mode IN ('fast','standard','deep')",
+            name="ck_lib_graph_extraction_build_mode",
+        ),
+        CheckConstraint(
+            "graph_assisted_chat_mode IN ('off','shadow','enabled')",
+            name="ck_lib_graph_assisted_chat_mode",
+        ),
+        CheckConstraint(
+            "schema_mode IN ('disabled','explore','governed')",
+            name="ck_lib_schema_mode",
+        ),
+        CheckConstraint(
+            "schema_confirmation_policy IN ('required','automatic')",
+            name="ck_lib_schema_confirmation_policy",
+        ),
+        CheckConstraint(
+            "claim_graph_shadow_policy IN ('inherit','enabled','disabled')",
+            name="ck_lib_claim_graph_shadow_policy",
+        ),
+        CheckConstraint(
             "jsonb_typeof(knowledge_artifact_allowed_security_levels) = 'array'",
             name="ck_lib_knowledge_artifact_security_levels_array",
         ),
@@ -106,6 +126,21 @@ class Library(Base):
 
     graph_extraction_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
+    )
+    schema_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="disabled", server_default="disabled"
+    )
+    schema_confirmation_policy: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="required", server_default="required"
+    )
+    claim_graph_shadow_policy: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="inherit", server_default="inherit"
+    )
+    graph_extraction_build_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="standard", server_default="standard"
+    )
+    graph_assisted_chat_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="off", server_default="off"
     )
     external_llm_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"

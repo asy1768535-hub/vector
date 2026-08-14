@@ -15,6 +15,8 @@ from app.services.knowledge_artifact_generation import (
     KnowledgeArtifactGenerationError,
     deterministic_outline,
     deterministic_summary,
+    outline_messages,
+    parse_model_outline,
     parse_model_summary,
     summary_messages,
 )
@@ -223,32 +225,42 @@ async def process_knowledge_artifact_job(
         return ArtifactProcessResult(status, exc.code)
 
     try:
-        if prepared.artifact_type == "outline":
-            payload = deterministic_outline(
-                list(prepared.title_paths),
-                document_title=prepared.document_title,
+        if prepared.generation_mode == "deterministic":
+            payload = (
+                deterministic_outline(
+                    list(prepared.title_paths),
+                    document_title=prepared.document_title,
+                )
+                if prepared.artifact_type == "outline"
+                else deterministic_summary(prepared.source_text)
             )
-        elif prepared.generation_mode == "deterministic":
-            payload = deterministic_summary(prepared.source_text)
         else:
             adapter = provider or OpenAICompatibleSummaryProvider(
-                base_url=config.knowledge_artifact_base_url,
-                model=config.knowledge_artifact_model,
-                api_key=config.knowledge_artifact_api_key.get_secret_value(),
+                base_url=config.graph_extraction_base_url,
+                model=config.graph_extraction_model,
+                api_key=config.graph_extraction_api_key.get_secret_value(),
                 timeout_seconds=config.knowledge_artifact_provider_timeout_seconds,
             )
             response = await call_provider_with_lease_renewal(
                 session_factory,
                 claimed=claimed,
                 provider=adapter,
-                messages=summary_messages(prepared.source_text),
+                messages=(
+                    outline_messages(prepared.source_text)
+                    if prepared.artifact_type == "outline"
+                    else summary_messages(prepared.source_text)
+                ),
                 renew_seconds=config.knowledge_artifact_worker_renew_seconds,
                 lease_seconds=config.knowledge_artifact_worker_lease_seconds,
             )
-            payload = parse_model_summary(
-                response.content,
-                source_character_count=prepared.source_character_count,
-                source_truncated=prepared.source_truncated,
+            payload = (
+                parse_model_outline(response.content)
+                if prepared.artifact_type == "outline"
+                else parse_model_summary(
+                    response.content,
+                    source_character_count=prepared.source_character_count,
+                    source_truncated=prepared.source_truncated,
+                )
             )
     except KnowledgeArtifactProviderError as exc:
         code = f"provider_{exc.category}"[:64]

@@ -242,9 +242,21 @@ async def validate_entity_write(
     source_type: str = GRAPH_SOURCE_MANUAL,
     confidence: float | None = None,
     exclude_entity_id: uuid.UUID | None = None,
+    allow_draft_ontology: bool = False,
 ) -> EntityWriteValidation:
-    ontology_version = await _get_scoped_active_ontology(db, library, ontology_version_id)
-    entity_type = await _get_active_entity_type(db, library, ontology_version.id, entity_type_id)
+    ontology_version = await _get_scoped_active_ontology(
+        db,
+        library,
+        ontology_version_id,
+        allow_draft=allow_draft_ontology,
+    )
+    entity_type = await _get_active_entity_type(
+        db,
+        library,
+        ontology_version.id,
+        entity_type_id,
+        allow_draft=allow_draft_ontology,
+    )
     _require_graph_fact_status(requested_status)
     _require_source_type(source_type)
     props = _coerce_properties(properties)
@@ -254,6 +266,7 @@ async def validate_entity_write(
         ontology_version.id,
         owner_kind=ATTRIBUTE_OWNER_ENTITY_TYPE,
         owner_type_id=entity_type.id,
+        allow_draft=allow_draft_ontology,
     )
     shape = validate_entity_shape(
         entity_type=_entity_type_rule(entity_type, attribute_definitions),
@@ -296,6 +309,7 @@ async def validate_relation_write(
     active_evidence_count: int | None = None,
     write_mode: Literal["create", "activate"] = "create",
     relation_id: uuid.UUID | None = None,
+    allow_draft_ontology: bool = False,
 ) -> RelationWriteValidation:
     _require_graph_fact_status(requested_status)
     _require_source_type(source_type)
@@ -307,8 +321,19 @@ async def validate_relation_write(
     if source_entity.ontology_version_id != target_entity.ontology_version_id:
         raise ValueError("source and target entities must belong to the same ontology")
 
-    ontology_version = await _get_scoped_active_ontology(db, library, source_entity.ontology_version_id)
-    relation_type = await _get_active_relation_type(db, library, ontology_version.id, relation_type_id)
+    ontology_version = await _get_scoped_active_ontology(
+        db,
+        library,
+        source_entity.ontology_version_id,
+        allow_draft=allow_draft_ontology,
+    )
+    relation_type = await _get_active_relation_type(
+        db,
+        library,
+        ontology_version.id,
+        relation_type_id,
+        allow_draft=allow_draft_ontology,
+    )
     props = _coerce_properties(properties)
     attribute_definitions = await _list_active_attribute_definitions(
         db,
@@ -316,6 +341,7 @@ async def validate_relation_write(
         ontology_version.id,
         owner_kind=ATTRIBUTE_OWNER_RELATION_TYPE,
         owner_type_id=relation_type.id,
+        allow_draft=allow_draft_ontology,
     )
     constraint = await _find_active_relation_type_constraint(
         db,
@@ -324,6 +350,7 @@ async def validate_relation_write(
         relation_type_id=relation_type.id,
         source_entity_type_id=source_entity.entity_type_id,
         target_entity_type_id=target_entity.entity_type_id,
+        allow_draft=allow_draft_ontology,
     )
     shape = validate_relation_shape(
         relation_type=_relation_type_rule(relation_type, attribute_definitions),
@@ -457,11 +484,14 @@ async def _get_scoped_active_ontology(
     db: AsyncSession,
     library: Library,
     ontology_version_id: uuid.UUID,
+    *,
+    allow_draft: bool = False,
 ) -> OntologyVersion:
     ontology_version = await db.get(OntologyVersion, ontology_version_id)
     if ontology_version is None or ontology_version.library_id != library.id:
         raise LookupError("ontology version not found")
-    if ontology_version.status != ONTOLOGY_STATUS_ACTIVE:
+    allowed_statuses = {ONTOLOGY_STATUS_ACTIVE, "draft"} if allow_draft else {ONTOLOGY_STATUS_ACTIVE}
+    if ontology_version.status not in allowed_statuses:
         raise ValueError("ontology version must be active")
     return ontology_version
 
@@ -471,12 +501,15 @@ async def _get_active_entity_type(
     library: Library,
     ontology_version_id: uuid.UUID,
     entity_type_id: uuid.UUID,
+    *,
+    allow_draft: bool = False,
 ) -> EntityType:
     entity_type = await db.get(EntityType, entity_type_id)
     if entity_type is None or entity_type.library_id != library.id:
         raise LookupError("entity type not found")
     _require_same_ontology(entity_type, ontology_version_id, "entity type")
-    if entity_type.status != SCHEMA_STATUS_ACTIVE:
+    allowed_statuses = {SCHEMA_STATUS_ACTIVE, "draft"} if allow_draft else {SCHEMA_STATUS_ACTIVE}
+    if entity_type.status not in allowed_statuses:
         raise ValueError("entity type must be active")
     return entity_type
 
@@ -486,12 +519,15 @@ async def _get_active_relation_type(
     library: Library,
     ontology_version_id: uuid.UUID,
     relation_type_id: uuid.UUID,
+    *,
+    allow_draft: bool = False,
 ) -> RelationType:
     relation_type = await db.get(RelationType, relation_type_id)
     if relation_type is None or relation_type.library_id != library.id:
         raise LookupError("relation type not found")
     _require_same_ontology(relation_type, ontology_version_id, "relation type")
-    if relation_type.status != SCHEMA_STATUS_ACTIVE:
+    allowed_statuses = {SCHEMA_STATUS_ACTIVE, "draft"} if allow_draft else {SCHEMA_STATUS_ACTIVE}
+    if relation_type.status not in allowed_statuses:
         raise ValueError("relation type must be active")
     return relation_type
 
@@ -516,7 +552,9 @@ async def _find_active_relation_type_constraint(
     relation_type_id: uuid.UUID,
     source_entity_type_id: uuid.UUID,
     target_entity_type_id: uuid.UUID,
+    allow_draft: bool = False,
 ) -> RelationTypeConstraint | None:
+    allowed_statuses = {SCHEMA_STATUS_ACTIVE, "draft"} if allow_draft else {SCHEMA_STATUS_ACTIVE}
     result = await db.execute(
         select(RelationTypeConstraint)
         .where(
@@ -525,7 +563,7 @@ async def _find_active_relation_type_constraint(
             RelationTypeConstraint.relation_type_id == relation_type_id,
             RelationTypeConstraint.source_entity_type_id == source_entity_type_id,
             RelationTypeConstraint.target_entity_type_id == target_entity_type_id,
-            RelationTypeConstraint.status == SCHEMA_STATUS_ACTIVE,
+            RelationTypeConstraint.status.in_(allowed_statuses),
         )
         .limit(1)
     )
@@ -539,14 +577,16 @@ async def _list_active_attribute_definitions(
     *,
     owner_kind: str,
     owner_type_id: uuid.UUID,
+    allow_draft: bool = False,
 ) -> list[AttributeDefinition]:
+    allowed_statuses = {SCHEMA_STATUS_ACTIVE, "draft"} if allow_draft else {SCHEMA_STATUS_ACTIVE}
     result = await db.execute(
         select(AttributeDefinition).where(
             AttributeDefinition.library_id == library.id,
             AttributeDefinition.ontology_version_id == ontology_version_id,
             AttributeDefinition.owner_kind == owner_kind,
             AttributeDefinition.owner_type_id == owner_type_id,
-            AttributeDefinition.status == SCHEMA_STATUS_ACTIVE,
+            AttributeDefinition.status.in_(allowed_statuses),
         )
     )
     return list(result.scalars().all())

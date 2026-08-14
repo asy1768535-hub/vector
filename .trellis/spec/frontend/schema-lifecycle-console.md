@@ -4,8 +4,10 @@
 
 ### 1. Scope / Trigger
 
-Use this contract when changing `/schema-lifecycle`, its menu access, strict API
-clients, version routing, draft forms, validation, impact, clone, or activation.
+Use this contract when changing `/knowledge-governance/schema` (legacy
+`/schema-lifecycle`), its menu access, strict API
+clients, version routing, draft forms, JSON file import, validation, impact, clone, activation,
+draft deletion, or active-version disable.
 This is a management workspace; Documents and Knowledge Catalog remain primary
 product entry points.
 
@@ -14,7 +16,7 @@ product entry points.
 Route and permission:
 
 ```text
-/schema-lifecycle?library=<slug>&version=<uuid>&tab=<known-tab>
+/knowledge-governance/schema?library=<slug>&version=<uuid>&tab=<known-tab>
 access: Organization administrator or exact Library admin permission
 ```
 
@@ -39,6 +41,9 @@ live in `schema_lifecycle_ui.js`.
 - Version list, detail, validation, impact, and mutation flows use independent
   monotonic request tokens. Responses must repeat exact Library/version
   identity, child scope, count, and state hash before display.
+- Import reads a JSON, YAML, or YML file locally, submits the file text to the
+  server for strict parsing and validation, creates a new draft, and never
+  activates it automatically.
 - Clone refreshes the version list before replacing the URL with the returned
   draft ID. This prevents route normalization from selecting the old version
   while the new draft is not yet present in the client list.
@@ -52,6 +57,10 @@ live in `schema_lifecycle_ui.js`.
   retrieval scope.
 - Activation requires a confirmation naming the exact version and stating that
   historical graph knowledge and Publications remain on their old versions.
+- Draft versions expose a delete command with exact-version confirmation. After
+  success the hidden version is removed from the list and the next version is
+  selected. Active versions expose a disable command that states historical
+  graph knowledge and Publications remain bound to that version.
 - Do not render arbitrary metadata, raw errors, Schema provider payloads,
   prompts, source content, credentials, storage locators, or `v-html`.
 - At `<=899px` the workspace stacks. At `<=520px` controls wrap, tables scroll
@@ -68,7 +77,8 @@ live in `schema_lifecycle_ui.js`.
 | `409` | Close unsafe UI, clear previews, reload server truth, never resubmit |
 | `422` | Fixed invalid-command state |
 | Malformed or mismatched response identity | Discard payload and show fixed malformed state |
-| Active or disabled version selected | Inspection only; no edit/validate/impact activation controls |
+| Active version selected | Inspection plus clone and disable; no draft edit controls |
+| Disabled version selected | Inspection only; no mutation controls |
 | Request completes after scope change | Ignore response without changing current UI |
 
 ### 5. Good / Base / Bad Cases
@@ -78,6 +88,8 @@ live in `schema_lifecycle_ui.js`.
   impact, confirms activation, and sees the old version disabled.
 - Good: after clone, the URL and detail both point to the returned draft even
   when the prior active version was selected.
+- Good: deleting a draft selects the next visible version; disabling an active
+  version leaves it visible with the disabled status.
 - Base: an active version is readable and offers clone; impact explains that a
   draft is required.
 - Bad: changing the URL before refreshing versions, accepting children from

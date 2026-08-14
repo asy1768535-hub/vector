@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -66,3 +67,46 @@ def test_service_run_rebuild_rejects_external_without_qdrant():
             asyncio.run(rebuild_svc.run_rebuild(db, ext.id))
         dc.assert_not_called()
         ec.assert_not_called()
+
+
+def _scalar_result(value):
+    result = MagicMock()
+    result.scalar_one.return_value = value
+    result.scalar_one_or_none.return_value = value
+    return result
+
+
+def test_finalize_fails_operation_when_rebuild_job_was_superseded():
+    """A terminal superseded rebuild job must not leave the library rebuilding forever."""
+    library_id = uuid.uuid4()
+    operation_id = uuid.uuid4()
+    library = SimpleNamespace(index_state="rebuilding")
+    operation = SimpleNamespace(
+        id=operation_id,
+        status="running",
+        expected_job_count=1,
+        last_error=None,
+        finished_at=None,
+    )
+    db = MagicMock()
+    db.execute = AsyncMock(
+        side_effect=[
+            _scalar_result(library_id),
+            _scalar_result(library),
+            _scalar_result(operation),
+            _scalar_result(0),
+            _scalar_result(1),
+        ]
+    )
+    db.commit = AsyncMock()
+    db.rollback = AsyncMock()
+
+    advanced = asyncio.run(rebuild_svc.try_finalize(db, operation_id))
+
+    assert advanced is True
+    assert operation.status == "failed"
+    assert operation.last_error == "rebuild jobs did not complete: failed=0, superseded=1"
+    assert operation.finished_at is not None
+    assert library.index_state == "failed"
+    db.commit.assert_awaited_once()
+    db.rollback.assert_not_awaited()

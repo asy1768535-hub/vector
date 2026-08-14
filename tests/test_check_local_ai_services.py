@@ -184,12 +184,12 @@ def test_local_url_never_sends_settings_api_key(monkeypatch):
     assert me.await_args.kwargs["api_key"] != "CLOUDKEY_EMB"
     assert not mr.await_args.kwargs["api_key"]
     assert mr.await_args.kwargs["api_key"] != "CLOUDKEY_RR"
-    assert mr.await_args.kwargs["provider"] == "standard"  # 强制 standard
+    assert mr.await_args.kwargs["provider"] == settings.rerank_provider
 
 
-def test_local_rerank_uses_standard_payload_despite_dashscope_provider(monkeypatch):
+def test_local_rerank_standard_payload(monkeypatch):
     """settings.rerank_provider=dashscope，但检查本地 URL 仍用 standard 请求格式，且不发鉴权头。"""
-    monkeypatch.setattr(settings, "rerank_provider", "dashscope")
+    monkeypatch.setattr(settings, "rerank_provider", "standard")
     monkeypatch.setattr(settings, "rerank_api_key", "CLOUDKEY_RR")
     captured = {}
 
@@ -225,6 +225,51 @@ def test_local_rerank_uses_standard_payload_despite_dashscope_provider(monkeypat
     assert "query" in p and "documents" in p and "top_n" in p   # standard 结构
     assert "input" not in p and "parameters" not in p           # 不是 dashscope 结构
     assert captured["headers"] is None                          # 本地：无 Authorization 头
+
+
+def test_local_rerank_uses_configured_tei_provider(monkeypatch):
+    monkeypatch.setattr(settings, "rerank_provider", "tei")
+    captured = {}
+
+    class _FakeResp:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return [{"index": 0, "score": 0.9}, {"index": 1, "score": 0.2}, {"index": 2, "score": 0.1}]
+
+    class _FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            captured["payload"] = json
+            captured["headers"] = headers
+            return _FakeResp()
+
+    with patch("app.services.rerank.httpx.AsyncClient", _FakeClient):
+        result = asyncio.run(
+            cl.check_rerank(
+                base_url=LOCAL_RR,
+                model="BAAI/bge-reranker-v2-m3",
+                api_key="CLOUDKEY_RR",
+                allow_cloud=False,
+            )
+        )
+    assert result.ok
+    assert captured["payload"] == {
+        "query": "什么是向量数据库",
+        "texts": ["猫是一种宠物。", "向量数据库用于相似度检索。", "今天的天气很好。"],
+        "return_text": False,
+        "raw_scores": False,
+    }
+    assert captured["headers"] is None
 
 
 def test_cloud_rerank_uses_dashscope_payload_when_allowed(monkeypatch):

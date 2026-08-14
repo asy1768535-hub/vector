@@ -14,9 +14,12 @@ from app.schemas.schema_lifecycle import (
     SchemaAttributeCreateRequest,
     SchemaCloneRequest,
     SchemaConstraintCreateRequest,
+    SchemaDraftDeleteRequest,
     SchemaEntityTypeCreateRequest,
+    SchemaImportRequest,
     SchemaItemDisableRequest,
     SchemaRelationTypeCreateRequest,
+    SchemaVersionDisableRequest,
 )
 from app.services.schema_lifecycle_contracts import (
     SCHEMA_LIFECYCLE_ACTION_KINDS,
@@ -31,6 +34,9 @@ from app.services.schema_lifecycle_contracts import (
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "alembic" / "versions" / "0039_v09_schema_lifecycle_actions.py"
+RETIREMENT_MIGRATION = (
+    ROOT / "alembic" / "versions" / "0043_v09_schema_version_retirement.py"
+)
 
 
 def _command(**overrides) -> SchemaLifecycleCommand:
@@ -68,10 +74,13 @@ def test_schema_lifecycle_defaults_off_and_requires_organization_authorization()
 def test_action_model_and_migration_are_closed_bounded_and_private():
     assert set(SCHEMA_LIFECYCLE_ACTION_KINDS) == {
         "clone_version",
+        "import_version",
         "create_item",
         "update_item",
         "disable_item",
         "activate_version",
+        "delete_version",
+        "disable_version",
     }
     assert set(SCHEMA_LIFECYCLE_TARGET_KINDS) == {
         "ontology_version",
@@ -126,10 +135,39 @@ def test_action_model_and_migration_are_closed_bounded_and_private():
     assert 'down_revision: Union[str, None] = "0038"' in migration
     assert 'op.create_table(\n        "schema_lifecycle_actions"' in migration
     assert 'op.drop_table("schema_lifecycle_actions")' in migration
-    for value in (*SCHEMA_LIFECYCLE_ACTION_KINDS, *SCHEMA_LIFECYCLE_TARGET_KINDS):
+    for value in (
+        "clone_version",
+        "create_item",
+        "update_item",
+        "disable_item",
+        "activate_version",
+        *SCHEMA_LIFECYCLE_TARGET_KINDS,
+    ):
         assert value in migration
+    retirement_migration = RETIREMENT_MIGRATION.read_text(encoding="utf-8")
+    assert 'revision: str = "0043"' in retirement_migration
+    assert 'down_revision: Union[str, None] = "0042"' in retirement_migration
+    assert "delete_version" in retirement_migration
+    assert "disable_version" in retirement_migration
     for value in forbidden:
         assert value not in migration
+
+
+def test_version_retirement_requests_require_fixed_confirmations():
+    common = {
+        "expected_version_state_hash": "a" * 64,
+        "idempotency_key": "retire-version-1",
+    }
+    assert SchemaDraftDeleteRequest(
+        **common, confirmation="delete_schema_draft"
+    ).confirmation == "delete_schema_draft"
+    assert SchemaVersionDisableRequest(
+        **common, confirmation="disable_schema_version"
+    ).confirmation == "disable_schema_version"
+    with pytest.raises(ValidationError):
+        SchemaDraftDeleteRequest(**common, confirmation="delete")
+    with pytest.raises(ValidationError):
+        SchemaVersionDisableRequest(**common, confirmation="disable")
 
 
 def test_command_hash_and_clone_identity_are_canonical_and_fail_closed():
@@ -232,4 +270,44 @@ def test_http_command_contracts_are_strict_and_bounded():
             expected_active_version_id=None,
             confirmation="yes",
             idempotency_key="activate-1",
+        )
+
+
+def test_schema_import_contract_uses_keys_and_never_accepts_database_ids():
+    request = SchemaImportRequest(
+        version_key="finance",
+        idempotency_key="import-1",
+        entity_types=[{"key": "company", "label": "Company"}],
+        relation_types=[
+            {
+                "key": "owns",
+                "label": "Owns",
+                "direction": "directed",
+                "default_review_policy": "pending_review",
+            }
+        ],
+        attributes=[
+            {
+                "owner_kind": "entity_type",
+                "owner_key": "company",
+                "key": "name",
+                "label": "Name",
+                "value_type": "string",
+            }
+        ],
+        constraints=[
+            {
+                "relation_type_key": "owns",
+                "source_entity_type_key": "company",
+                "target_entity_type_key": "company",
+            }
+        ],
+    )
+    assert request.version_key == "finance"
+    assert request.attributes[0].owner_key == "company"
+    with pytest.raises(ValidationError):
+        SchemaImportRequest(
+            version_key="finance",
+            idempotency_key="import-2",
+            entity_types=[{"id": str(uuid.uuid4()), "key": "company", "label": "Company"}],
         )

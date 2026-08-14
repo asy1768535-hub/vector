@@ -31,7 +31,7 @@ const ICONS = {
     'mdi:shield-key-outline':
         '<path fill="currentColor" d="M21 11c0 5.55-3.84 10.74-9 12-5.16-1.26-9-6.45-9-12V5l9-4 9 4v6m-9 10c3.75-1 7-5.46 7-9.78V6.3l-7-3.12L5 6.3v4.92C5 15.54 8.25 20 12 21m0-4a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0-2a1 1 0 0 1-1-1 1 1 0 0 1 1-1 1 1 0 0 1 1 1 1 1 0 0 1-1 1Z"/>',
     'mdi:cog-sync-outline':
-        '<path fill="currentColor" d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8m0 2a2 2 0 1 1 0 4 2 2 0 0 1 0-4m-1-7.35 2.83.97.36-2.78 2.45.78-.36 2.78 2.97.48.56 2.75-2.97-.48 1.4 2.41-.82.46 2.18 1.85-.85-.48-2.17-1.84.35-2.79-2.45-.78.35 2.79L12 1Z"/>',
+        '<g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="3.2"/><circle cx="12" cy="12" r="7.2"/><path d="M12 2.5v2.3M12 19.2v2.3M2.5 12h2.3M19.2 12h2.3M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M18.7 5.3l-1.6 1.6M6.9 17.1l-1.6 1.6"/></g>',
     'mdi:heart-pulse':
         '<path fill="currentColor" d="M18 8.17c.82.6 2 1.53 2 3.83h-3.17L16 13.88l-.71-.71L12 9.88l-3.29 3.29-.71.71L5.17 12H4c0-2.3 1.18-3.23 2-3.83V3h12v5.17M12 2l2.83 2.83L12 7.66 9.17 4.83 12 2M8 14h2.59L12 15.41 13.41 14H16v-2h-2.59L12 10.59 10.59 12H8v2Z"/>',
     'mdi:history':
@@ -65,7 +65,7 @@ const ICONS = {
 
     // ── Carbon Icons ──
     'carbon:chart-relationship':
-        '<path fill="currentColor" d="M26 6a3.996 3.996 0 0 0-3.858 3H17.93A4.98 4.98 0 0 0 14 5a4.99 4.99 0 0 0-3.93 2H6a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h4.07A4.98 4.98 0 0 0 14 17a4.99 4.99 0 0 0 3.93-2h4.21A3.993 3.993 0 1 0 26 16h-4.21a4.97 4.97 0 0 0-5.86-2H6v-4h9.93a4.98 4.98 0 0 0 5.86-2H26V6ZM6 9h4v4H6Zm8 7a3 3 0 1 1 3-3 3.003 3.003 0 0 1-3 3Zm12-7a2 2 0 1 1 2-2 2.002 2.002 0 0 1-2 2Z"/>',
+        '<g stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9.7 9.4 7.3 7"/><path d="M14.3 9.4 16.7 7"/><path d="M9.3 13.4 6.7 15"/><path d="M14.7 13.4 17.3 15"/><path d="M12 14.8V18"/><circle cx="12" cy="12" r="3"/><circle cx="5.8" cy="5.5" r="1.7"/><circle cx="18.2" cy="5.5" r="1.7"/><circle cx="5.2" cy="16" r="1.7"/><circle cx="18.8" cy="16" r="1.7"/><circle cx="12" cy="20" r="1.7"/></g>',
 
     // ── Sidebar Icons (stroke-based, viewBox 0 0 24 24) ──
     'sidebar:chat':
@@ -148,10 +148,8 @@ const ICONS = {
 const FALLBACK =
     '<path fill="currentColor" d="M11 18h2v-2h-2v2m1-16A10 10 0 0 0 2 12a10 10 0 0 0 10 10 10 10 0 0 0 10-10A10 10 0 0 0 12 2m0 18a8 8 0 0 1-8-8 8 8 0 0 1 8-8 8 8 0 0 1 8 8 8 8 0 0 1-8 8m0-14a2 2 0 0 0-2 2h2a.5.5 0 0 1-.5-.5.5.5 0 0 1 .5-.5 2 2 0 0 1 0 4h-1v2h1a4 4 0 0 0 0-8Z"/>';
 
-// 部分图标（如 Carbon）坐标超出 24×24，使用更大的 viewBox
-const VIEWBOX_MAP = {
-    'carbon:chart-relationship': '0 0 32 32',
-};
+// 为坐标超出 24×24 的图标保留单独 viewBox。
+const VIEWBOX_MAP = {};
 const DEFAULT_VIEWBOX = '0 0 24 24';
 
 /**

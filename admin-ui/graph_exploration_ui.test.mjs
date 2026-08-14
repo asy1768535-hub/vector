@@ -8,9 +8,6 @@ import {
     graphExplorationErrorProjection,
     graphTraversalResponseMatches,
     graphTraversalSummary,
-    hitTestGraphLayout,
-    layoutGraphRadially,
-    selectExplorationSeed,
 } from './src/graph_exploration_ui.js';
 
 const LIB_A = '10000000-0000-4000-8000-000000000001';
@@ -23,7 +20,7 @@ const OUTER = '40000000-0000-4000-8000-000000000003';
 const RELATION = '50000000-0000-4000-8000-000000000001';
 const RELATION_2 = '50000000-0000-4000-8000-000000000002';
 const ENTITY_TYPE = '60000000-0000-4000-8000-000000000001';
-const RELATION_TYPE = '70000000-0000-4000-8000-000000000001';
+const RELATION_TYPE = 'ee6a7def-d22a-cb63-4f3b-99ce126e9382';
 const EVIDENCE = '80000000-0000-4000-8000-000000000001';
 const DOCUMENT = '90000000-0000-4000-8000-000000000001';
 const REVISION = 'a0000000-0000-4000-8000-000000000001';
@@ -140,9 +137,6 @@ test('keeps same-named seeds separate by Library and rejects unavailable Publica
     const second = seed(LIB_B, 'legal-b');
     assert.equal(explorationSeedEligible(first), true);
     assert.notEqual(explorationSeedKey(first), explorationSeedKey(second));
-    assert.deepEqual(selectExplorationSeed([], first), [first]);
-    assert.deepEqual(selectExplorationSeed([first], second), [first, second]);
-    assert.deepEqual(selectExplorationSeed([first], first), [first]);
     assert.equal(explorationSeedEligible({
         ...first,
         publication: { ...first.publication, status: 'degraded' },
@@ -154,12 +148,7 @@ test('keeps same-named seeds separate by Library and rejects unavailable Publica
         publication: null,
     }), true);
     assert.equal(explorationSeedSearchRowValid({ ...first, entity_type: null }), false);
-    assert.equal(selectExplorationSeed([first, second, seed(LIB_A, 'a2'), seed(LIB_B, 'b2')], {
-        ...first,
-        id: NEIGHBOR,
-    }).length, 4);
 });
-
 test('accepts only exact bounded traversal identities, counts, endpoints, hops and Evidence', () => {
     const valid = response();
     assert.equal(graphTraversalResponseMatches(valid, identity), true);
@@ -214,24 +203,16 @@ test('projects fixed errors and explicit truncation without raw server detail', 
         evidence: 2,
         truncationLabels: ['关系'],
     });
-});
-
-test('builds deterministic concentric rings and hit-tests nodes before relations', () => {
-    const first = layoutGraphRadially(response(), 640, 420);
-    const second = layoutGraphRadially(response(), 640, 420);
-    assert.deepEqual(first, second);
-    assert.deepEqual(first.nodes.map((item) => item.depth), [0, 1, 2]);
-    assert.equal(first.nodes[0].x, 320);
-    assert.equal(first.nodes[0].y, 210);
-    assert.ok(first.nodes[1].y < first.nodes[0].y);
-    assert.ok(first.nodes[2].y < first.nodes[1].y);
-    assert.deepEqual(hitTestGraphLayout(first, first.nodes[0].x, first.nodes[0].y), {
-        kind: 'node',
-        id: SEED,
-    });
-    const edge = first.relations[0];
-    assert.deepEqual(hitTestGraphLayout(first, (edge.x1 + edge.x2) / 2, (edge.y1 + edge.y2) / 2), {
-        kind: 'relation',
-        id: RELATION,
+    assert.deepEqual(graphTraversalSummary({
+        entity_count: 223,
+        relation_count: 35,
+        evidence_count: 41,
+        nodes: Array(2),
+        relations: Array(1),
+    }), {
+        nodes: 223,
+        relations: 35,
+        evidence: 41,
+        truncationLabels: [],
     });
 });

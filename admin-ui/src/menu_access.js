@@ -23,8 +23,8 @@ export function menuAccess(user, permissions, organizations = []) {
     const acts = actionSet(user, permissions);
     const can = (a) => isSuper || acts.has(a);
     const organizationAdmin = hasOrganizationAdmin(organizations);
-    const classificationReview = manageableLibraries(permissions, organizations).length > 0;
-    return {
+    const libraryManagement = manageableLibraries(permissions, organizations).length > 0;
+    const access = {
         // Catalog requires Organization authorization; platform superuser is not a
         // customer-content bypass. Organization admins receive effective read rows.
         catalog: acts.has('read'),
@@ -35,9 +35,23 @@ export function menuAccess(user, permissions, organizations = []) {
         import: can('insert'),
         organizationAdmin,
         retrievalTest: organizationAdmin,
-        classificationReview,
-        schemaLifecycle: classificationReview,
+        schemaLifecycle: libraryManagement,
+        libraryConfiguration: isSuper,
         apiKeys: true,            // 始终显示
+    };
+    return {
+        ...access,
+        knowledgeUse: access.chat || access.search || access.retrievalTest,
+        knowledgeAssets: access.documents || access.catalog || access.import,
+        knowledgeGovernance: (
+            access.knowledgeGraph
+            || access.schemaLifecycle
+        ),
+        usersPermissions: isSuper,
+        libraries: isSuper || access.schemaLifecycle,
+        operationsCenter: isSuper,
+        auditCenter: isSuper,
+        account: !!user,
     };
 }
 

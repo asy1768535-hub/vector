@@ -22,23 +22,46 @@ const USER = { is_superuser: false };
 const cases = [
     // [name, user, perms, expected menuAccess]
     ['superuser 保留旧管理菜单但无有效 read 时不显示客户 Catalog', SUPER, NONE,
-        { catalog: false, knowledgeGraph: false, documents: true, search: true, chat: true, import: true, organizationAdmin: false, retrievalTest: false, classificationReview: false, schemaLifecycle: false, apiKeys: true }],
+        { catalog: false, knowledgeGraph: false, documents: true, search: true, chat: true, import: true, organizationAdmin: false, retrievalTest: false, schemaLifecycle: false, apiKeys: true }],
     ['只有 read：文档/检索/问答可见，导入隐藏', USER, READER,
-        { catalog: true, knowledgeGraph: true, documents: true, search: true, chat: true, import: false, organizationAdmin: false, retrievalTest: false, classificationReview: false, schemaLifecycle: false, apiKeys: true }],
+        { catalog: true, knowledgeGraph: true, documents: true, search: true, chat: true, import: false, organizationAdmin: false, retrievalTest: false, schemaLifecycle: false, apiKeys: true }],
     ['read+insert：全部业务菜单可见', USER, INSERTER,
-        { catalog: true, knowledgeGraph: true, documents: true, search: true, chat: true, import: true, organizationAdmin: false, retrievalTest: false, classificationReview: false, schemaLifecycle: false, apiKeys: true }],
+        { catalog: true, knowledgeGraph: true, documents: true, search: true, chat: true, import: true, organizationAdmin: false, retrievalTest: false, schemaLifecycle: false, apiKeys: true }],
     ['只有 insert：导入可见，读类隐藏', USER, INSERT_ONLY,
-        { catalog: false, knowledgeGraph: false, documents: false, search: false, chat: false, import: true, organizationAdmin: false, retrievalTest: false, classificationReview: false, schemaLifecycle: false, apiKeys: true }],
+        { catalog: false, knowledgeGraph: false, documents: false, search: false, chat: false, import: true, organizationAdmin: false, retrievalTest: false, schemaLifecycle: false, apiKeys: true }],
     ['无任何权限：仅 API Key 可见', USER, NONE,
-        { catalog: false, knowledgeGraph: false, documents: false, search: false, chat: false, import: false, organizationAdmin: false, retrievalTest: false, classificationReview: false, schemaLifecycle: false, apiKeys: true }],
+        { catalog: false, knowledgeGraph: false, documents: false, search: false, chat: false, import: false, organizationAdmin: false, retrievalTest: false, schemaLifecycle: false, apiKeys: true }],
 ];
 
 let passed = 0;
 for (const [name, user, perms, expected] of cases) {
-    assert.deepEqual(menuAccess(user, perms), expected, `[FAIL menuAccess] ${name}`);
+    const actual = menuAccess(user, perms);
+    const legacyProjection = Object.fromEntries(
+        Object.keys(expected).map((key) => [key, actual[key]]),
+    );
+    assert.deepEqual(legacyProjection, expected, `[FAIL menuAccess] ${name}`);
     console.log(`  ok  ${name}`);
     passed++;
 }
+
+const readerDomains = menuAccess(USER, READER);
+assert.equal(readerDomains.knowledgeUse, true);
+assert.equal(readerDomains.knowledgeAssets, true);
+assert.equal(readerDomains.knowledgeGovernance, true);
+assert.equal(readerDomains.usersPermissions, false);
+assert.equal(readerDomains.account, true);
+
+const insertDomains = menuAccess(USER, INSERT_ONLY);
+assert.equal(insertDomains.knowledgeUse, false);
+assert.equal(insertDomains.knowledgeAssets, true);
+assert.equal(insertDomains.knowledgeGovernance, false);
+
+const superDomains = menuAccess(SUPER, NONE);
+assert.equal(superDomains.usersPermissions, true);
+assert.equal(superDomains.libraries, true);
+assert.equal(superDomains.libraryConfiguration, true);
+assert.equal(superDomains.operationsCenter, true);
+assert.equal(superDomains.auditCenter, true);
 
 // canAccessRoute：路由级
 const routeCases = [
@@ -86,9 +109,9 @@ assert.deepEqual(manageableLibraries(managementPermissions, organizationRows), [
 ]);
 assert.equal(canAccessLibraryManagementRoute(managementPermissions, organizationRows), true);
 assert.equal(canAccessLibraryManagementRoute(READER, []), false);
-assert.equal(menuAccess(USER, managementPermissions, organizationRows).classificationReview, true);
 assert.equal(menuAccess(USER, managementPermissions, organizationRows).schemaLifecycle, true);
-assert.equal(menuAccess(SUPER, NONE, []).classificationReview, false);
+assert.equal(menuAccess(USER, managementPermissions, organizationRows).libraries, true);
+assert.equal(menuAccess(USER, managementPermissions, organizationRows).libraryConfiguration, false);
 assert.equal(menuAccess(SUPER, NONE, []).schemaLifecycle, false);
 
 // readableLibraries / resolveSelectedSlug：Documents 默认库（P1-2）

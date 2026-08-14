@@ -78,14 +78,6 @@ export async function logout() {
     finally { clearCache(); }
 }
 
-export const me = (forceRefresh) => cachedRequest('me', () => request('/users/me'), 30000, forceRefresh);
-export const myPermissions = (forceRefresh) => cachedRequest('myPermissions', () => request('/me/permissions'), 30000, forceRefresh);
-export const listMyOrganizations = (forceRefresh) => cachedRequest(
-    'listMyOrganizations',
-    () => request('/me/organizations'),
-    30000,
-    forceRefresh,
-);
 // 修改自己的资料/密码（复用 fastapi-users PATCH /users/me，不新建更新逻辑）
 export const updateMe = (data) => request('/users/me', jsonBody('PATCH', data));
 // 管理员重置某用户密码（专用端点；password 不混入普通 PATCH）
@@ -110,6 +102,7 @@ const _listLibsKey = (params) => 'listLibraries:' + new URLSearchParams(params).
 export const listLibraries = (params = {}, forceRefresh) => cachedRequest(_listLibsKey(params), () => request('/admin/libraries?' + new URLSearchParams(params).toString()), 30000, forceRefresh);
 export const createLibrary = (data) => request('/admin/libraries', jsonBody('POST', data));
 export const updateLibrary = (slug, data) => request(`/admin/libraries/${slug}`, jsonBody('PATCH', data));
+export const getLibrary = (slug) => request(`/admin/libraries/${slug}`);
 export const deleteLibrary = (slug) => request(`/admin/libraries/${slug}`, { method: 'DELETE' });
 export const rebuildLibraryCollection = (slug) =>
     request(`/admin/libraries/${slug}/rebuild-collection`, { method: 'POST' });
@@ -142,24 +135,91 @@ export const updateDocument = (slug, id, data) =>
     request(`/libraries/${slug}/documents/${id}`, jsonBody('PUT', data));
 const _docsKey = (slug, params) => `listDocuments:${slug}:${new URLSearchParams(params).toString()}`;
 export const listDocuments = (slug, params = {}, forceRefresh) => cachedRequest(_docsKey(slug, params), () => request(`/libraries/${slug}/documents?${new URLSearchParams(params).toString()}`), 15000, forceRefresh);
+export const listFolders = (slug, forceRefresh) => cachedRequest(
+    `listFolders:${slug}`,
+    () => request(`/libraries/${slug}/folders`),
+    15000,
+    forceRefresh,
+);
 export const deleteDocument = (slug, id) =>
     request(`/libraries/${slug}/documents/${id}`, { method: 'DELETE' });
 export const libraryStats = (slug, forceRefresh) => cachedRequest(`libraryStats:${slug}`, () => request(`/libraries/${slug}/stats`), 15000, forceRefresh);
 export const queryLibrary = (slug, data) =>
     request(`/libraries/${slug}/query`, jsonBody('POST', data));
-export const importFile = (slug, file, { externalId = null, replaceDocumentId = null } = {}) => {
+export const importFile = (slug, file, {
+    externalId = null,
+    replaceDocumentId = null,
+    securityLevel = null,
+    graphExtractionRequested = false,
+} = {}) => {
     const formData = new FormData();
     formData.append('file', file);
     if (externalId) formData.append('external_id', externalId);
     if (replaceDocumentId) formData.append('replace_document_id', replaceDocumentId);
+    if (securityLevel) formData.append('security_level', securityLevel);
+    if (graphExtractionRequested) formData.append('graph_extraction_requested', 'true');
     return request(`/libraries/${slug}/import-file`, { method: 'POST', body: formData });
 };
+export const getImportConfiguration = (slug) =>
+    request(`/libraries/${slug}/import-configuration`);
+export const createImportSession = (slug, data) =>
+    request(`/libraries/${slug}/import-sessions`, jsonBody('POST', data));
+export async function uploadImportChunk(slug, jobId, chunk, offset) {
+    const resp = await fetch(
+        `${BASE}/libraries/${slug}/import-sessions/${jobId}/content`,
+        {
+            method: 'PUT',
+            credentials: 'include',
+            headers: {
+                'Content-Type': 'application/octet-stream',
+                'Upload-Offset': String(offset),
+            },
+            body: chunk,
+        },
+    );
+    if (resp.status === 401) {
+        clearCache();
+        if (onUnauthorized) onUnauthorized();
+        throw new Error('登录已过期，请重新登录');
+    }
+    if (!resp.ok) {
+        const contentType = resp.headers.get('content-type') || '';
+        const body = contentType.includes('application/json')
+            ? await resp.json()
+            : await resp.text();
+        const error = new Error(
+            humanizeApiError(body, resp.status, `上传分块失败（HTTP ${resp.status}）`),
+        );
+        error.status = resp.status;
+        error.body = body;
+        throw error;
+    }
+    return Number(resp.headers.get('Upload-Offset'));
+}
+export const completeImportSession = (slug, jobId) =>
+    request(`/libraries/${slug}/import-sessions/${jobId}/complete`, { method: 'POST' });
+export const listImportJobs = (slug, params = {}) =>
+    request(`/libraries/${slug}/import-jobs?${new URLSearchParams(params).toString()}`);
+export const retryImportJob = (slug, jobId) =>
+    request(`/libraries/${slug}/import-jobs/${jobId}/retry`, { method: 'POST' });
+export const getUploadGraphExtractionConfiguration = (slug) =>
+    request(`/libraries/${slug}/v04/graph-extractions/upload-configuration`);
+export const listGraphExtractions = (slug, params = {}) =>
+    request(`/libraries/${slug}/v04/graph-extractions/?${new URLSearchParams(params).toString()}`);
+export const retryGraphExtraction = (slug, jobId) =>
+    request(`/libraries/${slug}/v04/graph-extractions/${jobId}/retry`, { method: 'POST' });
+export const listSchemaDiscoveryRuns = (slug, params = {}) =>
+    request(`/libraries/${slug}/v04/graph-extractions/schema-discovery-runs?${new URLSearchParams(params).toString()}`);
 // 任务状态（库级，普通用户可查）：按文档列出
 export const listDocumentJobs = (slug, documentId, forceRefresh) => cachedRequest(`listDocumentJobs:${slug}:${documentId}`, () => request(`/libraries/${slug}/documents/${documentId}/jobs`), 15000, forceRefresh);
 export const getDocumentSource = (slug, documentId, chunkId) =>
     request(`/libraries/${slug}/documents/${documentId}/source?` + new URLSearchParams({ chunk_id: chunkId }).toString());
-export const getDocumentFullSource = (slug, documentId) =>
-    request(`/libraries/${slug}/documents/${documentId}/source/full`);
+export const getDocumentFullSource = (slug, documentId, params = {}) => {
+    const query = new URLSearchParams(params).toString();
+    return request(`/libraries/${slug}/documents/${documentId}/source/full${query ? `?${query}` : ''}`);
+};
+export const getChatGraphContext = (slug, chunkId) =>
+    request(`/libraries/${slug}/chat/graph-context?` + new URLSearchParams({ chunk_id: chunkId }).toString());
 export async function downloadDocumentFile(slug, documentId) {
     const resp = await fetch(BASE + `/libraries/${slug}/documents/${documentId}/file`, {
         credentials: 'include',
@@ -251,7 +311,11 @@ export const reviewClassificationRun = (slug, runId, body) =>
         `/libraries/${slug}/classifications/runs/${runId}/review`,
         jsonBody('POST', body),
     );
-
+export const setDocumentClassification = (slug, documentId, body) =>
+    request(
+        `/libraries/${slug}/classifications/documents/${documentId}`,
+        jsonBody('PUT', body),
+    );
 // ── v0.8 Organization retrieval diagnostics ────────────────
 export const checkLibraryCompatibility = (body) =>
     request('/me/library-compatibility/check', jsonBody('POST', body));
@@ -349,8 +413,6 @@ export const listGraphGovernanceActions = (
     query.set('offset', String(offset));
     return request(`/libraries/${slug}/graph-governance/actions?${query.toString()}`);
 };
-export const getGraphGovernanceAction = (slug, actionId) =>
-    request(`/libraries/${slug}/graph-governance/actions/${actionId}`);
 export const decideGraphGovernanceAction = (slug, actionId, body) => graphCommand(
     `/libraries/${slug}/graph-governance/actions/${actionId}/decision`,
     body,
@@ -467,8 +529,17 @@ export const getActiveGraphPublication = (slug, ontologyVersionId = '') => {
         : '';
     return request(`/libraries/${slug}/v05/graph-publications/active${query}`);
 };
-export const getGraphPublication = (slug, publicationId) =>
-    request(`/libraries/${slug}/v05/graph-publications/${publicationId}`);
+export const listGraphPublicationItems = (slug, publicationId, params = {}) => {
+    const query = new URLSearchParams();
+    for (const key of ['item_kind', 'status', 'page', 'page_size']) {
+        const value = params?.[key];
+        if (value !== null && value !== undefined && value !== '') query.set(key, String(value));
+    }
+    const suffix = query.toString();
+    return request(
+        `/libraries/${slug}/v05/graph-publications/${publicationId}/items${suffix ? `?${suffix}` : ''}`,
+    );
+};
 export const activateGraphPublication = (slug, publicationId, body) => graphCommand(
     `/libraries/${slug}/v05/graph-publications/${publicationId}/activate`,
     body,
@@ -491,10 +562,24 @@ export const rerunGraphExtraction = (slug, jobId, body) => graphCommand(
 );
 
 // ── Admin: Jobs ──────────────────────────────────────────────
-const _jobsKey = (params) => 'listJobs:' + new URLSearchParams(params).toString();
-export const listJobs = (params = {}, forceRefresh) => cachedRequest(_jobsKey(params), () => request('/admin/jobs?' + new URLSearchParams(params).toString()), 10000, forceRefresh);
+const _monitoredTasksKey = (params) => 'listMonitoredTasks:' + new URLSearchParams(params).toString();
+export const listMonitoredTasks = (params = {}, forceRefresh) => cachedRequest(
+    _monitoredTasksKey(params),
+    () => request('/admin/jobs/monitor?' + new URLSearchParams(params).toString()),
+    8000,
+    forceRefresh,
+);
 export const retryJob = (id) => request(`/admin/jobs/${id}/retry`, { method: 'POST' });
-export const jobStats = (forceRefresh) => cachedRequest('jobStats', () => request('/admin/jobs/stats'), 10000, forceRefresh);
+export const retryMonitoredTasks = (items) => request('/admin/jobs/monitor/retry', {
+    method: 'POST',
+    body: JSON.stringify({ items }),
+});
+export const monitoredTaskStats = (forceRefresh) => cachedRequest(
+    'monitoredTaskStats',
+    () => request('/admin/jobs/monitor/stats'),
+    8000,
+    forceRefresh,
+);
 export const resetFailedJobs = (libraryId = null) =>
     request('/admin/jobs/reset-failed' + (libraryId ? `?library_id=${libraryId}` : ''), { method: 'POST' });
 
@@ -510,7 +595,10 @@ export const listChatLibraries = (forceRefresh) => cachedRequest('listChatLibrar
 
 // 会话历史
 export const listChatConversations = (includeArchived = false, forceRefresh) => cachedRequest(`listChatConversations:${includeArchived ? '1' : '0'}`, () => request('/chat/conversations' + (includeArchived ? '?include_archived=true' : '')), 15000, forceRefresh);
-export const getChatConversationMessages = (id) => request(`/chat/conversations/${id}/messages`); // not cached — real-time
+export const getChatConversationMessages = (id, params = {}) => {
+    const query = new URLSearchParams(params).toString();
+    return request(`/chat/conversations/${id}/messages${query ? `?${query}` : ''}`);
+}; // not cached — real-time
 export const archiveChatConversation = (id) =>
     request(`/chat/conversations/${id}/archive`, { method: 'POST' });
 export const deleteChatConversation = (id) =>
@@ -606,6 +694,10 @@ const schemaPath = (slug, versionId, suffix = '') => (
 
 export const listSchemaVersions = (slug) => request(`/libraries/${slug}/schema-lifecycle/versions`);
 export const getSchemaVersion = (slug, versionId) => request(schemaPath(slug, versionId));
+export const importSchemaFile = (slug, body) => request(
+    `/libraries/${slug}/schema-lifecycle/import-file`,
+    jsonBody('POST', body),
+);
 export const validateSchemaVersion = (slug, versionId) =>
     request(schemaPath(slug, versionId, '/validate'), { method: 'POST' });
 export const getSchemaImpact = (slug, versionId) => request(schemaPath(slug, versionId, '/impact'));
@@ -618,6 +710,14 @@ export const activateSchemaVersion = (slug, versionId, body) => request(
     jsonBody('POST', schemaBody(body, [
         ...SCHEMA_COMMON_KEYS, 'expected_active_version_id', 'confirmation',
     ])),
+);
+export const deleteSchemaDraft = (slug, versionId, body) => request(
+    schemaPath(slug, versionId, '/delete-draft'),
+    jsonBody('POST', schemaBody(body, [...SCHEMA_COMMON_KEYS, 'confirmation'])),
+);
+export const disableSchemaVersion = (slug, versionId, body) => request(
+    schemaPath(slug, versionId, '/disable'),
+    jsonBody('POST', schemaBody(body, [...SCHEMA_COMMON_KEYS, 'confirmation'])),
 );
 export const createSchemaEntityType = (slug, versionId, body) => request(
     schemaPath(slug, versionId, '/entity-types'),

@@ -32,6 +32,7 @@ from app.models.embedding_job import EmbeddingJob
 from app.models.library import Library
 from app.models.rebuild_operation import RebuildOperation
 from app.services import embedding, qdrant
+from app.services.evidence_locator_projection import chunk_locator_projection
 
 logging.basicConfig(
     level=logging.INFO,
@@ -166,6 +167,18 @@ def _build_payload(
             "security_level": doc.security_level,
         }
     )
+    locator_projection = (
+        chunk_locator_projection(
+            chunk,
+            document_id=doc.id,
+            document_revision_id=document_revision_id,
+            revision_no=document_revision_no,
+        )
+        if settings.enable_evidence_locator_projection
+        else None
+    )
+    if locator_projection is not None:
+        payload["evidence_locator_v1_projection"] = locator_projection
     return payload
 
 
@@ -313,6 +326,10 @@ async def _publish_revision_after_qdrant(
         await db.commit()
         return False
 
+    graph_extraction_requested = bool(
+        (revision.parser_config or {}).get("graph_extraction_requested")
+    )
+
     old_current_revision_id = doc.current_revision_id
     await db.execute(
         update(DocumentRevision)
@@ -414,6 +431,7 @@ async def _publish_revision_after_qdrant(
             library_id=library_id,
             document_id=document_id,
             revision_id=revision_id,
+            force=graph_extraction_requested,
         )
     except Exception:  # noqa: BLE001
         log.exception(

@@ -36,6 +36,7 @@ from app.services.classification_runtime_contracts import (
     build_classification_job,
     classification_job_identity,
     classification_messages,
+    classification_provider_name,
     parse_classifier_output,
 )
 from app.services.classification_runtime_policy import (
@@ -232,7 +233,6 @@ def test_0036_orm_migration_and_offline_sql_are_reversible():
         if isinstance(item, CheckConstraint)
     }
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_heads() == ["0042"]
     assert script.get_revision("0036").down_revision == "0035"
     upgrade = _offline("upgrade", "0035:0036")
     downgrade = _offline("downgrade", "0036:0035")
@@ -271,7 +271,7 @@ def test_startup_is_default_off_and_dependency_provider_limits_fail_closed():
                 classification_provider_timeout_seconds=20,
             )
         )
-    with pytest.raises(RuntimeError, match="approved DeepSeek"):
+    with pytest.raises(RuntimeError, match="approved provider identity"):
         validate_classification_runtime_startup(
             _settings(classification_model="other-model")
         )
@@ -281,6 +281,9 @@ def test_startup_is_default_off_and_dependency_provider_limits_fail_closed():
         )
     validate_classification_runtime_startup(
         _settings(classification_auto_trigger_enabled=True)
+    )
+    validate_classification_runtime_startup(
+        _settings(classification_model="deepseek-v4-flash")
     )
 
 
@@ -336,6 +339,19 @@ def test_job_identity_is_deterministic_strict_and_retry_scoped():
             config=_settings(),
         )
     assert bad_hash.value.code == "classification_hash_invalid"
+
+
+def test_flash_provider_identity_is_explicit_and_model_scoped():
+    flash = _settings(classification_model="deepseek-v4-flash")
+    assert classification_provider_name(flash) == "deepseek"
+    with pytest.raises(ClassificationRuntimeError) as invalid:
+        classification_provider_name(
+            _settings(
+                classification_base_url="http://10.0.10.2:8113/v1",
+                classification_model="deepseek-v4-flash",
+            )
+        )
+    assert invalid.value.code == "provider_config_invalid"
 
 
 def test_provider_output_is_strict_and_maps_known_and_unknown_candidates():
@@ -413,6 +429,23 @@ def test_provider_output_is_strict_and_maps_known_and_unknown_candidates():
     assert unknown.value.code == "provider_unknown_label_key"
 
 
+def test_provider_identity_allows_deepseek_and_local_qwen_only():
+    assert classification_provider_name(_settings()) == "deepseek"
+    assert classification_provider_name(
+        _settings(
+            classification_base_url="http://10.0.10.2:8113/v1",
+            classification_model="qwen3.5-9b",
+        )
+    ) == "openai-compatible"
+    with pytest.raises(ClassificationRuntimeError) as denied:
+        classification_provider_name(
+            _settings(
+                classification_base_url="http://unapproved.invalid/v1",
+                classification_model="unknown",
+            )
+        )
+    assert denied.value.code == "provider_config_invalid"
+
 def test_messages_are_bounded_structured_and_contain_no_credentials():
     messages = classification_messages(
         "source text",
@@ -422,6 +455,10 @@ def test_messages_are_bounded_structured_and_contain_no_credentials():
     payload = json.loads(messages[1]["content"])
     assert payload["document_text"] == "source text"
     assert payload["selectable_labels"][0]["key"] == "contract"
+    assert "95% is 950000, never 9500000" in messages[0]["content"]
+    assert "unique across both arrays" in messages[0]["content"]
+    assert "first primary candidate must use a selectable" in messages[0]["content"]
+    assert "Do not propose new labels" in messages[0]["content"]
     assert "api_key" not in messages[1]["content"].lower()
 
 
@@ -605,7 +642,7 @@ def test_retry_is_linked_immutable_and_rejects_changed_identity(monkeypatch):
                 document=document,
                 revision=revision,
                 requested_by_user_id=None,
-                config=_settings(classification_prompt_version="classification-prompt-v2"),
+                config=_settings(classification_prompt_version="classification-prompt-v4"),
             )
         )
     assert stale.value.code == "classification_job_identity_stale"

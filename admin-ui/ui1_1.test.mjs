@@ -21,10 +21,10 @@ eq('收起+窄屏', computeEffective(true, true), true);
 // 2. 窄屏菜单状态：isNarrow=true → effectiveCollapsed=true → el-menu :collapse=true
 // ═══════════════════════════════════════════════════════════════
 function sidebarWidth(effectiveCollapsed) {
-    return effectiveCollapsed ? '64px' : '224px';
+    return effectiveCollapsed ? '64px' : '220px';
 }
 eq('窄屏→64px', sidebarWidth(true), '64px');
-eq('宽屏展开→224px', sidebarWidth(false), '224px');
+eq('宽屏展开→220px', sidebarWidth(false), '220px');
 // 用户手动收起后，effectiveCollapsed 仍为 true（窄屏强制 + 用户偏好合并）
 eq('窄屏+手动展开无效', computeEffective(false, true), true);
 

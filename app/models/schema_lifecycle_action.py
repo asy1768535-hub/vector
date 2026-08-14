@@ -23,10 +23,13 @@ from app.db import Base
 
 SCHEMA_LIFECYCLE_ACTION_KINDS = (
     "clone_version",
+    "import_version",
     "create_item",
     "update_item",
     "disable_item",
     "activate_version",
+    "delete_version",
+    "disable_version",
 )
 SCHEMA_LIFECYCLE_TARGET_KINDS = (
     "ontology_version",
@@ -41,8 +44,8 @@ class SchemaLifecycleAction(Base):
     __tablename__ = "schema_lifecycle_actions"
     __table_args__ = (
         CheckConstraint(
-            "action_kind IN ('clone_version','create_item','update_item',"
-            "'disable_item','activate_version')",
+            "action_kind IN ('clone_version','import_version','create_item','update_item',"
+            "'disable_item','activate_version','delete_version','disable_version')",
             name="ck_schema_lifecycle_actions_kind",
         ),
         CheckConstraint(

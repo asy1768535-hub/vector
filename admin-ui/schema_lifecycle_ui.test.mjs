@@ -11,6 +11,7 @@ import {
     schemaRouteQuery,
     schemaStatusLabel,
     schemaValidationMatches,
+    schemaVersionDeletionMatches,
     schemaVersionDetailMatches,
     schemaVersionListMatches,
 } from './src/schema_lifecycle_ui.js';
@@ -56,6 +57,19 @@ test('Schema response identity rejects cross-Library and stale-version payloads'
     }), true);
     assert.equal(schemaVersionDetailMatches({ ...version, library_id: 'other' }, {
         libraryId: LIBRARY, librarySlug: 'enterprise-kb', versionId: VERSION,
+    }), false);
+    const deletion = {
+        action_id: '30000000-0000-4000-8000-000000000001',
+        reused: false,
+        library_id: LIBRARY,
+        ontology_version_id: VERSION,
+        status: 'deleted',
+    };
+    assert.equal(schemaVersionDeletionMatches(deletion, {
+        libraryId: LIBRARY, versionId: VERSION,
+    }), true);
+    assert.equal(schemaVersionDeletionMatches({ ...deletion, ontology_version_id: LIBRARY }, {
+        libraryId: LIBRARY, versionId: VERSION,
     }), false);
     const emptyDiff = { added: [], removed: [], changed: [] };
     const emptyReferences = {
@@ -137,6 +151,11 @@ test('Schema state and errors use fixed labels without raw server content', () =
     assert.equal(schemaStatusLabel('active'), '已激活');
     assert.equal(schemaStatusLabel('unknown'), '未知状态');
     assert.equal(schemaIssueLabel({ code: 'attribute_owner_missing' }), '属性所属类型不可用');
+    assert.equal(schemaErrorKind({
+        status: 409,
+        body: { detail: 'schema_lifecycle_dependency_conflict' },
+    }), 'dependency');
+    assert.equal(schemaErrorMessage('dependency'), '该 Schema 仍被图谱数据、任务或其他版本引用，不能删除或停用');
     for (const [status, kind] of [[404, 'unavailable'], [403, 'forbidden'], [409, 'conflict'], [422, 'invalid'], [503, 'unavailable']]) {
         const error = { status, message: 'raw secret prompt storage_url' };
         assert.equal(schemaErrorKind(error), kind);

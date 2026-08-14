@@ -218,7 +218,7 @@ async def _public_answer_events(
         async for provider_delta in provider:
             for delta in split_public_delta(provider_delta):
                 answer_length += len(delta)
-                if answer_length > 131_072:
+                if answer_length > chat_answer.CHAT_OUTPUT_MAX_CHARS:
                     raise PublicAPIError("upstream_failed", status_code=502)
                 answer_parts.append(delta)
                 yield _sse(

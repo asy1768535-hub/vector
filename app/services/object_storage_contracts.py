@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 
@@ -30,6 +31,10 @@ class ObjectStorageAdapter(Protocol):
 
     async def put(
         self, object_key: str, content: bytes, content_type: str | None
+    ) -> StorageObjectVersion: ...
+
+    async def put_file(
+        self, object_key: str, source_path: Path, content_type: str | None
     ) -> StorageObjectVersion: ...
 
     async def read(self, object_key: str, object_version: str | None) -> bytes: ...

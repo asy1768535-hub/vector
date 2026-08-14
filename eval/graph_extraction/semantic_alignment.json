@@ -1,0 +1,23 @@
+{
+  "schema_version": "graph-discovery-semantic-alignment-v1",
+  "accepted_entity_type_aliases": {
+    "project": ["photovoltaic_site"]
+  },
+  "relation_equivalences": [
+    {
+      "predicted_relation_key": "designed_by",
+      "gold_relation_key": "designed",
+      "reverse_endpoints": true
+    },
+    {
+      "predicted_relation_key": "supplied_by",
+      "gold_relation_key": "supplied",
+      "reverse_endpoints": true
+    },
+    {
+      "predicted_relation_key": "belongs_to",
+      "gold_relation_key": "part_of",
+      "reverse_endpoints": true
+    }
+  ]
+}

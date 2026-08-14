@@ -1,8 +1,8 @@
 // ── Service labels (shared by Dashboard & RuntimeStatus) ──
 export const SERVICE_LABELS = {
     api: 'API',
-    embedding_worker: 'Embedding Worker',
-    cleanup_worker: 'Cleanup Worker',
+    embedding_worker: '向量化处理服务（Worker）',
+    cleanup_worker: '清理服务（Worker）',
 };
 
 export const STATUS_TAG = { online: 'success', degraded: 'warning', offline: 'danger' };

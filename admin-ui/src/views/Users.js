@@ -7,11 +7,15 @@ import { dataEmpty } from '../illustrations.js';
 import {
     filterUsers, paginateUsers, formatUserTime, userInitial, userRoleLabel, userStatusLabel,
 } from '../users_ui.js';
+import { createRequestFence, readProjection } from '../read_state_ui.js';
 
 export default {
     setup() {
         const users = ref([]);
         const loading = ref(false);
+        const loadStarted = ref(false);
+        const usersResolved = ref(false);
+        const usersError = ref('');
         const allLibs = ref([]);
         const libsLoadFailed = ref(false);
         const dialog = reactive({ open: false, form: { email: '', password: '', username: '', display_name: '', is_superuser: false }, grantLibs: [] });
@@ -21,15 +25,27 @@ export default {
         const page = ref(1);
         const pageSize = ref(10);
         const submitting = ref(false);
+        const usersRequestFence = createRequestFence();
 
         const selfId = computed(() => store.user?.id);
 
         // ── Data ─────────────────────────────────────────────
         async function loadUsers(forceRefresh = false) {
+            const requestToken = usersRequestFence.begin();
+            loadStarted.value = true;
             loading.value = true;
-            try { users.value = await api.listUsers({ include_deleted: 'false', limit: 500 }, forceRefresh); }
-            catch (e) { ElMessage.error(e.message); }
-            finally { loading.value = false; }
+            usersError.value = '';
+            try {
+                const result = await api.listUsers({ include_deleted: 'false', limit: 500 }, forceRefresh);
+                if (!usersRequestFence.isCurrent(requestToken)) return;
+                users.value = result;
+                usersResolved.value = true;
+            } catch (e) {
+                if (!usersRequestFence.isCurrent(requestToken)) return;
+                usersError.value = e.message || '用户列表加载失败';
+            } finally {
+                if (usersRequestFence.isCurrent(requestToken)) loading.value = false;
+            }
         }
 
         async function loadLibsForGrant() {
@@ -39,6 +55,13 @@ export default {
 
         const filtered = computed(() => filterUsers(users.value, filters));
         const pagination = computed(() => paginateUsers(filtered.value, page.value, pageSize.value));
+        const usersReadState = computed(() => readProjection({
+            started: loadStarted.value,
+            loading: loading.value,
+            hasResolved: usersResolved.value,
+            empty: users.value.length === 0,
+            error: usersError.value,
+        }));
 
         // ── Filters ──────────────────────────────────────────
         function onFilterChange() { page.value = 1; }
@@ -129,7 +152,7 @@ export default {
         onMounted(loadUsers);
 
         return {
-            users, loading, allLibs, libsLoadFailed, dialog, resetDlg, editDlg, filters, page, pageSize, submitting,
+            users, loading, usersError, usersReadState, allLibs, libsLoadFailed, dialog, resetDlg, editDlg, filters, page, pageSize, submitting,
             pagination, filtered, selfId,
             loadUsers, openCreate, submitCreate, openEdit, submitEdit, openReset, submitReset,
             toggleActive, toggleSuper, disableUser, onFilterChange,
@@ -156,13 +179,34 @@ export default {
                 <el-option label="启用" value="active" />
                 <el-option label="停用" value="disabled" />
             </el-select>
-            <el-button :loading="loading" @click="loadUsers(true)">刷新</el-button>
+            <el-button class="app-refresh-button" :loading="loading" @click="loadUsers(true)">
+              <span class="app-refresh-icon" aria-hidden="true"></span>刷新
+            </el-button>
         </div>
 
-        <section class="users-table-card">
+        <section v-if="usersReadState === 'fatal'" class="users-read-state" role="alert">
+            <div>
+                <strong>用户列表加载失败</strong>
+                <p>{{ usersError }}</p>
+            </div>
+            <el-button type="primary" :loading="loading" @click="loadUsers(true)">重试</el-button>
+        </section>
+
+        <el-alert v-else-if="usersReadState === 'refresh-error'"
+                  type="warning" :closable="false" show-icon
+                  title="用户列表刷新失败，当前仍显示上次成功加载的数据">
+            <template #default>{{ usersError }}</template>
+        </el-alert>
+
+        <section v-if="usersReadState !== 'fatal'" class="users-table-card">
             <div class="users-table-shell">
                 <el-table :data="pagination.items" v-loading="loading">
-                    <template #empty><div class="illustration-empty-wrapper"><img :src="dataEmpty" class="illustration-data-empty" alt="" aria-hidden="true" /><p>暂无用户</p></div></template>
+                    <template #empty>
+                        <div v-if="usersReadState === 'empty'" class="illustration-empty-wrapper">
+                            <img :src="dataEmpty" class="illustration-data-empty" alt="" aria-hidden="true" />
+                            <p>暂无用户</p>
+                        </div>
+                    </template>
                     <el-table-column label="用户信息" min-width="180">
                         <template #default="{row}">
                             <div class="users-avatar-cell">

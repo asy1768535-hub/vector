@@ -4,9 +4,7 @@
 vectorDatabase/
 ├── .env                              # 运行配置（DB / Qdrant / embedding URL / JWT secret …）
 ├── alembic.ini                       # Alembic 配置入口
-├── pyproject.toml                    # 依赖（与 requirements*.txt 同步）
-├── requirements.txt                  # 运行时依赖
-├── requirements-dev.txt              # 测试 / 开发额外依赖
+├── pyproject.toml                    # 运行时、开发与可选依赖
 ├── README.md                         # 项目主入口（链到 docs/）
 │
 ├── alembic/
@@ -85,7 +83,7 @@ vectorDatabase/
 │           ├── Users.js
 │           ├── Libraries.js
 │           ├── Permissions.js        #   矩阵：选用户 → 勾 read/insert/delete → diff 保存
-│           ├── Documents.js
+│           ├── KnowledgeCatalog.js
 │           ├── ApiKeys.js
 │           ├── Jobs.js
 │           └── Audit.js

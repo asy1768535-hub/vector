@@ -5,6 +5,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -37,6 +38,7 @@ class PreparedStoredFile:
 class PreparedRevisionFileCapture(PreparedStoredFile):
     document_id: uuid.UUID
     document_revision_id: uuid.UUID
+    file_id: uuid.UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,11 +158,66 @@ async def prepare_managed_file_object(
     )
 
 
+async def prepare_managed_file_path(
+    *,
+    adapter,
+    library_id: uuid.UUID,
+    file_name: str,
+    content_type: str | None,
+    source_path: Path,
+    expected_sha256: str | None = None,
+    source_locator: SourceLocatorV1 | None = None,
+) -> PreparedStoredFile:
+    file_name, content_type = _file_metadata(file_name, content_type)
+    if not source_path.is_file() or source_path.is_symlink():
+        raise ObjectStorageError("source_file_invalid", "source file is invalid")
+    digest = hashlib.sha256()
+    size_bytes = 0
+    with source_path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+            size_bytes += len(chunk)
+    sha256 = digest.hexdigest()
+    if expected_sha256 is not None and sha256 != expected_sha256:
+        raise ObjectStorageError(
+            "source_file_changed", "source file changed after upload completion"
+        )
+    object_key = _managed_object_key(library_id, sha256, file_name)
+    version = await adapter.put_file(object_key, source_path, content_type)
+    locator = StorageLocatorV1(
+        provider=adapter.provider,
+        endpoint_ref=adapter.endpoint_ref,
+        bucket=adapter.bucket,
+        object_key=object_key,
+        object_version=version.object_version,
+        etag=version.etag,
+        immutability_mode="version_id" if version.object_version else "content_hash",
+    )
+    require_storage_adapter_identity(adapter, locator)
+    stat = await adapter.stat(locator.object_key, locator.object_version)
+    if stat.size_bytes != size_bytes:
+        raise ObjectStorageError(
+            "object_verification_failed", "stored object size verification failed"
+        )
+    return PreparedStoredFile(
+        library_id=library_id,
+        file_name=file_name,
+        content_type=content_type,
+        size_bytes=size_bytes,
+        sha256=sha256,
+        locator=locator,
+        managed_snapshot=True,
+        source_locator=source_locator or SourceLocatorV1(kind="upload"),
+        verified_at=datetime.now(timezone.utc),
+    )
+
+
 def bind_prepared_file_object(
     prepared: PreparedStoredFile,
     *,
     document_id: uuid.UUID,
     document_revision_id: uuid.UUID,
+    file_id: uuid.UUID | None = None,
 ) -> PreparedRevisionFileCapture:
     return PreparedRevisionFileCapture(
         library_id=prepared.library_id,
@@ -174,6 +231,7 @@ def bind_prepared_file_object(
         verified_at=prepared.verified_at,
         document_id=document_id,
         document_revision_id=document_revision_id,
+        file_id=file_id,
     )
 
 
@@ -311,6 +369,8 @@ def storage_locator_from_row(row: DocumentRevisionFile) -> StorageLocatorV1:
 def _same_capture_identity(
     row: DocumentRevisionFile, prepared: PreparedRevisionFileCapture
 ) -> bool:
+    if prepared.file_id is not None and row.id != prepared.file_id:
+        return False
     values = prepared_capture_values(prepared)
     fields = (
         "document_revision_id",
@@ -414,7 +474,7 @@ async def persist_revision_file_capture(
             )
         return existing
     row = DocumentRevisionFile(
-        id=uuid.uuid4(),
+        id=prepared.file_id or uuid.uuid4(),
         document_revision_id=prepared.document_revision_id,
         document_id=prepared.document_id,
         library_id=prepared.library_id,

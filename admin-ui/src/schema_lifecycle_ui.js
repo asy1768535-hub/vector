@@ -69,6 +69,15 @@ export function schemaVersionDetailMatches(value, identity) {
     ));
 }
 
+export function schemaVersionDeletionMatches(value, identity) {
+    return Boolean(value && typeof value === 'object'
+        && UUID_RE.test(String(value.action_id || ''))
+        && typeof value.reused === 'boolean'
+        && String(value.library_id || '') === String(identity.libraryId || '')
+        && String(value.ontology_version_id || '') === String(identity.versionId || '')
+        && value.status === 'deleted');
+}
+
 function validDiffGroup(value) {
     return Boolean(value && ['added', 'removed', 'changed'].every((key) => (
         Array.isArray(value[key]) && value[key].length <= 500
@@ -161,6 +170,8 @@ export function schemaIssueLabel(issue) {
 
 export function schemaErrorKind(error) {
     if (error?.status === 403) return 'forbidden';
+    if (error?.status === 409
+        && error?.body?.detail === 'schema_lifecycle_dependency_conflict') return 'dependency';
     if (error?.status === 409) return 'conflict';
     if (error?.status === 422) return 'invalid';
     if (error?.status === 404 || error?.status === 503) return 'unavailable';
@@ -170,6 +181,7 @@ export function schemaErrorKind(error) {
 export function schemaErrorMessage(kind) {
     return ({
         forbidden: '当前账号没有管理这个知识库 Schema 的权限',
+        dependency: '该 Schema 仍被图谱数据、任务或其他版本引用，不能删除或停用',
         conflict: 'Schema 已发生变化，请检查最新版本后重新操作',
         invalid: '提交内容不符合 Schema 约束',
         unavailable: 'Schema 生命周期功能当前不可用',

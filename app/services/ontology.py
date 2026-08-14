@@ -108,6 +108,8 @@ async def create_ontology_version(
     status: str = ONTOLOGY_STATUS_DRAFT,
     description: str | None = None,
     parent_version_id: uuid.UUID | None = None,
+    origin: str = "user",
+    confirmed: bool = True,
 ) -> OntologyVersion:
     if parent_version_id is not None:
         parent = await get_ontology_version(db, library, parent_version_id)
@@ -119,6 +121,8 @@ async def create_ontology_version(
         version_no=version_no,
         status=status,
         description=description,
+        origin=origin,
+        confirmed=confirmed,
         parent_version_id=parent_version_id,
     )
     db.add(ontology)

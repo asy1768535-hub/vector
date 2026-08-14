@@ -56,6 +56,7 @@ def _job(**changes):
         "ontology_version_id": ONTOLOGY_ID,
         "trigger_type": "manual",
         "execution_mode": "production",
+        "build_mode": "standard",
         "status": "queued",
         "current_stage": "preparing",
         "input_fingerprint": "a" * 64,
@@ -128,6 +129,7 @@ def _client(db, *, admin=True):
 def test_v04_graph_extraction_routes_are_mounted():
     paths = set(app.openapi()["paths"])
     prefix = "/libraries/{slug}/v04/graph-extractions"
+    assert f"{prefix}/upload-configuration" in paths
     assert f"{prefix}/" in paths
     assert f"{prefix}/{{job_id}}" in paths
     assert f"{prefix}/{{job_id}}/units" in paths
@@ -167,6 +169,8 @@ def test_create_returns_sanitized_job_without_frozen_or_raw_payloads():
     assert response.status_code == 201
     payload = response.json()
     assert payload["id"] == str(JOB_ID)
+    assert payload["build_mode"] == "standard"
+    assert create.await_args.kwargs["build_mode"] == "standard"
     for forbidden in (
         "idempotency_key",
         "model_config_snapshot",
@@ -196,9 +200,7 @@ def test_retry_returns_exact_no_retryable_units_conflict():
                 ),
             ),
         ):
-            response = _client(db).post(
-                f"/libraries/m5-api/v04/graph-extractions/{JOB_ID}/retry"
-            )
+            response = _client(db).post(f"/libraries/m5-api/v04/graph-extractions/{JOB_ID}/retry")
     finally:
         app.dependency_overrides.clear()
 
@@ -218,9 +220,7 @@ def test_retry_refreshes_server_updated_fields_before_response():
                 new=AsyncMock(return_value=job),
             ),
         ):
-            response = _client(db).post(
-                f"/libraries/m5-api/v04/graph-extractions/{JOB_ID}/retry"
-            )
+            response = _client(db).post(f"/libraries/m5-api/v04/graph-extractions/{JOB_ID}/retry")
     finally:
         app.dependency_overrides.clear()
 
@@ -241,9 +241,7 @@ def test_cancel_refreshes_server_updated_fields_before_response():
                 new=AsyncMock(return_value=job),
             ),
         ):
-            response = _client(db).post(
-                f"/libraries/m5-api/v04/graph-extractions/{JOB_ID}/cancel"
-            )
+            response = _client(db).post(f"/libraries/m5-api/v04/graph-extractions/{JOB_ID}/cancel")
     finally:
         app.dependency_overrides.clear()
 
@@ -274,3 +272,40 @@ def test_full_rerun_requires_admin_even_with_library_insert_permission():
     assert response.status_code == 403
     assert response.json()["detail"] == "admin_required"
     create.assert_not_awaited()
+
+
+def test_full_rerun_preserves_source_build_mode():
+    db = AsyncMock()
+    document, revision = _document_scope()
+    source = _job(build_mode="deep")
+
+    async def get_row(model, object_id):
+        return {
+            (Document, DOC_ID): document,
+            (DocumentRevision, REV_ID): revision,
+        }.get((model, object_id))
+
+    db.get = AsyncMock(side_effect=get_row)
+    db.commit = AsyncMock()
+    try:
+        with (
+            patch("app.deps.load_active_library", new=AsyncMock(return_value=_library())),
+            patch(
+                "app.api.v04_graph_extraction.graph_extraction_jobs.get_graph_extraction_job",
+                new=AsyncMock(return_value=source),
+            ),
+            patch(
+                "app.api.v04_graph_extraction.graph_extraction_jobs.create_graph_extraction_job",
+                new=AsyncMock(return_value=_job(build_mode="deep")),
+            ) as create,
+        ):
+            response = _client(db).post(
+                f"/libraries/m5-api/v04/graph-extractions/{JOB_ID}/rerun",
+                json={"client_idempotency_key": "rerun-deep-001"},
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["build_mode"] == "deep"
+    assert create.await_args.kwargs["build_mode"] == "deep"

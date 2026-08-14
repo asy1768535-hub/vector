@@ -13,6 +13,7 @@ from app.config import settings
 from app.db import get_db
 from app.deps import require_lib
 from app.models.graph_publication import GraphPublication
+from app.models.graph_publication_item import GraphPublicationItem
 from app.models.library import Library
 from app.models.user import User
 from app.schemas.v05_graph_publication import (
@@ -57,6 +58,28 @@ from app.services.organization_authorization import (
 router = APIRouter(
     prefix="/libraries/{slug}/v05/graph-publications",
     tags=["v0.5-graph-publication"],
+)
+
+
+_SAFE_FACT_SNAPSHOT_KEYS = frozenset(
+    {
+        "manifest_version",
+        "item_kind",
+        "library_id",
+        "ontology_version_id",
+        "entity_id",
+        "entity_type_id",
+        "canonical_name",
+        "normalized_name",
+        "properties_hash",
+        "source_type",
+        "confidence",
+        "relation_id",
+        "relation_type_id",
+        "source_entity_id",
+        "target_entity_id",
+        "support_evidence_ids",
+    }
 )
 
 
@@ -115,6 +138,15 @@ def _publication_read(publication: GraphPublication) -> GraphPublicationRead:
         created_at=publication.created_at,
         updated_at=publication.updated_at,
     )
+
+
+def _safe_fact_snapshot(item: GraphPublicationItem) -> dict:
+    snapshot = item.fact_snapshot if isinstance(item.fact_snapshot, dict) else {}
+    return {
+        key: snapshot[key]
+        for key in _SAFE_FACT_SNAPSHOT_KEYS
+        if key in snapshot
+    }
 
 
 def _command_read(result: GraphPublicationPlanResult) -> GraphPublicationCommandRead:
@@ -258,6 +290,7 @@ async def list_publication_items(
                 support_evidence_ids=list(view.item.support_evidence_ids or []),
                 support_counts=dict(view.item.support_counts or {}),
                 source_job_ids=list(view.source_job_ids),
+                fact_snapshot=_safe_fact_snapshot(view.item),
                 created_at=view.item.created_at,
                 updated_at=view.item.updated_at,
             )

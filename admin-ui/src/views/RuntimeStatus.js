@@ -73,8 +73,9 @@ export default {
                     icon: SERVICE_ICON[s.service_type] || null,
                     tagType: STATUS_TAG[s.status] || 'info',
                     statusText: STATUS_TEXT[s.status] || s.status,
-                    onlineInstances: s.online_instances != null ? s.online_instances : '—',
-                    knownInstances: s.known_instances != null ? s.known_instances : '—',
+                    instances: s.online_instances != null && s.known_instances != null
+                        ? `${s.online_instances} / ${s.known_instances}`
+                        : '—',
                     lastSeenAt: latest && latest.last_seen_at ? formatOperationTime(latest.last_seen_at) : '—',
                     lastSeenRel: latest ? relTime(latest.seconds_since_last_seen) : '—',
                     hostname: latest ? latest.hostname : '—',
@@ -123,7 +124,7 @@ export default {
           <local-icon icon="service:embedding-worker" class="runtime-overview-icon runtime-overview-icon--embedding" />
           <div class="runtime-overview-body">
             <b>{{ summary.embeddingPending != null ? summary.embeddingPending : '—' }}</b>
-            <span>Embedding 队列</span>
+            <span>向量化队列</span>
           </div>
         </div>
         <div class="runtime-overview-item">
@@ -156,7 +157,9 @@ export default {
         <div class="runtime-card-header">
           <span class="runtime-card-title">服务在线状态</span>
           <div class="runtime-card-header-actions">
-            <el-button size="small" @click="load(true)" :loading="loading">刷新</el-button>
+            <el-button class="app-refresh-button" size="small" @click="load(true)" :loading="loading">
+              <span class="app-refresh-icon" aria-hidden="true"></span>刷新
+            </el-button>
             <span class="runtime-auto-label">自动刷新</span>
             <el-switch v-model="autoRefresh" size="small" />
           </div>
@@ -180,8 +183,8 @@ export default {
                 <el-tag :type="row.tagType" size="small" effect="light">{{ row.statusText }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="在线实例数" width="120" align="center">
-              <template #default="{row}">{{ row.onlineInstances }}</template>
+            <el-table-column label="在线 / 已知实例" width="140" align="center">
+              <template #default="{row}">{{ row.instances }}</template>
             </el-table-column>
             <el-table-column label="最后心跳" min-width="180">
               <template #default="{row}">
@@ -208,7 +211,7 @@ export default {
         <!-- Embedding 任务 -->
         <div class="runtime-card">
           <div class="runtime-card-header">
-            <span class="runtime-card-title">Embedding 任务</span>
+            <span class="runtime-card-title">向量化任务</span>
           </div>
           <div class="runtime-card-body">
             <div class="runtime-metrics">
@@ -218,7 +221,7 @@ export default {
               <div class="runtime-metric"><span class="runtime-metric-label">已完成</span><b class="runtime-metric--done">{{ jobs.done != null ? jobs.done : '—' }}</b></div>
               <div class="runtime-metric"><span class="runtime-metric-label">失败</span><b class="runtime-metric--failed">{{ jobs.failed != null ? jobs.failed : '—' }}</b></div>
             </div>
-            <router-link to="/jobs" class="runtime-card-link">查看任务监控</router-link>
+            <router-link to="/operations-center/jobs" class="runtime-card-link">查看任务监控</router-link>
           </div>
         </div>
 

@@ -1,5 +1,37 @@
 import { paginate } from './common_ui.js';
 
+const SLUG_ALPHABET = 'abcdefghijklmnopqrstuvwxyz';
+
+function hashedSlugSuffix(value) {
+    let left = 2166136261;
+    let right = 2246822519;
+    for (const char of value) {
+        const codePoint = char.codePointAt(0);
+        left = Math.imul(left ^ codePoint, 16777619) >>> 0;
+        right = Math.imul(right ^ codePoint, 3266489917) >>> 0;
+    }
+    let suffix = '';
+    for (let index = 0; index < 12; index += 1) {
+        left = Math.imul(left ^ (right + index), 16777619) >>> 0;
+        right = Math.imul(right ^ (left + index), 2246822519) >>> 0;
+        suffix += SLUG_ALPHABET[((left ^ right) >>> 0) % SLUG_ALPHABET.length];
+    }
+    return suffix;
+}
+
+export function librarySlugFromName(name) {
+    const value = String(name || '').trim();
+    if (!value) return '';
+    const readable = value
+        .normalize('NFKD')
+        .toLowerCase()
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z]+/g, '_')
+        .replace(/^_+|_+$/g, '')
+        .slice(0, 80);
+    return readable.length >= 2 ? readable : `library_${hashedSlugSuffix(value)}`;
+}
+
 export function computeLibraryStats(libs = []) {
     return {
         total: libs.length,

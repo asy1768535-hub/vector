@@ -43,6 +43,7 @@ storage/document_files/
 
 # Claude Code / 工具生成的本地 brainstorm、preview 状态（含本机绝对路径）
 .superpowers/
+.workbuddy/
 .worktrees/
 .tmp_zip_compare/
 
@@ -51,6 +52,7 @@ storage/document_files/
 /eval/dataset*.jsonl
 !/eval/dataset.example.jsonl
 /eval/report*.md
+/eval/graph_extraction/results/*.json
 
 # 本机工具与含业务数据/绕权限的开发脚本——不入库
 # （.gitignore 不支持行尾注释，patterns 必须独占一行）
@@ -62,3 +64,4 @@ storage/document_files/
 /scripts/build_eval_test_one.py
 # scripts/build_bge_compare.py：bge/云对比的一次性本地工具
 /scripts/build_bge_compare.py
+.gitnexus

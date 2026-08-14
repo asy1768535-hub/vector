@@ -3,13 +3,19 @@ import { ElMessage, ElMessageBox } from 'element-plus';
 import * as api from '../api.js';
 import { dataEmpty } from '../illustrations.js';
 import {
-    computeLibraryStats, filterLibraries, libraryStatus, paginateLibraries, srcSummary,
+    computeLibraryStats, filterLibraries, librarySlugFromName,
+    libraryStatus, paginateLibraries, srcSummary,
 } from '../libraries_ui.js';
+import { createRequestFence, readProjection } from '../read_state_ui.js';
 
 export default {
     setup() {
         const libs = ref([]);
         const loading = ref(false);
+        const loadStarted = ref(false);
+        const librariesResolved = ref(false);
+        const librariesError = ref('');
+        const librariesRequestFence = createRequestFence();
         const showDeleted = ref(false);
         const keyword = ref('');
         const statusFilter = ref('');
@@ -22,17 +28,28 @@ export default {
         const create = reactive({
             open: false,
             submitting: false,
-            form: { slug: '', name: '', description: '', embedding_model: '', embedding_dim: null,
-                vector_distance: 'cosine', embedding_base_url: '', embed_batch_size: null,
-                rerank_enabled: null, ocr_enabled: null, docx_table_aware: null,
-                retrieval_mode: 'dense', source_enrichment_enabled: true, chunk_size: 1000, chunk_overlap: 120 },
+            slugEdited: false,
+            form: { slug: '', name: '', description: '', embedding_model: '', embedding_dim: 1024,
+                vector_distance: 'cosine', embedding_base_url: '', embed_batch_size: 32,
+                rerank_enabled: null, ocr_enabled: true, docx_table_aware: true,
+                retrieval_mode: 'dense', source_enrichment_enabled: true,
+                graph_extraction_enabled: true, graph_extraction_build_mode: 'standard',
+                schema_mode: 'explore',
+                schema_confirmation_policy: 'required',
+                schema_template: 'none',
+                chunk_size: 1000, chunk_overlap: 120 },
         });
         const edit = reactive({
-            open: false, slug: '', initial: null,
+            open: false, slug: '', initial: null, graphSecurityLevels: [],
             form: { name: '', description: '', embedding_model: '', embedding_dim: null,
                 vector_distance: 'cosine', embedding_base_url: '', embed_batch_size: null,
                 rerank_enabled: null, ocr_enabled: null, docx_table_aware: null,
-                retrieval_mode: 'dense', source_enrichment_enabled: true, chunk_size: 1000, chunk_overlap: 120 },
+                retrieval_mode: 'dense', source_enrichment_enabled: true,
+                graph_extraction_enabled: false, graph_extraction_build_mode: 'standard',
+                schema_mode: 'disabled',
+                schema_confirmation_policy: 'required',
+                graph_assisted_chat_mode: 'off',
+                chunk_size: 1000, chunk_overlap: 120 },
         });
 
         const stats = computed(() => computeLibraryStats(libs.value));
@@ -56,26 +73,62 @@ export default {
         function toggleLabel(val) { if (val === true) return '开启'; if (val === false) return '关闭'; return '继承'; }
         function embedDisplay(row) { return (row.embedding_model || '全局默认') + ' / ' + (row.embedding_dim ? row.embedding_dim + 'd' : '—'); }
         function sourceDisplay(config) { return config ? `开启（${srcSummary(config)}）` : '关闭'; }
+        function schemaModeDisplay(row) {
+            return { disabled: '普通知识库', explore: 'AI 探索', governed: 'Schema 治理' }[row?.schema_mode]
+                || (row?.graph_extraction_enabled ? 'Schema 治理' : '普通知识库');
+        }
 
         async function load(forceRefresh = false) {
+            const requestToken = librariesRequestFence.begin();
+            loadStarted.value = true;
             loading.value = true;
+            librariesError.value = '';
             try {
                 const params = showDeleted.value ? { include_deleted: 'true' } : {};
-                libs.value = await api.listLibraries(params, forceRefresh);
+                const result = await api.listLibraries(params, forceRefresh);
+                if (!librariesRequestFence.isCurrent(requestToken)) return;
+                libs.value = result;
+                librariesResolved.value = true;
                 if (selectedLibrary.value) {
                     selectedLibrary.value = libs.value.find((row) => row.slug === selectedLibrary.value.slug) || null;
                     if (!selectedLibrary.value) detailOpen.value = false;
                 }
-            } catch (e) { ElMessage.error(e.message); }
-            finally { loading.value = false; }
+            } catch (e) {
+                if (!librariesRequestFence.isCurrent(requestToken)) return;
+                librariesError.value = e.message || '知识库列表加载失败';
+            } finally {
+                if (librariesRequestFence.isCurrent(requestToken)) loading.value = false;
+            }
         }
 
+        const librariesReadState = computed(() => readProjection({
+            started: loadStarted.value,
+            loading: loading.value,
+            hasResolved: librariesResolved.value,
+            empty: libs.value.length === 0,
+            error: librariesError.value,
+        }));
+
         function openCreate() {
-            create.form = { slug: '', name: '', description: '', embedding_model: '', embedding_dim: null,
-                vector_distance: 'cosine', embedding_base_url: '', embed_batch_size: null,
-                rerank_enabled: null, ocr_enabled: null, docx_table_aware: null,
-                retrieval_mode: 'dense', source_enrichment_enabled: true, chunk_size: 1000, chunk_overlap: 120 };
+            create.slugEdited = false;
+            create.form = { slug: '', name: '', description: '', embedding_model: '', embedding_dim: 1024,
+                vector_distance: 'cosine', embedding_base_url: '', embed_batch_size: 32,
+                rerank_enabled: null, ocr_enabled: true, docx_table_aware: true,
+                retrieval_mode: 'dense', source_enrichment_enabled: true,
+                graph_extraction_enabled: false, graph_extraction_build_mode: 'standard',
+                schema_mode: 'disabled',
+                schema_confirmation_policy: 'required',
+                schema_template: 'none',
+                chunk_size: 1000, chunk_overlap: 120 };
             create.open = true;
+        }
+
+        function onCreateNameInput(name) {
+            if (!create.slugEdited) create.form.slug = librarySlugFromName(name);
+        }
+
+        function onCreateSlugInput() {
+            create.slugEdited = true;
         }
 
         async function submitCreate() {
@@ -84,8 +137,23 @@ export default {
             for (const k of ['embedding_model', 'embedding_base_url']) if (!body[k]) body[k] = null;
             if (!body.embedding_dim) body.embedding_dim = null;
             if (!body.embed_batch_size) body.embed_batch_size = null;
+            body.graph_extraction_enabled = body.schema_mode !== 'disabled';
+            if (body.schema_mode !== 'governed') body.schema_template = 'none';
+            body.external_llm_enabled = body.graph_extraction_enabled;
+            body.graph_extraction_allowed_security_levels = body.graph_extraction_enabled
+                ? ['internal']
+                : [];
             create.submitting = true;
-            try { await api.createLibrary(body); ElMessage.success('库已创建并已建 Qdrant collection'); create.open = false; await load(true); }
+            try {
+                const created = await api.createLibrary(body);
+                const generation = Number(created.slug.match(/__r(\d+)$/)?.[1] || 1);
+                const message = generation > 1
+                    ? '同名知识库已按第 ' + generation + ' 次创建，新 ID：' + created.slug
+                    : '知识库已创建，ID：' + created.slug;
+                ElMessage.success(message);
+                create.open = false;
+                await load(true);
+            }
             catch (e) { ElMessage.error(e.message); }
             finally { create.submitting = false; }
         }
@@ -98,19 +166,39 @@ export default {
                 rerank_enabled: row.rerank_enabled ?? null, ocr_enabled: row.ocr_enabled ?? null,
                 docx_table_aware: row.docx_table_aware ?? null, retrieval_mode: row.retrieval_mode || 'dense',
                 chunk_size: row.chunk_size, chunk_overlap: row.chunk_overlap,
-                source_enrichment_enabled: row.source_config != null };
+                source_enrichment_enabled: row.source_config != null,
+                graph_extraction_enabled: row.graph_extraction_enabled === true,
+                schema_mode: row.schema_mode || (row.graph_extraction_enabled ? 'governed' : 'disabled'),
+                schema_confirmation_policy: row.schema_confirmation_policy || 'required',
+                graph_extraction_build_mode: row.graph_extraction_build_mode || 'standard',
+                graph_assisted_chat_mode: row.graph_assisted_chat_mode || 'off' };
+            edit.graphSecurityLevels = Array.isArray(row.graph_extraction_allowed_security_levels)
+                ? [...row.graph_extraction_allowed_security_levels]
+                : [];
             edit.form = { ...snapshot }; edit.initial = snapshot; edit.open = true;
         }
 
         async function submitEdit() {
+            edit.form.graph_extraction_enabled = edit.form.schema_mode !== 'disabled';
             const diff = {};
             for (const k of Object.keys(edit.form)) if (edit.form[k] !== edit.initial[k]) diff[k] = edit.form[k];
             if (Object.keys(diff).length === 0) { ElMessage.info('未做任何修改'); edit.open = false; return; }
-            if (diff.embedding_dim !== undefined) {
-                try { await ElMessageBox.confirm('改了 embedding_dim ⚠️\nQdrant collection 结构已固定，保存后之后的新 embed 会维度不匹配。\n保存后请立刻点「重建 collection」按钮，否则后续摄入会失败。\n\n继续保存吗？', '危险操作', { type: 'warning', confirmButtonText: '我知道风险，保存', cancelButtonText: '取消' }); }
+            if (diff.graph_extraction_enabled === true) {
+                diff.external_llm_enabled = true;
+                diff.graph_extraction_allowed_security_levels = edit.graphSecurityLevels.length
+                    ? edit.graphSecurityLevels
+                    : ['internal'];
+            }
+            if (diff.embedding_dim !== undefined || diff.vector_distance !== undefined) {
+                try { await ElMessageBox.confirm('修改向量维度或距离算法后，现有 Qdrant collection 结构将不再匹配。\n保存后请立即执行「重建 collection」，否则后续摄入或检索可能失败。\n\n继续保存吗？', '危险操作', { type: 'warning', confirmButtonText: '确认保存', cancelButtonText: '取消' }); }
                 catch (_) { return; }
             }
-            try { await api.updateLibrary(edit.slug, diff); ElMessage.success('已保存'); edit.open = false; await load(true); }
+            try {
+                await api.updateLibrary(edit.slug, diff);
+                ElMessage.success('已保存');
+                edit.open = false;
+                await load(true);
+            }
             catch (e) { ElMessage.error(e.message); }
         }
 
@@ -137,8 +225,24 @@ export default {
             catch (e) { ElMessage.error(e.message || String(e)); }
         }
 
-        const faqMgr = reactive({ open: false, slug: '', loading: false, list: [], newQuestion: '', newSort: 0 });
-        async function loadFaq() { faqMgr.loading = true; try { faqMgr.list = await api.listLibraryFaqs(faqMgr.slug, { includeInactive: true }); } catch (e) { ElMessage.error(e.message); } finally { faqMgr.loading = false; } }
+        const faqMgr = reactive({ open: false, slug: '', loading: false, error: '', list: [], newQuestion: '', newSort: 0 });
+        const faqRequestFence = createRequestFence();
+        async function loadFaq() {
+            const requestToken = faqRequestFence.begin();
+            const requestedSlug = faqMgr.slug;
+            faqMgr.loading = true;
+            faqMgr.error = '';
+            try {
+                const result = await api.listLibraryFaqs(requestedSlug, { includeInactive: true });
+                if (!faqRequestFence.isCurrent(requestToken)) return;
+                faqMgr.list = result;
+            } catch (e) {
+                if (!faqRequestFence.isCurrent(requestToken)) return;
+                faqMgr.error = e.message || '常用问题加载失败';
+            } finally {
+                if (faqRequestFence.isCurrent(requestToken)) faqMgr.loading = false;
+            }
+        }
         async function openFaq(row) { faqMgr.slug = row.slug; faqMgr.newQuestion = ''; faqMgr.newSort = 0; faqMgr.list = []; faqMgr.open = true; await loadFaq(); }
         async function addFaq() { const q = (faqMgr.newQuestion || '').trim(); if (!q) { ElMessage.warning('请输入问题'); return; } try { await api.createLibraryFaq(faqMgr.slug, { question: q, sort_order: faqMgr.newSort || 0, is_active: true }); faqMgr.newQuestion = ''; faqMgr.newSort = 0; ElMessage.success('已新增'); loadFaq(); } catch (e) { ElMessage.error(e.message); } }
         async function saveFaq(row) { const q = (row.question || '').trim(); if (!q) { ElMessage.warning('问题不能为空'); return; } try { await api.updateLibraryFaq(faqMgr.slug, row.id, { question: q, sort_order: row.sort_order, is_active: row.is_active }); ElMessage.success('已保存'); loadFaq(); } catch (e) { ElMessage.error(e.message); } }
@@ -146,21 +250,40 @@ export default {
 
         onMounted(() => load(false));
 
-        return { libs, loading, showDeleted, create, edit, stats, pagedLibraries, detailOpen, selectedLibrary,
+        return { libs, loading, librariesResolved, librariesError, librariesReadState, showDeleted, create, edit, stats, pagedLibraries, detailOpen, selectedLibrary, schemaModeDisplay,
             keyword, statusFilter, retrievalFilter, page, pageSize, resetFilters, openDetail,
             load, openCreate, submitCreate, openEdit, submitEdit, rebuild, del, testEmbedding,
+            onCreateNameInput, onCreateSlugInput,
             dataEmpty, srcSummary, sourceDisplay, libraryStatus, toggleLabel, embedDisplay,
-            faqMgr, openFaq, addFaq, saveFaq, removeFaq };
+            faqMgr, loadFaq, openFaq, addFaq, saveFaq, removeFaq };
     },
     template: `
     <div class="libraries-workspace">
       <header class="libraries-header">
         <div><h2 class="libraries-title">知识库管理</h2><p class="libraries-desc">管理知识库配置、检索模式与处理能力</p></div>
         <div class="libraries-header-actions">
-          <el-button @click="load(true)" :loading="loading">刷新</el-button>
+          <el-button class="app-refresh-button" @click="load(true)" :loading="loading">
+            <span class="app-refresh-icon" aria-hidden="true"></span>刷新
+          </el-button>
           <el-button type="primary" @click="openCreate">新建知识库</el-button>
         </div>
       </header>
+
+      <section v-if="librariesReadState === 'fatal'" class="app-read-state app-read-state--error" role="alert">
+        <div><strong>知识库列表加载失败</strong><p>{{ librariesError }}</p></div>
+        <el-button type="primary" :loading="loading" @click="load(true)">重试</el-button>
+      </section>
+
+      <section v-else-if="librariesReadState === 'idle' || librariesReadState === 'loading'"
+               class="app-read-state" v-loading="true">
+        <span>正在加载知识库</span>
+      </section>
+
+      <template v-else>
+      <el-alert v-if="librariesReadState === 'refresh-error'"
+                type="warning" :closable="false" show-icon
+                title="知识库列表刷新失败，当前仍显示上次成功加载的数据"
+                :description="librariesError" />
 
       <section class="libraries-toolbar">
         <el-input v-model="keyword" class="libraries-search" clearable placeholder="搜索知识库名称或唯一 ID" />
@@ -184,7 +307,12 @@ export default {
       <section class="libraries-table-card">
         <div class="libraries-table-shell">
           <el-table :data="pagedLibraries.rows" v-loading="loading" row-key="slug" @row-click="openDetail">
-            <template #empty><div class="illustration-empty-wrapper"><img :src="dataEmpty" class="illustration-data-empty" alt="" aria-hidden="true" /><p>暂无知识库</p></div></template>
+            <template #empty>
+              <div v-if="librariesReadState === 'empty'" class="illustration-empty-wrapper">
+                <img :src="dataEmpty" class="illustration-data-empty" alt="" aria-hidden="true" />
+                <p>暂无知识库</p>
+              </div>
+            </template>
             <el-table-column label="名称" min-width="180">
               <template #default="{row}"><div class="libraries-library-cell"><div class="libraries-library-name">{{ row.name }}</div><div class="libraries-library-slug">{{ row.slug }}</div></div></template>
             </el-table-column>
@@ -218,6 +346,7 @@ export default {
         </div>
         <div class="libraries-pagination"><span>共 {{ pagedLibraries.total }} 条</span><el-pagination v-model:current-page="page" v-model:page-size="pageSize" :page-sizes="[10,20,50]" layout="sizes, prev, pager, next" :total="pagedLibraries.total" /></div>
       </section>
+      </template>
 
       <!-- Detail drawer -->
       <el-drawer v-model="detailOpen" class="libraries-detail-drawer" :with-header="false" size="480px">
@@ -269,6 +398,18 @@ export default {
                 <span class="libraries-detail-value">{{ selectedLibrary.retrieval_mode === 'hybrid' ? '混合检索' : '向量检索' }}</span>
               </div>
               <div class="libraries-detail-field">
+                <span class="libraries-detail-label">知识图谱</span>
+                <span class="libraries-detail-value"><el-tag :type="selectedLibrary.graph_extraction_enabled ? 'success' : 'info'" size="small">{{ selectedLibrary.graph_extraction_enabled ? '开启' : '关闭' }}</el-tag></span>
+              </div>
+              <div class="libraries-detail-field">
+                <span class="libraries-detail-label">知识组织</span>
+                <span class="libraries-detail-value">{{ schemaModeDisplay(selectedLibrary) }}</span>
+              </div>
+              <div v-if="selectedLibrary.graph_extraction_enabled" class="libraries-detail-field">
+                <span class="libraries-detail-label">构建模式</span>
+                <span class="libraries-detail-value">{{ { fast: '快速', standard: '标准', deep: '深度' }[selectedLibrary.graph_extraction_build_mode] || '标准' }}</span>
+              </div>
+              <div class="libraries-detail-field">
                 <span class="libraries-detail-label">切分</span>
                 <span class="libraries-detail-value">{{ selectedLibrary.chunk_size }} / {{ selectedLibrary.chunk_overlap }}</span>
               </div>
@@ -303,17 +444,15 @@ export default {
         <el-form label-width="92px">
           <div class="libraries-form-section"><h4 class="libraries-form-section-title">基本信息</h4>
             <el-row :gutter="16">
-              <el-col :span="12"><el-form-item label="库唯一ID" required><el-input v-model="create.form.slug" placeholder="小写字母/下划线，如 medical" class="libraries-form-control" /></el-form-item></el-col>
-              <el-col :span="12"><el-form-item label="名称" required><el-input v-model="create.form.name" placeholder="医学知识库" class="libraries-form-control" /></el-form-item></el-col>
+              <el-col :span="12"><el-form-item label="名称" required><el-input v-model="create.form.name" placeholder="医学知识库" class="libraries-form-control" @input="onCreateNameInput" /></el-form-item></el-col>
+              <el-col :span="12"><el-form-item label="库唯一ID" required><el-input v-model="create.form.slug" readonly placeholder="根据名称自动生成" class="libraries-form-control" /><div class="libraries-form-hint">同名历史库删除后可重新创建；系统会追加 __r2、__r3 表示创建代次</div></el-form-item></el-col>
               <el-col :span="24"><el-form-item label="描述"><el-input v-model="create.form.description" type="textarea" :rows="2" class="libraries-form-control" /></el-form-item></el-col>
             </el-row>
           </div>
           <div class="libraries-form-section"><h4 class="libraries-form-section-title">向量与切分配置</h4>
             <el-row :gutter="16">
-              <el-col :span="12"><el-form-item label="向量模型"><el-input v-model="create.form.embedding_model" placeholder="默认：bge-m3" class="libraries-form-control" /></el-form-item></el-col>
-              <el-col :span="12"><el-form-item label="接口地址"><el-input v-model="create.form.embedding_base_url" placeholder="默认 .../v1/embeddings" class="libraries-form-control" /></el-form-item></el-col>
               <el-col :span="12"><el-form-item label="向量维度"><el-input-number v-model="create.form.embedding_dim" :min="64" :max="8192" class="libraries-form-control" /></el-form-item></el-col>
-              <el-col :span="12"><el-form-item label="单批大小"><el-input-number v-model="create.form.embed_batch_size" :min="1" :max="256" class="libraries-form-control" /><div class="libraries-form-hint">留空=全局；阿里云填 10，本地 bge-m3 可填 32</div></el-form-item></el-col>
+              <el-col :span="12"><el-form-item label="单批大小"><el-input-number v-model="create.form.embed_batch_size" :min="1" :max="256" class="libraries-form-control" /><div class="libraries-form-hint">每次同时计算的切片数；本地 bge-m3 默认 32</div></el-form-item></el-col>
               <el-col :span="12"><el-form-item label="分片大小"><el-input-number v-model="create.form.chunk_size" :min="200" :max="8000" class="libraries-form-control" /></el-form-item></el-col>
               <el-col :span="12"><el-form-item label="分片重叠"><el-input-number v-model="create.form.chunk_overlap" :min="0" :max="2000" class="libraries-form-control" /></el-form-item></el-col>
             </el-row>
@@ -322,33 +461,37 @@ export default {
             <el-row :gutter="16">
               <el-col :span="12"><el-form-item label="检索模式"><el-select v-model="create.form.retrieval_mode" class="libraries-form-control"><el-option value="dense" label="向量检索 dense" /><el-option value="hybrid" label="混合检索 hybrid" /></el-select><div class="libraries-form-hint">hybrid=向量+关键词(pg_trgm) RRF</div></el-form-item></el-col>
               <el-col :span="12"><el-form-item label="Rerank"><el-select v-model="create.form.rerank_enabled" class="libraries-form-control"><el-option :value="null" label="继承全局" /><el-option :value="true" label="开启" /><el-option :value="false" label="关闭" /></el-select><div class="libraries-form-hint">需先在 .env 配 RERANK_* 才生效</div></el-form-item></el-col>
-              <el-col :span="12"><el-form-item label="图片 OCR"><el-select v-model="create.form.ocr_enabled" class="libraries-form-control"><el-option :value="null" label="继承全局" /><el-option :value="true" label="开启" /><el-option :value="false" label="关闭" /></el-select><div class="libraries-form-hint">识别 DOCX 内嵌图片/PDF 扫描页（较慢）</div></el-form-item></el-col>
-              <el-col :span="12"><el-form-item label="docx表格"><el-select v-model="create.form.docx_table_aware" class="libraries-form-control"><el-option :value="null" label="继承全局" /><el-option :value="true" label="开启" /><el-option :value="false" label="关闭" /></el-select><div class="libraries-form-hint">每表单独成块带表头；表格重的库建议开</div></el-form-item></el-col>
-              <el-col :span="12"><el-form-item label="全文源"><el-switch v-model="create.form.source_enrichment_enabled" active-text="启用 PGSQL 全文源补全" /></el-form-item></el-col>
+              <el-col :span="24"><el-form-item label="知识组织方式"><el-radio-group v-model="create.form.schema_mode"><el-radio-button value="disabled">不构建知识图谱</el-radio-button><el-radio-button value="explore">AI 自动发现</el-radio-button><el-radio-button value="governed">使用已有 Schema</el-radio-button></el-radio-group><div class="libraries-form-hint">AI 自动发现默认根据首次文件生成候选业务 Schema；确认后才成为长期 Schema。</div></el-form-item></el-col>
+              <el-col v-if="create.form.schema_mode !== 'disabled'" :span="12"><el-form-item label="构建模式"><el-radio-group v-model="create.form.graph_extraction_build_mode"><el-radio-button value="fast">快速</el-radio-button><el-radio-button value="standard">标准</el-radio-button><el-radio-button value="deep">深度</el-radio-button></el-radio-group><div class="libraries-form-hint">标准模式兼顾完整度与速度</div></el-form-item></el-col>
+              <el-col v-if="create.form.schema_mode !== 'disabled'" :span="12"><el-form-item label="Schema 确认"><el-radio-group v-model="create.form.schema_confirmation_policy"><el-radio-button value="required">人工确认</el-radio-button><el-radio-button value="automatic">自动批准</el-radio-button></el-radio-group></el-form-item></el-col>
+              <el-col v-if="create.form.schema_mode === 'governed'" :span="12"><el-form-item label="初始 Schema"><el-select v-model="create.form.schema_template" class="libraries-form-control"><el-option value="enterprise" label="基础企业 Schema（推荐）" /><el-option value="none" label="稍后导入自定义 Schema" /></el-select><div class="libraries-form-hint">导入只创建草稿；激活后才用于后续图谱抽取</div></el-form-item></el-col>
             </el-row>
+            <el-alert v-if="create.form.schema_mode === 'disabled'" type="info" :closable="false" class="libraries-form-alert">不会启动知识图谱抽取，也不会创建或修改 Schema；适合先使用普通文档检索。</el-alert>
+            <el-alert v-else-if="create.form.schema_mode === 'explore'" type="warning" :closable="false" class="libraries-form-alert">AI 探索模式用于首次面对陌生文件：先上传并向量化资料，再沉淀候选实体、关系和 Schema 草稿；Schema 激活后，后续新增和替换文件才按长期约束抽取。</el-alert>
+            <el-alert v-else-if="create.form.schema_template === 'enterprise'" type="info" :closable="false" class="libraries-form-alert">将创建并激活基础企业 Schema，之后可在 Schema 管理中导入新版本扩展。</el-alert>
+            <el-alert v-else type="warning" :closable="false" class="libraries-form-alert">Schema 治理适合已有长期结构约束的库；如果暂时没有激活 Schema，首次资料仍会先按 AI 探索完成上传和向量化。</el-alert>
           </div>
-          <el-alert v-if="create.form.source_enrichment_enabled" type="info" :closable="false" class="libraries-form-alert">PGSQL 全文源按<b>约定</b>自动配置：源表 = <code>{{ create.form.slug || '<库唯一ID>' }}</code>（本库唯一ID）· 外键 <code>text_id</code> → 正文列 <code>content</code> · <code>bigint</code> · 源库取 <code>.env</code> 配置。</el-alert>
-          <el-alert v-else type="warning" :closable="false" class="libraries-form-alert">已关闭全文源补全：检索结果只使用向量库已有文本，不自动回查 PGSQL 全文源。</el-alert>
         </el-form>
         <template #footer><el-button @click="create.open = false" :disabled="create.submitting">取消</el-button><el-button type="primary" :loading="create.submitting" @click="submitCreate">创建</el-button></template>
       </el-dialog>
 
       <!-- Edit dialog -->
       <el-dialog v-model="edit.open" :title="'编辑库 / ' + edit.slug" width="780px" top="6vh" class="libraries-dialog">
-        <el-alert type="warning" :closable="false" class="libraries-form-alert">改 <b>向量维度</b> 会让 Qdrant 现有 collection 维度对不上，保存后请立刻点表格里「重建」。改 <b>向量模型</b> / <b>接口地址</b> 只影响之后新摄入的文档；已存在 chunk 不会自动重 embed。</el-alert>
+        <el-alert type="warning" :closable="false" class="libraries-form-alert">修改<b>向量维度</b>或<b>距离算法</b>后必须重建 collection。修改<b>向量模型</b>或<b>接口地址</b>只影响之后上传的文档，已有切片不会自动重新计算向量。</el-alert>
         <el-form label-width="92px">
           <div class="libraries-form-section"><h4 class="libraries-form-section-title">基本信息</h4>
             <el-row :gutter="16">
               <el-col :span="12"><el-form-item label="名称"><el-input v-model="edit.form.name" class="libraries-form-control" /></el-form-item></el-col>
               <el-col :span="12"><el-form-item label="向量模型"><el-input v-model="edit.form.embedding_model" class="libraries-form-control" /></el-form-item></el-col>
               <el-col :span="24"><el-form-item label="描述"><el-input v-model="edit.form.description" type="textarea" :rows="2" class="libraries-form-control" /></el-form-item></el-col>
-              <el-col :span="24"><el-form-item label="接口地址"><el-input v-model="edit.form.embedding_base_url" placeholder="默认：http://10.0.10.2:8111/v1/embeddings" class="libraries-form-control" /></el-form-item></el-col>
+              <el-col :span="24"><el-form-item label="接口地址"><el-input v-model="edit.form.embedding_base_url" placeholder="留空继承全局 Embedding 服务" class="libraries-form-control" /></el-form-item></el-col>
             </el-row>
           </div>
-          <div class="libraries-form-section"><h4 class="libraries-form-section-title">向量与切分配置</h4>
+          <div class="libraries-form-section"><h4 class="libraries-form-section-title">Embedding 与切分</h4>
             <el-row :gutter="16">
               <el-col :span="12"><el-form-item label="向量维度"><el-input-number v-model="edit.form.embedding_dim" :min="64" :max="8192" class="libraries-form-control" /></el-form-item></el-col>
-              <el-col :span="12"><el-form-item label="单批大小"><el-input-number v-model="edit.form.embed_batch_size" :min="1" :max="256" class="libraries-form-control" /><div class="libraries-form-hint">留空=全局；阿里云填 10，本地 bge-m3 可填 32</div></el-form-item></el-col>
+              <el-col :span="12"><el-form-item label="距离算法"><el-select v-model="edit.form.vector_distance" class="libraries-form-control"><el-option value="cosine" label="余弦距离 cosine" /><el-option value="euclid" label="欧氏距离 euclid" /><el-option value="dot" label="点积 dot" /></el-select></el-form-item></el-col>
+              <el-col :span="12"><el-form-item label="单批大小"><el-input-number v-model="edit.form.embed_batch_size" :min="1" :max="256" placeholder="继承全局" class="libraries-form-control" /><div class="libraries-form-hint">每次同时计算的切片数；留空时继承全局配置</div></el-form-item></el-col>
               <el-col :span="12"><el-form-item label="分片大小"><el-input-number v-model="edit.form.chunk_size" :min="200" :max="8000" class="libraries-form-control" /></el-form-item></el-col>
               <el-col :span="12"><el-form-item label="分片重叠"><el-input-number v-model="edit.form.chunk_overlap" :min="0" :max="2000" class="libraries-form-control" /></el-form-item></el-col>
             </el-row>
@@ -358,9 +501,17 @@ export default {
               <el-col :span="12"><el-form-item label="检索模式"><el-select v-model="edit.form.retrieval_mode" class="libraries-form-control"><el-option value="dense" label="向量检索 dense" /><el-option value="hybrid" label="混合检索 hybrid" /></el-select><div class="libraries-form-hint">hybrid=向量+关键词 RRF；切换即时生效、无需重建</div></el-form-item></el-col>
               <el-col :span="12"><el-form-item label="Rerank"><el-select v-model="edit.form.rerank_enabled" class="libraries-form-control"><el-option :value="null" label="继承全局" /><el-option :value="true" label="开启" /><el-option :value="false" label="关闭" /></el-select><div class="libraries-form-hint">需先在 .env 配 RERANK_* 才生效</div></el-form-item></el-col>
               <el-col :span="12"><el-form-item label="图片 OCR"><el-select v-model="edit.form.ocr_enabled" class="libraries-form-control"><el-option :value="null" label="继承全局" /><el-option :value="true" label="开启" /><el-option :value="false" label="关闭" /></el-select><div class="libraries-form-hint">改开关只影响之后新上传/重灌的文档</div></el-form-item></el-col>
-              <el-col :span="12"><el-form-item label="docx表格"><el-select v-model="edit.form.docx_table_aware" class="libraries-form-control"><el-option :value="null" label="继承全局" /><el-option :value="true" label="开启" /><el-option :value="false" label="关闭" /></el-select><div class="libraries-form-hint">改开关只影响之后新上传/重灌的文档</div></el-form-item></el-col>
-              <el-col :span="12"><el-form-item label="全文源"><el-switch v-model="edit.form.source_enrichment_enabled" active-text="启用 PGSQL 全文源补全" /></el-form-item></el-col>
+              <el-col :span="12"><el-form-item label="DOCX 表格"><el-select v-model="edit.form.docx_table_aware" class="libraries-form-control"><el-option :value="null" label="继承全局" /><el-option :value="true" label="开启" /><el-option :value="false" label="关闭" /></el-select><div class="libraries-form-hint">改开关只影响之后新上传/重灌的文档</div></el-form-item></el-col>
+              <el-col :span="12"><el-form-item label="PGSQL 全文源"><el-switch v-model="edit.form.source_enrichment_enabled" active-text="启用正文回查" /></el-form-item></el-col>
+              <el-col :span="24"><el-form-item label="知识组织方式"><el-radio-group v-model="edit.form.schema_mode"><el-radio-button value="disabled">普通知识库</el-radio-button><el-radio-button value="explore">AI 探索</el-radio-button><el-radio-button value="governed">Schema 治理</el-radio-button></el-radio-group><div class="libraries-form-hint">普通模式只做文档与向量检索；AI 探索用于第一次陌生资料；Schema 治理用于按激活版本长期约束抽取。</div></el-form-item></el-col>
+              <el-col v-if="edit.form.schema_mode !== 'disabled'" :span="12"><el-form-item label="构建模式"><el-radio-group v-model="edit.form.graph_extraction_build_mode"><el-radio-button value="fast">快速</el-radio-button><el-radio-button value="standard">标准</el-radio-button><el-radio-button value="deep">深度</el-radio-button></el-radio-group></el-form-item></el-col>
+              <el-col v-if="edit.form.schema_mode !== 'disabled'" :span="12"><el-form-item label="Schema 确认"><el-radio-group v-model="edit.form.schema_confirmation_policy"><el-radio-button value="required">人工确认</el-radio-button><el-radio-button value="automatic">自动批准</el-radio-button></el-radio-group></el-form-item></el-col>
+              <el-col v-if="edit.form.schema_mode !== 'disabled'" :span="12"><el-form-item label="问答图谱"><el-select v-model="edit.form.graph_assisted_chat_mode" class="libraries-form-control"><el-option value="off" label="关闭" /><el-option value="shadow" label="影子评估" /><el-option value="enabled" label="增强回答" /></el-select><div class="libraries-form-hint">影子评估只统计命中，不改变回答；质量门通过后再启用增强回答</div></el-form-item></el-col>
+              <el-col v-if="edit.form.schema_mode !== 'disabled'" :span="12"><el-form-item label="Schema"><el-button type="primary" plain @click="edit.open=false;$router.push({ path: '/knowledge-governance/schema', query: { library: edit.slug, tab: 'overview' } })">打开 Schema 管理</el-button></el-form-item></el-col>
             </el-row>
+            <el-alert v-if="edit.form.schema_mode === 'disabled'" type="info" :closable="false" class="libraries-form-alert">当前为普通知识库：上传只入库并向量化，不做实体关系抽取。</el-alert>
+            <el-alert v-else-if="edit.form.schema_mode === 'explore'" type="warning" :closable="false" class="libraries-form-alert">AI 探索用于第一次陌生资料：先上传并向量化，再沉淀候选实体、关系和 Schema 草稿。</el-alert>
+            <el-alert v-else type="info" :closable="false" class="libraries-form-alert">Schema 治理用于长期约束。缺少有效 Schema 时会明确阻止上传；如需先让 AI 根据文件发现结构，请切换到“AI 自动发现”。</el-alert>
           </div>
           <el-alert v-if="edit.form.source_enrichment_enabled" type="info" :closable="false" class="libraries-form-alert">PGSQL 全文源按<b>约定</b>自动配置：源表 = <code>{{ edit.slug || '<库唯一ID>' }}</code>（本库唯一ID）· 开启时已有高级配置会保持不变；从关闭改为开启会按约定重新生成。</el-alert>
           <el-alert v-else type="warning" :closable="false" class="libraries-form-alert">已关闭全文源补全：检索结果只使用向量库已有文本，不自动回查 PGSQL 全文源。</el-alert>
@@ -371,6 +522,10 @@ export default {
       <!-- FAQ dialog -->
       <el-dialog v-model="faqMgr.open" :title="'常用问题 / ' + faqMgr.slug" width="680px" class="libraries-dialog">
         <el-alert type="info" :closable="false" class="libraries-faq-alert">管理员在此维护高频问题；普通用户在「数据检索」页选到该库后会看到这些问题，点一下即可发起检索。停用的不会展示给用户。</el-alert>
+        <el-alert v-if="faqMgr.error" type="warning" :closable="false" show-icon
+                  :title="'常用问题加载失败：' + faqMgr.error" class="libraries-faq-alert">
+          <template #default><el-button link type="primary" :loading="faqMgr.loading" @click="loadFaq">重试</el-button></template>
+        </el-alert>
         <div class="libraries-faq-create"><el-input v-model="faqMgr.newQuestion" placeholder="新增常用问题，如：八大员包括哪些岗位" @keyup.enter="addFaq" /><el-input-number v-model="faqMgr.newSort" :min="0" :max="9999" controls-position="right" /><el-button type="primary" @click="addFaq">新增</el-button></div>
         <el-table :data="faqMgr.list" v-loading="faqMgr.loading" border size="small">
           <el-table-column label="排序" width="110"><template #default="{row}"><el-input-number v-model="row.sort_order" :min="0" :max="9999" size="small" controls-position="right" class="libraries-form-control" /></template></el-table-column>

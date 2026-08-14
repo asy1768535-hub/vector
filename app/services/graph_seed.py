@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.attribute_definition import ATTRIBUTE_OWNER_ENTITY_TYPE
@@ -25,6 +26,9 @@ from app.services import ontology
 DEFAULT_ONTOLOGY_VERSION_KEY = "enterprise"
 DEFAULT_ONTOLOGY_VERSION_NO = 1
 DEFAULT_ONTOLOGY_DESCRIPTION = "Default enterprise ontology"
+EXPLORATION_ONTOLOGY_VERSION_KEY = "ai-exploration"
+EXPLORATION_ONTOLOGY_VERSION_NO = 2
+EXPLORATION_ONTOLOGY_DESCRIPTION = "Minimal AI exploration ontology used before a user schema is uploaded"
 
 _COUNT_KEYS = (
     "ontology_versions",
@@ -116,6 +120,11 @@ DEFAULT_RELATION_TYPES: tuple[RelationTypeSeed, ...] = (
     RelationTypeSeed("depends_on", "Depends On"),
     RelationTypeSeed("owns", "Owns"),
     RelationTypeSeed(
+        "contains",
+        "Contains",
+        description="A page, document, product, or project explicitly contains a component, artifact, or process.",
+    ),
+    RelationTypeSeed(
         "related_to",
         "Related To",
         direction=RELATION_DIRECTION_UNDIRECTED,
@@ -174,6 +183,12 @@ DEFAULT_RELATION_CONSTRAINT_GROUPS: tuple[RelationConstraintSeedGroup, ...] = (
         cardinality="one_to_many",
     ),
     RelationConstraintSeedGroup(
+        "contains",
+        ("document", "product", "project"),
+        ("document", "process", "product"),
+        cardinality="one_to_many",
+    ),
+    RelationConstraintSeedGroup(
         "related_to",
         _ALL_ENTITY_KEYS,
         _ALL_ENTITY_KEYS,
@@ -182,9 +197,13 @@ DEFAULT_RELATION_CONSTRAINT_GROUPS: tuple[RelationConstraintSeedGroup, ...] = (
 )
 
 DEFAULT_ATTRIBUTE_DEFINITIONS: tuple[AttributeDefinitionSeed, ...] = (
-    AttributeDefinitionSeed(ATTRIBUTE_OWNER_ENTITY_TYPE, "person", "employee_id", "Employee ID", "string", indexed=True),
+    AttributeDefinitionSeed(
+        ATTRIBUTE_OWNER_ENTITY_TYPE, "person", "employee_id", "Employee ID", "string", indexed=True
+    ),
     AttributeDefinitionSeed(ATTRIBUTE_OWNER_ENTITY_TYPE, "person", "email", "Email", "string", indexed=True),
-    AttributeDefinitionSeed(ATTRIBUTE_OWNER_ENTITY_TYPE, "department", "code", "Code", "string", indexed=True),
+    AttributeDefinitionSeed(
+        ATTRIBUTE_OWNER_ENTITY_TYPE, "department", "code", "Code", "string", indexed=True
+    ),
     AttributeDefinitionSeed(ATTRIBUTE_OWNER_ENTITY_TYPE, "process", "code", "Code", "string", indexed=True),
     AttributeDefinitionSeed(ATTRIBUTE_OWNER_ENTITY_TYPE, "project", "code", "Code", "string", indexed=True),
     AttributeDefinitionSeed(ATTRIBUTE_OWNER_ENTITY_TYPE, "product", "code", "Code", "string", indexed=True),
@@ -197,9 +216,120 @@ DEFAULT_ATTRIBUTE_DEFINITIONS: tuple[AttributeDefinitionSeed, ...] = (
         "date",
         indexed=True,
     ),
-    AttributeDefinitionSeed(ATTRIBUTE_OWNER_ENTITY_TYPE, "document", "source_uri", "Source URI", "string", indexed=True),
+    AttributeDefinitionSeed(
+        ATTRIBUTE_OWNER_ENTITY_TYPE, "document", "source_uri", "Source URI", "string", indexed=True
+    ),
     AttributeDefinitionSeed(ATTRIBUTE_OWNER_ENTITY_TYPE, "term", "definition", "Definition", "text"),
 )
+
+EXPLORATION_ENTITY_TYPES: tuple[EntityTypeSeed, ...] = (
+    EntityTypeSeed("approval", "批复", "批复、批准、审批文件、批复编号。"),
+    EntityTypeSeed("company", "公司", "公司、企业、有限公司、子公司、法人组织。"),
+    EntityTypeSeed("contract", "合同", "合同、协议、采购合同、合同编号。"),
+    EntityTypeSeed("equipment", "设备", "设备、型号、机器、变流器、保护系统、技术系统、继电保护系统。"),
+    EntityTypeSeed("location", "地点", "地点、地址、位置、省、市、区、县、行政区。"),
+    EntityTypeSeed("person", "人员", "人名、姓名、人员、法定代表人、经理、总监、负责人。"),
+    EntityTypeSeed("power_grid", "电网", "电网、供电网络、输配电网、并网系统。"),
+    EntityTypeSeed("project", "项目", "项目、工程、电站、建设项目、施工项目。"),
+)
+
+EXPLORATION_RELATION_TYPES: tuple[RelationTypeSeed, ...] = (
+    RelationTypeSeed("approves_connection", "批准接入", description="批准、批准接入、同意并网、批复接入。"),
+    RelationTypeSeed("connects_to", "接入", description="接入、并入、并网、连接到电网。"),
+    RelationTypeSeed("constructs", "施工", description="施工、承建、建设项目。"),
+    RelationTypeSeed(
+        "cooperates_with",
+        "合作",
+        direction=RELATION_DIRECTION_UNDIRECTED,
+        description="合作、联合、协作。",
+    ),
+    RelationTypeSeed("general_manager_of", "担任总经理", description="总经理、担任总经理、任命为总经理。"),
+    RelationTypeSeed("launches", "启动", description="启动、发起、项目开工。"),
+    RelationTypeSeed("legal_representative", "法定代表人", description="法定代表人、法人代表、企业法人。"),
+    RelationTypeSeed("located_in", "位于", description="位于、坐落、地址、项目位置。"),
+    RelationTypeSeed("procures", "采购", description="采购、购买、订购设备。"),
+    RelationTypeSeed(
+        "project_manager_of", "担任项目经理", description="项目经理、担任项目经理、任命为项目经理。"
+    ),
+    RelationTypeSeed("reports_to", "汇报给", description="汇报给、汇报工作、向上级汇报、直属上级。"),
+    RelationTypeSeed(
+        "safety_officer_of", "担任安全负责人", description="安全负责人、担任安全负责人、负责项目安全。"
+    ),
+    RelationTypeSeed("sales_director_of", "担任销售总监", description="销售总监、担任销售总监、负责销售。"),
+    RelationTypeSeed("supervises", "监理", description="监理、监督、项目监管。"),
+    RelationTypeSeed("supplies", "供应", description="供应、供货、提供设备。"),
+    RelationTypeSeed("uses", "采用", description="采用、使用、配备设备。"),
+    RelationTypeSeed("wholly_owns", "全资拥有", description="全资拥有、旗下拥有、全资子公司、百分之百持有。"),
+)
+
+EXPLORATION_RELATION_CONSTRAINTS: tuple[RelationConstraintSeed, ...] = (
+    RelationConstraintSeed("approves_connection", "company", "project", "many_to_many", False),
+    RelationConstraintSeed("connects_to", "project", "power_grid", "many_to_many", False),
+    RelationConstraintSeed("constructs", "company", "project", "many_to_many", False),
+    RelationConstraintSeed("cooperates_with", "company", "company", "many_to_many", False),
+    RelationConstraintSeed("general_manager_of", "person", "company", "many_to_one", False),
+    RelationConstraintSeed("launches", "company", "project", "many_to_many", False),
+    RelationConstraintSeed("legal_representative", "company", "person", "one_to_one", False),
+    RelationConstraintSeed("located_in", "project", "location", "many_to_one", False),
+    RelationConstraintSeed("procures", "company", "equipment", "many_to_many", False),
+    RelationConstraintSeed("project_manager_of", "person", "project", "many_to_many", False),
+    RelationConstraintSeed("reports_to", "person", "person", "many_to_one", False),
+    RelationConstraintSeed("safety_officer_of", "person", "project", "many_to_many", False),
+    RelationConstraintSeed("sales_director_of", "person", "company", "many_to_one", False),
+    RelationConstraintSeed("supervises", "company", "project", "many_to_many", False),
+    RelationConstraintSeed("supplies", "company", "equipment", "many_to_many", False),
+    RelationConstraintSeed("uses", "project", "equipment", "many_to_many", False),
+    RelationConstraintSeed("wholly_owns", "company", "company", "one_to_many", False),
+)
+
+EXPLORATION_ATTRIBUTE_DEFINITIONS: tuple[AttributeDefinitionSeed, ...] = ()
+
+
+async def ensure_ai_draft_ontology(
+    db: AsyncSession,
+    library: Library,
+    *,
+    rotate_active: bool = False,
+) -> OntologyVersion:
+    """Return a non-business, empty draft used until corpus discovery finishes.
+
+    This is a runtime coordination row only.  It deliberately creates no
+    entity/relation allowlist and is never the historical exploration ontology.
+    """
+
+    result = await db.execute(
+        select(OntologyVersion)
+        .where(
+            OntologyVersion.library_id == library.id,
+            OntologyVersion.version_key == "ai-draft",
+        )
+        .order_by(OntologyVersion.version_no.desc())
+        .limit(1)
+    )
+    existing = result.scalars().first()
+    if existing is not None and existing.status == ONTOLOGY_STATUS_DRAFT:
+        return existing
+    if existing is not None and existing.status == ONTOLOGY_STATUS_ACTIVE and not rotate_active:
+        return existing
+    next_version_no = (existing.version_no + 1) if existing is not None else 1
+    if existing is not None and existing.status == ONTOLOGY_STATUS_ACTIVE:
+        # Keep the historical draft addressable by old job snapshots while a
+        # new upload gets an independent, immutable discovery candidate.
+        existing.status = "disabled"
+        await db.flush()
+    elif existing is not None and existing.status not in {"disabled", "deleted"}:
+        raise ValueError("AI draft ontology is not reusable")
+    return await ontology.create_ontology_version(
+        db,
+        library,
+        version_key="ai-draft",
+        version_no=next_version_no,
+        status=ONTOLOGY_STATUS_DRAFT,
+        description="AI Schema discovery pending; no business allowlist",
+        parent_version_id=existing.id if existing is not None else None,
+        origin="ai_discovery",
+        confirmed=False,
+    )
 
 
 def expanded_default_relation_constraints() -> tuple[RelationConstraintSeed, ...]:
@@ -221,23 +351,68 @@ async def seed_enterprise_ontology(
     db: AsyncSession,
     library: Library,
 ) -> SeedEnterpriseOntologyResult:
+    return await _seed_ontology(
+        db,
+        library,
+        version_key=DEFAULT_ONTOLOGY_VERSION_KEY,
+        version_no=DEFAULT_ONTOLOGY_VERSION_NO,
+        description=DEFAULT_ONTOLOGY_DESCRIPTION,
+        entity_specs=DEFAULT_ENTITY_TYPES,
+        relation_specs=DEFAULT_RELATION_TYPES,
+        relation_constraint_specs=expanded_default_relation_constraints(),
+        attribute_specs=DEFAULT_ATTRIBUTE_DEFINITIONS,
+        label="enterprise",
+    )
+
+
+async def seed_exploration_ontology(
+    db: AsyncSession,
+    library: Library,
+) -> SeedEnterpriseOntologyResult:
+    return await _seed_ontology(
+        db,
+        library,
+        version_key=EXPLORATION_ONTOLOGY_VERSION_KEY,
+        version_no=EXPLORATION_ONTOLOGY_VERSION_NO,
+        description=EXPLORATION_ONTOLOGY_DESCRIPTION,
+        entity_specs=EXPLORATION_ENTITY_TYPES,
+        relation_specs=EXPLORATION_RELATION_TYPES,
+        relation_constraint_specs=EXPLORATION_RELATION_CONSTRAINTS,
+        attribute_specs=EXPLORATION_ATTRIBUTE_DEFINITIONS,
+        label="exploration",
+    )
+
+
+async def _seed_ontology(
+    db: AsyncSession,
+    library: Library,
+    *,
+    version_key: str,
+    version_no: int,
+    description: str,
+    entity_specs: tuple[EntityTypeSeed, ...],
+    relation_specs: tuple[RelationTypeSeed, ...],
+    relation_constraint_specs: tuple[RelationConstraintSeed, ...],
+    attribute_specs: tuple[AttributeDefinitionSeed, ...],
+    label: str,
+) -> SeedEnterpriseOntologyResult:
     created_counts = _zero_counts()
     existing_counts = _zero_counts()
     ontology_version = await ontology.find_ontology_version(
         db,
         library,
-        version_key=DEFAULT_ONTOLOGY_VERSION_KEY,
-        version_no=DEFAULT_ONTOLOGY_VERSION_NO,
+        version_key=version_key,
+        version_no=version_no,
     )
 
     if ontology_version is None:
         ontology_version = await ontology.create_ontology_version(
             db,
             library,
-            version_key=DEFAULT_ONTOLOGY_VERSION_KEY,
-            version_no=DEFAULT_ONTOLOGY_VERSION_NO,
+            version_key=version_key,
+            version_no=version_no,
             status=ONTOLOGY_STATUS_DRAFT,
-            description=DEFAULT_ONTOLOGY_DESCRIPTION,
+            description=description,
         )
         created_counts["ontology_versions"] += 1
 
@@ -249,11 +424,15 @@ async def seed_enterprise_ontology(
             allow_create=False,
             created_counts=created_counts,
             existing_counts=existing_counts,
+            entity_specs=entity_specs,
+            relation_specs=relation_specs,
+            relation_constraint_specs=relation_constraint_specs,
+            attribute_specs=attribute_specs,
         )
         return SeedEnterpriseOntologyResult(ontology_version, created_counts, existing_counts)
 
     if ontology_version.status != ONTOLOGY_STATUS_DRAFT:
-        raise ValueError("enterprise ontology must be draft or active to seed")
+        raise ValueError(f"{label} ontology must be draft or active to seed")
 
     await _ensure_seed_rows(
         db,
@@ -262,6 +441,10 @@ async def seed_enterprise_ontology(
         allow_create=True,
         created_counts=created_counts,
         existing_counts=existing_counts,
+        entity_specs=entity_specs,
+        relation_specs=relation_specs,
+        relation_constraint_specs=relation_constraint_specs,
+        attribute_specs=attribute_specs,
     )
     ontology_version = await ontology.update_ontology_version(
         db,
@@ -281,11 +464,20 @@ async def _ensure_seed_rows(
     allow_create: bool,
     created_counts: dict[str, int],
     existing_counts: dict[str, int],
+    entity_specs: tuple[EntityTypeSeed, ...] = DEFAULT_ENTITY_TYPES,
+    relation_specs: tuple[RelationTypeSeed, ...] = DEFAULT_RELATION_TYPES,
+    relation_constraint_specs: tuple[RelationConstraintSeed, ...] | None = None,
+    attribute_specs: tuple[AttributeDefinitionSeed, ...] = DEFAULT_ATTRIBUTE_DEFINITIONS,
 ) -> None:
     entity_types: dict[str, EntityType] = {}
     relation_types: dict[str, RelationType] = {}
+    constraint_specs = (
+        expanded_default_relation_constraints()
+        if relation_constraint_specs is None
+        else relation_constraint_specs
+    )
 
-    for spec in DEFAULT_ENTITY_TYPES:
+    for spec in entity_specs:
         entity_types[spec.key] = await _ensure_entity_type(
             db,
             library,
@@ -296,7 +488,7 @@ async def _ensure_seed_rows(
             existing_counts=existing_counts,
         )
 
-    for spec in DEFAULT_RELATION_TYPES:
+    for spec in relation_specs:
         relation_types[spec.key] = await _ensure_relation_type(
             db,
             library,
@@ -307,7 +499,7 @@ async def _ensure_seed_rows(
             existing_counts=existing_counts,
         )
 
-    for spec in expanded_default_relation_constraints():
+    for spec in constraint_specs:
         await _ensure_relation_type_constraint(
             db,
             library,
@@ -321,7 +513,7 @@ async def _ensure_seed_rows(
             existing_counts=existing_counts,
         )
 
-    for spec in DEFAULT_ATTRIBUTE_DEFINITIONS:
+    for spec in attribute_specs:
         await _ensure_attribute_definition(
             db,
             library,
@@ -545,7 +737,9 @@ def _validate_attribute_definition(
         "indexed": spec.indexed,
         "status": ontology.SCHEMA_STATUS_ACTIVE,
     }
-    _validate_expected_fields(row, expected, f"seeded attribute definition conflict: {spec.owner_type_key}.{spec.key}")
+    _validate_expected_fields(
+        row, expected, f"seeded attribute definition conflict: {spec.owner_type_key}.{spec.key}"
+    )
 
 
 def _validate_expected_fields(row, expected: dict[str, Any], message: str) -> None:

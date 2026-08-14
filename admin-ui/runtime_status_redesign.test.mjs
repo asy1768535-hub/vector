@@ -197,9 +197,9 @@ test('数据未加载时显示 —', () => {
 });
 
 // ── 服务在线状态卡 ──
-test('服务表格六列：服务、在线状态、在线实例数、最后心跳、主机、PID', () => {
+test('服务表格六列：服务、在线状态、在线与已知实例、最后心跳、主机、PID', () => {
     assert.ok(src.includes('在线状态'), 'status column');
-    assert.ok(src.includes('在线实例数'), 'instances column');
+    assert.ok(src.includes('在线 / 已知实例'), 'instances column');
     assert.ok(src.includes('最后心跳'), 'heartbeat column');
     assert.ok(src.includes('主机'), 'hostname column');
     assert.ok(src.includes('PID'), 'PID column');
@@ -208,11 +208,11 @@ test('服务表格六列：服务、在线状态、在线实例数、最后心�
     assert.ok(src.includes('row.pid'), 'pid separate');
 });
 
-test('在线实例数只显示 onlineInstances，不拼接 knownInstances', () => {
-    // Template: {{ row.onlineInstances }} only, no row.knownInstances in the same cell
+test('实例列同时显示 onlineInstances 和 knownInstances', () => {
     const tpl = src.slice(src.indexOf('template:'));
+    assert.ok(src.includes('${s.online_instances} / ${s.known_instances}'), 'must combine both counts');
     assert.ok(!tpl.includes('knownInstances'), 'must not display knownInstances in template');
-    assert.ok(tpl.includes('row.onlineInstances'), 'must display onlineInstances');
+    assert.ok(tpl.includes('row.instances'), 'must display combined instance count');
 });
 
 test('最后心跳主文字精确时间 + 默认次要文字', () => {

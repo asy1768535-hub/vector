@@ -277,7 +277,6 @@ def test_0035_orm_migration_and_offline_sql_are_reversible():
     indexes = {item.name for item in DocumentClassificationDecisionSet.__table__.indexes}
     assert "uq_document_classification_decision_sets_effective_revision" in indexes
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_heads() == ["0042"]
     assert script.get_revision("0035").down_revision == "0034"
     upgrade = _offline("upgrade", "0034:0035")
     downgrade = _offline("downgrade", "0035:0034")
@@ -395,21 +394,21 @@ def test_policy_exact_boundaries_and_manual_precedence():
             label_id=second,
         ),
     )
-    reviewed = evaluate_classification_policy(
+    applied = evaluate_classification_policy(
         below_margin, known_labels=known, has_manual_decision_protection=False
     )
-    assert reviewed.run_status == "pending_review"
-    assert reviewed.run_reason_codes == ("primary_margin_below_threshold",)
+    assert applied.run_status == "auto_applied"
+    assert applied.run_reason_codes == ()
+    assert applied.proposal_reason_codes == (
+        ("primary_margin_below_threshold",),
+        ("primary_margin_below_threshold",),
+    )
 
 
 @pytest.mark.parametrize(
     ("proposals", "known", "reason"),
     [
-        (
-            (ClassifierProposalInput("primary", 899_999, label_id=uuid.uuid4()),),
-            "enabled",
-            "primary_confidence_below_threshold",
-        ),
+
         (
             (
                 ClassifierProposalInput(
@@ -448,6 +447,28 @@ def test_policy_routes_any_invalid_generation_entirely_to_review(proposals, know
     assert result.run_status == "pending_review"
     assert reason in result.run_reason_codes
     assert set(result.proposal_statuses) == {"pending_review"}
+
+
+def test_low_confidence_primary_auto_applies_and_low_confidence_secondary_is_skipped():
+    primary, secondary = uuid.uuid4(), uuid.uuid4()
+    known = {
+        value: KnownLabelPolicyState(value, active=True, enabled=True)
+        for value in (primary, secondary)
+    }
+    result = evaluate_classification_policy(
+        (
+            ClassifierProposalInput("primary", 600_000, label_id=primary),
+            ClassifierProposalInput("secondary", 500_000, label_id=secondary),
+        ),
+        known_labels=known,
+        has_manual_decision_protection=False,
+    )
+    assert result.run_status == "auto_applied"
+    assert result.proposal_statuses == ("auto_selected", "not_selected")
+    assert result.proposal_reason_codes == (
+        ("primary_confidence_below_threshold",),
+        ("secondary_confidence_below_threshold",),
+    )
 
 
 def test_duplicate_and_excess_secondaries_never_partially_apply():

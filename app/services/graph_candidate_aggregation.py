@@ -26,7 +26,12 @@ from app.services.graph_candidate_evidence import (
     create_entity_candidate_evidence,
     create_relation_candidate_evidence,
 )
-from app.services.graph_normalization import normalize_graph_name_v1
+from app.services.graph_normalization import (
+    canonicalize_extracted_entity_name_v1,
+    evidence_backed_aliases_v1,
+    filter_identifier_aliases_v1,
+    normalize_graph_name_v1,
+)
 
 
 class CandidateAggregationError(ValueError):
@@ -142,15 +147,9 @@ def relation_candidate_key_v1(
     return canonical_graph_value_hash_v1(
         {
             "ontology_version_id": _canonical_uuid(ontology_version_id),
-            "source_candidate_key": _require_non_empty(
-                source_candidate_key, field="source_candidate_key"
-            ),
-            "relation_type_key": _require_non_empty(
-                relation_type_key, field="relation_type_key"
-            ),
-            "target_candidate_key": _require_non_empty(
-                target_candidate_key, field="target_candidate_key"
-            ),
+            "source_candidate_key": _require_non_empty(source_candidate_key, field="source_candidate_key"),
+            "relation_type_key": _require_non_empty(relation_type_key, field="relation_type_key"),
+            "target_candidate_key": _require_non_empty(target_candidate_key, field="target_candidate_key"),
             "properties": properties,
         }
     )
@@ -167,9 +166,7 @@ def merge_candidate_key_v1(
         {
             "job_id": _canonical_uuid(job_id),
             "entity_candidate_id": _canonical_uuid(entity_candidate_id),
-            "suggested_target_entity_id": _canonical_uuid(
-                suggested_target_entity_id, nullable=True
-            ),
+            "suggested_target_entity_id": _canonical_uuid(suggested_target_entity_id, nullable=True),
             "reason": _require_non_empty(reason, field="reason"),
         }
     )
@@ -226,9 +223,7 @@ def _require_confidence(value: Any) -> float | None:
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise CandidateAggregationError(
-            "invalid_occurrence_payload", "model confidence must be numeric"
-        )
+        raise CandidateAggregationError("invalid_occurrence_payload", "model confidence must be numeric")
     result = float(value)
     if not math.isfinite(result) or result < 0 or result > 1:
         raise CandidateAggregationError(
@@ -263,10 +258,7 @@ def _aggregate_aliases(occurrences: Iterable[dict[str, Any]]) -> list[str]:
             if current is None or original < current:
                 aliases_by_normalized[normalized] = original
     return [
-        original
-        for _, original in sorted(
-            aliases_by_normalized.items(), key=lambda item: (item[0], item[1])
-        )
+        original for _, original in sorted(aliases_by_normalized.items(), key=lambda item: (item[0], item[1]))
     ]
 
 
@@ -282,8 +274,7 @@ def _aggregate_external_mapping_hints(
             )
         for hint in hints:
             if not isinstance(hint, dict) or not all(
-                isinstance(key, str) and isinstance(value, str)
-                for key, value in hint.items()
+                isinstance(key, str) and isinstance(value, str) for key, value in hint.items()
             ):
                 raise CandidateAggregationError(
                     "invalid_occurrence_payload",
@@ -301,9 +292,7 @@ def _aggregate_properties(
     for raw_payload in occurrences:
         properties = raw_payload.get("properties", {})
         if not isinstance(properties, dict):
-            raise CandidateAggregationError(
-                "invalid_occurrence_payload", "properties must be an object"
-            )
+            raise CandidateAggregationError("invalid_occurrence_payload", "properties must be an object")
         canonical_graph_json_v1(properties)
         keys.update(properties)
 
@@ -350,15 +339,11 @@ def aggregate_entity_occurrence_payloads(
     representative = payloads[0]
     name = representative.get("name")
     if not isinstance(name, str):
-        raise CandidateAggregationError(
-            "invalid_occurrence_payload", "Entity name must be a string"
-        )
+        raise CandidateAggregationError("invalid_occurrence_payload", "Entity name must be a string")
     canonical_name = name.strip()
     normalized_name = normalize_graph_name_v1(canonical_name)
     if not normalized_name:
-        raise CandidateAggregationError(
-            "invalid_entity_name", "Entity name is empty after normalization"
-        )
+        raise CandidateAggregationError("invalid_entity_name", "Entity name is empty after normalization")
     properties, conflicts = _aggregate_properties(payloads)
     confidences = [
         confidence
@@ -387,9 +372,7 @@ def aggregate_relation_occurrence_payloads(
     payloads = [_payload_object(item.raw_payload) for item in ordered]
     representative_properties = payloads[0].get("properties", {})
     if not isinstance(representative_properties, dict):
-        raise CandidateAggregationError(
-            "invalid_occurrence_payload", "Relation properties must be an object"
-        )
+        raise CandidateAggregationError("invalid_occurrence_payload", "Relation properties must be an object")
     expected = canonical_graph_json_v1(representative_properties)
     for payload in payloads[1:]:
         properties = payload.get("properties", {})
@@ -441,9 +424,7 @@ async def _lock_entity_candidate(db, *, job: Any, candidate_key: str) -> GraphEn
     )
     candidate = result.scalars().first()
     if candidate is None:
-        raise CandidateAggregationError(
-            "candidate_upsert_failed", "Entity Candidate could not be reloaded"
-        )
+        raise CandidateAggregationError("candidate_upsert_failed", "Entity Candidate could not be reloaded")
     return candidate
 
 
@@ -473,9 +454,7 @@ async def _upsert_entity_candidate(
             model_confidence=payload.get("confidence"),
             status="extracted",
         )
-        .on_conflict_do_nothing(
-            index_elements=["job_id", "candidate_key"]
-        )
+        .on_conflict_do_nothing(index_elements=["job_id", "candidate_key"])
     )
     candidate = await _lock_entity_candidate(db, job=job, candidate_key=candidate_key)
     if (
@@ -515,8 +494,7 @@ async def _upsert_entity_occurrence(
             or existing.job_id != job.id
             or existing.entity_candidate_id != candidate.id
             or existing.model_confidence != payload["confidence"]
-            or canonical_graph_json_v1(existing.raw_payload)
-            != canonical_graph_json_v1(payload)
+            or canonical_graph_json_v1(existing.raw_payload) != canonical_graph_json_v1(payload)
         ):
             raise CandidateReplayError(
                 "entity_occurrence_replay_mismatch",
@@ -547,9 +525,7 @@ async def _lock_relation_candidate(db, *, job: Any, candidate_key: str) -> Graph
     )
     candidate = result.scalars().first()
     if candidate is None:
-        raise CandidateAggregationError(
-            "candidate_upsert_failed", "Relation Candidate could not be reloaded"
-        )
+        raise CandidateAggregationError("candidate_upsert_failed", "Relation Candidate could not be reloaded")
     return candidate
 
 
@@ -579,9 +555,7 @@ async def _upsert_relation_candidate(
             has_conflict=False,
             status="extracted",
         )
-        .on_conflict_do_nothing(
-            index_elements=["job_id", "candidate_key"]
-        )
+        .on_conflict_do_nothing(index_elements=["job_id", "candidate_key"])
     )
     candidate = await _lock_relation_candidate(db, job=job, candidate_key=candidate_key)
     if (
@@ -629,8 +603,7 @@ async def _upsert_relation_occurrence(
             or existing.source_entity_occurrence_id != source_occurrence.id
             or existing.target_entity_occurrence_id != target_occurrence.id
             or existing.model_confidence != payload["confidence"]
-            or canonical_graph_json_v1(existing.raw_payload)
-            != canonical_graph_json_v1(payload)
+            or canonical_graph_json_v1(existing.raw_payload) != canonical_graph_json_v1(payload)
         ):
             raise CandidateReplayError(
                 "relation_occurrence_replay_mismatch",
@@ -690,12 +663,8 @@ async def _handle_endpoint_replay_mismatch(
     if endpoints_match:
         return None
 
-    old_source_occurrence = await db.get(
-        GraphEntityOccurrence, occurrence.source_entity_occurrence_id
-    )
-    old_target_occurrence = await db.get(
-        GraphEntityOccurrence, occurrence.target_entity_occurrence_id
-    )
+    old_source_occurrence = await db.get(GraphEntityOccurrence, occurrence.source_entity_occurrence_id)
+    old_target_occurrence = await db.get(GraphEntityOccurrence, occurrence.target_entity_occurrence_id)
     if old_source_occurrence is None or old_target_occurrence is None:
         raise CandidateReplayError(
             "relation_occurrence_replay_mismatch",
@@ -714,12 +683,7 @@ async def _handle_endpoint_replay_mismatch(
     fields = [
         {
             "field": field,
-            "value_hashes": sorted(
-                {
-                    canonical_graph_value_hash_v1(str(value))
-                    for value in values
-                }
-            ),
+            "value_hashes": sorted({canonical_graph_value_hash_v1(str(value)) for value in values}),
         }
         for field, values in sorted(endpoint_values.items())
         if values[0] != values[1]
@@ -748,18 +712,10 @@ async def _handle_endpoint_replay_mismatch(
             details={
                 "existing_candidate_key": candidate.candidate_key,
                 "proposed_candidate_key": proposed_candidate_key,
-                "existing_source_candidate_id": str(
-                    old_source_occurrence.entity_candidate_id
-                ),
-                "proposed_source_candidate_id": str(
-                    source_occurrence.entity_candidate_id
-                ),
-                "existing_target_candidate_id": str(
-                    old_target_occurrence.entity_candidate_id
-                ),
-                "proposed_target_candidate_id": str(
-                    target_occurrence.entity_candidate_id
-                ),
+                "existing_source_candidate_id": str(old_source_occurrence.entity_candidate_id),
+                "proposed_source_candidate_id": str(source_occurrence.entity_candidate_id),
+                "existing_target_candidate_id": str(old_target_occurrence.entity_candidate_id),
+                "proposed_target_candidate_id": str(target_occurrence.entity_candidate_id),
             },
         )
         .on_conflict_do_nothing(index_elements=["job_id", "conflict_key"])
@@ -767,9 +723,7 @@ async def _handle_endpoint_replay_mismatch(
     candidate.has_conflict = True
     candidate.status = "pending_review"
     candidate.review_reason = "endpoint_mismatch"
-    candidate.validation_errors = [
-        {"code": "endpoint_mismatch", "field": item["field"]} for item in fields
-    ]
+    candidate.validation_errors = [{"code": "endpoint_mismatch", "field": item["field"]} for item in fields]
     return occurrence, candidate
 
 
@@ -798,9 +752,7 @@ async def _persist_property_conflicts(
         .with_for_update()
     )
     candidate_id = str(candidate.id)
-    existing_rows = [
-        row for row in result.scalars().all() if candidate_id in row.entity_candidate_ids
-    ]
+    existing_rows = [row for row in result.scalars().all() if candidate_id in row.entity_candidate_ids]
     if not conflicts:
         for row in existing_rows:
             if row.purged_at is None and row.status == "open":
@@ -811,8 +763,7 @@ async def _persist_property_conflicts(
             candidate.validation_errors = []
         return 0
     fields = [
-        {"field": conflict.field, "value_hashes": list(conflict.value_hashes)}
-        for conflict in conflicts
+        {"field": conflict.field, "value_hashes": list(conflict.value_hashes)} for conflict in conflicts
     ]
     conflict_key = conflict_key_v1(
         job_id=job.id,
@@ -870,8 +821,7 @@ async def _persist_property_conflicts(
     candidate.status = "pending_review"
     candidate.review_reason = "property_conflict"
     candidate.validation_errors = [
-        {"code": "property_conflict", "field": conflict.field}
-        for conflict in conflicts
+        {"code": "property_conflict", "field": conflict.field} for conflict in conflicts
     ]
     return 1
 
@@ -932,9 +882,7 @@ async def _recompute_entity_candidate(
             GraphEntityCandidateEvidence.purged_at.is_(None),
         )
     )
-    candidate.evidence_quality_score = _evidence_quality(
-        list(evidence_result.scalars().all())
-    )
+    candidate.evidence_quality_score = _evidence_quality(list(evidence_result.scalars().all()))
     return await _persist_property_conflicts(
         db,
         job=job,
@@ -990,9 +938,7 @@ async def _recompute_relation_candidate(
         for row in evidence_rows
         if row.validation_status == "valid" and row.resolved_evidence_id is not None
     }
-    candidate.evidence_support_mode = (
-        "evidence_group" if len(valid_evidence_ids) >= 2 else "single_evidence"
-    )
+    candidate.evidence_support_mode = "evidence_group" if len(valid_evidence_ids) >= 2 else "single_evidence"
     if candidate.status in {"extracted", "aggregated"}:
         candidate.status = "aggregated"
 
@@ -1009,13 +955,38 @@ async def stage_unit_candidate_occurrences(
     if not isinstance(payload, GraphExtractionPayload):
         raise TypeError("payload must be GraphExtractionPayload")
 
-    entity_entries: list[tuple[str, dict[str, Any]]] = []
+    prepared_entities: list[dict[str, Any]] = []
     for entity in payload.entities:
         raw = entity.model_dump(mode="json")
-        normalized_name = normalize_graph_name_v1(entity.name)
+        canonical_name = canonicalize_extracted_entity_name_v1(
+            entity.entity_type_key,
+            entity.name,
+        )
+        if canonical_name != entity.name.strip():
+            raw["aliases"] = [*raw.get("aliases", []), entity.name.strip()]
+        raw["name"] = canonical_name
+        raw["aliases"] = [
+            *raw.get("aliases", []),
+            *evidence_backed_aliases_v1(
+                name=canonical_name,
+                explicit_aliases=raw.get("aliases", []),
+                properties=raw.get("properties"),
+                evidence_quotes=(
+                    item.get("quote")
+                    for item in raw.get("evidence", [])
+                    if isinstance(item, dict)
+                ),
+            ),
+        ]
+        prepared_entities.append(raw)
+
+    prepared_entities = filter_identifier_aliases_v1(prepared_entities)
+    entity_entries: list[tuple[str, dict[str, Any]]] = []
+    for raw in prepared_entities:
+        normalized_name = normalize_graph_name_v1(raw["name"])
         key = entity_candidate_key_v1(
             ontology_version_id=job.ontology_version_id,
-            entity_type_key=entity.entity_type_key,
+            entity_type_key=raw["entity_type_key"],
             normalized_name=normalized_name,
         )
         entity_entries.append((key, raw))
@@ -1024,9 +995,7 @@ async def stage_unit_candidate_occurrences(
     occurrences_by_local: dict[str, GraphEntityOccurrence] = {}
     entity_candidates: dict[uuid.UUID, GraphEntityCandidate] = {}
     entity_occurrences: list[GraphEntityOccurrence] = []
-    for candidate_key, raw in sorted(
-        entity_entries, key=lambda item: (item[0], item[1]["local_id"])
-    ):
+    for candidate_key, raw in sorted(entity_entries, key=lambda item: (item[0], item[1]["local_id"])):
         normalized_name = normalize_graph_name_v1(raw["name"])
         candidate = await _upsert_entity_candidate(
             db,
@@ -1035,9 +1004,7 @@ async def stage_unit_candidate_occurrences(
             candidate_key=candidate_key,
             normalized_name=normalized_name,
         )
-        occurrence = await _upsert_entity_occurrence(
-            db, job=job, unit=unit, candidate=candidate, payload=raw
-        )
+        occurrence = await _upsert_entity_occurrence(db, job=job, unit=unit, candidate=candidate, payload=raw)
         candidates_by_local[raw["local_id"]] = candidate
         occurrences_by_local[raw["local_id"]] = occurrence
         entity_candidates[candidate.id] = candidate
@@ -1055,13 +1022,9 @@ async def stage_unit_candidate_occurrences(
 
     property_conflict_count = 0
     for candidate in sorted(entity_candidates.values(), key=lambda item: item.candidate_key):
-        property_conflict_count += await _recompute_entity_candidate(
-            db, job=job, candidate=candidate
-        )
+        property_conflict_count += await _recompute_entity_candidate(db, job=job, candidate=candidate)
 
-    relation_entries: list[
-        tuple[str, int, dict[str, Any], GraphEntityCandidate, GraphEntityCandidate]
-    ] = []
+    relation_entries: list[tuple[str, int, dict[str, Any], GraphEntityCandidate, GraphEntityCandidate]] = []
     for ordinal, relation in enumerate(payload.relations):
         raw = relation.model_dump(mode="json")
         source_candidate = candidates_by_local[relation.source_local_id]
@@ -1127,9 +1090,7 @@ async def stage_unit_candidate_occurrences(
                 quote=claim["quote"],
             )
 
-    for candidate in sorted(
-        relation_candidates.values(), key=lambda item: item.candidate_key
-    ):
+    for candidate in sorted(relation_candidates.values(), key=lambda item: item.candidate_key):
         if candidate.review_reason != "endpoint_mismatch":
             await _recompute_relation_candidate(db, candidate=candidate)
 
@@ -1160,9 +1121,7 @@ async def recompute_job_candidate_aggregates(
     entity_candidates = list(entity_result.scalars().all())
     property_conflict_count = 0
     for candidate in entity_candidates:
-        property_conflict_count += await _recompute_entity_candidate(
-            db, job=job, candidate=candidate
-        )
+        property_conflict_count += await _recompute_entity_candidate(db, job=job, candidate=candidate)
 
     relation_result = await db.execute(
         select(GraphRelationCandidate)

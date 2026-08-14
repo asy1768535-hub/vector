@@ -28,11 +28,13 @@ from app.api.admin_permissions import router as admin_permissions_router
 from app.api.admin_users import router as admin_users_router
 from app.api.api_keys import router as api_keys_router
 from app.api.chat import router as chat_router
+from app.api.chat_graph_context import router as chat_graph_context_router
 from app.api.classification_taxonomies import router as classification_taxonomies_router
 from app.api.classification_taxonomy_bootstrap import (
     router as classification_taxonomy_bootstrap_router,
 )
 from app.api.knowledge_catalog import router as knowledge_catalog_router
+from app.api.import_uploads import router as import_uploads_router
 from app.api.classification_decisions import router as classification_decisions_router
 from app.api.documents import router as documents_router
 from app.api.federated_retrieval import router as federated_retrieval_router
@@ -312,6 +314,7 @@ def create_app() -> FastAPI:
     app.include_router(classification_taxonomies_router)
     app.include_router(classification_taxonomy_bootstrap_router)
     app.include_router(knowledge_catalog_router)
+    app.include_router(import_uploads_router)
     app.include_router(graph_catalog_router)
     app.include_router(public_v1_router)
     app.include_router(graph_governance_router)
@@ -328,6 +331,7 @@ def create_app() -> FastAPI:
     app.include_router(v07_entity_linking_router)
     app.include_router(retrieval_router)
     app.include_router(chat_router)
+    app.include_router(chat_graph_context_router)
     app.include_router(admin_users_router)
     app.include_router(admin_libraries_router)
     app.include_router(admin_permissions_router)

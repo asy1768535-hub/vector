@@ -44,6 +44,7 @@ from app.models.relation_evidence import RelationEvidence
 from app.models.relation_type import RelationType
 from app.models.relation_type_constraint import RelationTypeConstraint
 from app.services.graph_extraction_eval import (
+    GraphEvalAttemptPerformance,
     GraphEvalAttemptMetric,
     GraphEvalEntityPrediction,
     GraphEvalMetricReport,
@@ -54,6 +55,7 @@ from app.services.graph_extraction_eval import (
     LoadedGraphEvalPolicy,
     assert_sanitized_eval_artifact,
     build_metric_report,
+    build_performance_report,
     canonical_graph_eval_hash,
     gold_entity_keys,
     gold_relation_keys,
@@ -108,6 +110,19 @@ class EvalSeedResult:
 class EvalRuntimeResult:
     artifact: GraphEvalRunArtifact
     output_path: Path
+
+
+def eval_batch_size() -> int:
+    raw = os.environ.get("GRAPH_EXTRACTION_EVAL_BATCH_SIZE", "").strip()
+    if raw in {"", "1"}:
+        return 1
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError("Eval batch size must be an integer between 2 and 8") from exc
+    if not 2 <= value <= 8:
+        raise ValueError("Eval batch size must be between 2 and 8")
+    return value
 
 
 def eval_uuid(*parts: str) -> uuid.UUID:
@@ -613,6 +628,42 @@ async def run_eval_workers(
     return outcomes
 
 
+async def run_batched_eval_workers(
+    session_factory,
+    *,
+    library_id: uuid.UUID,
+    workers: int,
+    batch_size: int,
+) -> Counter[str]:
+    from app.services.graph_extraction_batch_eval import (
+        drain_eval_graph_extraction_batches,
+    )
+
+    if isinstance(workers, bool) or not isinstance(workers, int) or not 1 <= workers <= 8:
+        raise ValueError("workers must be between 1 and 8")
+    if not 1 <= batch_size <= 8:
+        raise ValueError("batch_size must be between 1 and 8")
+    outcomes: Counter[str] = Counter()
+    for _wave in range(settings.graph_extraction_worker_max_model_attempts):
+        rows = await asyncio.gather(
+            *(
+                drain_eval_graph_extraction_batches(
+                    session_factory,
+                    worker_index=index,
+                    batch_size=batch_size,
+                )
+                for index in range(workers)
+            )
+        )
+        for row in rows:
+            outcomes.update(row)
+        if not await _retry_failed_eval_jobs(
+            session_factory, library_id=library_id
+        ):
+            break
+    return outcomes
+
+
 def _counter(rows: list[str | None], *, none_key: str = "none") -> dict[str, int]:
     return dict(sorted(Counter(row or none_key for row in rows).items()))
 
@@ -918,6 +969,22 @@ async def collect_eval_artifact(
         provider_request_id_count=len(request_ids),
         provider_request_id_sha256=request_digest,
         metrics=metrics,
+        performance=build_performance_report(
+            started_at=started_at,
+            finished_at=finished_at,
+            unit_count=len(units),
+            succeeded_unit_count=sum(row.status == "succeeded" for row in units),
+            attempted_unit_count=len({row.extraction_unit_id for row in attempts}),
+            attempts=tuple(
+                GraphEvalAttemptPerformance(
+                    latency_ms=row.latency_ms,
+                    input_token_count=row.input_token_count,
+                    output_token_count=row.output_token_count,
+                    finish_reason=row.finish_reason,
+                )
+                for row in attempts
+            ),
+        ),
         stable_error_code_counts=_counter(job_errors + unit_errors),
         policy_id=policy.policy_id if policy is not None else None,
         policy_sha256=policy_sha256,
@@ -982,6 +1049,7 @@ async def execute_eval_run(
         phase=phase,
     )
     code_commit = require_release_worktree_clean(repository_root)
+    batch_size = eval_batch_size()
     started_at = datetime.now(timezone.utc)
     database_url = await create_clean_eval_database(admin_dsn, database_name)
     upgrade_eval_database(database_url, repository_root=repository_root)
@@ -992,11 +1060,19 @@ async def execute_eval_run(
         job_ids = await create_eval_jobs(session_factory, loaded=loaded, seed=seed)
         worker_error: Exception | None = None
         try:
-            await run_eval_workers(
-                session_factory,
-                library_id=seed.library_id,
-                workers=workers,
-            )
+            if batch_size == 1:
+                await run_eval_workers(
+                    session_factory,
+                    library_id=seed.library_id,
+                    workers=workers,
+                )
+            else:
+                await run_batched_eval_workers(
+                    session_factory,
+                    library_id=seed.library_id,
+                    workers=workers,
+                    batch_size=batch_size,
+                )
         except Exception as exc:  # Preserve a failed artifact when database state is readable.
             worker_error = exc
         artifact = await collect_eval_artifact(
@@ -1014,6 +1090,32 @@ async def execute_eval_run(
             policy=policy.policy if policy is not None else None,
             policy_sha256=policy.policy_sha256 if policy is not None else None,
         )
+        if batch_size > 1:
+            from app.services.graph_extraction_batch_eval import (
+                BATCH_PROMPT_VERSION,
+                SCHEMA_ROUTER_VERSION,
+            )
+
+            components = {
+                **artifact.component_versions,
+                "batch_prompt_version": BATCH_PROMPT_VERSION,
+                "schema_router_version": SCHEMA_ROUTER_VERSION,
+                "eval_batch_size": str(batch_size),
+            }
+            artifact = artifact.model_copy(
+                update={
+                    "component_versions": components,
+                    "evaluation_config_hash": canonical_graph_eval_hash(
+                        {
+                            "job_config_hash": artifact.evaluation_config_hash,
+                            "batch_prompt_version": BATCH_PROMPT_VERSION,
+                            "schema_router_version": SCHEMA_ROUTER_VERSION,
+                            "batch_size": batch_size,
+                        }
+                    ),
+                }
+            )
+            assert_sanitized_eval_artifact(artifact.model_dump(mode="json"))
         path = write_eval_artifact(
             repository_root=repository_root,
             output_path=output_path,

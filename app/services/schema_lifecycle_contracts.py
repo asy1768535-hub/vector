@@ -14,10 +14,13 @@ from app.services.graph_canonical import (
 
 SchemaLifecycleActionKind = Literal[
     "clone_version",
+    "import_version",
     "create_item",
     "update_item",
     "disable_item",
     "activate_version",
+    "delete_version",
+    "disable_version",
 ]
 SchemaLifecycleTargetKind = Literal[
     "ontology_version",
@@ -28,10 +31,13 @@ SchemaLifecycleTargetKind = Literal[
 ]
 SCHEMA_LIFECYCLE_ACTION_KINDS = (
     "clone_version",
+    "import_version",
     "create_item",
     "update_item",
     "disable_item",
     "activate_version",
+    "delete_version",
+    "disable_version",
 )
 SCHEMA_LIFECYCLE_TARGET_KINDS = (
     "ontology_version",
@@ -109,6 +115,20 @@ def deterministic_schema_clone_id(
     return uuid.uuid5(uuid.NAMESPACE_URL, f"vector-kb:schema-clone:{identity}")
 
 
+def deterministic_schema_import_id(
+    library_id: uuid.UUID,
+    idempotency_key: str,
+) -> uuid.UUID:
+    if not _IDEMPOTENCY_RE.fullmatch(idempotency_key):
+        fail_schema_lifecycle(
+            "schema_lifecycle_request_invalid", "Idempotency key is invalid"
+        )
+    return uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"vector-kb:schema-import:{library_id}:{idempotency_key}",
+    )
+
+
 def deterministic_schema_child_id(
     draft_version_id: uuid.UUID,
     source_child_id: uuid.UUID,
@@ -165,7 +185,13 @@ class SchemaLifecycleCommand:
             fail_schema_lifecycle(
                 "schema_lifecycle_request_invalid", "Schema target kind is invalid"
             )
-        if self.action_kind in {"clone_version", "activate_version"} and (
+        if self.action_kind in {
+            "clone_version",
+            "import_version",
+            "activate_version",
+            "delete_version",
+            "disable_version",
+        } and (
             self.target_kind != "ontology_version"
         ):
             fail_schema_lifecycle(

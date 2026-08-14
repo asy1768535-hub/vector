@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 class DocumentIngestRequest(BaseModel):
@@ -31,6 +31,8 @@ class DocumentRead(BaseModel):
     id: uuid.UUID
     library_id: uuid.UUID
     external_id: Optional[str] = None
+    source_path: Optional[str] = None
+    folder_id: Optional[uuid.UUID] = None
     title: Optional[str] = None
     metadata: Optional[dict[str, Any]] = Field(
         default=None,
@@ -99,6 +101,9 @@ class DocumentFullSourceResponse(BaseModel):
     revision: int
     normalized_text: str
     text_length: int
+    total_chars: int = 0
+    offset: int = 0
+    truncated: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -128,4 +133,78 @@ class ImportFileResponse(BaseModel):
     failed_count: int = 0
     documents: list[ImportFileDocResult]
     errors: list[ImportFileDocError] = []
+
+
+class ImportConfigurationRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_file_bytes: int = Field(gt=0)
+    chunk_bytes: int = Field(gt=0)
+    max_files_per_selection: int = Field(gt=0)
+    upload_concurrency: int = Field(gt=0)
+    allowed_extensions: list[str] = Field(min_length=1)
+
+
+class ImportSessionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    batch_id: uuid.UUID
+    file_name: str = Field(min_length=1, max_length=512)
+    relative_path: str | None = Field(default=None, max_length=2048)
+    content_type: str | None = Field(default=None, max_length=255)
+    size_bytes: int = Field(gt=0)
+    last_modified_millis: int | None = Field(default=None, ge=0)
+    external_id: str | None = Field(default=None, max_length=512)
+    replace_document_id: uuid.UUID | None = None
+    security_level: str | None = Field(default=None, max_length=64)
+    graph_extraction_requested: bool = False
+
+
+class ImportJobRead(BaseModel):
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+    id: uuid.UUID
+    library_id: uuid.UUID
+    batch_id: uuid.UUID
+    file_name: str
+    relative_path: str | None
+    size_bytes: int
+    upload_offset: int
+    status: Literal[
+        "uploading",
+        "queued",
+        "processing",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "superseded",
+    ]
+    current_stage: Literal[
+        "uploading",
+        "queued",
+        "validating",
+        "parsing",
+        "chunking",
+        "embedding",
+        "graph",
+        "completed",
+    ]
+    schema_discovery_state: Literal["waiting_schema"] | None = None
+    retry_target_type: Literal["import", "graph"] | None = None
+    retry_target_id: uuid.UUID | None = None
+    attempt_count: int = Field(ge=0)
+    last_error: str | None
+    result_operation: str | None
+    document_id: uuid.UUID | None
+    document_revision_id: uuid.UUID | None
+    embedding_job_id: uuid.UUID | None
+    created_at: datetime
+    updated_at: datetime
+    upload_completed_at: datetime | None
+    claimed_at: datetime | None
+    finished_at: datetime | None
+
+
+class ImportSessionRead(ImportJobRead):
+    chunk_bytes: int = Field(gt=0)
 

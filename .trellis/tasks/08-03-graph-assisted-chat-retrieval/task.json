@@ -1,0 +1,41 @@
+{
+  "id": "graph-assisted-chat-retrieval",
+  "name": "graph-assisted-chat-retrieval",
+  "title": "关系型问答的图谱增强检索",
+  "description": "在现有 Hybrid RAG 问答中，为关系型问题增加证据约束的一跳图谱增强。",
+  "status": "in_progress",
+  "dev_type": "fullstack",
+  "scope": "app/api/chat.py, app/services, app/schemas, app/models, admin-ui/src/views/Chat.js",
+  "package": null,
+  "priority": "P1",
+  "creator": "alice",
+  "assignee": "alice",
+  "createdAt": "2026-08-03",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [
+    "app/api/chat.py",
+    "app/services/chat_graph_context.py",
+    "app/services/graph_retrieval.py",
+    "app/schemas/chat.py",
+    "app/models/chat_history.py",
+    "admin-ui/src/views/Chat.js"
+  ],
+  "notes": "task.py 缺失，按现有目录格式手动创建。",
+  "meta": {
+    "fp_analysis": {
+      "completed": true,
+      "axioms_count": 4,
+      "assumptions_challenged": 6,
+      "ground_truths_count": 5,
+      "validation_passed": true
+    }
+  }
+}

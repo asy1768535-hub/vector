@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     Float,
@@ -18,8 +19,9 @@ from sqlalchemy import (
     String,
     Text,
     func,
+    text,
 )
-from sqlalchemy.dialects.postgresql import UUID as PgUUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -67,6 +69,12 @@ class ChatMessage(Base):
     latency_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     status: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)  # assistant: success|failed
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    graph_augmented: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    graph_evidence: Mapped[list[dict]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
     # assistant 指向它回答的 user 消息（审计页配对问/答）
     parent_message_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         PgUUID(as_uuid=True), ForeignKey("chat_messages.id", ondelete="SET NULL"), nullable=True,
@@ -91,6 +99,10 @@ class ChatMessageSource(Base):
     document_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     chunk_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    score_type: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="rrf", server_default="rrf"
+    )
+    display_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     content: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

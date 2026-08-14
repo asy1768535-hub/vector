@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import hashlib
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 from fastapi import status
+from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.exc import IntegrityError
 
 from app.main import app
@@ -21,9 +24,12 @@ from app.models.document import Document
 from app.models.chunk import Chunk
 from app.models.document_file import DocumentFile
 from app.models.document_source import DocumentSource
+from app.models.document_revision import DocumentRevision
 from app.models.embedding_job import EmbeddingJob
+from app.api.documents import _persist_graph_extraction_request
 from app.schemas.documents import QueryRequest
 from app.services import ingest as ingest_service
+
 
 # Mock user and library
 mock_user = User(
@@ -76,6 +82,44 @@ def test_string_chunk_metadata_does_not_fabricate_offsets():
 
     assert text == "legacy chunk"
     assert metadata is None
+
+
+def test_upload_graph_request_is_persisted_on_the_target_revision():
+    job_id = uuid.uuid4()
+    revision_id = uuid.uuid4()
+    job = MagicMock(document_revision_id=revision_id)
+    revision = MagicMock(parser_config={"parser": "plain"})
+    db = AsyncMock()
+
+    async def get_row(model, object_id):
+        return {
+            (EmbeddingJob, job_id): job,
+            (DocumentRevision, revision_id): revision,
+        }.get((model, object_id))
+
+    db.get = AsyncMock(side_effect=get_row)
+    persisted = asyncio.run(_persist_graph_extraction_request(
+        db,
+        {"operation": "created", "job_id": str(job_id)},
+    ))
+
+    assert persisted is True
+    assert revision.parser_config == {
+        "parser": "plain",
+        "graph_extraction_requested": True,
+    }
+
+
+def test_unchanged_upload_does_not_request_graph_extraction():
+    db = AsyncMock()
+
+    persisted = asyncio.run(_persist_graph_extraction_request(
+        db,
+        {"operation": "unchanged", "job_id": str(uuid.uuid4())},
+    ))
+
+    assert persisted is False
+    db.get.assert_not_awaited()
 
 async def override_user():
     return mock_user
@@ -191,13 +235,13 @@ def test_query_library_endpoint(mock_search, mock_embed, client, monkeypatch):
 @patch("app.services.rerank.rerank", new_callable=AsyncMock)
 @patch("app.services.qdrant.search", new_callable=AsyncMock)
 @patch("app.services.embedding.embed_one", new_callable=AsyncMock)
-def test_query_rerank_backfills_and_keeps_both_scores(mock_embed, mock_search, mock_rerank, client, monkeypatch):
-    """rerank 生效路径端到端：召回 3 条、reranker 只返回 1 条 →
-    断言补满到 3 条、命中项带 rerank_score、补满项只带 vector_score。"""
+def test_query_rerank_returns_only_qualified_scores(mock_embed, mock_search, mock_rerank, client, monkeypatch):
+    """Successful rerank returns only candidates meeting its native score threshold."""
     # 全局开启 rerank 并配好地址（lib.rerank_enabled=None → 回退全局）
     monkeypatch.setattr(settings, "rerank_enabled", True)
     monkeypatch.setattr(settings, "rerank_base_url", "http://mock-rerank/rerank")
     monkeypatch.setattr(settings, "rerank_model", "bge-reranker-v2-m3")
+    monkeypatch.setattr(settings, "rerank_min_score", 0.05)
     monkeypatch.setattr(settings, "retrieval_consistency_filter", False)  # 本用例验 rerank，不验 #6 过滤
 
     mock_embed.return_value = [0.1] * 1024
@@ -206,27 +250,39 @@ def test_query_rerank_backfills_and_keeps_both_scores(mock_embed, mock_search, m
         {"id": "2", "score": 0.80, "payload": {"text": "B", "document_id": "d2", "chunk_id": "c2", "title": "tB"}},
         {"id": "3", "score": 0.70, "payload": {"text": "C", "document_id": "d3", "chunk_id": "c3", "title": "tC"}},
     ]
-    # reranker 只返回向量序最差的第 3 条（idx=2），高分上浮到首位
-    mock_rerank.return_value = [(2, 0.99)]
+    mock_rerank.return_value = [(2, 0.99), (0, 0.04), (1, 0.0)]
 
     response = client.post("/libraries/testlib/query", json={"query": "q", "limit": 5})
     assert response.status_code == status.HTTP_200_OK
     results = response.json()["results"]
 
-    # 补满：3 条召回全部返回，顺序 = 重排命中 [2] + 原向量序补满 [0,1]
-    assert [r["text"] for r in results] == ["C", "A", "B"]
+    assert [r["text"] for r in results] == ["C"]
 
     # 命中项：similarity=rerank 分，metadata 同时含 vector_score 与 rerank_score
     assert results[0]["similarity"] == 0.99
     assert results[0]["metadata"]["vector_score"] == 0.70
     assert results[0]["metadata"]["rerank_score"] == 0.99
 
-    # 补满项：similarity 回退向量分，metadata 只有 vector_score、无 rerank_score
-    assert results[1]["similarity"] == 0.90
-    assert results[1]["metadata"]["vector_score"] == 0.90
-    assert "rerank_score" not in results[1]["metadata"]
-    assert results[2]["metadata"]["vector_score"] == 0.80
-    assert "rerank_score" not in results[2]["metadata"]
+@patch("app.services.rerank.rerank", new_callable=AsyncMock)
+@patch("app.services.qdrant.search", new_callable=AsyncMock)
+@patch("app.services.embedding.embed_one", new_callable=AsyncMock)
+def test_query_rerank_failure_keeps_vector_results(mock_embed, mock_search, mock_rerank, client, monkeypatch):
+    monkeypatch.setattr(settings, "rerank_enabled", True)
+    monkeypatch.setattr(settings, "rerank_base_url", "http://mock-rerank/rerank")
+    monkeypatch.setattr(settings, "rerank_model", "bge-reranker-v2-m3")
+    monkeypatch.setattr(settings, "rerank_min_score", 0.95)
+    monkeypatch.setattr(settings, "retrieval_consistency_filter", False)
+    mock_embed.return_value = [0.1] * 1024
+    mock_search.return_value = [
+        {"id": "1", "score": 0.80, "payload": {"text": "A", "document_id": "d1", "chunk_id": "c1"}},
+    ]
+    mock_rerank.side_effect = RuntimeError("offline")
+
+    response = client.post("/libraries/testlib/query", json={"query": "q", "limit": 5})
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()["results"][0]["similarity"] == 0.80
+    assert "rerank_score" not in response.json()["results"][0]["metadata"]
 
 @patch("app.deps.has_permission")
 def test_query_library_unauthorized(mock_has_perm, client):
@@ -339,9 +395,15 @@ def test_import_xlsx_passes_table_aware_chunks(mock_ingest, client):
 
     files = {"file": ("台账.xlsx", buf.getvalue(),
                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
-    response = client.post("/libraries/testlib/import-file", files=files)
+    from app.services import xlsx_extract
+
+    with patch("app.api.documents.asyncio.to_thread", new_callable=AsyncMock) as offload:
+        offload.side_effect = lambda func, *args, **kwargs: func(*args, **kwargs)
+        response = client.post("/libraries/testlib/import-file", files=files)
 
     assert response.status_code == status.HTTP_201_CREATED
+    offload.assert_awaited_once()
+    assert offload.await_args.args[0] is xlsx_extract.extract_xlsx_segments
     mock_ingest.assert_called_once()
     kwargs = mock_ingest.call_args[1]
     chunks = kwargs.get("chunks")
@@ -356,6 +418,34 @@ def test_import_xlsx_passes_table_aware_chunks(mock_ingest, client):
     assert "【章节】技术选型" in joined                     # 工作表名作上下文（caption==heading 不重复）
     assert "类别 | 方案" in joined                          # 首行作表头
     assert "数据库 | MySQL" in joined and "缓存 | Redis" in joined
+
+
+@patch("app.services.xlsx_extract.extract_xlsx_segments")
+def test_import_xlsx_limit_returns_413_without_echoing_parser_details(mock_extract, client):
+    from app.services.xlsx_extract import XlsxLimitError
+
+    mock_extract.side_effect = XlsxLimitError("secret-cell-content")
+    response = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("limited.xlsx", b"fixture", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+
+    assert response.status_code == status.HTTP_413_CONTENT_TOO_LARGE
+    assert response.json()["detail"] == "spreadsheet exceeds parser safety limits"
+    assert "secret-cell-content" not in response.text
+
+
+@patch("app.services.xlsx_extract.extract_xlsx_segments")
+def test_import_xlsx_parse_error_is_clear_without_echoing_exception(mock_extract, client):
+    mock_extract.side_effect = ValueError("secret-cell-content")
+    response = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("invalid.xlsx", b"fixture", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert response.json()["detail"] == "Invalid spreadsheet format"
+    assert "secret-cell-content" not in response.text
 
 @patch("app.services.ingest.ingest_text", new_callable=AsyncMock)
 def test_import_json_file_list(mock_ingest, client):
@@ -401,6 +491,103 @@ def test_import_csv_file(mock_ingest, client):
     assert data["documents"][0]["title"] == "Title A"
     assert data["documents"][1]["title"] == "Title B"
     assert mock_ingest.call_count == 2
+
+
+@patch("app.services.ingest.ingest_text", new_callable=AsyncMock)
+def test_import_json_fanout_limit_returns_stable_413(mock_ingest, client, monkeypatch):
+    from app.services import import_parsing
+
+    monkeypatch.setattr(import_parsing, "MAX_FANOUT_DOCUMENTS", 1)
+    payload = json.dumps([
+        {"title": "secret one", "text": "private one"},
+        {"title": "secret two", "text": "private two"},
+    ]).encode("utf-8")
+
+    response = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("many.json", payload, "application/json")},
+    )
+
+    assert response.status_code == status.HTTP_413_CONTENT_TOO_LARGE
+    assert response.json()["detail"] == import_parsing.RESOURCE_LIMIT_ERROR
+    assert "secret" not in response.text
+    mock_ingest.assert_not_awaited()
+
+
+@patch("app.services.ingest.ingest_text", new_callable=AsyncMock)
+def test_import_json_text_budget_returns_stable_413(mock_ingest, client, monkeypatch):
+    from app.services import import_parsing
+
+    monkeypatch.setattr(import_parsing, "MAX_NORMALIZED_TEXT_CHARS", 4)
+    response = client.post(
+        "/libraries/testlib/import-file",
+        files={
+            "file": (
+                "large-text.json",
+                json.dumps({"title": "secret", "text": "private text"}).encode("utf-8"),
+                "application/json",
+            )
+        },
+    )
+
+    assert response.status_code == status.HTTP_413_CONTENT_TOO_LARGE
+    assert response.json()["detail"] == import_parsing.RESOURCE_LIMIT_ERROR
+    assert "secret" not in response.text
+    mock_ingest.assert_not_awaited()
+
+
+@patch("app.services.ingest.ingest_text", new_callable=AsyncMock)
+def test_import_json_input_bytes_rejects_before_json_loads(mock_ingest, client, monkeypatch):
+    from app.api import documents
+    from app.services import import_parsing
+
+    payload = b'{"title":"secret","text":"private"}'
+    monkeypatch.setattr(import_parsing, "MAX_JSON_INPUT_BYTES", len(payload) - 1)
+    load_calls = 0
+
+    def fail_json_loads(*_args, **_kwargs):
+        nonlocal load_calls
+        load_calls += 1
+        raise AssertionError("json.loads must not run")
+
+    monkeypatch.setattr(documents.json, "loads", fail_json_loads)
+    response = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("large-input.json", payload, "application/json")},
+    )
+
+    assert response.status_code == status.HTTP_413_CONTENT_TOO_LARGE
+    assert import_parsing.RESOURCE_LIMIT_ERROR in response.text
+    assert "secret" not in response.text
+    assert load_calls == 0
+    mock_ingest.assert_not_awaited()
+
+
+@patch("app.services.ingest.ingest_text", new_callable=AsyncMock)
+def test_import_csv_row_and_cell_limits_return_stable_413(mock_ingest, client, monkeypatch):
+    from app.services import import_parsing
+
+    monkeypatch.setattr(import_parsing, "MAX_CSV_ROWS", 2)
+    payload = "text,title\nsecret one,one\nsecret two,two\n".encode("utf-8")
+
+    response = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("many.csv", payload, "text/csv")},
+    )
+
+    assert response.status_code == status.HTTP_413_CONTENT_TOO_LARGE
+    assert response.json()["detail"] == import_parsing.RESOURCE_LIMIT_ERROR
+    assert "secret" not in response.text
+    mock_ingest.assert_not_awaited()
+
+    monkeypatch.setattr(import_parsing, "MAX_CSV_ROWS", 100_000)
+    monkeypatch.setattr(import_parsing, "MAX_CSV_CELLS", 2)
+    response = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("wide.csv", payload, "text/csv")},
+    )
+    assert response.status_code == status.HTTP_413_CONTENT_TOO_LARGE
+    assert response.json()["detail"] == import_parsing.RESOURCE_LIMIT_ERROR
 
 
 # ── 3A：API Key（无 cookie）上传闭环 ──────────────────────────────────────
@@ -1292,25 +1479,61 @@ def test_get_document_full_source_returns_normalized_text():
         status="ready",
     )
     now = datetime.now(timezone.utc)
+    source_text = "第一行\n第二行 needle"
     source = DocumentSource(
         document_id=doc.id,
         revision=3,
         file_name="full-source.txt",
         file_type="txt",
-        normalized_text="第一行\n第二行 needle",
+        normalized_text=source_text,
         created_at=now,
         updated_at=now,
     )
+    projection_rows = iter([
+        SimpleNamespace(
+            revision=source.revision,
+            file_name=source.file_name,
+            file_type=source.file_type,
+            created_at=source.created_at,
+            updated_at=source.updated_at,
+            total_chars=len(source_text),
+            text_window=source_text,
+        ),
+        SimpleNamespace(
+            revision=source.revision,
+            file_name=source.file_name,
+            file_type=source.file_type,
+            created_at=source.created_at,
+            updated_at=source.updated_at,
+            total_chars=len(source_text),
+            text_window="\n第二行 ",
+        ),
+        SimpleNamespace(
+            revision=source.revision,
+            file_name=source.file_name,
+            file_type=source.file_type,
+            created_at=source.created_at,
+            updated_at=source.updated_at,
+            total_chars=len(source_text),
+            text_window="",
+        ),
+    ])
+    source_statements = []
     db = AsyncMock()
 
     async def _get(model, ident):
         if model is Document:
             return doc
-        if model is DocumentSource:
-            return source
         return None
 
+    async def _execute(stmt):
+        source_statements.append(stmt)
+        result = MagicMock()
+        result.one_or_none.return_value = next(projection_rows)
+        return result
+
     db.get = _get
+    db.execute = _execute
     try:
         with patch("app.deps.load_active_library", new_callable=AsyncMock) as ml:
             ml.return_value = mock_library
@@ -1322,8 +1545,94 @@ def test_get_document_full_source_returns_normalized_text():
             assert data["file_name"] == "full-source.txt"
             assert data["file_type"] == "txt"
             assert data["revision"] == 3
-            assert data["normalized_text"] == "第一行\n第二行 needle"
-            assert data["text_length"] == len("第一行\n第二行 needle")
+            assert data["normalized_text"] == source_text
+            assert data["text_length"] == len(source_text)
+            assert data["total_chars"] == len(source_text)
+            assert data["offset"] == 0
+            assert data["truncated"] is False
+
+            window = _client_with_db(db).get(
+                f"/libraries/testlib/documents/{doc.id}/source/full?offset=3&limit=5"
+            )
+            assert window.status_code == status.HTTP_200_OK
+            window_data = window.json()
+            assert window_data["normalized_text"] == "\n第二行 "
+            assert window_data["text_length"] == len(source_text)
+            assert window_data["total_chars"] == len(source_text)
+            assert window_data["offset"] == 3
+            assert window_data["truncated"] is True
+
+            end = _client_with_db(db).get(
+                f"/libraries/testlib/documents/{doc.id}/source/full"
+                f"?offset={len(source_text)}&limit=5"
+            )
+            assert end.status_code == status.HTTP_200_OK
+            assert end.json()["normalized_text"] == ""
+            assert end.json()["truncated"] is True
+
+            too_large = _client_with_db(db).get(
+                f"/libraries/testlib/documents/{doc.id}/source/full?limit=100001"
+            )
+            assert too_large.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+            assert len(source_statements) == 3
+            for dialect in (postgresql.dialect(), sqlite.dialect()):
+                for statement in source_statements:
+                    compiled = statement.compile(
+                        dialect=dialect, compile_kwargs={"literal_binds": True},
+                    )
+                    sql = compiled.string.lower()
+                    assert "length(" in sql
+                    assert "substr(" in sql
+                    assert all(
+                        getattr(column, "name", None) != "normalized_text"
+                        for column in statement.selected_columns
+                    )
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_get_document_full_source_prefers_current_revision_text():
+    mock_user.is_superuser = True
+    revision_id = uuid.uuid4()
+    doc = Document(
+        id=uuid.uuid4(),
+        library_id=mock_library.id,
+        title="current.docx",
+        content_hash="h",
+        current_revision=2,
+        current_revision_id=revision_id,
+        status="ready",
+    )
+    now = datetime.now(timezone.utc)
+    db = AsyncMock()
+
+    async def _get(model, ident):
+        return doc if model is Document and ident == doc.id else None
+
+    revision_row = SimpleNamespace(
+        revision=2,
+        file_name="current.docx",
+        file_type="docx",
+        created_at=now,
+        updated_at=now,
+        total_chars=12,
+        text_window="current text",
+    )
+    result = MagicMock()
+    result.one_or_none.return_value = revision_row
+    db.get = _get
+    db.execute = AsyncMock(return_value=result)
+    try:
+        with patch("app.deps.load_active_library", new_callable=AsyncMock) as ml:
+            ml.return_value = mock_library
+            response = _client_with_db(db).get(
+                f"/libraries/testlib/documents/{doc.id}/source/full"
+            )
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["normalized_text"] == "current text"
+        statement = db.execute.await_args.args[0]
+        assert "document_revisions" in str(statement)
+        assert "document_sources" not in str(statement)
     finally:
         app.dependency_overrides.clear()
 
@@ -1343,11 +1652,16 @@ def test_get_document_full_source_without_snapshot_returns_clear_404():
     async def _get(model, ident):
         if model is Document:
             return doc
-        if model is DocumentSource:
-            return None
         return None
 
     db.get = _get
+
+    async def _execute(_statement):
+        result = MagicMock()
+        result.one_or_none.return_value = None
+        return result
+
+    db.execute = _execute
     try:
         with patch("app.deps.load_active_library", new_callable=AsyncMock) as ml:
             ml.return_value = mock_library

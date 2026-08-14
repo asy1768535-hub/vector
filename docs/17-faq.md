@@ -7,7 +7,7 @@
 用国内镜像：
 
 ```bash
-pip install -r requirements-dev.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip install -e ".[dev]" -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
 ### Q：`alembic upgrade head` 报 `database "vector_kb" does not exist`

@@ -19,6 +19,7 @@ const api = readFileSync(new URL('./src/api.js', import.meta.url), 'utf8');
 const app = readFileSync(new URL('./src/app.js', import.meta.url), 'utf8');
 const layout = readFileSync(new URL('./src/views/Layout.js', import.meta.url), 'utf8');
 const menu = readFileSync(new URL('./src/menu_access.js', import.meta.url), 'utf8');
+const navigation = readFileSync(new URL('./src/domain_navigation.js', import.meta.url), 'utf8');
 const store = readFileSync(new URL('./src/store.js', import.meta.url), 'utf8');
 const css = readFileSync(new URL('./style.css', import.meta.url), 'utf8');
 
@@ -69,7 +70,7 @@ test('validates strict retrieval bounds and candidate relationship', () => {
 });
 
 test('maps known compatibility reasons and bounds structured conflicts', () => {
-    assert.equal(compatibilityReasonLabel('embedding_profile_mismatch'), 'Embedding 配置不一致');
+    assert.equal(compatibilityReasonLabel('embedding_profile_mismatch'), '向量化配置不一致');
     assert.equal(compatibilityReasonLabel('library_index_unready'), '知识库索引未就绪');
     assert.equal(compatibilityReasonLabel('future_reason'), 'future_reason');
     const projected = compatibilityConflicts({
@@ -87,6 +88,12 @@ test('maps known compatibility reasons and bounds structured conflicts', () => {
     assert.deepEqual(projected, [
         { librarySlug: 'legal', reasons: ['检索策略不一致'] },
     ]);
+});
+
+test('diagnostics links back to single-library search and restores route scope', () => {
+    assert.ok(view.includes('RetrievalModeSwitch'));
+    assert.ok(view.includes("route.query.libraries"));
+    assert.ok(view.includes(':library-slugs="librarySlugs"'));
 });
 
 test('projects per-Library text readiness without graph inference', () => {
@@ -120,10 +127,10 @@ test('wires Organization auth state, route, menu, and strict APIs', () => {
     assert.match(app, /path:\s*'retrieval-test'/);
     assert.match(app, /organizationAdmin:\s*true/);
     assert.match(app, /canAccessOrganizationRoute/);
-    assert.match(layout, /access\.retrievalTest/);
-    assert.match(layout, /index="\/retrieval-test"/);
+    assert.match(layout, /visibleSidebarGroups/);
+    assert.match(navigation, /access:\s*'retrievalTest'/);
+    assert.match(navigation, /path:\s*APP_PATHS\.retrievalTest/);
     for (const token of [
-        'listMyOrganizations',
         'checkLibraryCompatibility',
         'runOrganizationRetrievalTest',
     ]) assert.ok(api.includes(`export const ${token}`), `missing ${token}`);

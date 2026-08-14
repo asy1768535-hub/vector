@@ -42,7 +42,7 @@ export default {
                     return;
                 }
                 ElMessage.success('登录成功');
-                const redirect = route.query.redirect || '/dashboard';
+                const redirect = route.query.redirect || '/';
                 router.replace(redirect);
             } catch (e) {
                 const msg = e.message || '';
@@ -53,7 +53,7 @@ export default {
                         || /HTTP 405/.test(msg))) {
                     setMockUser();
                     ElMessage.success('已进入本地预览模式（超管）');
-                    const redirect = route.query.redirect || '/dashboard';
+                    const redirect = route.query.redirect || '/';
                     router.replace(redirect);
                     loading.value = false;
                     return;

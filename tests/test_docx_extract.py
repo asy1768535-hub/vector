@@ -4,8 +4,10 @@ from __future__ import annotations
 import io
 
 import docx
+import pytest
 
-from app.services.docx_extract import extract_docx_text
+from app.services import docx_extract
+from app.services.docx_extract import DocxResourceLimitError, extract_docx_text
 
 
 def _build_docx() -> bytes:
@@ -110,3 +112,29 @@ def test_table_dedups_merged_cells():
     d.save(buf)
     text = extract_docx_text(buf.getvalue())
     assert text == "A | B"    # 相邻重复被折叠
+
+
+def test_docx_zip_preflight_rejects_uncompressed_budget(monkeypatch):
+    monkeypatch.setattr(docx_extract, "DOCX_MAX_ZIP_UNCOMPRESSED_BYTES", 1)
+    with pytest.raises(DocxResourceLimitError, match="zip uncompressed bytes"):
+        extract_docx_text(_build_docx())
+
+
+def test_docx_table_budget_rejects_before_structured_units(monkeypatch):
+    monkeypatch.setattr(docx_extract, "DOCX_MAX_TABLE_ROWS", 1)
+    with pytest.raises(DocxResourceLimitError, match="table rows"):
+        extract_docx_text(_build_docx())
+
+
+def test_docx_image_budget_is_checked_before_ocr(monkeypatch):
+    monkeypatch.setattr(docx_extract, "DOCX_MAX_IMAGES", 0)
+    called = False
+
+    def ocr(_blob):
+        nonlocal called
+        called = True
+        return "unexpected"
+
+    with pytest.raises(DocxResourceLimitError, match="embedded image count"):
+        extract_docx_text(_build_docx_with_image(), ocr=ocr)
+    assert called is False

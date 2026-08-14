@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from app.api import admin_libraries as admin_libraries_api
+from app.api import admin_permissions as admin_permissions_api
 from app.api import api_keys as api_keys_api
 from app.api import me as me_api
 from app.api import organizations as organizations_api
@@ -30,7 +31,7 @@ from app.schemas.organizations import (
     OrganizationMemberCreate,
     OrganizationPermissionGrant,
 )
-from app.schemas.admin import PermissionMatrixRow
+from app.schemas.admin import PermissionGrant, PermissionMatrixRow, PermissionRevoke
 from app.schemas.v02_m4 import SyncBatchRequest
 from app.services.organization_accounts import (
     OrganizationAccountError,
@@ -313,6 +314,87 @@ def test_permission_compensation_failure_still_rolls_back():
         asyncio.run(organizations_api._commit_permission_mutation(db, result))
     assert exc_info.value.code == "organization_permission_compensation_failed"
     db.rollback.assert_awaited_once()
+
+
+def test_platform_permission_endpoint_establishes_runtime_membership():
+    actor = _user()
+    actor.is_superuser = True
+    target = _user()
+    organization = _organization()
+    library = _library(organization)
+    row = MagicMock()
+    row.scalar_one_or_none.return_value = library
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=target)
+    db.execute = AsyncMock(return_value=row)
+    mutation = MagicMock()
+    mutation.added = ("read",)
+
+    with (
+        patch.object(settings, "organization_authorization_enabled", True),
+        patch.object(
+            admin_permissions_api,
+            "grant_platform_library_permissions",
+            new=AsyncMock(return_value=mutation),
+        ) as grant,
+    ):
+        response = asyncio.run(
+            admin_permissions_api.grant(
+                PermissionGrant(
+                    user_id=target.id,
+                    library_slug=library.slug,
+                    actions=["read"],
+                ),
+                actor,
+                db,
+            )
+        )
+
+    assert response == {
+        "added": [[str(target.id), f"library:{library.slug}", "read"]]
+    }
+    grant.assert_awaited_once_with(
+        db,
+        actor_user_id=actor.id,
+        target_user_id=target.id,
+        library=library,
+        actions=["read"],
+    )
+    db.commit.assert_awaited_once()
+
+
+def test_platform_permission_endpoint_cannot_revoke_library_creator():
+    actor = _user()
+    actor.is_superuser = True
+    creator = _user()
+    organization = _organization()
+    library = _library(organization)
+    library.created_by = creator.id
+    row = MagicMock()
+    row.scalar_one_or_none.return_value = library
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=creator)
+    db.execute = AsyncMock(return_value=row)
+
+    with (
+        patch.object(admin_permissions_api.casbin_service, "revoke") as revoke,
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        asyncio.run(
+            admin_permissions_api.revoke(
+                PermissionRevoke(
+                    user_id=creator.id,
+                    library_slug=library.slug,
+                    actions=["read"],
+                ),
+                actor,
+                db,
+            )
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "知识库创建者默认拥有全部权限，不能撤销"
+    revoke.assert_not_called()
 
 
 def test_enabled_api_key_issue_requires_and_returns_organization_scope():

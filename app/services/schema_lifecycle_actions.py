@@ -10,18 +10,25 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.attribute_definition import AttributeDefinition
+from app.models.entity import Entity
 from app.models.entity_type import EntityType
+from app.models.graph_extraction_job import GraphExtractionJob
+from app.models.graph_governance_action import GraphGovernanceAction
+from app.models.graph_publication import GraphPublication
+from app.models.knowledge_relation import KnowledgeRelation
 from app.models.library import Library
 from app.models.ontology_version import OntologyVersion
 from app.models.relation_type import RelationType
 from app.models.relation_type_constraint import RelationTypeConstraint
 from app.models.schema_lifecycle_action import SchemaLifecycleAction
+from app.schemas.schema_lifecycle import SchemaImportRequest
 from app.services import audit_log, ontology
 from app.services.schema_lifecycle_contracts import (
     SchemaLifecycleCommand,
     SchemaLifecycleError,
     deterministic_schema_child_id,
     deterministic_schema_clone_id,
+    deterministic_schema_import_id,
 )
 from app.services.schema_lifecycle_read import (
     SchemaVersionBundle,
@@ -34,6 +41,7 @@ from app.services.schema_lifecycle_validation import validate_schema_draft_bundl
 _DRAFT = "draft"
 _ACTIVE = "active"
 _DISABLED = "disabled"
+_DELETED = "deleted"
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,8 +51,17 @@ class SchemaLifecycleActionResult:
     reused: bool
 
 
+@dataclass(frozen=True, slots=True)
+class SchemaVersionDeletionResult:
+    action: SchemaLifecycleAction
+    version_id: uuid.UUID
+    reused: bool
+
+
 def _clone_status(status: str) -> str:
     if status == _ACTIVE:
+        return _DRAFT
+    if status == _DRAFT:
         return _DRAFT
     if status == _DISABLED:
         return _DISABLED
@@ -60,7 +77,7 @@ def clone_schema_bundle_rows(
     version_no: int,
     description: str | None,
 ) -> SchemaVersionBundle:
-    if source.version.status != _ACTIVE or version_no <= source.version.version_no:
+    if source.version.status not in {_ACTIVE, _DRAFT} or version_no <= source.version.version_no:
         raise SchemaLifecycleError(
             "schema_lifecycle_request_invalid", "Schema clone source is invalid"
         )
@@ -72,6 +89,8 @@ def clone_schema_bundle_rows(
         status=_DRAFT,
         description=description,
         parent_version_id=source.version.id,
+        origin=getattr(source.version, "origin", "user") or "user",
+        confirmed=False,
     )
     entity_ids = {
         row.id: deterministic_schema_child_id(
@@ -203,13 +222,9 @@ async def _replay(
     library: Library,
     command: SchemaLifecycleCommand,
 ) -> SchemaLifecycleActionResult | None:
-    action = await _find_action(db, command)
+    action = await _replay_action(db, command)
     if action is None:
         return None
-    if action.command_hash != command.command_hash:
-        raise SchemaLifecycleError(
-            "schema_lifecycle_idempotency_conflict", "Idempotency key is in use"
-        )
     version_id = action.result_payload.get("version_id")
     try:
         parsed_version_id = uuid.UUID(str(version_id))
@@ -219,6 +234,18 @@ async def _replay(
         ) from exc
     bundle = await load_schema_version_bundle(db, library, parsed_version_id)
     return SchemaLifecycleActionResult(action=action, bundle=bundle, reused=True)
+
+
+async def _replay_action(
+    db: AsyncSession,
+    command: SchemaLifecycleCommand,
+) -> SchemaLifecycleAction | None:
+    action = await _find_action(db, command)
+    if action is not None and action.command_hash != command.command_hash:
+        raise SchemaLifecycleError(
+            "schema_lifecycle_idempotency_conflict", "Idempotency key is in use"
+        )
+    return action
 
 
 async def _record_action(
@@ -290,9 +317,12 @@ async def clone_schema_version(
     source = await load_schema_version_bundle(
         db, library, command.ontology_version_id, for_update=True
     )
-    if source.version.status != _ACTIVE:
+    if source.version.status != _ACTIVE and not (
+        source.version.status == _DRAFT
+        and getattr(source.version, "origin", "user") == "ai_discovery"
+    ):
         raise SchemaLifecycleError(
-            "schema_lifecycle_state_changed", "Schema clone source changed"
+            "schema_lifecycle_state_changed", "Schema clone source is not derivable"
         )
     if schema_version_state_hash(source) != command.expected_state_hash:
         raise SchemaLifecycleError(
@@ -349,6 +379,198 @@ async def clone_schema_version(
     return SchemaLifecycleActionResult(action=action, bundle=draft, reused=False)
 
 
+async def import_schema_version(
+    db: AsyncSession,
+    library: Library,
+    command: SchemaLifecycleCommand,
+    spec: SchemaImportRequest,
+) -> SchemaLifecycleActionResult:
+    if (
+        command.library_id != library.id
+        or command.action_kind != "import_version"
+        or command.target_kind != "ontology_version"
+        or command.target_id != deterministic_schema_import_id(
+            library.id, command.idempotency_key
+        )
+        or spec.idempotency_key != command.idempotency_key
+    ):
+        raise SchemaLifecycleError(
+            "schema_lifecycle_request_invalid", "Schema import command is invalid"
+        )
+    await _lock_library(db, library)
+    replay = await _replay(db, library, command)
+    if replay is not None:
+        return replay
+
+    family = (
+        await db.execute(
+            select(OntologyVersion)
+            .where(
+                OntologyVersion.library_id == library.id,
+                OntologyVersion.version_key == spec.version_key,
+            )
+            .with_for_update()
+        )
+    ).scalars().all()
+    active_versions = [row for row in family if row.status == _ACTIVE]
+    if len(active_versions) > 1:
+        raise SchemaLifecycleError(
+            "schema_lifecycle_unavailable", "Active Schema identity is ambiguous"
+        )
+    draft = OntologyVersion(
+        id=command.target_id,
+        library_id=library.id,
+        version_key=spec.version_key,
+        version_no=max((row.version_no for row in family), default=0) + 1,
+        status=_DRAFT,
+        description=spec.description,
+        parent_version_id=active_versions[0].id if active_versions else None,
+    )
+    entity_keys = [row.key for row in spec.entity_types]
+    relation_keys = [row.key for row in spec.relation_types]
+    if len(entity_keys) != len(set(entity_keys)) or len(relation_keys) != len(set(relation_keys)):
+        raise SchemaLifecycleError(
+            "schema_lifecycle_request_invalid", "Schema type keys must be unique"
+        )
+    entity_ids = {
+        row.key: uuid.uuid5(draft.id, f"import:entity_type:{row.key}")
+        for row in spec.entity_types
+    }
+    relation_ids = {
+        row.key: uuid.uuid5(draft.id, f"import:relation_type:{row.key}")
+        for row in spec.relation_types
+    }
+    entities = tuple(
+        EntityType(
+            id=entity_ids[row.key],
+            library_id=library.id,
+            ontology_version_id=draft.id,
+            key=row.key,
+            label=row.label,
+            description=row.description,
+            properties_schema=deepcopy(row.properties_schema),
+            is_seeded=False,
+            status=_DRAFT,
+        )
+        for row in spec.entity_types
+    )
+    relations = tuple(
+        RelationType(
+            id=relation_ids[row.key],
+            library_id=library.id,
+            ontology_version_id=draft.id,
+            key=row.key,
+            label=row.label,
+            description=row.description,
+            direction=row.direction,
+            requires_evidence=row.requires_evidence,
+            default_review_policy=row.default_review_policy,
+            properties_schema=deepcopy(row.properties_schema),
+            is_seeded=False,
+            status=_DRAFT,
+        )
+        for row in spec.relation_types
+    )
+    owner_ids = {
+        **{("entity_type", key): value for key, value in entity_ids.items()},
+        **{("relation_type", key): value for key, value in relation_ids.items()},
+    }
+    attribute_keys = [
+        (row.owner_kind, row.owner_key, row.key) for row in spec.attributes
+    ]
+    if len(attribute_keys) != len(set(attribute_keys)):
+        raise SchemaLifecycleError(
+            "schema_lifecycle_request_invalid", "Schema attribute keys must be unique"
+        )
+    attributes = []
+    for row in spec.attributes:
+        owner_id = owner_ids.get((row.owner_kind, row.owner_key))
+        if owner_id is None:
+            raise SchemaLifecycleError(
+                "schema_lifecycle_request_invalid", "Schema attribute owner is unavailable"
+            )
+        attributes.append(
+            AttributeDefinition(
+                id=uuid.uuid5(
+                    draft.id,
+                    f"import:attribute:{row.owner_kind}:{row.owner_key}:{row.key}",
+                ),
+                library_id=library.id,
+                ontology_version_id=draft.id,
+                owner_kind=row.owner_kind,
+                owner_type_id=owner_id,
+                key=row.key,
+                label=row.label,
+                value_type=row.value_type,
+                required=row.required,
+                enum_values=deepcopy(row.enum_values),
+                validation_schema=deepcopy(row.validation_schema),
+                indexed=row.indexed,
+                status=_DRAFT,
+            )
+        )
+    constraint_keys = [
+        (
+            row.relation_type_key,
+            row.source_entity_type_key,
+            row.target_entity_type_key,
+        )
+        for row in spec.constraints
+    ]
+    if len(constraint_keys) != len(set(constraint_keys)):
+        raise SchemaLifecycleError(
+            "schema_lifecycle_request_invalid", "Schema constraints must be unique"
+        )
+    constraints = []
+    for row in spec.constraints:
+        relation_id = relation_ids.get(row.relation_type_key)
+        source_id = entity_ids.get(row.source_entity_type_key)
+        target_id = entity_ids.get(row.target_entity_type_key)
+        if relation_id is None or source_id is None or target_id is None:
+            raise SchemaLifecycleError(
+                "schema_lifecycle_request_invalid", "Schema constraint endpoint is unavailable"
+            )
+        constraints.append(
+            RelationTypeConstraint(
+                id=uuid.uuid5(
+                    draft.id,
+                    f"import:constraint:{row.relation_type_key}:{row.source_entity_type_key}:{row.target_entity_type_key}",
+                ),
+                library_id=library.id,
+                ontology_version_id=draft.id,
+                relation_type_id=relation_id,
+                source_entity_type_id=source_id,
+                target_entity_type_id=target_id,
+                cardinality=row.cardinality,
+                requires_review=row.requires_review,
+                status=_DRAFT,
+            )
+        )
+    bundle = SchemaVersionBundle(
+        version=draft,
+        entity_types=entities,
+        relation_types=relations,
+        attributes=tuple(attributes),
+        constraints=tuple(constraints),
+    )
+    db.add(draft)
+    await db.flush()
+    db.add_all([*entities, *relations, *attributes, *constraints])
+    await db.flush()
+    action = await _record_action(
+        db,
+        command=command,
+        version=draft,
+        target_id=draft.id,
+        state_hash=schema_version_state_hash(bundle),
+        item_count=sum(
+            len(rows)
+            for rows in (entities, relations, attributes, constraints)
+        ),
+    )
+    return SchemaLifecycleActionResult(action=action, bundle=bundle, reused=False)
+
+
 def _require_draft(bundle: SchemaVersionBundle, expected_hash: str) -> None:
     if bundle.version.status != _DRAFT:
         raise SchemaLifecycleError(
@@ -357,6 +579,30 @@ def _require_draft(bundle: SchemaVersionBundle, expected_hash: str) -> None:
     if schema_version_state_hash(bundle) != expected_hash:
         raise SchemaLifecycleError(
             "schema_lifecycle_state_changed", "Schema draft changed"
+        )
+
+
+async def _require_editable_draft(db: AsyncSession, version: OntologyVersion) -> None:
+    """Keep AI drafts immutable while any job may still consume their snapshot."""
+
+    if getattr(version, "origin", "user") != "ai_discovery":
+        return
+    active_job = (
+        await db.execute(
+            select(GraphExtractionJob.id)
+            .where(
+                GraphExtractionJob.ontology_version_id == version.id,
+                GraphExtractionJob.status.in_(
+                    ("waiting_schema", "queued", "processing", "partially_succeeded")
+                ),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if active_job is not None:
+        raise SchemaLifecycleError(
+            "schema_lifecycle_dependency_conflict",
+            "AI Schema draft is frozen while a graph extraction task is running; derive a new version to edit it",
         )
 
 
@@ -688,6 +934,7 @@ async def apply_schema_item_command(
         db, library, command.ontology_version_id, for_update=True
     )
     _require_draft(bundle, command.expected_state_hash)
+    await _require_editable_draft(db, bundle.version)
     if command.action_kind == "create_item":
         await _create_item(db, library, bundle, command)
     else:
@@ -746,29 +993,52 @@ async def activate_schema_version(
         db, library, command.ontology_version_id, for_update=True
     )
     _require_draft(draft, command.expected_state_hash)
-    versions = (
-        await db.execute(
-            select(OntologyVersion)
-            .where(
-                OntologyVersion.library_id == library.id,
-                OntologyVersion.version_key == draft.version.version_key,
-                OntologyVersion.status.in_((_ACTIVE, _DRAFT)),
+    if getattr(draft.version, "origin", "user") == "ai_discovery":
+        versions = (
+            await db.execute(
+                select(OntologyVersion)
+                .where(
+                    OntologyVersion.library_id == library.id,
+                    OntologyVersion.status.in_((_ACTIVE, _DRAFT)),
+                )
+                .order_by(OntologyVersion.id)
+                .with_for_update()
             )
-            .order_by(OntologyVersion.id)
-            .with_for_update()
-        )
-    ).scalars().all()
+        ).scalars().all()
+    else:
+        versions = (
+            await db.execute(
+                select(OntologyVersion)
+                .where(
+                    OntologyVersion.library_id == library.id,
+                    OntologyVersion.version_key == draft.version.version_key,
+                    OntologyVersion.status.in_((_ACTIVE, _DRAFT)),
+                )
+                .order_by(OntologyVersion.id)
+                .with_for_update()
+            )
+        ).scalars().all()
     active_versions = [row for row in versions if row.status == _ACTIVE]
     if len(active_versions) > 1:
         raise SchemaLifecycleError(
             "schema_lifecycle_invalid_draft", "Active Schema identity is ambiguous"
         )
     active = active_versions[0] if active_versions else None
-    if (active.id if active is not None else None) != expected_active_id:
+    active_ids = {row.id for row in active_versions}
+    if getattr(draft.version, "origin", "user") == "ai_discovery":
+        if expected_active_id is not None and expected_active_id not in active_ids:
+            raise SchemaLifecycleError(
+                "schema_lifecycle_state_changed", "Active Schema version changed"
+            )
+    elif (active.id if active is not None else None) != expected_active_id:
         raise SchemaLifecycleError(
             "schema_lifecycle_state_changed", "Active Schema version changed"
         )
-    if active is not None and active.version_key != draft.version.version_key:
+    if (
+        getattr(draft.version, "origin", "user") != "ai_discovery"
+        and active is not None
+        and active.version_key != draft.version.version_key
+    ):
         raise SchemaLifecycleError(
             "schema_lifecycle_invalid_draft", "Schema version family is incompatible"
         )
@@ -778,7 +1048,7 @@ async def activate_schema_version(
             "schema_lifecycle_invalid_draft", "Schema draft validation failed"
         )
 
-    if active is not None:
+    for active in active_versions:
         active.status = _DISABLED
         await db.flush()
     for row in (
@@ -790,9 +1060,20 @@ async def activate_schema_version(
         if row.status == _DRAFT:
             row.status = _ACTIVE
     draft.version.status = _ACTIVE
+    draft.version.confirmed = True
     draft.version.published_at = datetime.now(timezone.utc)
     await db.flush()
     activated = await load_schema_version_bundle(db, library, draft.version.id)
+    if getattr(draft.version, "origin", "user") == "ai_discovery":
+        from app.services.schema_discovery_runs import (
+            resume_schema_discovery_run_after_confirmation,
+        )
+
+        await resume_schema_discovery_run_after_confirmation(
+            db,
+            library=library,
+            ontology_version_id=draft.version.id,
+        )
     state_hash = schema_version_state_hash(activated)
     action = await _record_action(
         db,
@@ -813,5 +1094,169 @@ async def activate_schema_version(
     return SchemaLifecycleActionResult(
         action=action,
         bundle=activated,
+        reused=False,
+    )
+
+
+async def _require_unreferenced_draft(
+    db: AsyncSession,
+    version_id: uuid.UUID,
+) -> None:
+    reference_models = (
+        Entity,
+        KnowledgeRelation,
+        GraphExtractionJob,
+        GraphPublication,
+        GraphGovernanceAction,
+    )
+    for model in reference_models:
+        reference_id = (
+            await db.execute(
+                select(model.id)
+                .where(model.ontology_version_id == version_id)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if reference_id is not None:
+            raise SchemaLifecycleError(
+                "schema_lifecycle_dependency_conflict",
+                "Schema draft is referenced and cannot be deleted",
+            )
+    child_version_id = (
+        await db.execute(
+            select(OntologyVersion.id)
+            .where(
+                OntologyVersion.parent_version_id == version_id,
+                OntologyVersion.status != _DELETED,
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if child_version_id is not None:
+        raise SchemaLifecycleError(
+            "schema_lifecycle_dependency_conflict",
+            "Schema draft has a child version and cannot be deleted",
+        )
+
+
+async def delete_schema_draft(
+    db: AsyncSession,
+    library: Library,
+    command: SchemaLifecycleCommand,
+) -> SchemaVersionDeletionResult:
+    if (
+        command.library_id != library.id
+        or command.action_kind != "delete_version"
+        or command.target_kind != "ontology_version"
+        or command.target_id != command.ontology_version_id
+    ):
+        raise SchemaLifecycleError(
+            "schema_lifecycle_request_invalid", "Schema deletion command is invalid"
+        )
+    _require_exact_payload(command.payload, required={"confirmation"}, optional=set())
+    if command.payload["confirmation"] != "delete_schema_draft":
+        raise SchemaLifecycleError(
+            "schema_lifecycle_request_invalid", "Schema deletion is not confirmed"
+        )
+
+    await _lock_library(db, library)
+    replay = await _replay_action(db, command)
+    if replay is not None:
+        return SchemaVersionDeletionResult(
+            action=replay,
+            version_id=command.ontology_version_id,
+            reused=True,
+        )
+    draft = await load_schema_version_bundle(
+        db, library, command.ontology_version_id, for_update=True
+    )
+    _require_draft(draft, command.expected_state_hash)
+    await _require_unreferenced_draft(db, draft.version.id)
+
+    rows = (
+        *draft.entity_types,
+        *draft.relation_types,
+        *draft.attributes,
+        *draft.constraints,
+    )
+    for row in rows:
+        row.status = _DELETED
+    draft.version.status = _DELETED
+    await db.flush()
+    state_hash = schema_version_state_hash(draft)
+    action = await _record_action(
+        db,
+        command=command,
+        version=draft.version,
+        target_id=draft.version.id,
+        state_hash=state_hash,
+        item_count=len(rows),
+    )
+    return SchemaVersionDeletionResult(
+        action=action,
+        version_id=draft.version.id,
+        reused=False,
+    )
+
+
+async def disable_schema_version(
+    db: AsyncSession,
+    library: Library,
+    command: SchemaLifecycleCommand,
+) -> SchemaLifecycleActionResult:
+    if (
+        command.library_id != library.id
+        or command.action_kind != "disable_version"
+        or command.target_kind != "ontology_version"
+        or command.target_id != command.ontology_version_id
+    ):
+        raise SchemaLifecycleError(
+            "schema_lifecycle_request_invalid", "Schema disable command is invalid"
+        )
+    _require_exact_payload(command.payload, required={"confirmation"}, optional=set())
+    if command.payload["confirmation"] != "disable_schema_version":
+        raise SchemaLifecycleError(
+            "schema_lifecycle_request_invalid", "Schema disable is not confirmed"
+        )
+
+    await _lock_library(db, library)
+    replay = await _replay(db, library, command)
+    if replay is not None:
+        return replay
+    bundle = await load_schema_version_bundle(
+        db, library, command.ontology_version_id, for_update=True
+    )
+    if (
+        bundle.version.status != _ACTIVE
+        or schema_version_state_hash(bundle) != command.expected_state_hash
+    ):
+        raise SchemaLifecycleError(
+            "schema_lifecycle_state_changed", "Only the active Schema can be disabled"
+        )
+
+    bundle.version.status = _DISABLED
+    await db.flush()
+    disabled = await load_schema_version_bundle(db, library, bundle.version.id)
+    state_hash = schema_version_state_hash(disabled)
+    item_count = sum(
+        len(rows)
+        for rows in (
+            disabled.entity_types,
+            disabled.relation_types,
+            disabled.attributes,
+            disabled.constraints,
+        )
+    )
+    action = await _record_action(
+        db,
+        command=command,
+        version=disabled.version,
+        target_id=disabled.version.id,
+        state_hash=state_hash,
+        item_count=item_count,
+    )
+    return SchemaLifecycleActionResult(
+        action=action,
+        bundle=disabled,
         reused=False,
     )

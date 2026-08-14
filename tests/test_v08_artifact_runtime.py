@@ -179,8 +179,8 @@ def test_runtime_config_defaults_and_fail_closed_validation():
         {
             "knowledge_artifact_runtime_enabled": True,
             "knowledge_artifact_external_model_enabled": True,
-            "knowledge_artifact_api_key": SecretStr("key"),
-            "knowledge_artifact_base_url": "http://unapproved.invalid/v1",
+            "graph_extraction_api_key": SecretStr("key"),
+            "graph_extraction_base_url": "",
         },
         {"knowledge_artifact_provider_timeout_seconds": float("nan")},
         {"knowledge_artifact_worker_poll_seconds": float("inf")},
@@ -254,6 +254,16 @@ def test_deterministic_summary_is_normalized_bounded_and_repeatable():
     assert long.truncated is True
 
 
+def test_summary_prompt_requires_a_concise_chinese_semantic_summary():
+    from app.services.knowledge_artifact_generation import summary_messages
+
+    messages = summary_messages("source")
+    prompt = messages[0]["content"]
+    assert "300" in prompt and "500" in prompt
+    assert "不要逐段照抄原文" in prompt
+    assert messages[1] == {"role": "user", "content": "source"}
+
+
 def test_deterministic_outline_expands_paths_deduplicates_and_falls_back():
     from app.services.knowledge_artifact_generation import deterministic_outline
 
@@ -287,7 +297,7 @@ def test_generation_policy_enforces_library_type_and_model_egress_gates():
         _env_file=None,
         knowledge_artifact_runtime_enabled=True,
         knowledge_artifact_external_model_enabled=True,
-        knowledge_artifact_api_key=SecretStr("key"),
+        graph_extraction_api_key=SecretStr("key"),
     )
     library = _library()
     document_id = uuid.uuid4()
@@ -300,8 +310,8 @@ def test_generation_policy_enforces_library_type_and_model_egress_gates():
         source_character_count=100,
         config=config,
     )
-    assert short.generation_mode == "deterministic"
-    assert short.model_provider is None
+    assert short.generation_mode == "model"
+    assert short.model_provider == "openai-compatible"
 
     long = select_generation_spec(
         library=library,
@@ -311,20 +321,31 @@ def test_generation_policy_enforces_library_type_and_model_egress_gates():
         config=config,
     )
     assert long.generation_mode == "model"
-    assert long.model_provider == "deepseek"
+    assert long.model_provider == "openai-compatible"
     assert len(long.model_config_hash or "") == 64
 
     outline = select_generation_spec(
-        library=_library(knowledge_artifact_external_model_enabled=False),
+        library=library,
         revision=revision,
         artifact_type="outline",
-        source_character_count=0,
-        config=Settings(
-            _env_file=None,
-            knowledge_artifact_runtime_enabled=True,
-        ),
+        source_character_count=100,
+        config=config,
     )
-    assert outline.generation_mode == "deterministic"
+    assert outline.generation_mode == "model"
+    assert outline.model_provider == "openai-compatible"
+
+    with pytest.raises(KnowledgeArtifactRuntimeError) as exc_info:
+        select_generation_spec(
+            library=library,
+            revision=revision,
+            artifact_type="summary",
+            source_character_count=5_000,
+            config=Settings(
+                _env_file=None,
+                knowledge_artifact_runtime_enabled=True,
+            ),
+        )
+    assert exc_info.value.code == "external_model_disabled"
 
     cases = (
         (
@@ -472,6 +493,27 @@ def test_model_summary_provider_has_no_raw_response_field_and_sanitizes_errors()
     assert "private body" not in str(exc_info.value)
 
 
+def test_model_outline_parser_and_prompt_require_real_hierarchy():
+    from app.services.knowledge_artifact_generation import (
+        KnowledgeArtifactGenerationError,
+        outline_messages,
+        parse_model_outline,
+    )
+
+    payload = parse_model_outline(
+        '{"items":[{"level":1,"title":"Overview","path":["Overview"]},'
+        '{"level":2,"title":"Scope","path":["Overview","Scope"]}]}'
+    )
+    assert payload.generation_mode == "model"
+    assert [item.title for item in payload.items] == ["Overview", "Scope"]
+    prompt = outline_messages("source")[0]["content"]
+    assert "不要把文件名当作章节" in prompt
+
+    with pytest.raises(KnowledgeArtifactGenerationError):
+        parse_model_outline(
+            '{"items":[{"level":2,"title":"Scope","path":["Wrong"]}]}'
+        )
+
 def test_model_summary_parser_rejects_unknown_invalid_and_oversized_output():
     from app.services.knowledge_artifact_generation import (
         KnowledgeArtifactGenerationError,
@@ -600,7 +642,12 @@ def test_enqueue_is_idempotent_for_the_same_revision_and_contract():
     from app.config import Settings
     from app.services.knowledge_artifact_jobs import enqueue_knowledge_artifact_job
 
-    config = Settings(_env_file=None, knowledge_artifact_runtime_enabled=True)
+    config = Settings(
+        _env_file=None,
+        knowledge_artifact_runtime_enabled=True,
+        knowledge_artifact_external_model_enabled=True,
+        graph_extraction_api_key=SecretStr("key"),
+    )
     library = _library()
     document_id = uuid.uuid4()
     revision = _revision(library.id, document_id)
@@ -637,8 +684,11 @@ def test_enqueue_is_idempotent_for_the_same_revision_and_contract():
 
 
 def _queued_job(*, attempt_count=0):
+    from app.config import Settings
+    from app.services.knowledge_artifact_policy import _model_config_hash
     from app.services.knowledge_artifacts import build_artifact_job
 
+    config = Settings(_env_file=None)
     job = build_artifact_job(
         library_id=uuid.uuid4(),
         document_id=uuid.uuid4(),
@@ -647,7 +697,10 @@ def _queued_job(*, attempt_count=0):
         artifact_type="summary",
         contract_version="summary-v1",
         extractor_version="summary-extractor-v1",
-        generation_mode="deterministic",
+        generation_mode="model",
+        model_provider="openai-compatible",
+        model_name=config.graph_extraction_model,
+        model_config_hash=_model_config_hash(config),
         trigger_type="manual",
     )
     job.attempt_count = attempt_count
@@ -752,7 +805,7 @@ class _PublishDb(_JobDb):
 
 def test_publish_is_claim_and_revision_fenced_and_stales_previous_current():
     from app.config import Settings
-    from app.services.knowledge_artifact_generation import deterministic_summary
+    from app.services.knowledge_artifact_generation import parse_model_summary
     from app.services.knowledge_artifact_publication import publish_knowledge_artifact
 
     now = datetime(2026, 7, 21, tzinfo=timezone.utc)
@@ -787,11 +840,17 @@ def test_publish_is_claim_and_revision_fenced_and_stales_previous_current():
         publish_knowledge_artifact(
             db,
             prepared=prepared,
-            payload=deterministic_summary("short source"),
+            payload=parse_model_summary(
+                '{"summary":"Concise result"}',
+                source_character_count=len("short source"),
+                source_truncated=False,
+            ),
             now=now,
             config=Settings(
                 _env_file=None,
                 knowledge_artifact_runtime_enabled=True,
+                knowledge_artifact_external_model_enabled=True,
+                graph_extraction_api_key=SecretStr("key"),
             ),
         )
     )
@@ -1141,6 +1200,8 @@ def test_retry_creates_a_linked_generation_without_overwriting_source():
             config=Settings(
                 _env_file=None,
                 knowledge_artifact_runtime_enabled=True,
+                knowledge_artifact_external_model_enabled=True,
+                graph_extraction_api_key=SecretStr("key"),
             ),
         )
     )
@@ -1184,6 +1245,8 @@ def test_retry_rejects_a_job_whose_generation_identity_is_no_longer_current():
                 config=Settings(
                     _env_file=None,
                     knowledge_artifact_runtime_enabled=True,
+                knowledge_artifact_external_model_enabled=True,
+                graph_extraction_api_key=SecretStr("key"),
                     knowledge_artifact_summary_extractor_version="summary-extractor-v2",
                 ),
             )

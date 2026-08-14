@@ -15,6 +15,7 @@ ProviderErrorCategory = Literal[
 DEEPSEEK_PROVIDER_NAME = "deepseek"
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 DEEPSEEK_MODEL_NAME = "deepseek-v4-pro"
+OPENAI_COMPATIBLE_PROVIDER_NAME = "openai-compatible"
 
 
 def _endpoint(base_url: str) -> str:

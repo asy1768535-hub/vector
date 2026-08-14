@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFileSync } from 'node:fs';
 
 import {
     classificationReviewErrorKind,
@@ -54,7 +53,6 @@ test('accept requires one known proposal set from the current enabled taxonomy',
         proposals: [...run.proposals, { role: 'primary', label_id: 'label-b', label: '财务' }],
     }, page), false);
 });
-
 test('initial selection keeps only current unique enabled proposal labels', () => {
     assert.deepEqual(initialReviewSelection(run, page), {
         primaryLabelId: 'label-a',
@@ -135,51 +133,4 @@ test('review API uses exact list query and fenced mutation body', async () => {
         primary_label_id: null,
         secondary_label_ids: [],
     });
-});
-
-test('route, API, view, menu, and responsive privacy contracts are wired', () => {
-    const api = readFileSync(new URL('./src/api.js', import.meta.url), 'utf8');
-    const app = readFileSync(new URL('./src/app.js', import.meta.url), 'utf8');
-    const layout = readFileSync(new URL('./src/views/Layout.js', import.meta.url), 'utf8');
-    const menu = readFileSync(new URL('./src/menu_access.js', import.meta.url), 'utf8');
-    const css = readFileSync(new URL('./style.css', import.meta.url), 'utf8');
-    const viewUrl = new URL('./src/views/ClassificationReview.js', import.meta.url);
-    const view = readFileSync(viewUrl, 'utf8');
-
-    assert.ok(api.includes('export const listClassificationReviews'));
-    assert.ok(api.includes('export const reviewClassificationRun'));
-    assert.match(app, /path:\s*'classification-review'/);
-    assert.match(app, /libraryManagement:\s*true/);
-    assert.match(layout, /access\.classificationReview/);
-    assert.match(layout, /index="\/classification-review"/);
-    assert.match(layout, /class="header-user-label"/);
-    assert.match(menu, /manageableLibraries/);
-    assert.match(menu, /canAccessLibraryManagementRoute/);
-    for (const token of [
-        'loadRequestSeq',
-        'mutationRequestSeq',
-        'expected_run_status',
-        'expected_effective_decision_set_id',
-        'api.reviewClassificationRun',
-        "path: '/catalog'",
-        'ElMessageBox.confirm',
-    ]) assert.ok(view.includes(token), `missing view contract ${token}`);
-    for (const forbidden of [
-        'model_provider',
-        'model_name',
-        'prompt_version',
-        'error_code',
-        'v-html',
-        'console.',
-        'localStorage',
-    ]) assert.ok(!view.includes(forbidden), `forbidden view token ${forbidden}`);
-    for (const token of [
-        '.classification-review-workspace',
-        '.classification-review-grid',
-        '.classification-review-queue',
-        '.classification-review-detail',
-        '@media screen and (max-width: 899px)',
-        '@media (max-width: 520px)',
-        '.header-user-label',
-    ]) assert.ok(css.includes(token), `missing CSS token ${token}`);
 });

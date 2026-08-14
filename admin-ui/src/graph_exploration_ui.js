@@ -1,4 +1,4 @@
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const UUID_RE = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const HASH_RE = /^[0-9a-f]{64}$/;
 const TYPE_KEY_RE = /^[^\s]{1,128}$/;
 const SOURCE_TYPES = new Set(['manual', 'imported', 'extracted']);
@@ -81,6 +81,191 @@ function validLibrary(library) {
         && text(library?.name).length <= 160
     );
 }
+function validSnapshotConfidence(value) {
+    if (value === null || value === undefined) return true;
+    if (typeof value === 'number') return validConfidence(value);
+    if (typeof value !== 'string' || !value.trim()) return false;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1;
+}
+
+function snapshotConfidence(value) {
+    if (value === null || value === undefined) return null;
+    const parsed = typeof value === 'number' ? value : Number(value);
+    return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1 ? parsed : null;
+}
+
+function validEvidenceIds(value) {
+    return Array.isArray(value) && value.every(validUuid);
+}
+
+function sameUuidList(left, right) {
+    return Array.isArray(left) && Array.isArray(right)
+        && left.length === right.length
+        && left.every((value, index) => text(value).toLowerCase() === text(right[index]).toLowerCase());
+}
+
+function validSnapshotBase(snapshot, item, identity, kind) {
+    return Boolean(
+        snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot)
+        && snapshot.manifest_version === 'v1'
+        && snapshot.item_kind === kind
+        && text(snapshot.library_id) === text(identity.libraryId)
+        && text(snapshot.ontology_version_id) === text(identity.ontologyVersionId)
+        && validHash(snapshot.properties_hash)
+        && validSnapshotConfidence(snapshot.confidence)
+        && SOURCE_TYPES.has(snapshot.source_type)
+        && validEvidenceIds(snapshot.support_evidence_ids)
+        && sameUuidList(snapshot.support_evidence_ids, item.support_evidence_ids)
+    );
+}
+
+function validPublicationItem(item, identity, kind) {
+    if (!validUuid(item?.id)
+        || text(item?.publication_id) !== text(identity.publicationId)
+        || item?.item_kind !== kind
+        || item?.status !== 'active'
+        || !validHash(item?.item_hash)
+        || !validEvidenceIds(item?.support_evidence_ids)) return false;
+
+    const snapshot = item.fact_snapshot;
+    if (!validSnapshotBase(snapshot, item, identity, kind)) return false;
+    if (kind === 'entity') {
+        return text(item.entity_id) === text(snapshot.entity_id)
+            && validUuid(item.entity_id)
+            && validUuid(snapshot.entity_type_id)
+            && text(snapshot.canonical_name).length >= 1
+            && text(snapshot.canonical_name).length <= 512
+            && text(snapshot.normalized_name).length >= 1
+            && text(snapshot.normalized_name).length <= 512;
+    }
+    return text(item.relation_id) === text(snapshot.relation_id)
+        && validUuid(item.relation_id)
+        && validUuid(snapshot.relation_type_id)
+        && validUuid(snapshot.source_entity_id)
+        && validUuid(snapshot.target_entity_id);
+}
+
+export function graphPublicationReadMatches(value, identity) {
+    return Boolean(
+        validUuid(value?.id)
+        && text(value.id) === text(identity?.publicationId)
+        && validUuid(value?.library_id)
+        && text(value.library_id) === text(identity?.libraryId)
+        && validUuid(value?.ontology_version_id)
+        && text(value.ontology_version_id) === text(identity?.ontologyVersionId)
+        && value.status === 'active'
+        && value.healthy === true
+        && value.publication_enabled === true
+        && value.manifest_version === 'v1'
+        && validHash(value.manifest_hash)
+        && Number.isInteger(value.entity_count) && value.entity_count >= 0
+        && Number.isInteger(value.relation_count) && value.relation_count >= 0
+        && typeof value.activated_at === 'string'
+        && Number.isFinite(Date.parse(value.activated_at))
+    );
+}
+
+export function graphPublicationItemPageMatches(value, identity, kind) {
+    const expectedTotal = kind === 'entity'
+        ? identity?.entityCount
+        : identity?.relationCount;
+    if (!['entity', 'relation'].includes(kind)
+        || !Number.isInteger(identity?.page)
+        || !Number.isInteger(identity?.pageSize)
+        || identity.page < 1 || identity.pageSize < 1 || identity.pageSize > 500
+        || !Number.isInteger(expectedTotal) || expectedTotal < 0
+        || !Number.isInteger(value?.page) || value.page !== identity.page
+        || !Number.isInteger(value?.page_size) || value.page_size !== identity.pageSize
+        || !Number.isInteger(value?.total) || value.total !== expectedTotal
+        || !Array.isArray(value?.items) || value.items.length > identity.pageSize) return false;
+    const ids = new Set();
+    for (const item of value.items) {
+        if (ids.has(item?.id) || !validPublicationItem(item, identity, kind)) return false;
+        ids.add(item.id);
+    }
+    return true;
+}
+
+function snapshotType(id, prefix) {
+    const value = text(id);
+    return { id: value, key: value, label: prefix };
+}
+
+export function staticPublicationPanorama(publication, entityItems, relationItems, library) {
+    const identity = {
+        publicationId: publication?.id,
+        libraryId: publication?.library_id,
+        ontologyVersionId: publication?.ontology_version_id,
+    };
+    if (!graphPublicationReadMatches(publication, identity)
+        || !Array.isArray(entityItems) || !Array.isArray(relationItems)
+        || entityItems.length !== publication.entity_count
+        || relationItems.length !== publication.relation_count) return null;
+
+    const entityIds = new Set();
+    const nodes = entityItems.map((item) => {
+        if (entityIds.has(item.entity_id) || !validPublicationItem(item, identity, 'entity')) return null;
+        entityIds.add(item.entity_id);
+        const snapshot = item.fact_snapshot;
+        return {
+            id: item.entity_id,
+            canonical_name: snapshot.canonical_name,
+            normalized_name: snapshot.normalized_name,
+            entity_type: snapshotType(snapshot.entity_type_id, 'Entity'),
+            library: library || { id: publication.library_id, slug: '' },
+            ontology_version_id: publication.ontology_version_id,
+            source_type: snapshot.source_type,
+            confidence: snapshotConfidence(snapshot.confidence),
+            item_hash: item.item_hash,
+            evidence: item.support_evidence_ids.map((evidence_id) => ({ evidence_id })),
+            publication_id: publication.id,
+            manifest_hash: publication.manifest_hash,
+            depth: 1,
+        };
+    });
+    if (nodes.some((node) => !node)) return null;
+
+    const relationIds = new Set();
+    const relations = relationItems.map((item) => {
+        if (relationIds.has(item.relation_id) || !validPublicationItem(item, identity, 'relation')) return null;
+        relationIds.add(item.relation_id);
+        const snapshot = item.fact_snapshot;
+        if (!entityIds.has(snapshot.source_entity_id) || !entityIds.has(snapshot.target_entity_id)) return null;
+        return {
+            id: item.relation_id,
+            source_entity_id: snapshot.source_entity_id,
+            target_entity_id: snapshot.target_entity_id,
+            relation_type: snapshotType(snapshot.relation_type_id, 'Relation'),
+            library: library || { id: publication.library_id, slug: '' },
+            ontology_version_id: publication.ontology_version_id,
+            source_type: snapshot.source_type,
+            confidence: snapshotConfidence(snapshot.confidence),
+            item_hash: item.item_hash,
+            evidence: item.support_evidence_ids.map((evidence_id) => ({ evidence_id })),
+            publication_id: publication.id,
+            manifest_hash: publication.manifest_hash,
+            depth: 1,
+        };
+    });
+    if (relations.some((relation) => !relation)) return null;
+
+    const connectedIds = new Set(relations.flatMap((relation) => [
+        relation.source_entity_id,
+        relation.target_entity_id,
+    ]));
+    return {
+        panorama: true,
+        publication,
+        nodes,
+        relations,
+        entity_count: nodes.length,
+        relation_count: relations.length,
+        isolated_count: nodes.filter((node) => !connectedIds.has(node.id)).length,
+        evidence_count: [...nodes, ...relations].reduce((total, item) => total + item.evidence.length, 0),
+        library_count: 1,
+    };
+}
 
 export function explorationSeedSearchRowValid(seed) {
     const publicationValid = seed?.publication_state === 'staged'
@@ -116,16 +301,6 @@ export function explorationSeedKey(seed) {
     const libraryId = validUuid(seed?.library?.id) ? seed.library.id : '';
     const entityId = validUuid(seed?.id) ? seed.id : '';
     return libraryId && entityId ? `${libraryId}:${entityId}` : '';
-}
-
-export function selectExplorationSeed(current, seed, limit = 4) {
-    const selected = Array.isArray(current) ? [...current] : [];
-    const key = explorationSeedKey(seed);
-    if (!key || !explorationSeedEligible(seed)
-        || selected.length >= Math.min(4, Math.max(1, limit))
-        || selected.some((item) => explorationSeedKey(item) === key)) return selected;
-    selected.push(seed);
-    return selected;
 }
 
 function validPublication(publication, identity) {
@@ -256,87 +431,19 @@ export function graphTraversalSummary(value) {
     if (value?.truncated?.relations) truncationLabels.push('关系');
     if (value?.truncated?.evidence) truncationLabels.push('证据');
     return {
-        nodes: Number.isInteger(value?.counts?.nodes) ? value.counts.nodes : 0,
-        relations: Number.isInteger(value?.counts?.relations) ? value.counts.relations : 0,
+        nodes: Number.isInteger(value?.counts?.nodes)
+            ? value.counts.nodes
+            : Number.isInteger(value?.entity_count)
+                ? value.entity_count
+                : Array.isArray(value?.nodes) ? value.nodes.length : 0,
+        relations: Number.isInteger(value?.counts?.relations)
+            ? value.counts.relations
+            : Number.isInteger(value?.relation_count)
+                ? value.relation_count
+                : Array.isArray(value?.relations) ? value.relations.length : 0,
         evidence: Number.isInteger(value?.counts?.evidence_locators)
             ? value.counts.evidence_locators
-            : 0,
+            : Number.isInteger(value?.evidence_count) ? value.evidence_count : 0,
         truncationLabels,
     };
-}
-
-function sortedNodes(value) {
-    return [...(value?.nodes || [])].sort((left, right) => (
-        left.depth - right.depth
-        || text(left.normalized_name).localeCompare(text(right.normalized_name), 'zh-CN')
-        || text(left.id).localeCompare(text(right.id))
-    ));
-}
-
-export function layoutGraphRadially(value, width, height) {
-    const safeWidth = Math.max(240, Number(width) || 240);
-    const safeHeight = Math.max(220, Number(height) || 220);
-    const centerX = safeWidth / 2;
-    const centerY = safeHeight / 2;
-    const ringBase = Math.max(54, Math.min(safeWidth, safeHeight));
-    const radii = { 0: 0, 1: ringBase * 0.24, 2: ringBase * 0.41 };
-    const resultNodes = [];
-    const byId = new Map();
-    const nodes = sortedNodes(value);
-    for (const depth of [0, 1, 2]) {
-        const ring = nodes.filter((item) => item.depth === depth);
-        ring.forEach((item, index) => {
-            const angle = depth === 0 ? 0 : (-Math.PI / 2) + ((Math.PI * 2 * index) / ring.length);
-            const layoutNode = {
-                id: item.id,
-                depth,
-                label: item.canonical_name,
-                x: centerX + Math.cos(angle) * radii[depth],
-                y: centerY + Math.sin(angle) * radii[depth],
-                radius: depth === 0 ? 20 : 17,
-            };
-            resultNodes.push(layoutNode);
-            byId.set(item.id, layoutNode);
-        });
-    }
-    const relations = [...(value?.relations || [])]
-        .sort((left, right) => text(left.id).localeCompare(text(right.id)))
-        .map((relation) => {
-            const source = byId.get(relation.source_entity_id);
-            const target = byId.get(relation.target_entity_id);
-            return {
-                id: relation.id,
-                direction: relation.relation_type.direction,
-                label: relation.relation_type.label,
-                x1: source.x,
-                y1: source.y,
-                x2: target.x,
-                y2: target.y,
-            };
-        });
-    return { width: safeWidth, height: safeHeight, nodes: resultNodes, relations };
-}
-
-function pointSegmentDistance(x, y, line) {
-    const dx = line.x2 - line.x1;
-    const dy = line.y2 - line.y1;
-    if (dx === 0 && dy === 0) return Math.hypot(x - line.x1, y - line.y1);
-    const ratio = Math.max(0, Math.min(1, (
-        ((x - line.x1) * dx) + ((y - line.y1) * dy)
-    ) / ((dx * dx) + (dy * dy))));
-    return Math.hypot(x - (line.x1 + ratio * dx), y - (line.y1 + ratio * dy));
-}
-
-export function hitTestGraphLayout(layout, x, y) {
-    for (const node of layout?.nodes || []) {
-        if (Math.hypot(x - node.x, y - node.y) <= node.radius + 5) {
-            return { kind: 'node', id: node.id };
-        }
-    }
-    for (const relation of layout?.relations || []) {
-        if (pointSegmentDistance(x, y, relation) <= 7) {
-            return { kind: 'relation', id: relation.id };
-        }
-    }
-    return null;
 }

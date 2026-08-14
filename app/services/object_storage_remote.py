@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 from datetime import timedelta
+from pathlib import Path
 from typing import Any, Callable
 
 from app.schemas.storage import validate_object_key
@@ -103,6 +104,24 @@ class MinioObjectStorageAdapter:
                 object_key,
                 io.BytesIO(content),
                 len(content),
+                content_type=content_type or "application/octet-stream",
+            ),
+        )
+        return StorageObjectVersion(
+            object_version=_provider_text_or_none(getattr(result, "version_id", None)),
+            etag=_provider_text_or_none(getattr(result, "etag", None)),
+        )
+
+    async def put_file(
+        self, object_key: str, source_path: Path, content_type: str | None
+    ) -> StorageObjectVersion:
+        _validate_remote_key(object_key)
+        result = await self._call(
+            "provider_write_failed",
+            lambda: self._client.fput_object(
+                self.bucket,
+                object_key,
+                str(source_path),
                 content_type=content_type or "application/octet-stream",
             ),
         )
@@ -215,6 +234,22 @@ class OssObjectStorageAdapter:
         result = await self._call(
             "provider_write_failed",
             lambda: self._bucket_client.put_object(object_key, content, headers=headers),
+        )
+        return StorageObjectVersion(
+            object_version=_provider_text_or_none(getattr(result, "versionid", None)),
+            etag=_provider_text_or_none(getattr(result, "etag", None)),
+        )
+
+    async def put_file(
+        self, object_key: str, source_path: Path, content_type: str | None
+    ) -> StorageObjectVersion:
+        _validate_remote_key(object_key)
+        headers = {"Content-Type": content_type} if content_type else None
+        result = await self._call(
+            "provider_write_failed",
+            lambda: self._bucket_client.put_object_from_file(
+                object_key, str(source_path), headers=headers
+            ),
         )
         return StorageObjectVersion(
             object_version=_provider_text_or_none(getattr(result, "versionid", None)),

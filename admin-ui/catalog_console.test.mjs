@@ -22,8 +22,10 @@ import {
 } from './src/catalog_ui.js';
 import {
     getCatalogDocumentProcessing,
+    getDocumentFullSource,
     listCatalogDocuments,
     retryCatalogDocumentProcessing,
+    setDocumentClassification,
 } from './src/api.js';
 import { canManageLibrary } from './src/menu_access.js';
 
@@ -32,6 +34,7 @@ const api = readFileSync(new URL('./src/api.js', import.meta.url), 'utf8');
 const app = readFileSync(new URL('./src/app.js', import.meta.url), 'utf8');
 const layout = readFileSync(new URL('./src/views/Layout.js', import.meta.url), 'utf8');
 const menu = readFileSync(new URL('./src/menu_access.js', import.meta.url), 'utf8');
+const navigation = readFileSync(new URL('./src/domain_navigation.js', import.meta.url), 'utf8');
 const css = readFileSync(new URL('./style.css', import.meta.url), 'utf8');
 
 test('maps coarse and capability states without treating unknown values as ready', () => {
@@ -260,16 +263,44 @@ test('processing API uses the exact current-document routes and fenced retry bod
     });
 });
 
-test('wires a read-gated Catalog route and sidebar entry', () => {
+test('classification editing uses the document endpoint and effective decision fence', async () => {
+    const originalFetch = globalThis.fetch;
+    const requests = [];
+    globalThis.fetch = async (path, options = {}) => {
+        requests.push({ path: String(path), options });
+        return new Response(JSON.stringify({ ok: true }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+        });
+    };
+    const body = {
+        expected_effective_decision_set_id: 'decision-set-1',
+        primary_label_id: 'label-a',
+        secondary_label_ids: ['label-b'],
+    };
+    try {
+        await setDocumentClassification('contracts', 'doc-1', body);
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+    assert.deepEqual(requests.map((item) => item.path), [
+        '/libraries/contracts/classifications/documents/doc-1',
+    ]);
+    assert.equal(requests[0].options.method, 'PUT');
+    assert.deepEqual(JSON.parse(requests[0].options.body), body);
+});
+test('wires a read-gated Catalog route inside the knowledge asset domain', () => {
     assert.match(app, /path:\s*'catalog'/);
     assert.match(app, /KnowledgeCatalog/);
     assert.match(app, /perm:\s*'read'/);
     assert.match(app, /effectivePerm:\s*'read'/);
     assert.match(menu, /catalog:\s*acts\.has\('read'\)/);
     assert.match(app, /canAccessEffectiveRoute/);
-    assert.match(layout, /v-if="access\.catalog"/);
-    assert.match(layout, /index="\/catalog"/);
-    assert.match(layout, /知识目录/);
+    assert.match(layout, /visibleSidebarGroups/);
+    assert.match(navigation, /knowledgeAssets/);
+    assert.match(navigation, /label:\s*'知识资产'/);
+    assert.match(navigation, /path:\s*APP_PATHS\.catalog/);
+    assert.match(navigation, /access:\s*'catalog'/);
 });
 
 test('uses the strict Catalog read and processing APIs', () => {
@@ -311,6 +342,9 @@ test('view keeps list, deep-linked detail, evidence, and file access in one read
         'api.getCatalogDocumentProcessing',
         'api.retryCatalogDocumentProcessing',
         'processingResponseMatches',
+        'classificationEditor',
+        'api.setDocumentClassification',
+        'expected_effective_decision_set_id',
         'source_job_id: stage.job_id',
         'retry_generation: stage.retry_generation',
     ]) assert.ok(view.includes(token), `missing view contract ${token}`);
@@ -320,11 +354,71 @@ test('view keeps list, deep-linked detail, evidence, and file access in one read
     assert.doesNotMatch(view, /style="[^"]*"/, 'Catalog template must not use inline styles');
 });
 
+test('document detail shows content directly and only surfaces processing failures', () => {
+    assert.ok(view.includes('processingIssues'));
+    assert.ok(view.includes('<h3>处理异常</h3>'));
+    assert.ok(view.includes('v-for="stage in processingIssues"'));
+    assert.ok(!view.includes('<h3>知识能力</h3>'));
+    assert.ok(!view.includes('<h3>文档处理</h3>'));
+    assert.ok(!view.includes('catalog-capability-grid'));
+});
+
+test('full source API sends bounded window parameters', async () => {
+    const originalFetch = globalThis.fetch;
+    let requestedPath = '';
+    globalThis.fetch = async (path) => {
+        requestedPath = String(path);
+        return new Response(JSON.stringify({ normalized_text: 'page' }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+        });
+    };
+    try {
+        await getDocumentFullSource('contracts', 'doc-1', { offset: 100000, limit: 100000 });
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+    assert.equal(
+        requestedPath,
+        '/libraries/contracts/documents/doc-1/source/full?offset=100000&limit=100000',
+    );
+});
+
+test('full source reader exposes bounded progress, explicit loading, and stale response fence', () => {
+    assert.match(view, /sourceRequestSeq/);
+    assert.match(view, /Array\.from\(String\(data\.normalized_text \|\| ''\)\)\.length/);
+    assert.match(view, /已加载 \{\{ sourceReader\.nextOffset \}\}/);
+    assert.match(view, /搜索已加载内容/);
+    assert.match(view, /@click="loadMoreSource"/);
+});
+
+test('full source dialog keeps long documents inside a scrollable viewport', () => {
+    assert.match(css, /\.documents-source-dialog\s*\{[^}]*width:\s*min\(860px,\s*calc\(100vw - 32px\)\)/s);
+    assert.match(css, /\.documents-source-dialog \.el-dialog__body\s*\{[^}]*max-height:\s*calc\(90vh - 72px\)[^}]*overflow-y:\s*auto/s);
+    assert.match(css, /\.documents-source-text\s*\{[^}]*overflow-wrap:\s*anywhere[^}]*white-space:\s*pre-wrap/s);
+});
+
+test('pending classifications are reviewed inside the catalog document detail', () => {
+    for (const token of [
+        'loadCurrentClassificationReview',
+        'api.listClassificationReviews',
+        'reviewPageMatches',
+        'api.reviewClassificationRun',
+        'expected_run_status: run.status',
+        "submitClassificationReview('accept')",
+        "submitClassificationReview('change')",
+        "submitClassificationReview('reject')",
+        '确认建议',
+        '调整后确认',
+    ]) assert.ok(view.includes(token), `missing inline review contract ${token}`);
+    assert.match(view, /state === 'pending_review'[\s\S]*?\? '审核' : '详情'/);
+    assert.ok(css.includes('.catalog-classification-review'));
+});
+
 test('catalog styles are compact, responsive, and bounded', () => {
     for (const token of [
         '.catalog-workspace',
         '.catalog-filter-band',
-        '.catalog-capability-grid',
         '.catalog-graph-grid',
         '.catalog-processing-list',
         '.catalog-processing-row',

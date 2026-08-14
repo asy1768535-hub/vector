@@ -6,6 +6,9 @@
 from __future__ import annotations
 
 import logging
+import math
+from dataclasses import dataclass
+from collections.abc import Mapping
 from typing import Sequence
 
 import httpx
@@ -15,10 +18,33 @@ from app.config import settings
 log = logging.getLogger(__name__)
 
 _TIMEOUT = httpx.Timeout(connect=5.0, read=60.0, write=30.0, pool=5.0)
+_DEFAULT_BATCH_SIZE = 32
 
 
 class RerankError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class RerankObservation:
+    """Bounded request-local rerank outcome without query or provider payloads."""
+
+    effective: str
+    provider: str
+    candidate_count: int
+    scored_count: int
+    fallback_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RankedCandidates:
+    order: list[int]
+    scores: dict[int, float]
+    observation: RerankObservation
+
+    def __iter__(self):
+        yield self.order
+        yield self.scores
 
 
 def is_configured() -> bool:
@@ -53,33 +79,66 @@ async def rank_candidates(
     top_k: int,
     enabled: bool,
     log_label: str = "",
-) -> tuple[list[int], dict[int, float]]:
-    """召回候选重排 → (order, rerank_scores)。Dify 检索与库内查询共用。
-
-    - enabled=False 或无候选：返回原向量序、空分数（不发请求）。
-    - 重排成功：order 为重排序补满后截到 top_k；rerank_scores 仅含合法且命中的下标。
-    - 重排失败：打 ERROR（带 log_label 区分来源）后回退原向量序（绝不阻断检索）。
-    """
+    disabled_reason: str = "disabled",
+) -> RankedCandidates:
+    """Rerank candidates in bounded batches and expose a safe outcome summary."""
     total = len(contents)
-    order = list(range(total))
-    scores: dict[int, float] = {}
-    if enabled and total:
-        try:
-            ranked = await rerank(query, contents, top_n=top_k)
-            order = fill_order([idx for idx, _ in ranked], total)
-            # 与 fill_order 同口径：合法 + 首次出现优先。重复 index 时 ranked 已按分降序，
-            # 首次即最高分；若用字典推导式会被末项（较低分）覆盖，造成顺序按高分、展示按低分。
-            for idx, sc in ranked:
-                if 0 <= idx < total and idx not in scores:
-                    scores[idx] = sc
-        except Exception as exc:  # noqa: BLE001
-            suffix = f" ({log_label})" if log_label else ""
-            log.error("rerank failed%s, fallback to vector order: %s", suffix, exc)
-            order = list(range(total))
-    return order[:top_k], scores
+    provider = (settings.rerank_provider or "standard").lower()
+    vector_order = list(range(total))[:top_k]
+    if not enabled:
+        return RankedCandidates(
+            vector_order,
+            {},
+            RerankObservation("disabled", provider, total, 0, disabled_reason),
+        )
+    if not total:
+        return RankedCandidates([], {}, RerankObservation("success", provider, 0, 0))
+
+    try:
+        ranked: list[tuple[int, float]] = []
+        batch_size = max(1, min(settings.rerank_batch_size, _DEFAULT_BATCH_SIZE, total))
+        for start in range(0, total, batch_size):
+            batch = contents[start : start + batch_size]
+            batch_ranked = await rerank(query, batch, top_n=len(batch))
+            if not batch_ranked:
+                raise RerankError("empty_result")
+            ranked.extend((start + idx, score) for idx, score in batch_ranked)
+        ranked.sort(key=lambda item: (-item[1], item[0]))
+        deduped: list[tuple[int, float]] = []
+        seen: set[int] = set()
+        for idx, score in ranked:
+            if 0 <= idx < total and idx not in seen:
+                seen.add(idx)
+                deduped.append((idx, score))
+        order = fill_order([idx for idx, _ in deduped], total)[:top_k]
+        scores = {idx: score for idx, score in deduped}
+        return RankedCandidates(
+            order,
+            scores,
+            RerankObservation("success", provider, total, len(scores)),
+        )
+    except Exception as exc:  # noqa: BLE001
+        suffix = f" ({log_label})" if log_label else ""
+        log.error(
+            "rerank failed%s: error_type=%s candidate_count=%s",
+            suffix,
+            type(exc).__name__,
+            total,
+        )
+        return RankedCandidates(
+            vector_order,
+            {},
+            RerankObservation("fallback", provider, total, 0, "provider_error"),
+        )
 
 
-def _parse_results(body: dict, top_n: int) -> list[tuple[int, float]]:
+def _parse_results(
+    body: object,
+    top_n: int,
+    *,
+    provider: str = "standard",
+    total: int | None = None,
+) -> list[tuple[int, float]]:
     """解析 rerank 响应 {"results":[{"index","relevance_score"}]}。
 
     兼容两种包装：标准格式直接在 body["results"]；DashScope 原生在 body["output"]["results"]。
@@ -90,17 +149,50 @@ def _parse_results(body: dict, top_n: int) -> list[tuple[int, float]]:
     去重在截断之前：标准 reranker 不该返回重复 index，但异常时若重复，降序后保留首次
     （最高分）出现，避免重复 index 占用 top_n 名额、把合法的不同文档挤出结果。
     """
-    results = body.get("results")
-    if results is None:
-        results = (body.get("output") or {}).get("results")
-    results = results or []
+    if provider == "tei":
+        if not isinstance(body, list):
+            raise RerankError("TEI rerank response must be a JSON array")
+        results = body
+        score_key = "score"
+    else:
+        if not isinstance(body, Mapping):
+            raise RerankError("rerank response must be a JSON object")
+        results = body.get("results")
+        if results is None:
+            output = body.get("output")
+            results = output.get("results") if isinstance(output, Mapping) else None
+        results = [] if results is None else results
+        score_key = "relevance_score"
+    if not isinstance(results, list):
+        raise RerankError("rerank results must be a JSON array")
     out: list[tuple[int, float]] = []
     for item in results:
+        if not isinstance(item, Mapping):
+            raise RerankError("rerank result item must be an object")
         idx = item.get("index")
         if idx is None:
+            if provider == "tei":
+                raise RerankError("TEI rerank result is missing index")
             continue
-        score = item.get("relevance_score")
-        out.append((int(idx), float(score) if score is not None else 0.0))
+        if isinstance(idx, bool) or not isinstance(idx, int) or idx < 0:
+            raise RerankError(f"invalid rerank index: {idx!r}")
+        if total is not None and idx >= total:
+            raise RerankError(f"rerank index out of range: {idx}")
+        raw_score = item.get(score_key)
+        if raw_score is None:
+            if provider == "tei":
+                raise RerankError("TEI rerank result is missing score")
+            score = 0.0
+        else:
+            if isinstance(raw_score, bool):
+                raise RerankError(f"invalid rerank score: {raw_score!r}")
+            try:
+                score = float(raw_score)
+            except (TypeError, ValueError) as exc:
+                raise RerankError(f"invalid rerank score: {raw_score!r}") from exc
+            if not math.isfinite(score):
+                raise RerankError(f"non-finite rerank score: {raw_score!r}")
+        out.append((idx, score))
     out.sort(key=lambda item: (-item[1], item[0]))
     deduped: list[tuple[int, float]] = []
     seen: set[int] = set()
@@ -131,11 +223,24 @@ async def rerank(
     """
     if not documents:
         return []
+    eff_provider = (provider or settings.rerank_provider or "standard").lower()
     url = base_url or settings.rerank_base_url
     # key 优先级：显式传入 > RERANK_API_KEY > 复用 EMBEDDING_API_KEY（同服务商同 key 省事）
-    key = api_key if api_key is not None else (settings.rerank_api_key or settings.embedding_api_key)
+    if api_key is not None:
+        key = api_key
+    elif eff_provider == "tei":
+        key = settings.rerank_api_key
+    else:
+        key = settings.rerank_api_key or settings.embedding_api_key
     mdl = model or settings.rerank_model
-    if (provider or settings.rerank_provider or "standard").lower() == "dashscope":
+    if eff_provider == "tei":
+        payload = {
+            "query": query,
+            "texts": list(documents),
+            "return_text": False,
+            "raw_scores": False,
+        }
+    elif eff_provider == "dashscope":
         # DashScope 原生 text-rerank：input/parameters 结构，结果在 output.results
         payload = {
             "model": mdl,
@@ -154,4 +259,6 @@ async def rerank(
         resp = await client.post(url, json=payload, headers=headers)
     if resp.status_code != 200:
         raise RerankError(f"rerank service {resp.status_code}: {resp.text[:300]}")
-    return _parse_results(resp.json(), top_n)
+    return _parse_results(
+        resp.json(), top_n, provider=eff_provider, total=len(documents)
+    )

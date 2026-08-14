@@ -82,6 +82,18 @@ def test_threshold_returns_fewer_than_top_k():
     assert len(resp.records) == 1 and resp.records[0].score == 0.9   # 仅 1 条过阈，正常返回较少
 
 
+def test_successful_rerank_returns_only_qualified_evidence():
+    hits = [_hit("a", 0.9, "A"), _hit("b", 0.8, "B")]
+    resp, _ = _run(
+        _req(top_k=5, threshold=0.0),
+        rerank_enabled=True,
+        search_return=hits,
+        rank_return=([0, 1], {0: 0.8, 1: 0.01}),
+    )
+
+    assert [record.metadata["document_id"] for record in resp.records] == ["a"]
+
+
 def test_threshold_zero_no_extra_filter():
     hits = [_hit("a", 0.9, "A"), _hit("b", 0.01, "B")]
     resp, _ = _run(_req(top_k=5, threshold=0.0), rerank_enabled=False, search_return=hits)

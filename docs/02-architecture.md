@@ -21,26 +21,35 @@
                                             ▼         ▼
                                    ┌──────────┐  ┌─────────────┐
                                    │  Qdrant  │  │ PostgreSQL  │
-                                   │lib_<slug>│  │ 8 业务表 +  │
-                                   │  ……      │  │ casbin_rule │
+                                   │lib_<slug>│  │ 核心表 +     │
+                                   │  ……      │  │ 能力表       │
                                    └────▲─────┘  └─────▲───────┘
                                         │              │
                                         │      poll    │ FOR UPDATE
-                                        │   ┌──────────┴──────┐
-                                        └───┤ embedding_worker│ 独立进程
-                                            │  ↓ bge-m3 HTTP  │ 可水平扩展
-                                            └─────────────────┘
+                                        │   ┌──────────┴───────────┐
+                                        └───┤ enabled workers       │ 独立进程
+                                            │ embed / cleanup       │ 可水平扩展
+                                            │ import / graph        │
+                                            │ artifact / class      │
+                                            └───────────────────────┘
 ```
 
 ## 进程模型
 
 | 进程 | 启动命令 | 状态 | 可水平扩展？ |
 |---|---|---|---|
-| API | `python -m app.main`（读 .env）/ `uvicorn app.main:app` | 无状态 | ✅ 任意副本 |
-| Worker | `python -m app.workers.embedder --watch` | 无状态 | ✅ `SKIP LOCKED` 保证不重复抢锁 |
+| API | `python -m app.main`（读 `.env`）/ `uvicorn app.main:app` | 无状态 | 按部署 profile 与权限同步策略扩展 |
+| Embedding Worker | `python -m app.workers.embedder --watch` | 无状态 | ✅ `SKIP LOCKED` 保证不重复抢锁 |
+| Cleanup Worker | `python -m app.workers.cleanup --watch` | 无状态 | ✅ 消费 Qdrant cleanup outbox |
+| Import Worker | `python -m app.workers.importer --watch` | 无状态 | 使用文件导入链路时启用 |
+| Graph Worker | `python -m app.workers.graph_extractor --watch` | 无状态 | `GRAPH_EXTRACTION_ENABLED=true` 时启用 |
+| Knowledge Artifact Worker | `python -m app.workers.knowledge_artifacts --watch` | 无状态 | `KNOWLEDGE_ARTIFACT_RUNTIME_ENABLED=true` 时启用 |
+| Classification Worker | `python -m app.workers.classifications --watch` | 无状态 | `CLASSIFICATION_RUNTIME_ENABLED=true` 时启用 |
 | PostgreSQL | 外部 | 有状态 | 主从 / 读写分离按需 |
 | Qdrant | 外部 | 有状态 | 当前用单节点 |
-| Embedding 服务（bge-m3） | 外部 | 无状态 | ✅ |
+| Embedding / Rerank / OCR / Model 服务 | 外部或本地 | 无状态 | 按 provider 与 feature gate 配置 |
+
+基础部署通常需要 API、Embedding Worker 和 Cleanup Worker。文件导入、图谱提取、知识产物和分类分别由对应入口消费；未启用的能力不需要启动对应进程。`graph_claim_shadow_enabled` 属于图谱/claim shadow 处理链路，不能从“迁移存在”推断为已对外启用。
 
 ## 数据流（写）
 

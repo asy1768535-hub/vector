@@ -1,6 +1,6 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { ElMessage } from 'element-plus';
+import { ElMessage, ElMessageBox } from 'element-plus';
 
 import * as api from '../api.js';
 import {
@@ -35,14 +35,32 @@ import {
     shortCatalogId,
 } from '../catalog_ui.js';
 import { dataEmpty, serviceError } from '../illustrations.js';
+import {
+    classificationReviewErrorKind,
+    classificationReviewErrorMessage,
+    formatReviewConfidence,
+    initialReviewSelection,
+    reviewCanAccept,
+    reviewPageMatches,
+    reviewProposalLabel,
+    reviewReasonLabel,
+    reviewRoleLabel,
+    validateReviewSelection,
+} from '../classification_review_ui.js';
+import {
+    documentStatusLabel,
+    documentStatusTag,
+    documentTypeIcon,
+} from '../documents_ui.js';
 import { canManageLibrary, readableLibraries, resolveSelectedSlug } from '../menu_access.js';
-import { store } from '../store.js';
+import { hasPermission, store } from '../store.js';
 
 const EMPTY_FILTERS = {
     title: '',
     status: '',
     classificationState: '',
     labelId: '',
+    dateRange: [],
 };
 
 function copyFilters(target, source) {
@@ -50,12 +68,13 @@ function copyFilters(target, source) {
     target.status = String(source?.status || '');
     target.classificationState = String(source?.classificationState || '');
     target.labelId = String(source?.labelId || '');
+    target.dateRange = Array.isArray(source?.dateRange) ? [...source.dateRange] : [];
 }
 
 function fixedErrorMessage(kind) {
     if (kind === 'forbidden') return '你没有读取该知识库目录的权限';
-    if (kind === 'unavailable') return '知识目录暂未启用，或当前内容已不可用';
-    return '知识目录加载失败，请稍后重试';
+    if (kind === 'unavailable') return '知识暂未启用，或当前内容已不可用';
+    return '知识加载失败，请稍后重试';
 }
 
 function fixedProcessingErrorMessage(kind) {
@@ -63,6 +82,29 @@ function fixedProcessingErrorMessage(kind) {
     if (kind === 'unavailable') return '文档处理诊断暂不可用';
     if (kind === 'conflict') return '文档或任务状态已变化，请刷新后重试';
     return '文档处理详情加载失败，请稍后重试';
+}
+
+function rowInDateRange(row, filters) {
+    const [startText, endText] = Array.isArray(filters?.dateRange) ? filters.dateRange : [];
+    const start = startText ? new Date(`${startText}T00:00:00`) : null;
+    const end = endText ? new Date(`${endText}T23:59:59.999`) : null;
+    if (!start && !end) return true;
+    if ((start && Number.isNaN(start.getTime())) || (end && Number.isNaN(end.getTime()))) return false;
+    const updated = new Date(row?.updated_at);
+    if (Number.isNaN(updated.getTime())) return false;
+    if (start && updated < start) return false;
+    if (end && updated > end) return false;
+    return true;
+}
+
+function hasFilterValues(filters) {
+    return Boolean(
+        filters.title
+        || filters.status
+        || filters.classificationState
+        || filters.labelId
+        || (Array.isArray(filters.dateRange) && filters.dateRange.length)
+    );
 }
 
 export default {
@@ -74,6 +116,7 @@ export default {
         const filterDraft = reactive({ ...EMPTY_FILTERS });
         const appliedFilters = reactive({ ...EMPTY_FILTERS });
         const pageSize = ref(20);
+        const stats = ref(null);
         const cursor = reactive({ history: [], current: null });
         const page = reactive({
             items: [],
@@ -91,6 +134,22 @@ export default {
             errorKind: '',
             errorMessage: '',
         });
+        const classificationEditor = reactive({
+            labels: [],
+            primaryLabelId: '',
+            secondaryLabelIds: [],
+            editing: false,
+            loading: false,
+            saving: false,
+            error: '',
+        });
+        const classificationReview = reactive({
+            run: null,
+            taxonomyVersionId: '',
+            loading: false,
+            error: '',
+            mutatingAction: '',
+        });
         const evidence = reactive({
             open: false,
             data: null,
@@ -106,6 +165,23 @@ export default {
             retryingStage: '',
             retryError: '',
         });
+        const sourceReader = reactive({
+            open: false,
+            loading: false,
+            loadingMore: false,
+            row: null,
+            data: null,
+            error: '',
+            keyword: '',
+            nextOffset: 0,
+        });
+        const dialog = reactive({
+            open: false,
+            mode: 'create',
+            docId: null,
+            row: null,
+            form: { title: '', external_id: '', text: '', splitter: 'text', metadata_json: '' },
+        });
         const fileLoadingId = ref('');
 
         let requestSeq = 0;
@@ -114,25 +190,83 @@ export default {
         let fileRequestSeq = 0;
         let processingRequestSeq = 0;
         let processingMutationSeq = 0;
+        let classificationReviewSeq = 0;
+        let sourceRequestSeq = 0;
         let routeReady = false;
 
-        const documentId = computed(() => String(route.query.document || ''));
+        const documentId = computed(() => String(route.query.document || route.query.open || ''));
         const showingDetail = computed(() => Boolean(documentId.value));
         const pageNumber = computed(() => cursor.history.length + 1);
         const selectedLibrary = computed(() => (
             libraries.value.find((item) => item.slug === selectedSlug.value) || null
+        ));
+        const canInsert = computed(() => (
+            Boolean(selectedSlug.value)
+            && (store.user?.is_superuser || hasPermission(selectedSlug.value, 'insert'))
+        ));
+        const canDelete = computed(() => (
+            Boolean(selectedSlug.value)
+            && (store.user?.is_superuser || hasPermission(selectedSlug.value, 'delete'))
         ));
         const canManageProcessing = computed(() => canManageLibrary(
             store.permissions,
             store.organizations,
             selectedSlug.value,
         ));
-        const hasAppliedFilters = computed(() => Object.values(appliedFilters).some(Boolean));
-        const hasDraftFilters = computed(() => Object.values(filterDraft).some(Boolean));
-        const detailCapabilities = computed(() => capabilityEntries(detail.data?.capabilities));
+        const processingCount = computed(() => (
+            Number(stats.value?.pending_jobs || 0) + Number(stats.value?.processing_jobs || 0)
+        ));
+        const hasAppliedFilters = computed(() => hasFilterValues(appliedFilters));
+        const hasDraftFilters = computed(() => hasFilterValues(filterDraft));
+        const visibleItems = computed(() => (page.items || []).filter((row) => rowInDateRange(row, appliedFilters)));
+        const processingIssues = computed(() => (processing.data?.stages || []).filter((stage) => (
+            stage?.safe_error_code
+            || processingStageRetryable(stage)
+            || ['failed', 'partially_succeeded'].includes(stage?.status)
+        )));
         const detailPrimary = computed(() => classificationPrimary(detail.data?.classification));
         const detailSecondary = computed(() => classificationSecondary(detail.data?.classification));
         const evidenceParts = computed(() => catalogEvidenceParts(evidence.data));
+        const sourceText = computed(() => String(sourceReader.data?.normalized_text || ''));
+        const sourceMatchCount = computed(() => {
+            const keyword = sourceReader.keyword.trim().toLowerCase();
+            if (!keyword) return 0;
+            const text = sourceText.value.toLowerCase();
+            let count = 0;
+            let pos = 0;
+            while (pos < text.length) {
+                const idx = text.indexOf(keyword, pos);
+                if (idx < 0) break;
+                count += 1;
+                pos = idx + keyword.length;
+            }
+            return count;
+        });
+        const highlightedSourceParts = computed(() => {
+            const text = sourceText.value;
+            const keyword = sourceReader.keyword.trim();
+            if (!keyword) return [{ text, match: false }];
+            const lowerText = text.toLowerCase();
+            const lowerKeyword = keyword.toLowerCase();
+            const parts = [];
+            let pos = 0;
+            while (pos < text.length) {
+                const idx = lowerText.indexOf(lowerKeyword, pos);
+                if (idx < 0) break;
+                if (idx > pos) parts.push({ text: text.slice(pos, idx), match: false });
+                parts.push({ text: text.slice(idx, idx + keyword.length), match: true });
+                pos = idx + keyword.length;
+            }
+            if (pos < text.length) parts.push({ text: text.slice(pos), match: false });
+            return parts.length ? parts : [{ text, match: false }];
+        });
+        const canAcceptClassificationReview = computed(() => reviewCanAccept(
+            classificationReview.run,
+            {
+                taxonomy_version_id: classificationReview.taxonomyVersionId,
+                available_labels: classificationEditor.labels,
+            },
+        ));
 
         function setCursorState(next) {
             cursor.history.splice(0, cursor.history.length, ...(next.history || []));
@@ -153,6 +287,215 @@ export default {
             processing.retryError = '';
             if (resetMutation) processing.retryingStage = '';
         }
+        let classificationMutationSeq = 0;
+
+        function resetClassificationEditor(classification = null) {
+            classificationMutationSeq += 1;
+            classificationEditor.primaryLabelId = String(
+                classificationPrimary(classification)?.id || '',
+            );
+            classificationEditor.secondaryLabelIds = classificationSecondary(classification)
+                .map((item) => String(item.id));
+            classificationEditor.editing = false;
+            classificationEditor.loading = false;
+            classificationEditor.saving = false;
+            classificationEditor.error = '';
+        }
+
+        function clearClassificationReview() {
+            classificationReviewSeq += 1;
+            classificationReview.run = null;
+            classificationReview.taxonomyVersionId = '';
+            classificationReview.loading = false;
+            classificationReview.error = '';
+            classificationReview.mutatingAction = '';
+        }
+
+        async function loadCurrentClassificationReview(id) {
+            if (!canManageProcessing.value || !selectedSlug.value || !id) return;
+            const token = ++classificationReviewSeq;
+            const slug = selectedSlug.value;
+            classificationReview.loading = true;
+            classificationReview.run = null;
+            classificationReview.error = '';
+            try {
+                let offset = 0;
+                let response;
+                do {
+                    response = await api.listClassificationReviews(slug, { limit: 100, offset });
+                    if (token !== classificationReviewSeq || selectedSlug.value !== slug) return;
+                    if (!reviewPageMatches(response, { limit: 100, offset })) {
+                        classificationReview.error = classificationReviewErrorMessage('malformed');
+                        return;
+                    }
+                    const run = response.items.find((item) => (
+                        String(item.document_id) === String(id)
+                        && String(item.document_revision_id) === String(detail.data?.revision_id || '')
+                    ));
+                    classificationReview.taxonomyVersionId = String(
+                        response.taxonomy_version_id || '',
+                    );
+                    classificationEditor.labels = response.available_labels.map((label) => ({
+                        ...label,
+                        id: String(label.id),
+                        label: String(label.label || label.key || label.id),
+                    }));
+                    if (run) {
+                        classificationReview.run = run;
+                        return;
+                    }
+                    offset += response.items.length;
+                } while (response.items.length && offset < response.total);
+                classificationReview.error = '没有找到当前文档的待审核记录，请刷新后重试';
+            } catch (error) {
+                if (token !== classificationReviewSeq) return;
+                classificationReview.error = classificationReviewErrorMessage(
+                    classificationReviewErrorKind(error),
+                );
+            } finally {
+                if (token === classificationReviewSeq) classificationReview.loading = false;
+            }
+        }
+
+        async function loadClassificationOptions() {
+            if (!canManageProcessing.value || !selectedSlug.value) return;
+            const token = ++classificationMutationSeq;
+            const slug = selectedSlug.value;
+            classificationEditor.loading = true;
+            classificationEditor.error = '';
+            try {
+                const response = await api.listClassificationReviews(slug, {
+                    limit: 1,
+                    offset: 0,
+                });
+                if (token !== classificationMutationSeq || selectedSlug.value !== slug) return;
+                classificationEditor.labels = Array.isArray(response?.available_labels)
+                    ? response.available_labels.map((label) => ({
+                        id: String(label.id),
+                        label: String(label.label || label.key || label.id),
+                    }))
+                    : [];
+            } catch (error) {
+                if (token !== classificationMutationSeq) return;
+                classificationEditor.error = error?.status === 403
+                    ? '\u4f60\u6ca1\u6709\u4fee\u6539\u8be5\u77e5\u8bc6\u5e93\u5206\u7c7b\u7684\u6743\u9650'
+                    : '\u5206\u7c7b\u9009\u9879\u52a0\u8f7d\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5';
+            } finally {
+                if (token === classificationMutationSeq) classificationEditor.loading = false;
+            }
+        }
+
+        async function startEditingClassification() {
+            resetClassificationEditor(detail.data?.classification);
+            classificationEditor.editing = true;
+            if (!classificationEditor.labels.length) await loadClassificationOptions();
+        }
+
+        function startEditingClassificationReview() {
+            const selection = initialReviewSelection(classificationReview.run, {
+                available_labels: classificationEditor.labels,
+            });
+            classificationEditor.primaryLabelId = selection.primaryLabelId;
+            classificationEditor.secondaryLabelIds = selection.secondaryLabelIds;
+            classificationEditor.error = '';
+            classificationEditor.editing = true;
+        }
+
+        async function submitClassificationReview(action) {
+            const run = classificationReview.run;
+            if (!run || classificationReview.mutatingAction || !selectedSlug.value) return;
+            if (action === 'accept' && !canAcceptClassificationReview.value) {
+                ElMessage.warning('模型建议包含无效分类，请调整后再确认');
+                return;
+            }
+            if (action === 'change') {
+                const validation = validateReviewSelection(
+                    classificationEditor.primaryLabelId,
+                    classificationEditor.secondaryLabelIds,
+                    classificationEditor.labels,
+                );
+                if (validation) {
+                    ElMessage.warning(validation);
+                    return;
+                }
+            }
+            if (run.status === 'blocked_manual' && action !== 'reject') {
+                try {
+                    await ElMessageBox.confirm(
+                        '当前文档已有人工分类，继续后将替换现有结果。',
+                        '确认替换分类',
+                        { confirmButtonText: '继续审核', cancelButtonText: '取消', type: 'warning' },
+                    );
+                } catch {
+                    return;
+                }
+            }
+            const token = ++classificationReviewSeq;
+            const slug = selectedSlug.value;
+            const id = String(detail.data.document_id);
+            classificationReview.mutatingAction = action;
+            classificationReview.error = '';
+            try {
+                await api.reviewClassificationRun(slug, run.id, {
+                    expected_run_status: run.status,
+                    expected_effective_decision_set_id: run.effective_decision_set_id || null,
+                    action,
+                    primary_label_id: action === 'change'
+                        ? classificationEditor.primaryLabelId : null,
+                    secondary_label_ids: action === 'change'
+                        ? classificationEditor.secondaryLabelIds : [],
+                });
+                if (token !== classificationReviewSeq || selectedSlug.value !== slug) return;
+                ElMessage.success(action === 'reject' ? '分类建议已驳回' : '分类审核已确认');
+                classificationEditor.editing = false;
+                await loadDetail(id, true);
+                await loadList(true);
+            } catch (error) {
+                if (token !== classificationReviewSeq) return;
+                classificationReview.error = classificationReviewErrorMessage(
+                    classificationReviewErrorKind(error),
+                );
+            } finally {
+                if (token === classificationReviewSeq) {
+                    classificationReview.mutatingAction = '';
+                }
+            }
+        }
+
+        async function saveClassification() {
+            if (!selectedSlug.value || !detail.data || classificationEditor.saving) return;
+            if (!classificationEditor.primaryLabelId) {
+                classificationEditor.error = '\u8bf7\u9009\u62e9\u4e3b\u5206\u7c7b';
+                return;
+            }
+            const token = ++classificationMutationSeq;
+            const slug = selectedSlug.value;
+            const id = String(detail.data.document_id);
+            classificationEditor.saving = true;
+            classificationEditor.error = '';
+            try {
+                await api.setDocumentClassification(slug, id, {
+                    expected_effective_decision_set_id: (
+                        detail.data.classification?.decision_set_id || null
+                    ),
+                    primary_label_id: classificationEditor.primaryLabelId,
+                    secondary_label_ids: classificationEditor.secondaryLabelIds
+                        .filter((labelId) => labelId !== classificationEditor.primaryLabelId)
+                        .slice(0, 8),
+                });
+                if (token !== classificationMutationSeq || selectedSlug.value !== slug) return;
+                ElMessage.success('\u5206\u7c7b\u5df2\u66f4\u65b0');
+                await loadDetail(id, true);
+                await loadList(true);
+            } catch (error) {
+                if (token !== classificationMutationSeq) return;
+                classificationEditor.error = error?.status === 409
+                    ? '\u5206\u7c7b\u5df2\u53d1\u751f\u53d8\u5316\uff0c\u8bf7\u5237\u65b0\u540e\u91cd\u65b0\u4fee\u6539'
+                    : '\u5206\u7c7b\u4fdd\u5b58\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5';
+            } finally {
+                if (token === classificationMutationSeq) classificationEditor.saving = false;
+            }
+        }
 
         function clearDetail() {
             detailRequestSeq += 1;
@@ -162,6 +505,8 @@ export default {
             detail.loading = false;
             detail.errorKind = '';
             detail.errorMessage = '';
+            resetClassificationEditor();
+            clearClassificationReview();
             clearProcessing();
             closeEvidence();
         }
@@ -195,6 +540,18 @@ export default {
             };
         }
 
+        async function loadStats(forceRefresh = false) {
+            if (!selectedSlug.value) {
+                stats.value = null;
+                return;
+            }
+            try {
+                stats.value = await api.libraryStats(selectedSlug.value, forceRefresh);
+            } catch (_) {
+                stats.value = null;
+            }
+        }
+
         async function loadList(forceRefresh = false, reset = false) {
             if (reset) resetCursor();
             if (!selectedSlug.value) {
@@ -204,6 +561,7 @@ export default {
                 page.next_cursor = null;
                 page.loaded = true;
                 page.loading = false;
+                stats.value = null;
                 return;
             }
             const token = ++requestSeq;
@@ -222,6 +580,7 @@ export default {
                 page.next_cursor = response?.next_cursor || null;
                 page.loaded = true;
                 mergeLabelOptions(page.items);
+                void loadStats(forceRefresh);
             } catch (error) {
                 if (token !== requestSeq) return;
                 const kind = catalogErrorKind(error);
@@ -255,6 +614,14 @@ export default {
                 );
                 if (token !== detailRequestSeq) return;
                 detail.data = response;
+                resetClassificationEditor(response.classification);
+                clearClassificationReview();
+                if (canManageProcessing.value
+                    && response.classification?.state === 'pending_review') {
+                    void loadCurrentClassificationReview(id);
+                } else if (canManageProcessing.value) {
+                    void loadClassificationOptions();
+                }
                 if (canManageProcessing.value) void loadProcessing(id);
             } catch (error) {
                 if (token !== detailRequestSeq) return;
@@ -346,7 +713,8 @@ export default {
         }
 
         async function syncFromRoute() {
-            const requestedSlug = String(route.query.library || '');
+            const requestedSlug = String(route.query.library || route.query.slug || '');
+            const requestedDocument = String(route.query.document || route.query.open || '');
             const nextSlug = resolveSelectedSlug(requestedSlug, libraries.value);
             if (!nextSlug) {
                 selectedSlug.value = null;
@@ -357,13 +725,19 @@ export default {
                 return;
             }
             if (requestedSlug !== nextSlug) {
-                await router.replace({ path: '/catalog', query: { library: nextSlug } });
+                await router.replace({
+                    path: '/knowledge-assets/catalog',
+                    query: requestedDocument
+                        ? { library: nextSlug, document: requestedDocument }
+                        : { library: nextSlug },
+                });
                 return;
             }
             const libraryChanged = selectedSlug.value !== nextSlug;
             if (libraryChanged) {
                 selectedSlug.value = nextSlug;
                 labelOptions.value = [];
+                classificationEditor.labels = [];
                 page.loaded = false;
                 copyFilters(filterDraft, EMPTY_FILTERS);
                 copyFilters(appliedFilters, EMPTY_FILTERS);
@@ -377,19 +751,245 @@ export default {
 
         async function selectLibrary(value) {
             if (!value || value === selectedSlug.value) return;
-            await router.push({ path: '/catalog', query: { library: value } });
+            await router.push({
+                path: '/knowledge-assets/catalog',
+                query: { library: value },
+            });
+        }
+
+        function documentIdOf(row) {
+            return String(row?.document_id || row?.id || '');
+        }
+
+        function openFileImport() {
+            if (!selectedSlug.value || !canInsert.value) return;
+            router.push({
+                path: '/knowledge-assets/import',
+                query: { library: selectedSlug.value, mode: 'add' },
+            });
+        }
+
+        function openIngest() {
+            if (!selectedSlug.value || !canInsert.value) return;
+            dialog.mode = 'create';
+            dialog.docId = null;
+            dialog.row = null;
+            dialog.form = { title: '', external_id: '', text: '', splitter: 'text', metadata_json: '' };
+            dialog.open = true;
+        }
+
+        function openEdit(row) {
+            if (!selectedSlug.value || !canInsert.value) return;
+            dialog.mode = 'edit';
+            dialog.docId = documentIdOf(row);
+            dialog.row = row;
+            dialog.form = {
+                title: row?.title || '',
+                external_id: '',
+                text: '',
+                splitter: 'text',
+                metadata_json: '',
+            };
+            dialog.open = true;
+        }
+
+        function openReplaceImport(row) {
+            if (!selectedSlug.value || !canInsert.value) return;
+            router.push({
+                path: '/knowledge-assets/import',
+                query: {
+                    library: selectedSlug.value,
+                    mode: 'replace',
+                    replaceDocumentId: documentIdOf(row),
+                    replaceTitle: row?.title || '',
+                },
+            });
+        }
+
+        async function submitIngest() {
+            if (!selectedSlug.value) {
+                ElMessage.warning('请先选择知识库');
+                return;
+            }
+            if (!dialog.form.text.trim()) {
+                ElMessage.warning('请输入正文');
+                return;
+            }
+            let metadata = null;
+            if (dialog.form.metadata_json.trim()) {
+                try { metadata = JSON.parse(dialog.form.metadata_json); }
+                catch (_) { ElMessage.error('metadata 不是合法 JSON'); return; }
+            }
+            try {
+                const body = {
+                    title: dialog.form.title || null,
+                    external_id: dialog.mode === 'edit' ? null : (dialog.form.external_id || null),
+                    text: dialog.form.text,
+                    splitter: dialog.form.splitter,
+                    metadata,
+                };
+                const resp = dialog.mode === 'edit'
+                    ? await api.updateDocument(selectedSlug.value, dialog.docId, body)
+                    : await api.ingestDocument(selectedSlug.value, body);
+                ElMessage.success(dialog.mode === 'edit'
+                    ? `已覆盖正文并重新入队 ${resp.chunk_count} 个分片`
+                    : `已入队 ${resp.chunk_count} 个分片`);
+                dialog.open = false;
+                if (dialog.mode === 'edit' && documentId.value === dialog.docId) {
+                    await loadDetail(dialog.docId, true);
+                }
+                await loadList(true, true);
+            } catch (e) { ElMessage.error(e.message || String(e)); }
+        }
+
+        async function deleteDocument(row) {
+            if (!selectedSlug.value || !row) return;
+            if (!canDelete.value) {
+                ElMessage.warning('没有删除权限');
+                return;
+            }
+            const id = documentIdOf(row);
+            try {
+                await ElMessageBox.confirm(
+                    `确认删除文档 "${row.title || id}"？\n\n删除后文档将不可用于后续检索；向量清理为异步执行。`,
+                    '删除文档',
+                    { type: 'warning', confirmButtonText: '确认删除', cancelButtonText: '取消' },
+                );
+                await api.deleteDocument(selectedSlug.value, id);
+                ElMessage.success('已删除，向量清理将异步完成');
+                if (documentId.value === id) await backToList();
+                await loadList(true, true);
+            } catch (e) {
+                if (e !== 'cancel') ElMessage.error(e.message || String(e));
+            }
+        }
+
+        function handleRowCommand(command, row) {
+            if (command === 'edit') openEdit(row);
+            else if (command === 'replace') openReplaceImport(row);
+            else if (command === 'delete') void deleteDocument(row);
+        }
+
+        async function openFullSource(row) {
+            if (!selectedSlug.value || !row) return;
+            const seq = ++sourceRequestSeq;
+            sourceReader.open = true;
+            sourceReader.loading = true;
+            sourceReader.loadingMore = false;
+            sourceReader.row = row;
+            sourceReader.data = null;
+            sourceReader.error = '';
+            sourceReader.keyword = '';
+            sourceReader.nextOffset = 0;
+            try {
+                const data = await api.getDocumentFullSource(
+                    selectedSlug.value,
+                    documentIdOf(row),
+                    { offset: 0, limit: 100000 },
+                );
+                if (seq !== sourceRequestSeq || !sourceReader.open) return;
+                sourceReader.data = data;
+                sourceReader.nextOffset = Number(data.offset || 0)
+                    + Array.from(String(data.normalized_text || '')).length;
+            } catch (e) {
+                if (seq !== sourceRequestSeq || !sourceReader.open) return;
+                sourceReader.error = e.status === 404
+                    ? '该文档缺少原文快照，请重新导入后再阅读。'
+                    : (e.message || '加载原文失败');
+            } finally {
+                if (seq === sourceRequestSeq) sourceReader.loading = false;
+            }
+        }
+
+        async function loadMoreSource() {
+            if (
+                !selectedSlug.value
+                || !sourceReader.row
+                || !sourceReader.data
+                || sourceReader.loadingMore
+                || sourceReader.nextOffset >= Number(sourceReader.data.total_chars || 0)
+            ) return;
+            const seq = sourceRequestSeq;
+            sourceReader.loadingMore = true;
+            try {
+                const data = await api.getDocumentFullSource(
+                    selectedSlug.value,
+                    documentIdOf(sourceReader.row),
+                    { offset: sourceReader.nextOffset, limit: 100000 },
+                );
+                if (seq !== sourceRequestSeq || !sourceReader.open) return;
+                const nextText = String(data.normalized_text || '');
+                if (!nextText) {
+                    ElMessage.warning('服务端未返回更多原文');
+                    return;
+                }
+                sourceReader.data = {
+                    ...data,
+                    offset: 0,
+                    normalized_text: sourceText.value + nextText,
+                    truncated: sourceReader.nextOffset + Array.from(nextText).length
+                        < Number(data.total_chars || 0),
+                };
+                sourceReader.nextOffset += Array.from(nextText).length;
+            } catch (e) {
+                if (seq === sourceRequestSeq) ElMessage.error(e.message || '加载更多原文失败');
+            } finally {
+                if (seq === sourceRequestSeq) sourceReader.loadingMore = false;
+            }
+        }
+
+        async function downloadOriginalFile(row) {
+            if (!selectedSlug.value || !row) return;
+            try {
+                const { blob, filename } = await api.downloadDocumentFile(selectedSlug.value, documentIdOf(row));
+                const url = URL.createObjectURL(blob);
+                const anchor = document.createElement('a');
+                anchor.href = url;
+                anchor.download = filename || row.title || 'document-file';
+                document.body.appendChild(anchor);
+                anchor.click();
+                anchor.remove();
+                URL.revokeObjectURL(url);
+            } catch (e) {
+                ElMessage.error(e.status === 404
+                    ? '该文档缺少原始文件快照，无法下载。'
+                    : (e.message || '下载原文件失败'));
+            }
+        }
+
+        function closeFullSource() {
+            sourceRequestSeq += 1;
+            sourceReader.open = false;
+            sourceReader.loading = false;
+            sourceReader.loadingMore = false;
+            sourceReader.data = null;
+            sourceReader.error = '';
+            sourceReader.keyword = '';
+            sourceReader.nextOffset = 0;
         }
 
         async function applyFilters() {
+            const serverChanged = (
+                appliedFilters.title !== String(filterDraft.title || '').trim()
+                || appliedFilters.status !== String(filterDraft.status || '')
+                || appliedFilters.classificationState !== String(filterDraft.classificationState || '')
+                || appliedFilters.labelId !== String(filterDraft.labelId || '')
+            );
             copyFilters(appliedFilters, filterDraft);
-            await loadList(false, true);
+            if (serverChanged) await loadList(false, true);
         }
 
         async function resetFilters() {
+            const serverChanged = Boolean(
+                appliedFilters.title
+                || appliedFilters.status
+                || appliedFilters.classificationState
+                || appliedFilters.labelId
+            );
             copyFilters(filterDraft, EMPTY_FILTERS);
             copyFilters(appliedFilters, EMPTY_FILTERS);
             labelOptions.value = [];
-            await loadList(false, true);
+            if (serverChanged) await loadList(false, true);
         }
 
         async function nextPage() {
@@ -411,14 +1011,17 @@ export default {
         async function openDocument(row) {
             if (!row?.document_id || !selectedSlug.value) return;
             await router.push({
-                path: '/catalog',
+                path: '/knowledge-assets/catalog',
                 query: { library: selectedSlug.value, document: row.document_id },
             });
         }
 
         async function backToList() {
             if (!selectedSlug.value) return;
-            await router.push({ path: '/catalog', query: { library: selectedSlug.value } });
+            await router.push({
+                path: '/knowledge-assets/catalog',
+                query: { library: selectedSlug.value },
+            });
         }
 
         async function refreshCurrent() {
@@ -504,7 +1107,7 @@ export default {
         }
 
         watch(
-            () => [route.query.library, route.query.document],
+            () => [route.query.library, route.query.slug, route.query.document, route.query.open],
             () => { if (routeReady) syncFromRoute(); },
         );
 
@@ -520,24 +1123,34 @@ export default {
 
         return {
             libraries, selectedSlug, selectedLibrary,
+            stats, processingCount, canInsert, canDelete,
             filterDraft, appliedFilters, hasAppliedFilters, hasDraftFilters, labelOptions,
-            pageSize, page, pageNumber, cursor,
-            showingDetail, detail, detailCapabilities, detailPrimary, detailSecondary,
+            pageSize, page, pageNumber, cursor, visibleItems,
+            showingDetail, detail, detailPrimary, detailSecondary,
+            sourceReader, sourceText, sourceMatchCount, highlightedSourceParts, dialog,
             evidence, evidenceParts, fileLoadingId,
-            canManageProcessing, processing,
+            canManageProcessing, processing, processingIssues,
+            classificationEditor, classificationReview, canAcceptClassificationReview,
             selectLibrary, applyFilters, resetFilters, loadList,
             nextPage, previousPage, changePageSize,
             openDocument, backToList, refreshCurrent, openEvidence, closeEvidence,
+            openFileImport, openIngest, openEdit, openReplaceImport, submitIngest,
+            deleteDocument, handleRowCommand,
+            openFullSource, loadMoreSource, downloadOriginalFile, closeFullSource,
             loadProcessing, retryProcessing,
+            startEditingClassification, resetClassificationEditor, saveClassification,
+            startEditingClassificationReview, submitClassificationReview,
             isCurrentFile, openFileById,
             listClassification, listSecondary, rowCapabilities,
             catalogOverallLabel, catalogOverallTag,
             capabilityStateLabel, capabilityStateTag,
+            documentStatusLabel, documentStatusTag, documentTypeIcon,
             classificationStateLabel, formatCatalogConfidence, formatCatalogTime,
             formatCatalogBytes, catalogSourceTypeLabel, catalogReviewLabel,
             catalogPageLabel, catalogTitlePath, shortCatalogId,
             processingStageLabel, processingStageRetryable,
             processingStatusLabel, processingStatusTag, processingErrorLabel,
+            reviewProposalLabel, reviewReasonLabel, reviewRoleLabel, formatReviewConfidence,
             dataEmpty, serviceError,
         };
     },
@@ -550,7 +1163,7 @@ export default {
             <local-icon icon="mdi:chevron-left"></local-icon>
           </el-button>
           <div>
-            <h2>{{ showingDetail ? (detail.data?.title || '文档详情') : '知识目录' }}</h2>
+            <h2>{{ showingDetail ? (detail.data?.title || '文档详情') : '知识资产' }}</h2>
             <div class="catalog-page-context">
               {{ selectedLibrary ? selectedLibrary.name : '未选择知识库' }}
               <template v-if="showingDetail && detail.data"> · v{{ detail.data.revision_no }}</template>
@@ -558,14 +1171,16 @@ export default {
           </div>
         </div>
         <div class="catalog-page-actions">
+          <el-button v-if="!showingDetail" :disabled="!canInsert" @click="openFileImport">文件导入</el-button>
+          <el-button v-if="!showingDetail" type="primary" :disabled="!canInsert" @click="openIngest">提交文本</el-button>
           <el-select :model-value="selectedSlug" class="catalog-library-select"
                      placeholder="选择知识库" @change="selectLibrary">
             <el-option v-for="library in libraries" :key="library.slug"
                        :label="library.name" :value="library.slug" />
           </el-select>
-          <el-button :loading="page.loading || detail.loading" title="刷新当前内容"
+          <el-button class="app-refresh-button" :loading="page.loading || detail.loading" title="刷新当前内容"
                      aria-label="刷新当前内容" @click="refreshCurrent">
-            <local-icon icon="status:retry"></local-icon><span>刷新</span>
+            <span class="app-refresh-icon" aria-hidden="true"></span><span>刷新</span>
           </el-button>
         </div>
       </header>
@@ -574,6 +1189,12 @@ export default {
                 title="当前账号没有可读取的知识库" type="info" :closable="false" show-icon />
 
       <template v-if="!showingDetail && libraries.length">
+        <section class="catalog-asset-stats">
+          <div><span>文档总数</span><b>{{ stats?.document_count || page.total || 0 }}</b></div>
+          <div><span>处理中</span><b>{{ processingCount }}</b></div>
+          <div><span>已完成</span><b>{{ stats?.done_jobs || 0 }}</b></div>
+          <div><span>失败</span><b class="catalog-stat-danger">{{ stats?.failed_jobs || 0 }}</b></div>
+        </section>
         <section class="catalog-filter-band">
           <el-input v-model="filterDraft.title" clearable maxlength="160"
                     placeholder="搜索文档标题" @keyup.enter="applyFilters">
@@ -595,6 +1216,8 @@ export default {
             <el-option v-for="label in labelOptions" :key="label.id"
                        :label="label.label" :value="label.id" />
           </el-select>
+          <el-date-picker v-model="filterDraft.dateRange" type="daterange" value-format="YYYY-MM-DD"
+                          start-placeholder="开始日期" end-placeholder="结束日期" />
           <div class="catalog-filter-actions">
             <el-button :disabled="!hasAppliedFilters && !hasDraftFilters"
                        @click="resetFilters">重置</el-button>
@@ -614,20 +1237,22 @@ export default {
             <span>第 {{ pageNumber }} 页</span>
           </div>
           <div class="catalog-table-shell">
-            <el-table :data="page.items" v-loading="page.loading" row-key="document_id">
+            <el-table :data="visibleItems" v-loading="page.loading" row-key="document_id">
               <template #empty>
                 <div class="illustration-empty-wrapper">
                   <img :src="dataEmpty" class="illustration-data-empty" alt="" aria-hidden="true" />
-                  <p>{{ hasAppliedFilters ? '当前筛选下没有文档' : '知识目录中暂无文档' }}</p>
+                  <p>{{ hasAppliedFilters ? '当前筛选下没有文档' : '当前知识中暂无文档' }}</p>
                 </div>
               </template>
               <el-table-column label="文档" min-width="270">
                 <template #default="{row}">
                   <button type="button" class="catalog-document-link" @click="openDocument(row)">
-                    <local-icon icon="mdi:file-document-outline"></local-icon>
+                    <img v-if="documentTypeIcon(row)" class="catalog-document-icon"
+                         :src="documentTypeIcon(row)" alt="" aria-hidden="true" />
+                    <local-icon v-else class="catalog-document-icon" icon="mdi:file-document-outline"></local-icon>
                     <span class="catalog-document-copy">
                       <b :title="row.title">{{ row.title }}</b>
-                      <small v-if="row.summary_excerpt">{{ row.summary_excerpt }}</small>
+                      <small v-if="row.summary_excerpt" class="catalog-document-summary">{{ row.summary_excerpt }}</small>
                     </span>
                   </button>
                 </template>
@@ -647,6 +1272,9 @@ export default {
               <el-table-column label="状态与能力" min-width="250">
                 <template #default="{row}">
                   <div class="catalog-state-cell">
+                    <el-tag :type="documentStatusTag(row.document_status)" size="small">
+                      {{ documentStatusLabel(row.document_status) }}
+                    </el-tag>
                     <el-tag :type="catalogOverallTag(row.overall_state)" size="small">
                       {{ catalogOverallLabel(row.overall_state) }}
                     </el-tag>
@@ -667,17 +1295,33 @@ export default {
                   </div>
                 </template>
               </el-table-column>
-              <el-table-column label="版本" width="90">
-                <template #default="{row}">v{{ row.revision_no }}</template>
-              </el-table-column>
-              <el-table-column label="更新时间" width="164">
-                <template #default="{row}">{{ formatCatalogTime(row.updated_at) }}</template>
-              </el-table-column>
-              <el-table-column label="操作" width="90" fixed="right">
+              <el-table-column label="版本/更新时间" width="170">
                 <template #default="{row}">
-                  <el-button link type="primary" @click="openDocument(row)">
-                    查看<local-icon icon="mdi:chevron-right"></local-icon>
-                  </el-button>
+                  <div class="catalog-version-cell">
+                    <b>v{{ row.revision_no }}</b>
+                    <span>{{ formatCatalogTime(row.updated_at) }}</span>
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="150" fixed="right">
+                <template #default="{row}">
+                  <div class="catalog-row-actions">
+                    <el-button link :type="row.classification?.state === 'pending_review'
+                                 && canManageProcessing ? 'warning' : 'primary'"
+                               @click="openDocument(row)">
+                      {{ row.classification?.state === 'pending_review' && canManageProcessing ? '审核' : '详情' }}
+                    </el-button>
+                    <el-dropdown trigger="click" @command="(command) => handleRowCommand(command, row)">
+                      <el-button link>更多<local-icon icon="mdi:chevron-down"></local-icon></el-button>
+                      <template #dropdown>
+                        <el-dropdown-menu>
+                          <el-dropdown-item command="edit" :disabled="!canInsert">编辑</el-dropdown-item>
+                          <el-dropdown-item command="replace" :disabled="!canInsert">替换导入</el-dropdown-item>
+                          <el-dropdown-item command="delete" :disabled="!canDelete" divided>删除</el-dropdown-item>
+                        </el-dropdown-menu>
+                      </template>
+                    </el-dropdown>
+                  </div>
                 </template>
               </el-table-column>
             </el-table>
@@ -727,6 +1371,12 @@ export default {
                          @click="openFileById(detail.data.file.id)">
                 <local-icon icon="mdi:archive-arrow-down-outline"></local-icon>打开源文件
               </el-button>
+              <div class="catalog-detail-actions">
+                <el-button plain @click="openFullSource(detail.data)">阅读原文</el-button>
+                <el-button plain :disabled="!canInsert" @click="openEdit(detail.data)">编辑</el-button>
+                <el-button plain :disabled="!canInsert" @click="openReplaceImport(detail.data)">替换导入</el-button>
+                <el-button type="danger" plain :disabled="!canDelete" @click="deleteDocument(detail.data)">删除</el-button>
+              </div>
             </div>
             <dl class="catalog-identity-grid">
               <div><dt>文档 ID</dt><dd :title="detail.data.document_id">{{ shortCatalogId(detail.data.document_id) }}</dd></div>
@@ -738,38 +1388,20 @@ export default {
             </dl>
           </section>
 
-          <section class="catalog-detail-section">
-            <div class="catalog-section-heading"><h3>知识能力</h3></div>
-            <div class="catalog-capability-grid">
-              <div v-for="capability in detailCapabilities" :key="capability.key"
-                   class="catalog-capability-item">
-                <span>{{ capability.label }}</span>
-                <el-tag :type="capabilityStateTag(capability.state)" size="small">
-                  {{ capabilityStateLabel(capability.state) }}
-                </el-tag>
-              </div>
-            </div>
-          </section>
-
-          <section v-if="canManageProcessing" class="catalog-detail-section catalog-processing-section">
-            <div class="catalog-section-heading">
-              <h3>文档处理</h3>
-              <span v-if="processing.loading">正在更新...</span>
-            </div>
-            <div v-if="processing.loading && !processing.data" class="catalog-processing-loading">
-              正在加载处理状态...
-            </div>
-            <el-alert v-else-if="processing.errorKind" :title="processing.errorMessage"
+          <section v-if="canManageProcessing && (processing.errorKind || processing.retryError || processingIssues.length)"
+                   class="catalog-detail-section catalog-processing-section">
+            <div class="catalog-section-heading"><h3>处理异常</h3></div>
+            <el-alert v-if="processing.errorKind" :title="processing.errorMessage"
                       type="warning" :closable="false" show-icon>
               <template #default>
                 <el-button link type="primary" @click="loadProcessing(detail.data.document_id)">重试</el-button>
               </template>
             </el-alert>
-            <template v-else-if="processing.data">
+            <template v-else>
               <el-alert v-if="processing.retryError" class="catalog-processing-alert"
                         :title="processing.retryError" type="warning" :closable="false" show-icon />
               <div class="catalog-processing-list">
-                <article v-for="stage in processing.data.stages" :key="stage.stage"
+                <article v-for="stage in processingIssues" :key="stage.stage"
                          class="catalog-processing-row">
                   <span class="catalog-processing-marker"
                         :class="'is-' + stage.status" aria-hidden="true"></span>
@@ -777,7 +1409,7 @@ export default {
                     <div class="catalog-processing-title">
                       <strong>{{ processingStageLabel(stage.stage) }}</strong>
                       <el-tag :type="processingStatusTag(stage.status)" size="small">
-                        {{ stage.availability === 'disabled' ? '未启用' : processingStatusLabel(stage.status) }}
+                        {{ processingStatusLabel(stage.status) }}
                       </el-tag>
                     </div>
                     <div class="catalog-processing-meta">
@@ -828,6 +1460,11 @@ export default {
               <el-tag size="small" effect="plain">
                 {{ classificationStateLabel(detail.data.classification.state) }}
               </el-tag>
+              <el-button v-if="canManageProcessing && !classificationEditor.editing
+                               && detail.data.classification.state !== 'pending_review'"
+                         link type="primary" @click="startEditingClassification">
+                &#x4FEE;&#x6539;&#x5206;&#x7C7B;
+              </el-button>
             </div>
             <div class="catalog-classification-line">
               <strong v-if="detailPrimary">{{ detailPrimary.label }}</strong>
@@ -835,6 +1472,89 @@ export default {
               <el-tag v-for="label in detailSecondary" :key="label.id" size="small" type="info">
                 {{ label.label }}
               </el-tag>
+            </div>
+            <div v-if="detail.data.classification.state === 'pending_review' && canManageProcessing"
+                 class="catalog-classification-review">
+              <div v-if="classificationReview.loading" class="catalog-inline-empty">
+                正在加载模型分类建议...
+              </div>
+              <el-alert v-else-if="classificationReview.error" :title="classificationReview.error"
+                        type="warning" :closable="false" show-icon />
+              <template v-else-if="classificationReview.run">
+                <div class="classification-review-proposals">
+                  <article v-for="proposal in classificationReview.run.proposals"
+                           :key="proposal.id || proposal.rank"
+                           class="classification-review-proposal">
+                    <span class="classification-review-proposal-role">
+                      {{ reviewRoleLabel(proposal.role) }}
+                    </span>
+                    <div>
+                      <strong>{{ reviewProposalLabel(proposal) }}</strong>
+                    </div>
+                    <b>{{ formatReviewConfidence(proposal.confidence_micros) }}</b>
+                    <div v-if="proposal.reason_codes?.length" class="classification-review-reasons">
+                      <span v-for="reason in proposal.reason_codes" :key="reason">
+                        {{ reviewReasonLabel(reason) }}
+                      </span>
+                    </div>
+                  </article>
+                </div>
+                <div v-if="!classificationEditor.editing" class="catalog-classification-actions">
+                  <el-button type="primary" :disabled="!canAcceptClassificationReview"
+                             :loading="classificationReview.mutatingAction === 'accept'"
+                             @click="submitClassificationReview('accept')">确认建议</el-button>
+                  <el-button :disabled="Boolean(classificationReview.mutatingAction)"
+                             @click="startEditingClassificationReview">调整后确认</el-button>
+                  <el-button type="danger" plain
+                             :loading="classificationReview.mutatingAction === 'reject'"
+                             :disabled="Boolean(classificationReview.mutatingAction)"
+                             @click="submitClassificationReview('reject')">驳回</el-button>
+                </div>
+              </template>
+            </div>
+            <div v-if="classificationEditor.editing" class="catalog-classification-editor">
+              <el-alert v-if="classificationEditor.error" :title="classificationEditor.error"
+                        type="warning" :closable="false" show-icon />
+              <div v-if="classificationEditor.loading" class="catalog-inline-empty">
+                &#x6B63;&#x5728;&#x52A0;&#x8F7D;&#x5206;&#x7C7B;&#x9009;&#x9879;...
+              </div>
+              <el-alert v-else-if="!classificationEditor.labels.length"
+                        title="&#x5F53;&#x524D;&#x77E5;&#x8BC6;&#x5E93;&#x6CA1;&#x6709;&#x53EF;&#x7528;&#x5206;&#x7C7B;"
+                        type="info" :closable="false" show-icon />
+              <template v-else>
+                <label>
+                  <span>&#x4E3B;&#x5206;&#x7C7B;</span>
+                  <el-select v-model="classificationEditor.primaryLabelId"
+                             placeholder="&#x8BF7;&#x9009;&#x62E9;&#x4E3B;&#x5206;&#x7C7B;">
+                    <el-option v-for="label in classificationEditor.labels" :key="label.id"
+                               :label="label.label" :value="label.id" />
+                  </el-select>
+                </label>
+                <label>
+                  <span>&#x9644;&#x52A0;&#x5206;&#x7C7B;</span>
+                  <el-select v-model="classificationEditor.secondaryLabelIds" multiple
+                             collapse-tags collapse-tags-tooltip :max-collapse-tags="3"
+                             :multiple-limit="8"
+                             placeholder="&#x6700;&#x591A;&#x9009;&#x62E9; 8 &#x9879;">
+                    <el-option v-for="label in classificationEditor.labels" :key="label.id"
+                               :label="label.label" :value="label.id"
+                               :disabled="label.id === classificationEditor.primaryLabelId" />
+                  </el-select>
+                </label>
+                <div class="catalog-classification-actions">
+                  <el-button type="primary"
+                             :loading="classificationEditor.saving
+                               || classificationReview.mutatingAction === 'change'"
+                             :disabled="Boolean(classificationReview.mutatingAction)"
+                             @click="detail.data.classification.state === 'pending_review'
+                               ? submitClassificationReview('change') : saveClassification()">
+                    {{ detail.data.classification.state === 'pending_review' ? '确认调整' : '保存' }}
+                  </el-button>
+                  <el-button :disabled="classificationEditor.saving
+                               || Boolean(classificationReview.mutatingAction)"
+                             @click="resetClassificationEditor(detail.data.classification)">&#x53D6;&#x6D88;</el-button>
+                </div>
+              </template>
             </div>
           </section>
 
@@ -901,6 +1621,79 @@ export default {
           </section>
         </template>
       </template>
+
+      <el-dialog v-model="sourceReader.open" title="阅读原文" width="860px" class="documents-source-dialog" @closed="closeFullSource">
+        <div v-if="sourceReader.loading" class="documents-source-loading">正在加载原文...</div>
+        <template v-else>
+          <el-alert v-if="sourceReader.error" type="warning" :closable="false" show-icon :title="sourceReader.error" />
+          <template v-else-if="sourceReader.data">
+            <div class="documents-source-meta">
+              <span>{{ sourceReader.data.file_name || sourceReader.data.document_title || sourceReader.row?.title || '文档' }}</span>
+              <span v-if="sourceReader.data.file_type">{{ sourceReader.data.file_type }}</span>
+              <span>v{{ sourceReader.data.revision || sourceReader.row?.revision_no || 0 }}</span>
+              <span>已加载 {{ sourceReader.nextOffset }} / {{ sourceReader.data.total_chars || sourceReader.data.text_length || sourceReader.nextOffset }} 字</span>
+            </div>
+            <div class="documents-source-toolbar">
+              <el-input v-model="sourceReader.keyword" clearable placeholder="搜索已加载内容" />
+              <span class="documents-source-match-count">{{ sourceReader.keyword ? ('已加载内容匹配 ' + sourceMatchCount + ' 处') : '输入关键词后高亮匹配' }}</span>
+            </div>
+            <el-empty v-if="!sourceText" description="原文快照为空" />
+            <pre v-else class="documents-source-text"><template v-for="(part, pi) in highlightedSourceParts" :key="pi"><mark v-if="part.match">{{ part.text }}</mark><span v-else>{{ part.text }}</span></template></pre>
+            <div v-if="sourceReader.nextOffset < Number(sourceReader.data.total_chars || 0)" class="documents-source-more">
+              <el-button :loading="sourceReader.loadingMore" @click="loadMoreSource">加载更多</el-button>
+            </div>
+          </template>
+          <el-empty v-else description="暂无原文内容" />
+        </template>
+      </el-dialog>
+
+      <el-dialog v-model="dialog.open" :title="dialog.mode === 'edit' ? '编辑文档' : (selectedSlug ? ('向 ' + selectedSlug + ' 提交文档') : '提交文档')" width="720px" class="documents-edit-dialog">
+        <template v-if="dialog.mode === 'edit'">
+          <el-alert type="warning" :closable="false" class="documents-edit-alert"
+                    title="当前保存是文本覆盖：会替换正文、重新切分、重新向量化，旧问答引用不会自动更新。" />
+        </template>
+        <el-form label-width="110px">
+          <section class="documents-edit-section">
+            <h3>{{ dialog.mode === 'edit' ? '基础信息编辑' : '基础信息' }}</h3>
+            <p v-if="dialog.mode === 'edit'" class="documents-edit-hint">标题和元数据会随下方文本覆盖一起提交；外部文档编号当前版本不可修改。</p>
+            <el-form-item label="标题"><el-input v-model="dialog.form.title" /></el-form-item>
+            <el-form-item label="外部文档编号">
+              <el-input v-model="dialog.form.external_id" :disabled="dialog.mode === 'edit'" placeholder="可选；用于与外部业务系统建立对应关系" />
+              <div v-if="dialog.mode === 'edit'" class="documents-form-help">当前不支持在文档页单独修改外部文档编号。</div>
+            </el-form-item>
+            <el-form-item label="metadata">
+              <el-input v-model="dialog.form.metadata_json" type="textarea" :rows="3"
+                        placeholder='可选 JSON，例如 {"author":"...","year":2024}' />
+            </el-form-item>
+          </section>
+
+          <section class="documents-edit-section documents-content-overwrite">
+            <h3>{{ dialog.mode === 'edit' ? '覆盖文档内容（文本覆盖）' : '正文' }}</h3>
+            <p v-if="dialog.mode === 'edit'" class="documents-edit-hint">此操作会用下面的完整正文替换旧正文，重新切分并重新向量化。</p>
+            <el-form-item label="切分方式">
+              <el-radio-group v-model="dialog.form.splitter">
+                <el-radio value="text">text</el-radio>
+                <el-radio value="markdown">markdown</el-radio>
+                <el-radio value="none">none（单一切片）</el-radio>
+              </el-radio-group>
+            </el-form-item>
+            <el-form-item label="正文" required>
+              <el-input v-model="dialog.form.text" type="textarea" :rows="10"
+                        placeholder="粘贴完整文本 / Markdown / JSON 字符串" />
+            </el-form-item>
+          </section>
+
+          <section v-if="dialog.mode === 'edit'" class="documents-edit-section documents-reimport-zone">
+            <h3>覆盖导入新文件</h3>
+            <p>如果需要用 PDF、Word、Excel 等文件覆盖，请使用导入页的替换模式。</p>
+            <el-button type="warning" plain @click="openReplaceImport(dialog.row)">重新导入并覆盖此文档</el-button>
+          </section>
+        </el-form>
+        <template #footer>
+          <el-button @click="dialog.open = false">取消</el-button>
+          <el-button type="primary" @click="submitIngest">{{ dialog.mode === 'edit' ? '保存文本覆盖并重新向量化' : '提交（异步 embed）' }}</el-button>
+        </template>
+      </el-dialog>
 
       <el-drawer v-model="evidence.open" class="catalog-evidence-drawer" size="560px"
                  title="原文证据" @closed="closeEvidence">

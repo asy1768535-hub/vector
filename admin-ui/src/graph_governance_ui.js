@@ -1,8 +1,9 @@
 import { canManageLibrary } from './menu_access.js';
 
-const GRAPH_TABS = new Set(['entities', 'relations', 'review', 'publications', 'explore']);
+const GRAPH_TABS = new Set(['browse', 'publications', 'review']);
+const LEGACY_BROWSE_TABS = new Set(['explore', 'entities', 'relations']);
 const MANAGEMENT_TABS = new Set(['review', 'publications']);
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const UUID_RE = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const HASH_RE = /^[0-9a-f]{64}$/;
 const SAFE_LIBRARY_SLUG = /^[A-Za-z0-9_.:-]{1,80}$/;
 const SAFE_REASON = /^[a-z][a-z0-9_:-]{0,63}$/;
@@ -70,6 +71,31 @@ const ERROR_MESSAGES = {
     error: '知识图谱服务暂时不可用，请稍后重试。',
 };
 
+const ENTITY_TYPE_DISPLAY_LABELS = Object.freeze({
+    person: '人员',
+    department: '部门',
+    position: '岗位',
+    policy: '制度',
+    process: '流程',
+    project: '项目',
+    product: '产品',
+    customer: '客户',
+    document: '文档',
+    term: '术语',
+});
+
+const ENTITY_TYPE_LEGACY_LABELS = Object.freeze({
+    person: 'Person',
+    department: 'Department',
+    position: 'Position',
+    policy: 'Policy',
+    process: 'Process',
+    project: 'Project',
+    product: 'Product',
+    customer: 'Customer',
+    document: 'Document',
+    term: 'Term',
+});
 function text(value) {
     return typeof value === 'string' ? value : String(value || '');
 }
@@ -138,7 +164,9 @@ export function graphScopeOptions(permissions, organizations = []) {
 export function resolveGraphScope(query, permissions, organizations = []) {
     const groups = graphScopeOptions(permissions, organizations);
     const requestedTab = text(query?.tab);
-    const tab = GRAPH_TABS.has(requestedTab) ? requestedTab : 'entities';
+    const tab = LEGACY_BROWSE_TABS.has(requestedTab)
+        ? 'browse'
+        : GRAPH_TABS.has(requestedTab) ? requestedTab : 'browse';
     const requestedOrganizationId = text(query?.organization);
     let organization = groups.find((item) => item.id === requestedOrganizationId) || groups[0] || null;
     if (organization && MANAGEMENT_TABS.has(tab)) {
@@ -166,7 +194,9 @@ export function resolveGraphScope(query, permissions, organizations = []) {
     ));
     if (!librarySlugs.length && eligible.length) librarySlugs = [eligible[0].slug];
     if (MANAGEMENT_TABS.has(tab)) librarySlugs = librarySlugs.slice(0, 1);
-    const entityId = tab === 'entities' && validUuid(query?.entity) ? text(query.entity) : '';
+    const entityId = ['browse', 'entities'].includes(tab) && validUuid(query?.entity)
+        ? text(query.entity)
+        : '';
     const relationId = tab === 'relations' && validUuid(query?.relation) ? text(query.relation) : '';
     return {
         tab,
@@ -179,13 +209,15 @@ export function resolveGraphScope(query, permissions, organizations = []) {
 
 export function graphRouteQuery(scope) {
     const query = {
-        tab: GRAPH_TABS.has(scope?.tab) ? scope.tab : 'entities',
+        tab: GRAPH_TABS.has(scope?.tab) ? scope.tab : 'browse',
     };
     if (scope?.organizationId) query.organization = text(scope.organizationId);
     if (Array.isArray(scope?.librarySlugs) && scope.librarySlugs.length) {
         query.libraries = scope.librarySlugs.slice(0, 20).map(text).join(',');
     }
-    if (query.tab === 'entities' && validUuid(scope?.entityId)) query.entity = text(scope.entityId);
+    if (['browse', 'entities'].includes(query.tab) && validUuid(scope?.entityId)) {
+        query.entity = text(scope.entityId);
+    }
     if (query.tab === 'relations' && validUuid(scope?.relationId)) query.relation = text(scope.relationId);
     return query;
 }
@@ -214,6 +246,17 @@ export function graphPublicationLabel(value) {
     return PUBLICATION_LABELS[value] || '未知状态';
 }
 
+export function graphEntityTypeLabel(value) {
+    const key = text(typeof value === 'object' ? value?.key : value);
+    const label = text(typeof value === 'object' ? value?.label : value);
+    const displayLabel = ENTITY_TYPE_DISPLAY_LABELS[key];
+    if (displayLabel && (!label || label === ENTITY_TYPE_LEGACY_LABELS[key])) return displayLabel;
+
+    const legacyKey = Object.keys(ENTITY_TYPE_LEGACY_LABELS).find((item) => (
+        ENTITY_TYPE_LEGACY_LABELS[item].toLowerCase() === label.toLowerCase()
+    ));
+    return ENTITY_TYPE_DISPLAY_LABELS[legacyKey] || label || key;
+}
 export function graphActionLabel(value) {
     return ACTION_LABELS[value] || '未知操作';
 }

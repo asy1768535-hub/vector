@@ -19,6 +19,9 @@ from app.services.classification_taxonomy_contracts import (
     ClassificationTaxonomyError,
     normalize_stable_key,
 )
+from app.services.graph_extraction_provider import (
+    graph_extraction_provider_name,
+)
 
 
 CLASSIFICATION_JOB_INPUT_VERSION = "classification-job-input-v1"
@@ -36,6 +39,21 @@ class ClassificationRuntimeError(ValueError):
 
 def fail_classification_runtime(code: str, message: str) -> None:
     raise ClassificationRuntimeError(code, message)
+
+
+def classification_provider_name(config: Settings = settings) -> str:
+    try:
+        return graph_extraction_provider_name(
+            base_url=config.classification_base_url,
+            model=config.classification_model,
+        )
+    except ValueError:
+        fail_classification_runtime(
+            "provider_config_invalid",
+            "classification provider identity is not approved",
+        )
+
+
 
 
 def canonical_json(value: object) -> str:
@@ -59,9 +77,10 @@ def canonical_sha256(value: object) -> str:
 
 
 def classification_model_config_hash(config: Settings = settings) -> str:
+    provider_name = classification_provider_name(config)
     return canonical_sha256(
         {
-            "provider": CLASSIFICATION_PROVIDER_NAME,
+            "provider": provider_name,
             "model": config.classification_model,
             "prompt_version": config.classification_prompt_version,
             "max_source_chars": config.classification_model_max_source_chars,
@@ -126,6 +145,7 @@ def classification_job_identity(
         )
     enabled_hash = canonical_sha256([str(value) for value in enabled_label_ids])
     model_hash = classification_model_config_hash(config)
+    provider_name = classification_provider_name(config)
     fingerprint = canonical_sha256(
         {
             "contract_version": CLASSIFICATION_JOB_INPUT_VERSION,
@@ -136,7 +156,7 @@ def classification_job_identity(
             "taxonomy_version_id": str(taxonomy_version_id),
             "enabled_label_set_hash": enabled_hash,
             "classifier_version": config.classification_classifier_version,
-            "model_provider": CLASSIFICATION_PROVIDER_NAME,
+            "model_provider": provider_name,
             "model_name": config.classification_model,
             "model_config_hash": model_hash,
             "prompt_version": config.classification_prompt_version,
@@ -174,6 +194,7 @@ def build_classification_job(
             "classification_trigger_invalid",
             "classification trigger is invalid",
         )
+    provider_name = classification_provider_name(config)
     identity = classification_job_identity(
         library_id=library_id,
         document_id=document_id,
@@ -193,7 +214,7 @@ def build_classification_job(
         taxonomy_version_id=taxonomy_version_id,
         enabled_label_set_hash=identity.enabled_label_set_hash,
         classifier_version=config.classification_classifier_version,
-        model_provider=CLASSIFICATION_PROVIDER_NAME,
+        model_provider=provider_name,
         model_name=config.classification_model,
         model_config_hash=identity.model_config_hash,
         prompt_version=config.classification_prompt_version,
@@ -277,10 +298,14 @@ def classification_messages(
         for key, label, description in enabled_labels
     ]
     instructions = (
-        "Classify the document using the supplied selectable labels. Return strict JSON "
-        "with primary_candidates (1..5) and secondary_candidates (0..8). Each item must "
-        "contain integer confidence_micros and either label_key or proposed_key plus "
-        "proposed_label. Do not add any other fields."
+        "Classify the document using the supplied selectable labels. Return exactly one "
+        "JSON object with primary_candidates (1..5) and secondary_candidates (0..8), "
+        "without prose or Markdown. Each item must contain confidence_micros as an integer "
+        "from 0 through 1000000 (95% is 950000, never 9500000) and either label_key or "
+        "proposed_key plus proposed_label. The first primary candidate must use a selectable "
+        "label_key and is applied automatically; when uncertain, use reference-other if it is "
+        "available. Do not propose new labels. Candidate keys must be unique across both arrays. "
+        "Do not add any other fields."
     )
     user_payload = canonical_json(
         {

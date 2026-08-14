@@ -154,6 +154,82 @@ async def grant_organization_permissions(
     return result
 
 
+async def grant_platform_library_permissions(
+    db,
+    *,
+    actor_user_id: uuid.UUID,
+    target_user_id: uuid.UUID,
+    library: Library,
+    actions: tuple[str, ...] | list[str],
+) -> PermissionMutationResult:
+    """Grant library actions and establish the target's organization membership."""
+    values = _validated_actions(actions)
+    organization = (
+        await db.execute(
+            select(Organization)
+            .where(
+                Organization.id == library.organization_id,
+                Organization.status == "active",
+            )
+            .with_for_update()
+        )
+    ).scalars().first()
+    if organization is None:
+        raise OrganizationPermissionError("organization_permission_scope_not_found")
+
+    membership = (
+        await db.execute(
+            select(OrganizationMembership)
+            .where(
+                OrganizationMembership.organization_id == library.organization_id,
+                OrganizationMembership.user_id == target_user_id,
+            )
+            .with_for_update()
+        )
+    ).scalars().first()
+    membership_change = "unchanged"
+    if membership is None:
+        membership = OrganizationMembership(
+            organization_id=library.organization_id,
+            user_id=target_user_id,
+            role="member",
+            status="active",
+            created_by_user_id=actor_user_id,
+        )
+        db.add(membership)
+        await db.flush()
+        membership_change = "created"
+    elif membership.status != "active":
+        membership.status = "active"
+        membership.disabled_at = None
+        membership_change = "reactivated"
+
+    added_rows = casbin_service.grant(str(target_user_id), library.slug, values)
+    result = PermissionMutationResult(
+        user_id=target_user_id,
+        library_slug=library.slug,
+        added=tuple(row[2] for row in added_rows),
+    )
+    try:
+        await audit_log.record(
+            db,
+            actor_user_id,
+            "platform.permission_grant",
+            {
+                "organization_id": str(library.organization_id),
+                "user_id": str(target_user_id),
+                "library_id": str(library.id),
+                "actions": list(values),
+                "added": len(result.added),
+                "membership_change": membership_change,
+            },
+        )
+    except Exception:
+        result.compensate()
+        raise
+    return result
+
+
 async def revoke_organization_permissions(
     db,
     *,

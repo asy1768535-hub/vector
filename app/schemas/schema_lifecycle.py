@@ -78,9 +78,147 @@ class SchemaCloneRequest(SchemaCommandRequest):
     )
 
 
+class SchemaImportEntityType(StrictSchemaLifecycleModel):
+    key: str = Field(min_length=1, max_length=128)
+    label: str = Field(min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=2_000)
+    properties_schema: dict[str, Any] | None = None
+
+    _key = field_validator("key")(_key)
+    _label = field_validator("label")(_trim)
+    _description = field_validator("description")(
+        lambda value: _trim(value) if value is not None else None
+    )
+    _properties = field_validator("properties_schema")(_bounded_json_object)
+
+
+class SchemaImportRelationType(SchemaImportEntityType):
+    direction: Literal["directed", "undirected"]
+    requires_evidence: bool = True
+    default_review_policy: Literal[
+        "auto_active", "pending_review", "manual_only"
+    ]
+
+
+class SchemaImportAttribute(StrictSchemaLifecycleModel):
+    owner_kind: Literal["entity_type", "relation_type"]
+    owner_key: str = Field(min_length=1, max_length=128)
+    key: str = Field(min_length=1, max_length=128)
+    label: str = Field(min_length=1, max_length=255)
+    value_type: Literal[
+        "string",
+        "text",
+        "integer",
+        "number",
+        "boolean",
+        "date",
+        "datetime",
+        "enum",
+        "json",
+    ]
+    required: bool = False
+    enum_values: list[str | int | float | bool] | None = Field(
+        default=None, max_length=100
+    )
+    validation_schema: dict[str, Any] | None = None
+    indexed: bool = False
+
+    _owner_key = field_validator("owner_key")(_key)
+    _key = field_validator("key")(_key)
+    _label = field_validator("label")(_trim)
+    _validation = field_validator("validation_schema")(_bounded_json_object)
+
+    @model_validator(mode="after")
+    def validate_enum(self):
+        if self.value_type == "enum" and not self.enum_values:
+            raise ValueError("enum attributes require enum_values")
+        if self.value_type != "enum" and self.enum_values is not None:
+            raise ValueError("enum_values are allowed only for enum attributes")
+        return self
+
+
+class SchemaImportConstraint(StrictSchemaLifecycleModel):
+    relation_type_key: str = Field(min_length=1, max_length=128)
+    source_entity_type_key: str = Field(min_length=1, max_length=128)
+    target_entity_type_key: str = Field(min_length=1, max_length=128)
+    cardinality: Literal[
+        "one_to_one", "one_to_many", "many_to_one", "many_to_many"
+    ] | None = None
+    requires_review: bool = False
+
+    _relation_key = field_validator("relation_type_key")(_key)
+    _source_key = field_validator("source_entity_type_key")(_key)
+    _target_key = field_validator("target_entity_type_key")(_key)
+
+
+class SchemaImportRequest(StrictSchemaLifecycleModel):
+    version_key: str = Field(min_length=1, max_length=128)
+    description: str | None = Field(default=None, max_length=2_000)
+    entity_types: list[SchemaImportEntityType] = Field(default_factory=list, max_length=500)
+    relation_types: list[SchemaImportRelationType] = Field(default_factory=list, max_length=500)
+    attributes: list[SchemaImportAttribute] = Field(default_factory=list, max_length=1_000)
+    constraints: list[SchemaImportConstraint] = Field(default_factory=list, max_length=1_000)
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+    _version_key = field_validator("version_key")(_key)
+    _description = field_validator("description")(
+        lambda value: _trim(value) if value is not None else None
+    )
+
+    @field_validator("idempotency_key")
+    @classmethod
+    def validate_idempotency_key(cls, value: str) -> str:
+        value = value.strip()
+        if _IDEMPOTENCY_RE.fullmatch(value) is None:
+            raise ValueError("idempotency_key is invalid")
+        return value
+
+    @model_validator(mode="after")
+    def validate_payload_size(self):
+        try:
+            encoded = canonical_graph_json_v1(
+                self.model_dump(mode="json", exclude={"idempotency_key"})
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Schema import payload is invalid") from exc
+        if len(encoded) > 65_536:
+            raise ValueError("Schema import payload is too large")
+        return self
+
+
+class SchemaImportFileRequest(StrictSchemaLifecycleModel):
+    file_name: str = Field(min_length=1, max_length=255)
+    content: str = Field(min_length=1, max_length=65_536)
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+    @field_validator("file_name")
+    @classmethod
+    def validate_file_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("file_name must not be blank")
+        return value
+
+    @field_validator("idempotency_key")
+    @classmethod
+    def validate_idempotency_key(cls, value: str) -> str:
+        value = value.strip()
+        if _IDEMPOTENCY_RE.fullmatch(value) is None:
+            raise ValueError("idempotency_key is invalid")
+        return value
+
+
 class SchemaActivationRequest(SchemaCommandRequest):
     expected_active_version_id: uuid.UUID | None
     confirmation: Literal["activate_schema_version"]
+
+
+class SchemaDraftDeleteRequest(SchemaCommandRequest):
+    confirmation: Literal["delete_schema_draft"]
+
+
+class SchemaVersionDisableRequest(SchemaCommandRequest):
+    confirmation: Literal["disable_schema_version"]
 
 
 class SchemaEntityTypeCreateRequest(SchemaCommandRequest):
@@ -319,6 +457,8 @@ class SchemaVersionSummaryRead(StrictSchemaLifecycleModel):
     version_no: int
     status: str
     description: str | None
+    origin: str
+    confirmed: bool
     parent_version_id: uuid.UUID | None
     published_at: datetime | None
     created_at: datetime | None
@@ -403,3 +543,11 @@ class SchemaCommandResultRead(StrictSchemaLifecycleModel):
     action_id: uuid.UUID
     reused: bool
     version: SchemaVersionDetailRead
+
+
+class SchemaVersionDeletionResultRead(StrictSchemaLifecycleModel):
+    action_id: uuid.UUID
+    reused: bool
+    library_id: uuid.UUID
+    ontology_version_id: uuid.UUID
+    status: Literal["deleted"]

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import math
 import sys
 import time
 from dataclasses import dataclass
@@ -106,6 +107,8 @@ def _valid_ranking(results, n_docs: int) -> tuple[bool, str]:
         if idx in seen:
             return False, f"index 重复: {idx}"
         seen.add(idx)
+        if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
+            return False, "score is not finite"
         if prev is not None and score > prev:
             return False, "分数未按降序排列"
         prev = score
@@ -123,7 +126,7 @@ async def check_rerank(*, base_url: str, model: str, api_key: str, allow_cloud: 
     # 这样 DashScope 备用检查能真正发 DashScope 的 input/parameters 格式。
     cloud = is_cloud_host(base_url)
     eff_key = api_key if cloud else ""
-    eff_provider = (settings.rerank_provider or "standard") if cloud else "standard"
+    eff_provider = settings.rerank_provider or "standard"
     docs = ["猫是一种宠物。", "向量数据库用于相似度检索。", "今天的天气很好。"]
     try:
         results = await rerank_svc.rerank(

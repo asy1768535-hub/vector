@@ -1,0 +1,104 @@
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime, timedelta, timezone
+from typing import Literal
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import Settings, settings
+from app.models.document_import_job import DocumentImportJob
+from app.services.import_uploads import ImportUploadError, staging_path
+
+
+MAX_CLEANUP_BATCH = 256
+UnlinkResult = Literal["removed", "missing", "failed", "invalid"]
+CleanupPlan = tuple[int, tuple[str, ...]]
+
+
+def _positive_limit(value: object, name: str, *, maximum: int | None = None) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ImportUploadError(
+            "staging_quota_unavailable",
+            f"{name} is invalid",
+            status_code=503,
+        )
+    if maximum is not None and value > maximum:
+        raise ImportUploadError(
+            "staging_quota_unavailable",
+            f"{name} is invalid",
+            status_code=503,
+        )
+    return value
+
+
+async def _unlink_staging_key(
+    staging_key: str,
+    config: Settings,
+) -> UnlinkResult:
+    try:
+        path = staging_path(staging_key, config)
+    except ImportUploadError:
+        return "invalid"
+    try:
+        await asyncio.to_thread(path.unlink)
+    except FileNotFoundError:
+        return "missing"
+    except OSError:
+        return "failed"
+    return "removed"
+
+
+async def cleanup_staging(
+    db: AsyncSession,
+    *,
+    config: Settings = settings,
+    batch_size: int = MAX_CLEANUP_BATCH,
+    now: datetime | None = None,
+) -> CleanupPlan:
+    """Bounded, database-driven staging retention.
+
+    Orphan and crashed terminal files are deliberately left alone: scanning
+    the staging directory is unbounded and cannot be made safe in the importer
+    hot loop. Only stale uploading rows need a state transition, so they are
+    selected with SKIP LOCKED and their bounded set of keys is returned to the
+    worker for deletion after the transaction commits.
+    """
+    retention_seconds = _positive_limit(
+        config.import_staging_retention_seconds,
+        "staging retention",
+    )
+    batch_size = _positive_limit(
+        batch_size,
+        "staging cleanup batch size",
+        maximum=MAX_CLEANUP_BATCH,
+    )
+    cutoff = (now or datetime.now(timezone.utc)) - timedelta(seconds=retention_seconds)
+
+    stale_uploads = list(
+        (
+            await db.execute(
+                select(DocumentImportJob)
+                .where(
+                    DocumentImportJob.status == "uploading",
+                    DocumentImportJob.updated_at < cutoff,
+                )
+                .order_by(DocumentImportJob.updated_at, DocumentImportJob.id)
+                .limit(batch_size)
+                .with_for_update(skip_locked=True)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    transitioned = 0
+    for job in stale_uploads:
+        job.status = "cancelled"
+        job.finished_at = now or datetime.now(timezone.utc)
+        job.last_error = "upload expired before completion"
+        transitioned += 1
+    if stale_uploads:
+        await db.flush()
+
+    return transitioned, tuple(job.staging_key for job in stale_uploads)

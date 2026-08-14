@@ -5,6 +5,7 @@ import csv
 import hashlib
 import re
 import io
+import asyncio
 import json
 import logging
 import uuid
@@ -25,6 +26,8 @@ from app.deps import require_lib
 from app.models.chunk import Chunk
 from app.models.document import Document
 from app.models.document_file import DocumentFile
+from app.models.document_revision import DocumentRevision
+from app.models.document_revision_file import DocumentRevisionFile
 from app.models.document_source import DocumentSource
 from app.models.embedding_job import EmbeddingJob
 from app.models.library import Library
@@ -43,7 +46,7 @@ from app.schemas.documents import (
     QueryResponse,
 )
 from app.config import settings
-from app.services import embedding, ingest as ingest_service, source_enrichment
+from app.services import embedding, import_parsing, ingest as ingest_service, source_enrichment
 from app.services import cleanup as cleanup_service
 from app.services.metadata_guard import MetadataValidationError
 from app.services import rerank as rerank_svc
@@ -63,6 +66,7 @@ from app.services.revision_files import (
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/libraries/{slug}", tags=["documents"])
 SOURCE_CONTEXT_CHARS = 3000
+SOURCE_FULL_MAX_CHARS = 100_000
 
 # #13：导入文件后缀白名单（小写）。不在表内 → 415。
 _SUPPORTED_IMPORT_SUFFIXES = {
@@ -277,6 +281,27 @@ def _uuid_or_none(value) -> uuid.UUID | None:
         except ValueError:
             return None
     return None
+
+
+async def _persist_graph_extraction_request(db: AsyncSession, result: dict) -> bool:
+    """Bind a per-upload extraction request to the revision the embed job will publish."""
+    if result.get("operation") == "unchanged":
+        return False
+    job_id = _uuid_or_none(result.get("job_id"))
+    if job_id is None:
+        return False
+    job = await db.get(EmbeddingJob, job_id)
+    revision_id = _uuid_or_none(getattr(job, "document_revision_id", None))
+    if revision_id is None:
+        return False
+    revision = await db.get(DocumentRevision, revision_id)
+    if revision is None:
+        return False
+    revision.parser_config = {
+        **(revision.parser_config or {}),
+        "graph_extraction_requested": True,
+    }
+    return True
 
 
 def _str_or_none(value) -> str | None:
@@ -645,7 +670,8 @@ async def list_documents(
     status_filter: Optional[str] = Query(default=None, alias="status",
                                          pattern="^(pending|processing|ready|failed|deleted)$"),
     external_id: Optional[str] = Query(default=None),
-    limit: int = Query(default=50, ge=1, le=500),
+    folder_id: uuid.UUID | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
     lib: Library = Depends(require_lib("read")),
     db: AsyncSession = Depends(get_db),
@@ -661,6 +687,8 @@ async def list_documents(
         stmt = stmt.where(Document.status == status_filter)
     if external_id:
         stmt = stmt.where(Document.external_id == external_id)
+    if folder_id is not None:
+        stmt = stmt.where(Document.folder_id == folder_id)
     rows = await db.execute(stmt)
     return list(rows.scalars().all())
 
@@ -738,6 +766,8 @@ async def get_document_source(
 @router.get("/documents/{document_id}/source/full", response_model=DocumentFullSourceResponse)
 async def get_document_full_source(
     document_id: uuid.UUID,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=SOURCE_FULL_MAX_CHARS, ge=1, le=SOURCE_FULL_MAX_CHARS),
     lib: Library = Depends(require_lib("read")),
     db: AsyncSession = Depends(get_db),
 ) -> DocumentFullSourceResponse:
@@ -745,21 +775,65 @@ async def get_document_full_source(
     if doc is None or doc.library_id != lib.id or doc.deleted_at is not None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "document not found")
 
-    source = await db.get(DocumentSource, document_id)
-    if source is None:
+    source_row = None
+    if doc.current_revision_id is not None:
+        revision_stmt = (
+            select(
+                DocumentRevision.revision_no.label("revision"),
+                DocumentRevisionFile.file_name,
+                DocumentRevision.parser_name.label("file_type"),
+                DocumentRevision.created_at,
+                DocumentRevision.updated_at,
+                func.length(DocumentRevision.normalized_text).label("total_chars"),
+                func.substr(DocumentRevision.normalized_text, offset + 1, limit).label(
+                    "text_window"
+                ),
+            )
+            .outerjoin(
+                DocumentRevisionFile,
+                (DocumentRevisionFile.document_revision_id == DocumentRevision.id)
+                & (DocumentRevisionFile.lifecycle_status == "available"),
+            )
+            .where(
+                DocumentRevision.id == doc.current_revision_id,
+                DocumentRevision.document_id == doc.id,
+                DocumentRevision.library_id == lib.id,
+                DocumentRevision.normalized_text.is_not(None),
+            )
+            .limit(1)
+        )
+        source_row = (await db.execute(revision_stmt)).one_or_none()
+
+    if source_row is None:
+        source_stmt = select(
+            DocumentSource.revision,
+            DocumentSource.file_name,
+            DocumentSource.file_type,
+            DocumentSource.created_at,
+            DocumentSource.updated_at,
+            func.length(DocumentSource.normalized_text).label("total_chars"),
+            func.substr(DocumentSource.normalized_text, offset + 1, limit).label("text_window"),
+        ).where(DocumentSource.document_id == doc.id).limit(1)
+        source_row = (await db.execute(source_stmt)).one_or_none()
+    if source_row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "该文档需重新导入后才能阅读原文")
 
-    text = source.normalized_text or ""
+    total_chars = int(source_row.total_chars or 0)
+    window_end = min(offset + limit, total_chars)
+    window = source_row.text_window or ""
     return DocumentFullSourceResponse(
         document_id=doc.id,
-        document_title=doc.title or source.file_name,
-        file_name=source.file_name,
-        file_type=source.file_type,
-        revision=source.revision,
-        normalized_text=text,
-        text_length=len(text),
-        created_at=source.created_at,
-        updated_at=source.updated_at,
+        document_title=doc.title or source_row.file_name,
+        file_name=source_row.file_name,
+        file_type=source_row.file_type,
+        revision=source_row.revision,
+        normalized_text=window,
+        text_length=total_chars,
+        total_chars=total_chars,
+        offset=offset,
+        truncated=offset != 0 or window_end < total_chars,
+        created_at=source_row.created_at,
+        updated_at=source_row.updated_at,
     )
 
 
@@ -983,12 +1057,18 @@ async def query_library(
         for i in range(len(raw))
     ]
     # 重排：召回候选按 query 重排取前 limit；失败/未启用回退向量序（不阻断）
-    order, rerank_scores = await rerank_svc.rank_candidates(
+    ranked_candidates = await rerank_svc.rank_candidates(
         body.query, contents, top_k=body.limit, enabled=bool(eff_rerank), log_label="query"
     )
+    order, rerank_scores = ranked_candidates
 
     results = []
     for i in order:
+        if (
+            ranked_candidates.observation.effective == "success"
+            and rerank_scores.get(i, 0.0) < settings.rerank_min_score
+        ):
+            continue
         item, payload, enriched, src_row = raw[i], payloads[i], enr.texts[i], enr.rows[i]
         text = enriched if enriched is not None else (payload.get("text") or "")
         metadata = {k: v for k, v in payload.items() if k not in internal_keys}
@@ -1021,6 +1101,7 @@ async def import_file(
     replace_document_id: Optional[uuid.UUID] = Form(default=None),
     visibility_scope: Annotated[Optional[str], Form(max_length=64)] = None,
     security_level: Annotated[Optional[str], Form(max_length=64)] = None,
+    graph_extraction_requested: bool = Form(default=False),
     lib: Library = Depends(require_lib("insert")),
     user: User = Depends(current_active_user),
     db: AsyncSession = Depends(get_db),
@@ -1067,12 +1148,22 @@ async def import_file(
 
     if suffix == ".json":
         try:
-            data = json.loads(content.decode("utf-8"))
+            import_parsing.validate_json_input_size(len(content))
+            try:
+                data = json.loads(content.decode("utf-8"))
+            except RecursionError as exc:
+                raise import_parsing.ImportResourceLimitError from exc
+            import_parsing.validate_json_resource_budget(data)
+            normalized_chars = 0
             if isinstance(data, list):
+                import_parsing.validate_fanout_document_count(len(data))
                 for item in data:
                     text = item.get("text")
                     if not text:
                         continue
+                    import_parsing.validate_fanout_document_count(len(documents_to_ingest) + 1)
+                    normalized_chars += len(text)
+                    import_parsing.validate_normalized_text_budget(normalized_chars)
                     documents_to_ingest.append({
                         "text": text,
                         "title": item.get("title") or filename,
@@ -1085,6 +1176,8 @@ async def import_file(
             elif isinstance(data, dict):
                 text = data.get("text")
                 if text:
+                    import_parsing.validate_fanout_document_count(1)
+                    import_parsing.validate_normalized_text_budget(len(text))
                     documents_to_ingest.append({
                         "text": text,
                         "title": data.get("title") or filename,
@@ -1094,6 +1187,11 @@ async def import_file(
                         "chunks": _structured_chunks(text, data.get("splitter", "text"), lib),
                         "source": _source_data(text, filename, suffix),
                     })
+        except import_parsing.ImportResourceLimitError:
+            raise HTTPException(
+                status.HTTP_413_CONTENT_TOO_LARGE,
+                import_parsing.RESOURCE_LIMIT_ERROR,
+            ) from None
         except Exception as e:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid JSON format: {str(e)}")
 
@@ -1101,7 +1199,21 @@ async def import_file(
         try:
             text_stream = io.StringIO(content.decode("utf-8"))
             reader = csv.DictReader(text_stream)
-            for row in reader:
+            total_cells = 0
+            normalized_chars = 0
+            document_count = 0
+            if reader.fieldnames is not None:
+                total_cells = import_parsing.validate_csv_row_budget(
+                    1, reader.fieldnames, total_cells
+                )
+            for row_number, row in enumerate(reader, start=2):
+                row_width = len(reader.fieldnames or ())
+                extra_cells = row.get(None)
+                if isinstance(extra_cells, list):
+                    row_width += len(extra_cells)
+                total_cells = import_parsing.validate_csv_row_budget(
+                    row_number, range(row_width), total_cells
+                )
                 # Find first column matching 'text' or 'content'
                 text_col = next((col for col in reader.fieldnames or [] if col.lower() in ("text", "content")), None)
                 if not text_col and reader.fieldnames:
@@ -1114,6 +1226,10 @@ async def import_file(
                 if not text:
                     continue
 
+                document_count += 1
+                import_parsing.validate_fanout_document_count(document_count)
+                normalized_chars += len(text)
+                import_parsing.validate_normalized_text_budget(normalized_chars)
                 title_col = next((col for col in reader.fieldnames or [] if col.lower() in ("title", "name")), None)
                 title = row.get(title_col) if title_col else filename
 
@@ -1129,6 +1245,11 @@ async def import_file(
                     "chunks": _structured_chunks(text, "text", lib, {"type": "csv_row", "row": reader.line_num}),
                     "source": _source_data(text, filename, suffix),
                 })
+        except import_parsing.ImportResourceLimitError:
+            raise HTTPException(
+                status.HTTP_413_CONTENT_TOO_LARGE,
+                import_parsing.RESOURCE_LIMIT_ERROR,
+            ) from None
         except Exception as e:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid CSV format: {str(e)}")
 
@@ -1207,10 +1328,10 @@ async def import_file(
     elif suffix == ".xlsx":
         # 电子表格：每个工作表按表格感知切分入库
         try:
-            from app.services.xlsx_extract import extract_xlsx_segments
+            from app.services import xlsx_extract
             from app.services.splitter import build_structured_source_from_segments
 
-            segs = extract_xlsx_segments(content)
+            segs = await asyncio.to_thread(xlsx_extract.extract_xlsx_segments, content)
             source = build_structured_source_from_segments(
                 segs, chunk_size=lib.chunk_size, chunk_overlap=lib.chunk_overlap
             )
@@ -1225,8 +1346,13 @@ async def import_file(
             })
         except HTTPException:
             raise
-        except Exception as e:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid spreadsheet: {str(e)}")
+        except xlsx_extract.XlsxLimitError:
+            raise HTTPException(
+                status.HTTP_413_CONTENT_TOO_LARGE,
+                "spreadsheet exceeds parser safety limits",
+            ) from None
+        except Exception:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid spreadsheet format") from None
 
     else:
         # 纯文本类（.txt/.md/.markdown）——已被白名单限定，不会再误吞未知二进制
@@ -1244,6 +1370,21 @@ async def import_file(
     management = {}
     normalized_visibility = _normalize_import_scope(visibility_scope, "visibility_scope")
     normalized_security = _normalize_import_scope(security_level, "security_level")
+    if graph_extraction_requested:
+        from app.services.graph_extraction_triggers import graph_extraction_upload_configuration
+
+        graph_config = await graph_extraction_upload_configuration(db, lib)
+        graph_allowed = graph_config["available"] or graph_config["exploration_available"]
+        if not graph_allowed:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                {"code": "graph_extraction_unavailable", "reasons": graph_config["reasons"]},
+            )
+        if normalized_security not in graph_config["allowed_security_levels"]:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                {"code": "graph_extraction_security_level_not_allowed"},
+            )
     if normalized_visibility is not None:
         management["visibility_scope"] = normalized_visibility
     if normalized_security is not None:
@@ -1283,6 +1424,8 @@ async def import_file(
             raise HTTPException(http_status, "document file storage failed") from None
         except ValueError as exc:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+        if graph_extraction_requested:
+            await _persist_graph_extraction_request(db, result)
         await db.commit()
         return {
             "status": "success", "imported_count": 1, "failed_count": 0,
@@ -1346,6 +1489,10 @@ async def import_file(
             status.HTTP_400_BAD_REQUEST,
             {"message": "所有文档摄入均失败", "errors": errors},
         )
+
+    if graph_extraction_requested:
+        for result in ingested:
+            await _persist_graph_extraction_request(db, result)
 
     await db.commit()
     return {
