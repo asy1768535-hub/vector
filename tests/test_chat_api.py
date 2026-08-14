@@ -191,6 +191,19 @@ def test_messages_empty_query_422():
     assert r.status_code == 422
 
 
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("合同金额和供应商是谁？只根据材料回答。", "合同金额和供应商是谁"),
+        ("合同金额和供应商是谁，请仅依据原文回答", "合同金额和供应商是谁"),
+        ("只根据材料回答", "只根据材料回答"),
+        ("根据材料回答的内容是什么", "根据材料回答的内容是什么"),
+    ],
+)
+def test_retrieval_query_removes_only_explicit_answer_constraint(query, expected):
+    assert chat_api._retrieval_query(query) == expected
+
+
 def test_messages_top_k_out_of_range_422():
     _override(mock_user, AsyncMock())
     with patch.object(chat_api.settings, "chat_enabled", True):
@@ -222,11 +235,14 @@ def test_messages_return_rerank_display_score():
         metadata={"document_id": "d1", "chunk_id": "c1", "rerank_score": 0.863},
     )]
     _override(mock_user, AsyncMock())
-    patches, _retr, _gen = _patch_pipeline(records)
+    patches, retr, gen = _patch_pipeline(records)
     for p in patches:
         p.start()
     try:
-        response = TestClient(app).post("/chat/messages", json={"library_slug": "medical", "query": "q"})
+        query = "合同金额和供应商是谁？只根据材料回答。"
+        response = TestClient(app).post(
+            "/chat/messages", json={"library_slug": "medical", "query": query}
+        )
     finally:
         for p in reversed(patches):
             p.stop()
@@ -234,6 +250,8 @@ def test_messages_return_rerank_display_score():
     assert response.status_code == 200
     assert response.json()["sources"][0]["score_type"] == "rerank"
     assert response.json()["sources"][0]["display_score"] == 0.863
+    assert retr.await_args.kwargs["request"].query == "合同金额和供应商是谁"
+    assert gen.await_args.args[0] == query
 
 
 def test_messages_calls_retrieval_and_returns_sources():

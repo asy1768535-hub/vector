@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 
@@ -55,6 +56,15 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/chat", tags=["chat"])
 _CHAT_STREAM_CANCELLED = "chat_stream_cancelled"
 _CHAT_OUTPUT_LIMIT_EXCEEDED = chat_answer.CHAT_OUTPUT_LIMIT_EXCEEDED
+_ANSWER_CONSTRAINT_SUFFIX = re.compile(
+    r"[，,。；;！？?\s]*(?:请)?(?:只|仅)(?:根据|依据)"
+    r"(?:以上|所给|提供的|这些)?(?:材料|资料|文档|原文|内容)(?:来)?回答[。！!？?\s]*$"
+)
+
+
+def _retrieval_query(query: str) -> str:
+    cleaned = _ANSWER_CONSTRAINT_SUFFIX.sub("", query).strip()
+    return cleaned or query
 
 
 @router.get("/libraries", response_model=list[ChatLibraryRead])
@@ -175,7 +185,7 @@ async def _retrieve_for_chat(body: ChatMessageRequest, user: User, db: AsyncSess
             embedding_model=lib.embedding_model,
             embedding_base_url=lib.embedding_base_url,
             request=DifyRetrievalRequest(
-                knowledge_id=lib.slug, query=body.query,
+                knowledge_id=lib.slug, query=_retrieval_query(body.query),
                 retrieval_setting=RetrievalSetting(top_k=body.top_k),
             ),
             source_config=lib.source_config,
