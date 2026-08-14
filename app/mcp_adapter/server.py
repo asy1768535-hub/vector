@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import uuid
 from collections.abc import Awaitable
 from typing import Literal, TypeVar
@@ -9,6 +11,8 @@ from mcp.server.fastmcp.exceptions import ResourceError, ToolError
 from pydantic import BaseModel
 
 from app.mcp_adapter.client import MCPAdapterError, PublicV1Client
+from app.schemas.admin import PermissionMatrixRow
+from app.schemas.documents import ImportFileResponse
 from app.schemas.public_v1 import (
     PublicAnswerRequest,
     PublicAnswerResponse,
@@ -29,9 +33,49 @@ from app.schemas.public_v1 import (
 )
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
+ResultT = TypeVar("ResultT")
+
+_UPLOAD_CONTENT_TYPES = {
+    ".csv": "text/csv",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".json": "application/json",
+    ".markdown": "text/markdown",
+    ".md": "text/markdown",
+    ".pdf": "application/pdf",
+    ".txt": "text/plain",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
 
 
-async def _tool_result(result: Awaitable[ModelT]) -> ModelT:
+def _decode_upload(
+    filename: str,
+    content_base64: str,
+    max_bytes: int,
+) -> tuple[bytes, str]:
+    suffix = "." + filename.rsplit(".", 1)[-1].lower()
+    content_type = _UPLOAD_CONTENT_TYPES.get(suffix)
+    if (
+        not filename
+        or len(filename) > 255
+        or "/" in filename
+        or "\\" in filename
+        or content_type is None
+    ):
+        raise MCPAdapterError("upload_invalid")
+    if len(content_base64) > 4 * ((max_bytes + 2) // 3):
+        raise MCPAdapterError("upload_too_large")
+    try:
+        content = base64.b64decode(content_base64, validate=True)
+    except (binascii.Error, ValueError, UnicodeEncodeError):
+        raise MCPAdapterError("upload_invalid") from None
+    if not content:
+        raise MCPAdapterError("upload_invalid")
+    if len(content) > max_bytes:
+        raise MCPAdapterError("upload_too_large")
+    return content, content_type
+
+
+async def _tool_result(result: Awaitable[ResultT]) -> ResultT:
     try:
         return await result
     except MCPAdapterError as exc:
@@ -53,14 +97,25 @@ def _resource_uuid(value: str) -> uuid.UUID:
         raise ResourceError("resource_identifier_invalid") from None
 
 
-def create_mcp_server(client: PublicV1Client) -> FastMCP:
+def create_mcp_server(
+    client: PublicV1Client,
+    *,
+    upload_enabled: bool = False,
+    max_upload_bytes: int = 10 * 1024 * 1024,
+) -> FastMCP:
+    instructions = (
+        "Read authorized knowledge libraries through the stable public v1 "
+        "contracts. Select an explicit Library scope or a saved scope for "
+        "search, retrieval, and answer operations."
+    )
+    if upload_enabled:
+        instructions += (
+            " Upload files only to Libraries where the configured service "
+            "credential has insert permission."
+        )
     server = FastMCP(
         name="Vector Knowledge",
-        instructions=(
-            "Read authorized knowledge libraries through the stable public v1 "
-            "contracts. Select an explicit Library scope or a saved scope for "
-            "search, retrieval, and answer operations."
-        ),
+        instructions=instructions,
         stateless_http=True,
         json_response=True,
     )
@@ -69,6 +124,11 @@ def create_mcp_server(client: PublicV1Client) -> FastMCP:
     async def list_libraries() -> PublicLibrariesResponse:
         """List knowledge libraries visible to the configured credential."""
         return await _tool_result(client.list_libraries())
+
+    @server.tool()
+    async def list_permissions() -> list[PermissionMatrixRow]:
+        """List Library actions granted to the configured service credential."""
+        return await _tool_result(client.list_permissions())
 
     @server.tool()
     async def validate_scope(
@@ -134,11 +194,54 @@ def create_mcp_server(client: PublicV1Client) -> FastMCP:
         return await _tool_result(client.retrieve(request))
 
     @server.tool()
+    async def search_knowledge(
+        knowledge_id: LibrarySlug,
+        query: str,
+        top_k: int = 5,
+        score_threshold: float = 0.0,
+    ) -> PublicRetrievalResponse:
+        """Search one authorized Library with text and published graph context."""
+        request = PublicRetrievalRequest(
+            scope=PublicScopeSelection(library_slugs=[knowledge_id]),
+            query=query,
+            top_k=top_k,
+            candidate_k=min(100, max(top_k, top_k * 2)),
+            score_threshold=score_threshold,
+        )
+        return await _tool_result(client.retrieve(request))
+
+    @server.tool()
     async def answer(
         request: PublicAnswerRequest,
     ) -> PublicAnswerResponse:
         """Generate one grounded answer with bounded sources and graph context."""
         return await _tool_result(client.answer(request))
+
+    if upload_enabled:
+
+        @server.tool()
+        async def upload_file(
+            library_slug: LibrarySlug,
+            filename: str,
+            content_base64: str,
+        ) -> ImportFileResponse:
+            """Upload one Base64-encoded file to an authorized Library."""
+            try:
+                content, content_type = _decode_upload(
+                    filename,
+                    content_base64,
+                    max_upload_bytes,
+                )
+            except MCPAdapterError as exc:
+                raise ToolError(str(exc)) from None
+            return await _tool_result(
+                client.upload_file(
+                    library_slug,
+                    filename,
+                    content,
+                    content_type,
+                )
+            )
 
     @server.resource("vector-kb://libraries")
     async def libraries_resource() -> str:

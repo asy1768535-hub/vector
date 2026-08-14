@@ -21,6 +21,12 @@ class MCPAdapterSettings(BaseSettings):
     transport: Literal["stdio", "streamable-http"] = "stdio"
     http_host: str = Field(default="127.0.0.1", min_length=1, max_length=255)
     http_port: int = Field(default=8001, ge=1, le=65535)
+    upload_enabled: bool = False
+    max_upload_bytes: int = Field(
+        default=10 * 1024 * 1024,
+        ge=1,
+        le=50 * 1024 * 1024,
+    )
 
     @model_validator(mode="after")
     def require_enabled_credentials(self) -> MCPAdapterSettings:

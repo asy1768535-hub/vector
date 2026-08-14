@@ -127,6 +127,12 @@ def test_health_migration_head_matches_alembic_head() -> None:
     assert health_api._migration_heads() == frozenset(script.get_heads())
 
 
+def test_supported_deployment_runbook_names_current_head() -> None:
+    runbook = Path("docs/39-v0.9-supported-deployment.md").read_text(encoding="utf-8")
+    assert "expected release head is `0060`" in runbook
+    assert "verify `0060`" in runbook
+
+
 class _FakeMigrationSession:
     def __init__(self, revisions: list[str] | None = None, error: Exception | None = None):
         self.revisions = revisions or []

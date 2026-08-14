@@ -13,7 +13,11 @@ def main() -> None:
         )
 
     client = PublicV1Client(settings)
-    server = create_mcp_server(client)
+    server = create_mcp_server(
+        client,
+        upload_enabled=settings.upload_enabled,
+        max_upload_bytes=settings.max_upload_bytes,
+    )
     server.settings.host = settings.http_host
     server.settings.port = settings.http_port
     server.run(transport=settings.transport)

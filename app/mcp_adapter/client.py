@@ -9,6 +9,8 @@ import httpx
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from app.mcp_adapter.config import MCPAdapterSettings
+from app.schemas.admin import PermissionMatrixRow
+from app.schemas.documents import ImportFileResponse
 from app.schemas.public_v1 import (
     PublicAnswerRequest,
     PublicAnswerResponse,
@@ -33,6 +35,7 @@ from app.schemas.public_v1 import (
 ResponseModelT = TypeVar("ResponseModelT", bound=BaseModel)
 RequestBody = BaseModel | Mapping[str, Any]
 _LIBRARY_SLUG = TypeAdapter(LibrarySlug)
+_PERMISSION_ROWS = TypeAdapter(list[PermissionMatrixRow])
 
 
 class MCPAdapterError(RuntimeError):
@@ -63,6 +66,7 @@ class PublicV1Client:
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         base_url = str(settings.base_url).rstrip("/")
+        self._service_base_url = base_url.removesuffix("/api/v1")
         self._base_url = (
             base_url if base_url.endswith("/api/v1") else f"{base_url}/api/v1"
         )
@@ -151,6 +155,38 @@ class PublicV1Client:
 
     async def list_libraries(self) -> PublicLibrariesResponse:
         return await self._request("GET", "/libraries", PublicLibrariesResponse)
+
+    async def list_permissions(self) -> list[PermissionMatrixRow]:
+        try:
+            response = await self._http_client.request(
+                "GET",
+                f"{self._service_base_url}/me/permissions",
+                headers={
+                    "Authorization": self._authorization,
+                    "X-Vector-KB-Client": "mcp-adapter",
+                },
+                timeout=self._timeout,
+                follow_redirects=False,
+            )
+        except asyncio.CancelledError:
+            raise
+        except httpx.TimeoutException:
+            raise MCPAdapterError("upstream_timeout") from None
+        except httpx.RequestError:
+            raise MCPAdapterError("upstream_unavailable") from None
+        if not response.is_success:
+            code = {
+                401: "authentication_required",
+                403: "permission_forbidden",
+            }.get(response.status_code, "permission_lookup_failed")
+            raise MCPAdapterError(code, status_code=response.status_code)
+        try:
+            return _PERMISSION_ROWS.validate_python(response.json())
+        except (ValueError, ValidationError):
+            raise MCPAdapterError(
+                "upstream_invalid_response",
+                status_code=response.status_code,
+            ) from None
 
     async def validate_scope(
         self,
@@ -257,3 +293,49 @@ class PublicV1Client:
             PublicAnswerResponse,
             json_body=self._body(body, PublicAnswerRequest),
         )
+
+    async def upload_file(
+        self,
+        slug: str,
+        filename: str,
+        content: bytes,
+        content_type: str,
+    ) -> ImportFileResponse:
+        slug = self._slug(slug)
+        try:
+            response = await self._http_client.request(
+                "POST",
+                f"{self._service_base_url}/libraries/{slug}/import-file",
+                headers={
+                    "Authorization": self._authorization,
+                    "X-Vector-KB-Client": "mcp-adapter",
+                },
+                files={"file": (filename, content, content_type)},
+                timeout=self._timeout,
+                follow_redirects=False,
+            )
+        except asyncio.CancelledError:
+            raise
+        except httpx.TimeoutException:
+            raise MCPAdapterError("upstream_timeout") from None
+        except httpx.RequestError:
+            raise MCPAdapterError("upstream_unavailable") from None
+
+        if not response.is_success:
+            code = {
+                401: "authentication_required",
+                403: "library_forbidden",
+                404: "library_not_found",
+                409: "upload_conflict",
+                413: "upload_too_large",
+                415: "upload_type_unsupported",
+                422: "upload_invalid",
+            }.get(response.status_code, "upload_failed")
+            raise MCPAdapterError(code, status_code=response.status_code)
+        try:
+            return ImportFileResponse.model_validate(response.json())
+        except (ValueError, ValidationError):
+            raise MCPAdapterError(
+                "upstream_invalid_response",
+                status_code=response.status_code,
+            ) from None

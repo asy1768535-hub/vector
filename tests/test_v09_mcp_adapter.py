@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import uuid
 from pathlib import Path
@@ -15,6 +16,7 @@ from pydantic import SecretStr, ValidationError
 from app.mcp_adapter.client import MCPAdapterError, PublicV1Client
 from app.mcp_adapter.config import MCPAdapterSettings
 from app.mcp_adapter.server import create_mcp_server
+from app.schemas.documents import ImportFileResponse
 from app.schemas.public_v1 import (
     PublicEntitySearchRequest,
     PublicLibrariesResponse,
@@ -56,10 +58,32 @@ def _libraries_response() -> PublicLibrariesResponse:
     )
 
 
+def _upload_response() -> ImportFileResponse:
+    return ImportFileResponse.model_validate(
+        {
+            "status": "success",
+            "imported_count": 1,
+            "failed_count": 0,
+            "documents": [
+                {
+                    "document_id": "00000000-0000-4000-8000-000000000004",
+                    "title": "notes.txt",
+                    "chunk_count": 1,
+                    "status": "pending",
+                    "job_id": "00000000-0000-4000-8000-000000000005",
+                }
+            ],
+            "errors": [],
+        }
+    )
+
+
 def test_mcp_settings_are_default_off_and_require_secret_when_enabled() -> None:
     settings = MCPAdapterSettings()
     assert settings.enabled is False
     assert settings.transport == "stdio"
+    assert settings.upload_enabled is False
+    assert settings.max_upload_bytes == 10 * 1024 * 1024
 
     with pytest.raises(ValidationError, match="API key"):
         MCPAdapterSettings(enabled=True)
@@ -171,6 +195,76 @@ async def test_client_does_not_swallow_cancellation() -> None:
 
 
 @pytest.mark.asyncio
+async def test_client_uploads_to_permission_checked_library_endpoint() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(201, json=_upload_response().model_dump(mode="json"))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = PublicV1Client(
+            _settings(base_url="https://knowledge.example.test/api/v1"),
+            http_client,
+        )
+        result = await client.upload_file(
+            "projects",
+            "notes.txt",
+            b"release notes",
+            "text/plain",
+        )
+
+    assert result == _upload_response()
+    assert seen[0].method == "POST"
+    assert seen[0].url == "https://knowledge.example.test/libraries/projects/import-file"
+    assert seen[0].headers["authorization"] == "Bearer vkb_secret_value"
+    assert b'filename="notes.txt"' in seen[0].content
+    assert b"release notes" in seen[0].content
+
+
+@pytest.mark.asyncio
+async def test_client_lists_service_credential_permissions() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "library_slug": "projects",
+                    "library_name": "Projects",
+                    "actions": ["insert", "read"],
+                    "organization_id": str(ORGANIZATION_ID),
+                }
+            ],
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = PublicV1Client(_settings(), http_client)
+        result = await client.list_permissions()
+
+    assert result[0].library_slug == "projects"
+    assert result[0].actions == ["insert", "read"]
+    assert seen[0].url == "https://knowledge.example.test/me/permissions"
+    assert seen[0].headers["authorization"] == "Bearer vkb_secret_value"
+
+
+@pytest.mark.asyncio
+async def test_client_upload_errors_do_not_leak_upstream_body() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, text="private upload details vkb_secret_value")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = PublicV1Client(_settings(), http_client)
+        with pytest.raises(MCPAdapterError, match="library_forbidden") as caught:
+            await client.upload_file("projects", "notes.txt", b"x", "text/plain")
+
+    assert "private upload details" not in str(caught.value)
+    assert "vkb_secret_value" not in str(caught.value)
+
+
+@pytest.mark.asyncio
 async def test_client_methods_match_frozen_http_contracts() -> None:
     client = PublicV1Client(_settings(), AsyncMock())
     client._request = AsyncMock(return_value=_libraries_response())
@@ -241,6 +335,7 @@ async def test_fastmcp_discovers_bounded_tools_and_read_resources() -> None:
 
     assert tool_names == {
         "list_libraries",
+        "list_permissions",
         "validate_scope",
         "get_document",
         "get_entity",
@@ -249,6 +344,7 @@ async def test_fastmcp_discovers_bounded_tools_and_read_resources() -> None:
         "search_entities",
         "search_relations",
         "retrieve",
+        "search_knowledge",
         "answer",
     }
     assert {str(resource.uri) for resource in resources} == {"vector-kb://libraries"}
@@ -260,6 +356,64 @@ async def test_fastmcp_discovers_bounded_tools_and_read_resources() -> None:
     _, structured = await server.call_tool("list_libraries", {})
     assert structured["contract_version"] == "public-libraries-v1"
     assert structured["libraries"][0]["slug"] == "projects"
+
+
+@pytest.mark.asyncio
+async def test_fastmcp_discovers_and_calls_upload_only_when_enabled() -> None:
+    client = AsyncMock(spec=PublicV1Client)
+    client.upload_file.return_value = _upload_response()
+    server = create_mcp_server(client, upload_enabled=True, max_upload_bytes=32)
+
+    tools = await server.list_tools()
+    assert "upload_file" in {tool.name for tool in tools}
+
+    _, structured = await server.call_tool(
+        "upload_file",
+        {
+            "library_slug": "projects",
+            "filename": "notes.txt",
+            "content_base64": base64.b64encode(b"release notes").decode("ascii"),
+        },
+    )
+
+    assert structured["imported_count"] == 1
+    client.upload_file.assert_awaited_once_with(
+        "projects",
+        "notes.txt",
+        b"release notes",
+        "text/plain",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("filename", "content_base64", "error"),
+    [
+        ("../notes.txt", "eA==", "upload_invalid"),
+        ("notes.exe", "eA==", "upload_invalid"),
+        ("notes.txt", "!!!", "upload_invalid"),
+        ("notes.txt", "eHl6", "upload_too_large"),
+    ],
+)
+async def test_fastmcp_rejects_invalid_uploads_before_network(
+    filename: str,
+    content_base64: str,
+    error: str,
+) -> None:
+    client = AsyncMock(spec=PublicV1Client)
+    server = create_mcp_server(client, upload_enabled=True, max_upload_bytes=2)
+
+    with pytest.raises(ToolError, match=error):
+        await server.call_tool(
+            "upload_file",
+            {
+                "library_slug": "projects",
+                "filename": filename,
+                "content_base64": content_base64,
+            },
+        )
+
+    client.upload_file.assert_not_awaited()
 
 
 @pytest.mark.asyncio

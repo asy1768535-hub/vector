@@ -1,9 +1,10 @@
 # MCP Knowledge Adapter
 
-The v0.9 MCP adapter exposes the accepted public knowledge API as read-only MCP
-tools and resources. It is a separate, default-off process. It does not access
-the database or implement authorization, scope resolution, retrieval, graph
-traversal, or Publication logic.
+The v0.9 MCP adapter exposes the accepted public knowledge API as MCP tools and
+resources. It is a separate, default-off process. Read tools use public v1;
+optional file upload delegates to the existing permission-checked Library import
+API. The adapter never accesses the database or implements authorization, scope
+resolution, retrieval, graph traversal, import parsing, or Publication logic.
 
 ## Prerequisites
 
@@ -11,6 +12,8 @@ traversal, or Publication logic.
 2. Issue an API key for a user bound to one active Organization.
 3. Grant that user `read` permission on only the required Libraries.
 4. Install the project dependencies, including the official MCP Python SDK.
+
+Grant `insert` on a Library only when MCP upload is enabled for that process.
 
 Do not put the API key in MCP tool arguments, resource URIs, checked-in client
 configuration, or command-line arguments. Supply it through the MCP process
@@ -24,6 +27,8 @@ MCP_ADAPTER_BASE_URL=http://127.0.0.1:8000
 MCP_ADAPTER_API_KEY=<organization-bound-api-key>
 MCP_ADAPTER_TIMEOUT_SECONDS=60
 MCP_ADAPTER_TRANSPORT=stdio
+MCP_ADAPTER_UPLOAD_ENABLED=false
+MCP_ADAPTER_MAX_UPLOAD_BYTES=10485760
 ```
 
 `MCP_ADAPTER_BASE_URL` may include `/api/v1`; the adapter normalizes it exactly
@@ -47,6 +52,7 @@ configuration. On initialization the client discovers these tools:
 
 ```text
 list_libraries
+list_permissions
 validate_scope
 get_document
 get_entity
@@ -55,7 +61,17 @@ get_evidence
 search_entities
 search_relations
 retrieve
+search_knowledge
 answer
+```
+
+`search_knowledge` is the single-Library compatibility entry point. It returns
+the same bounded text and published graph context as `retrieve`.
+
+When `MCP_ADAPTER_UPLOAD_ENABLED=true`, discovery also includes:
+
+```text
+upload_file
 ```
 
 Search, retrieval, and answer calls require exactly one bounded scope:
@@ -76,6 +92,19 @@ vector-kb://libraries/{slug}/evidence/{evidence_id}
 Each resource calls the same public endpoint as its equivalent tool. There is
 no adapter cache or second query path.
 
+## Controlled Upload
+
+`upload_file` accepts `library_slug`, a basename-only `filename`, and standard
+Base64 `content_base64`. Supported extensions are `.txt`, `.md`, `.markdown`,
+`.json`, `.csv`, `.pdf`, `.docx`, and `.xlsx`. Empty, malformed, path-like,
+unsupported, or oversized inputs are rejected before the upstream request.
+
+The configured service user must have `insert` permission on the target
+Library. The existing import API remains responsible for authentication,
+permission checks, parsing, deduplication, revision storage, chunking, and
+embedding job creation. An accepted upload is not searchable until the
+Embedding Worker completes its job.
+
 ## Streamable HTTP
 
 For a controlled network deployment:
@@ -94,6 +123,25 @@ loopback and provide authenticated TLS externally. The upstream Organization
 API key is process-wide, so do not expose this adapter as a multi-tenant public
 endpoint. Non-loopback upstream APIs must use HTTPS.
 
+For systemd, run the adapter independently from the API and workers:
+
+```ini
+[Unit]
+Description=Vector KB MCP Adapter
+After=vector-kb-api.service
+
+[Service]
+User=vkb
+WorkingDirectory=/opt/vector-kb
+EnvironmentFile=/opt/vector-kb/.env
+ExecStart=/opt/vector-kb/.venv/bin/python -m app.mcp_adapter
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
 ## Errors And Cancellation
 
 Validated public v1 errors retain only their stable error code, request ID, HTTP
@@ -106,11 +154,12 @@ metadata.
 
 ## Rollback
 
-Stop the adapter process or set:
+Stop the adapter process or set `MCP_ADAPTER_ENABLED=false`. To remove only the
+write surface while retaining reads, set:
 
 ```dotenv
-MCP_ADAPTER_ENABLED=false
+MCP_ADAPTER_UPLOAD_ENABLED=false
 ```
 
-The adapter has no migration, persistent state, write tool, or rollout side
-effect. Disabling it does not alter `/api/v1` or existing clients.
+The adapter has no migration or local persistent state. Disabling it does not
+alter `/api/v1`, imported documents, or existing clients.
