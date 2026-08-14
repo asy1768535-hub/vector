@@ -5760,6 +5760,22 @@ local-icon { display: inline-block; vertical-align: -0.125em; }
     min-height: 0;
 }
 
+.documents-source-dialog {
+    width: min(860px, calc(100vw - 32px)) !important;
+}
+
+.documents-source-dialog .el-dialog__body {
+    max-height: calc(90vh - 72px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+.documents-source-text {
+    margin: 0;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+}
+
 /* Account settings */
 .account-profile {
     width: min(100%, 920px);

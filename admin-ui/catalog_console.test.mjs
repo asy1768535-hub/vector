@@ -392,6 +392,12 @@ test('full source reader exposes bounded progress, explicit loading, and stale r
     assert.match(view, /@click="loadMoreSource"/);
 });
 
+test('full source dialog keeps long documents inside a scrollable viewport', () => {
+    assert.match(css, /\.documents-source-dialog\s*\{[^}]*width:\s*min\(860px,\s*calc\(100vw - 32px\)\)/s);
+    assert.match(css, /\.documents-source-dialog \.el-dialog__body\s*\{[^}]*max-height:\s*calc\(90vh - 72px\)[^}]*overflow-y:\s*auto/s);
+    assert.match(css, /\.documents-source-text\s*\{[^}]*overflow-wrap:\s*anywhere[^}]*white-space:\s*pre-wrap/s);
+});
+
 test('pending classifications are reviewed inside the catalog document detail', () => {
     for (const token of [
         'loadCurrentClassificationReview',
