@@ -1057,12 +1057,18 @@ async def query_library(
         for i in range(len(raw))
     ]
     # 重排：召回候选按 query 重排取前 limit；失败/未启用回退向量序（不阻断）
-    order, rerank_scores = await rerank_svc.rank_candidates(
+    ranked_candidates = await rerank_svc.rank_candidates(
         body.query, contents, top_k=body.limit, enabled=bool(eff_rerank), log_label="query"
     )
+    order, rerank_scores = ranked_candidates
 
     results = []
     for i in order:
+        if (
+            ranked_candidates.observation.effective == "success"
+            and rerank_scores.get(i, 0.0) < settings.rerank_min_score
+        ):
+            continue
         item, payload, enriched, src_row = raw[i], payloads[i], enr.texts[i], enr.rows[i]
         text = enriched if enriched is not None else (payload.get("text") or "")
         metadata = {k: v for k, v in payload.items() if k not in internal_keys}

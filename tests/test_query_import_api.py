@@ -235,13 +235,13 @@ def test_query_library_endpoint(mock_search, mock_embed, client, monkeypatch):
 @patch("app.services.rerank.rerank", new_callable=AsyncMock)
 @patch("app.services.qdrant.search", new_callable=AsyncMock)
 @patch("app.services.embedding.embed_one", new_callable=AsyncMock)
-def test_query_rerank_backfills_and_keeps_both_scores(mock_embed, mock_search, mock_rerank, client, monkeypatch):
-    """rerank 生效路径端到端：召回 3 条、reranker 只返回 1 条 →
-    断言补满到 3 条、命中项带 rerank_score、补满项只带 vector_score。"""
+def test_query_rerank_returns_only_qualified_scores(mock_embed, mock_search, mock_rerank, client, monkeypatch):
+    """Successful rerank returns only candidates meeting its native score threshold."""
     # 全局开启 rerank 并配好地址（lib.rerank_enabled=None → 回退全局）
     monkeypatch.setattr(settings, "rerank_enabled", True)
     monkeypatch.setattr(settings, "rerank_base_url", "http://mock-rerank/rerank")
     monkeypatch.setattr(settings, "rerank_model", "bge-reranker-v2-m3")
+    monkeypatch.setattr(settings, "rerank_min_score", 0.05)
     monkeypatch.setattr(settings, "retrieval_consistency_filter", False)  # 本用例验 rerank，不验 #6 过滤
 
     mock_embed.return_value = [0.1] * 1024
@@ -250,27 +250,39 @@ def test_query_rerank_backfills_and_keeps_both_scores(mock_embed, mock_search, m
         {"id": "2", "score": 0.80, "payload": {"text": "B", "document_id": "d2", "chunk_id": "c2", "title": "tB"}},
         {"id": "3", "score": 0.70, "payload": {"text": "C", "document_id": "d3", "chunk_id": "c3", "title": "tC"}},
     ]
-    # reranker 只返回向量序最差的第 3 条（idx=2），高分上浮到首位
-    mock_rerank.return_value = [(2, 0.99)]
+    mock_rerank.return_value = [(2, 0.99), (0, 0.04), (1, 0.0)]
 
     response = client.post("/libraries/testlib/query", json={"query": "q", "limit": 5})
     assert response.status_code == status.HTTP_200_OK
     results = response.json()["results"]
 
-    # 补满：3 条召回全部返回，顺序 = 重排命中 [2] + 原向量序补满 [0,1]
-    assert [r["text"] for r in results] == ["C", "A", "B"]
+    assert [r["text"] for r in results] == ["C"]
 
     # 命中项：similarity=rerank 分，metadata 同时含 vector_score 与 rerank_score
     assert results[0]["similarity"] == 0.99
     assert results[0]["metadata"]["vector_score"] == 0.70
     assert results[0]["metadata"]["rerank_score"] == 0.99
 
-    # 补满项：similarity 回退向量分，metadata 只有 vector_score、无 rerank_score
-    assert results[1]["similarity"] == 0.90
-    assert results[1]["metadata"]["vector_score"] == 0.90
-    assert "rerank_score" not in results[1]["metadata"]
-    assert results[2]["metadata"]["vector_score"] == 0.80
-    assert "rerank_score" not in results[2]["metadata"]
+@patch("app.services.rerank.rerank", new_callable=AsyncMock)
+@patch("app.services.qdrant.search", new_callable=AsyncMock)
+@patch("app.services.embedding.embed_one", new_callable=AsyncMock)
+def test_query_rerank_failure_keeps_vector_results(mock_embed, mock_search, mock_rerank, client, monkeypatch):
+    monkeypatch.setattr(settings, "rerank_enabled", True)
+    monkeypatch.setattr(settings, "rerank_base_url", "http://mock-rerank/rerank")
+    monkeypatch.setattr(settings, "rerank_model", "bge-reranker-v2-m3")
+    monkeypatch.setattr(settings, "rerank_min_score", 0.95)
+    monkeypatch.setattr(settings, "retrieval_consistency_filter", False)
+    mock_embed.return_value = [0.1] * 1024
+    mock_search.return_value = [
+        {"id": "1", "score": 0.80, "payload": {"text": "A", "document_id": "d1", "chunk_id": "c1"}},
+    ]
+    mock_rerank.side_effect = RuntimeError("offline")
+
+    response = client.post("/libraries/testlib/query", json={"query": "q", "limit": 5})
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()["results"][0]["similarity"] == 0.80
+    assert "rerank_score" not in response.json()["results"][0]["metadata"]
 
 @patch("app.deps.has_permission")
 def test_query_library_unauthorized(mock_has_perm, client):
