@@ -102,7 +102,6 @@ const _listLibsKey = (params) => 'listLibraries:' + new URLSearchParams(params).
 export const listLibraries = (params = {}, forceRefresh) => cachedRequest(_listLibsKey(params), () => request('/admin/libraries?' + new URLSearchParams(params).toString()), 30000, forceRefresh);
 export const createLibrary = (data) => request('/admin/libraries', jsonBody('POST', data));
 export const updateLibrary = (slug, data) => request(`/admin/libraries/${slug}`, jsonBody('PATCH', data));
-export const getLibrary = (slug) => request(`/admin/libraries/${slug}`);
 export const deleteLibrary = (slug) => request(`/admin/libraries/${slug}`, { method: 'DELETE' });
 export const rebuildLibraryCollection = (slug) =>
     request(`/admin/libraries/${slug}/rebuild-collection`, { method: 'POST' });
@@ -135,12 +134,6 @@ export const updateDocument = (slug, id, data) =>
     request(`/libraries/${slug}/documents/${id}`, jsonBody('PUT', data));
 const _docsKey = (slug, params) => `listDocuments:${slug}:${new URLSearchParams(params).toString()}`;
 export const listDocuments = (slug, params = {}, forceRefresh) => cachedRequest(_docsKey(slug, params), () => request(`/libraries/${slug}/documents?${new URLSearchParams(params).toString()}`), 15000, forceRefresh);
-export const listFolders = (slug, forceRefresh) => cachedRequest(
-    `listFolders:${slug}`,
-    () => request(`/libraries/${slug}/folders`),
-    15000,
-    forceRefresh,
-);
 export const deleteDocument = (slug, id) =>
     request(`/libraries/${slug}/documents/${id}`, { method: 'DELETE' });
 export const libraryStats = (slug, forceRefresh) => cachedRequest(`libraryStats:${slug}`, () => request(`/libraries/${slug}/stats`), 15000, forceRefresh);
@@ -569,7 +562,6 @@ export const listMonitoredTasks = (params = {}, forceRefresh) => cachedRequest(
     8000,
     forceRefresh,
 );
-export const retryJob = (id) => request(`/admin/jobs/${id}/retry`, { method: 'POST' });
 export const retryMonitoredTasks = (items) => request('/admin/jobs/monitor/retry', {
     method: 'POST',
     body: JSON.stringify({ items }),

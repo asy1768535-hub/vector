@@ -40,19 +40,19 @@ Schema 和分类审核继续依据有效 Library/Organization 权限判断。
 
 ## 导航结构
 
-后台保留 20 个可直接访问的叶子页面，其中 19 个是 v0.9 历史能力，另有
-个人资料页面。登录页独立显示；登录后的左侧导航按 7 个业务域和账户设置
-分组，并直接提供当前用户有权访问的叶子页面按钮。页面顶部不再重复渲染
-功能域子页面标签。
+后台当前有 17 个登录后可直接访问的叶子页面。登录页独立显示；登录后的左侧
+导航按业务域和账户设置分组，并直接提供当前用户有权访问的叶子页面按钮。
+按钮级功能、权限和 API 映射见
+[前端按钮功能清单](./48-frontend-button-function-inventory.md)。
 
 | 功能域 | 规范路由 | 子页面 |
 |---|---|---|
 | 登录 | `#/login` | 登录 |
 | 知识使用 | `#/knowledge-use/*` | 智能问答、单库检索、联邦检索诊断 |
-| 知识资产 | `#/knowledge-assets/*` | 知识内容（文档/知识目录切换）、导入与替换 |
-| 知识治理 | `#/knowledge-governance/*` | 知识图谱、Schema 管理、分类审核 |
+| 知识资产 | `#/knowledge-assets/*` | 知识资产、导入与替换 |
+| 知识治理 | `#/knowledge-governance/*` | 知识图谱 |
 | 用户与权限 | `#/users-permissions/*` | 用户管理、权限矩阵 |
-| 库管理 | `#/libraries` | 库配置 |
+| 库管理 | `#/libraries`、`#/knowledge-governance/schema` | 库配置、Schema 管理 |
 | 运维中心 | `#/operations-center/*` | 概览、服务与队列、任务 |
 | 审计中心 | `#/audit-center/*` | 操作审计、问答审计 |
 | 账户设置 | `#/account/*` | 个人资料、API Key |
@@ -161,14 +161,14 @@ API：`POST /me/library-compatibility/check`、
 
 ## 3. 知识资产
 
-### 文档
+### 知识资产目录（文档、处理与分类）
 
-路由：`#/knowledge-assets/documents`
+路由：`#/knowledge-assets/catalog`
 
 权限：任一 Library `read`；写入、删除按钮继续按对应动作控制。
 
-侧栏与知识目录共用“知识内容”入口；页面顶部通过“文档 / 知识目录”分段控件
-切换，切换时保留当前 Library，上述两个稳定路由及其权限元数据保持独立。
+历史 `#/documents`、`#/knowledge-assets/documents` 和
+`#/classification-review` 入口都重定向到当前统一知识资产页面。
 
 用途：管理知识库中的文档、处理状态和原始内容。
 
@@ -184,9 +184,7 @@ API：`POST /me/library-compatibility/check`、
 API：`/libraries/{slug}/documents*`、`/libraries/{slug}/stats`、
 文档 source、jobs 和 file 下载接口。
 
-### 知识目录
-
-路由：`#/knowledge-assets/catalog`
+#### 目录、处理与分类能力
 
 权限：有效 Library `read`，不使用平台超级管理员绕过客户内容权限。
 
@@ -244,7 +242,7 @@ Organization 管理员或精确 Library `admin`。
 API：Organization Graph Catalog、Library graph-governance、v0.5
 graph-publications、v0.6 published graph query 和 Catalog Evidence 接口。
 
-### Schema 管理
+### Schema 管理（侧栏归属“库管理”）
 
 路由：`#/knowledge-governance/schema`
 
@@ -265,9 +263,9 @@ graph-publications、v0.6 published graph query 和 Catalog Evidence 接口。
 API：`/libraries/{slug}/schema-lifecycle/versions*` 及其 validate、impact、
 clone、activate、delete-draft、disable 和 item 命令。
 
-### 分类审核
+### 分类审核（已并入知识资产详情）
 
-路由：`#/knowledge-governance/classification`
+路由：`#/knowledge-assets/catalog`
 
 权限：Organization 管理员或精确 Library `admin`。
 
@@ -304,7 +302,8 @@ API：`/admin/users*`、`/admin/users/{id}/reset-password` 和权限接口。
 
 权限：平台超级管理员。
 
-用途：按用户配置各 Library 的 `read`、`insert`、`delete`、`admin` 权限。
+用途：按用户配置各 Library 的 `read`、`insert`、`delete` 权限。Library
+`admin` 和组织管理员身份不在这个三列矩阵中授予。
 
 功能：选择用户、加载权限矩阵、勾选动作、计算差异、保存或重置。
 
@@ -365,9 +364,11 @@ API：`GET /admin/operations/status`。
 
 用途：检查和处理后台任务。
 
-功能：按状态和 Library 筛选、分页、查看错误摘要、重试单个任务、重置失败任务。
+功能：按状态和 Library 筛选、分页、查看错误摘要、通过统一 monitor 合同重试
+单个或所选任务、重置失败向量任务。
 
-API：`/admin/jobs`、`/admin/jobs/stats`、retry 和 reset-failed 接口。
+API：`/admin/jobs/monitor`、`/admin/jobs/monitor/stats`、
+`/admin/jobs/monitor/retry` 和 reset-failed 接口。
 
 ## 8. 审计中心
 
@@ -435,12 +436,12 @@ API：`GET/POST /me/api-keys`、`DELETE /me/api-keys/{id}`。
 | 智能问答 | 知识使用 | 域内子页面 |
 | 数据检索 | 知识使用 | 域内子页面 |
 | 检索诊断 | 知识使用 | 组织管理员子页面 |
-| 文档 | 知识资产 | 资产列表、详情和写操作 |
-| 知识目录 | 知识资产 | 只读目录、Evidence 和修订 |
+| 文档 | 知识资产 | 并入统一知识资产目录 |
+| 知识目录 | 知识资产 | 目录、Evidence、修订和处理诊断 |
 | 导入数据 | 知识资产 | 文件导入与替换流程 |
 | 知识图谱 | 知识治理 | 独立治理子模块 |
-| Schema 管理 | 知识治理 | 独立 Schema 子模块 |
-| 分类审核 | 知识治理 | 独立分类子模块 |
+| Schema 管理 | 库管理 | 独立 Schema 子模块，规范路由保持不变 |
+| 分类审核 | 知识资产 | 并入文档详情的分类区 |
 | 用户管理 | 用户与权限 | 用户生命周期子页面 |
 | 权限矩阵 | 用户与权限 | 授权子页面 |
 | 库管理 | 库管理 | 保留 |

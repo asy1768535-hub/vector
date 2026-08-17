@@ -296,10 +296,6 @@ test('library save failures stay on the existing error path', () => {
     assert.match(submitEdit, /catch \(e\) \{ ElMessage\.error\(e\.message\); \}/);
 });
 
-test('admin library API exposes the exact uncached detail endpoint', () => {
-    assert.match(apiSource, /export const getLibrary = \(slug\) => request\(`\/admin\/libraries\/\$\{slug\}`\);/);
-});
-
 test('detail drawer displays source enrichment enabled or disabled clearly', () => {
     assert.match(source, /function sourceDisplay\(config\)/);
     assert.match(source, /开启（\$\{srcSummary\(config\)\}）/);

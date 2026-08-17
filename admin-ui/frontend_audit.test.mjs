@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { menuAccess, canAccessRoute } from './src/menu_access.js';
 import { csvEscape, downloadCSV } from './src/logs_ui.js';
 
@@ -167,6 +167,31 @@ test('API: getLibraryJob removed', () => {
 
 test('API: sendChatMessage removed', () => {
     assert.ok(!apiSrc.includes('sendChatMessage'), 'sendChatMessage removed');
+});
+
+test('API: every exported frontend wrapper has a real source consumer', () => {
+    const sourceDirectories = ['./src/', './src/views/', './src/components/'];
+    const sourceFiles = [];
+    for (const directory of sourceDirectories) {
+        const url = new URL(directory, import.meta.url);
+        for (const name of readdirSync(url).filter((value) => value.endsWith('.js'))) {
+            sourceFiles.push(`${directory}${name}`);
+        }
+    }
+    const consumers = sourceFiles
+        .map((name) => readFileSync(new URL(name, import.meta.url), 'utf8'))
+        .join('\n');
+    const exportedNames = Array.from(apiSrc.matchAll(
+        /export\s+(?:async\s+)?(?:const|function)\s+([A-Za-z_][A-Za-z0-9_]*)/g,
+    ), (match) => match[1]);
+    const unused = exportedNames.filter((name) => {
+        if (new RegExp(`\\bapi\\.${name}\\b`).test(consumers)) return false;
+        return !new RegExp(
+            `import\\s*\\{[^}]*\\b${name}\\b[^}]*\\}\\s*from\\s*['\"][^'\"]*api\\.js['\"]`,
+            's',
+        ).test(consumers);
+    });
+    assert.deepEqual(unused, []);
 });
 
 console.log('frontend audit test passed');

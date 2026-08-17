@@ -133,7 +133,7 @@
 - 统计标签改为横排指标
 - 状态标签颜色规范
 - 重试按钮仅图标
-**依赖 API**: `listJobs`, `jobStats`, `retryJob`, `resetFailedJobs`
+**依赖 API**: `listMonitoredTasks`, `monitoredTaskStats`, `retryMonitoredTasks`, `resetFailedJobs`
 **风险**: 低
 
 ---

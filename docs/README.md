@@ -2,11 +2,11 @@
 
 ## 当前真相与历史记录
 
-截至 **2026-08-12**，当前代码真相是：`pyproject.toml` package version 为 `0.1.0`；代码迁移 head 为 **`0060`**，参考部署数据库同日 `alembic current` 为 `0060`。向量摄入/检索是核心，代码还包含按 feature gate 或 rollout 控制的图谱、分类、知识产物、Evidence/claim shadow、公开 API/MCP 与组织能力。
+截至 **2026-08-17**，当前代码真相是：`pyproject.toml` package version 为 `0.1.0`；代码迁移 head 为 **`0060`**。向量摄入/检索是核心，代码还包含按 feature gate 或 rollout 控制的图谱、分类、知识产物、Evidence/claim shadow、公开 API/MCP 与组织能力。
 
 部署、架构、worker、schema、测试和内部试运行的当前说明以根目录 README 及 [02](./02-architecture.md)、[11](./11-worker.md)、[14](./14-database-schema.md)、[15](./15-deployment.md)、[16](./16-testing.md)、[22](./22-internal-pilot-checklist.md) 为准。下方“版本说明”中的 `v0.x`、`M*`、旧 head 和旧测试数字是历史设计/验收记录，保留其原始时点，不是当前 package version 或部署 head。
 
-当前 `docs/` 下共有 **63 个 Markdown 文件**（根目录 47 个、子目录 16 个；命令：`Get-ChildItem docs -File -Recurse -Filter *.md`，核对日期 2026-08-12）。本页是分组索引，不再使用旧的“24 篇”数量描述。
+当前 `docs/` 下共有 **64 个 Markdown 文件**（根目录 48 个、子目录 16 个；命令：`Get-ChildItem docs -File -Recurse -Filter *.md`，核对日期 2026-08-17）。本页是分组索引，不再使用旧的“24 篇”数量描述。
 
 > **v0.7 corrective G2.8 UTF-8 evidence correction (2026-07-21):** The initial
 > PowerShell-to-Python qualification encoded the two Chinese public probes incorrectly;
@@ -115,6 +115,7 @@
 | 10 | [检索接口](./10-retrieval-api.md) | Dify external knowledge base spec |
 | 11 | [Worker](./11-worker.md) | Embedding / Cleanup / Importer 及按能力启用的 worker |
 | 12 | [管理后台 UI](./12-admin-ui.md) | 零构建 Vue 3 SPA |
+| 48 | [前端按钮功能清单](./48-frontend-button-function-inventory.md) | 按页面按钮核对功能、权限和真实 API |
 
 ## 参考资料
 
@@ -147,7 +148,7 @@
 | 31 | [v0.2 Evidence Foundation upgrade summary](./31-upgrade-summary-v0.2-evidence-foundation.md) | Compatibility fields, release scope, and v0.3 evidence handoff |
 | 32 | [v0.4 Graph Extraction evaluation runbook](./32-v0.4-graph-extraction-eval-runbook.md) | Synthetic Eval safety, real DeepSeek runs, immutable artifacts, verification and disposal |
 | 34 | [v0.5 Active Graph Publication operator summary](./34-v0.5-active-graph-publication.md) | Feature gate, lifecycle, API roles, healthy/degraded reads, rollout and rollback |
-| v0.9 MCP | [MCP knowledge adapter](./mcp-knowledge-adapter.md) | Read-only tools/resources over the accepted `/api/v1`, stdio/Streamable HTTP operation, credentials, and rollback |
+| v0.9 MCP | [MCP knowledge adapter](./mcp-knowledge-adapter.md) | Read tools、可选受控文件上传、stdio/Streamable HTTP、凭据和回滚 |
 | v0.9 External Graph Sync | [External graph fact synchronization](./external-graph-sync.md) | SyncSource policy, entity/relation identity, authority conflicts, tombstones, snapshots, Publication safety, and rollback |
 | v0.9 Deployment | [Supported deployment runbook](./39-v0.9-supported-deployment.md) | Hosted/private initialization, readiness, Organization rollout, backup/restore, upgrade, and rollback |
 | v0.3 | [Graph Relation Foundation spec](./superpowers/specs/2026-07-09-v0.3-graph-relation-foundation.md) | Ontology, graph facts, evidence binding, lifecycle, API and acceptance contracts |
