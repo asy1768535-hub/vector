@@ -421,18 +421,27 @@ async def _load_monitor_tasks(
     *,
     library_id: Optional[uuid.UUID] = None,
     per_type_limit: Optional[int] = None,
+    task_types: Optional[set[str]] = None,
 ) -> list[TaskMonitorRead]:
-    def scoped(model):
+    selected_types = task_types or {"import", "embedding", "graph"}
+
+    def scoped(model, task_type: str):
         stmt = select(model).order_by(model.created_at.desc(), model.id.desc())
         if library_id is not None:
             stmt = stmt.where(model.library_id == library_id)
         if per_type_limit is not None:
             stmt = stmt.limit(per_type_limit)
-        return stmt
+        return stmt if task_type in selected_types else None
 
-    import_jobs = list((await db.execute(scoped(DocumentImportJob))).scalars().all())
-    embedding_jobs = list((await db.execute(scoped(EmbeddingJob))).scalars().all())
-    graph_jobs = list((await db.execute(scoped(GraphExtractionJob))).scalars().all())
+    async def load(model, task_type: str):
+        stmt = scoped(model, task_type)
+        if stmt is None:
+            return []
+        return list((await db.execute(stmt)).scalars().all())
+
+    import_jobs = await load(DocumentImportJob, "import")
+    embedding_jobs = await load(EmbeddingJob, "embedding")
+    graph_jobs = await load(GraphExtractionJob, "graph")
     latest_production_graph_ids: set[uuid.UUID] = set()
     latest_production_by_revision: dict[uuid.UUID, uuid.UUID] = {}
     for graph_job in graph_jobs:
@@ -635,7 +644,12 @@ async def monitor_jobs(
     db: AsyncSession = Depends(get_db),
 ) -> list[TaskMonitorRead]:
     """Persistent monitor covering import, embedding, and graph extraction jobs."""
-    rows = await _load_monitor_tasks(db, library_id=library_id)
+    rows = await _load_monitor_tasks(
+        db,
+        library_id=library_id,
+        per_type_limit=None if status_filter is not None else limit + offset,
+        task_types={task_type} if task_type is not None else None,
+    )
     if task_type is not None:
         rows = [row for row in rows if row.task_type == task_type]
     if status_filter is not None:
@@ -649,7 +663,11 @@ async def monitor_job_stats(
     _: User = Depends(current_superuser),
     db: AsyncSession = Depends(get_db),
 ) -> TaskMonitorStats:
-    rows = await _load_monitor_tasks(db, library_id=library_id)
+    rows = await _load_monitor_tasks(
+        db,
+        library_id=library_id,
+        task_types={"import", "graph"},
+    )
     counts = {
         key: sum(row.status == key for row in rows)
         for key in (
@@ -661,13 +679,35 @@ async def monitor_job_stats(
             "superseded",
         )
     }
+    embedding_stmt = select(EmbeddingJob.status, func.count()).group_by(EmbeddingJob.status)
+    retryable_embedding_stmt = select(func.count()).where(
+        EmbeddingJob.status == "failed",
+        EmbeddingJob.attempt_count < settings.embed_worker_max_attempts,
+    )
+    if library_id is not None:
+        embedding_stmt = embedding_stmt.where(EmbeddingJob.library_id == library_id)
+        retryable_embedding_stmt = retryable_embedding_stmt.where(EmbeddingJob.library_id == library_id)
+    embedding_rows = (await db.execute(embedding_stmt)).all()
+    retryable_embedding = int((await db.execute(retryable_embedding_stmt)).scalar_one())
+    embedding_total = 0
+    for raw_status, count in embedding_rows:
+        normalized = _EMBEDDING_STATUS.get(raw_status, raw_status)
+        if normalized in counts:
+            counts[normalized] += int(count)
+        embedding_total += int(count)
+
     return TaskMonitorStats(
         **counts,
-        retryable_failed=sum(row.retryable and row.status == "failed" for row in rows),
-        total=len(rows),
-        retryable_embedding_failed=sum(
-            row.retryable and row.status == "failed" and row.retry_target_type == "embedding"
-            for row in rows
+        retryable_failed=(
+            retryable_embedding + sum(row.retryable and row.status == "failed" for row in rows)
+        ),
+        total=len(rows) + embedding_total,
+        retryable_embedding_failed=(
+            retryable_embedding
+            + sum(
+                row.retryable and row.status == "failed" and row.retry_target_type == "embedding"
+                for row in rows
+            )
         ),
     )
 

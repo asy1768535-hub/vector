@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi import status
@@ -15,6 +16,8 @@ from app.api.admin_jobs import (
     _graph_monitor_row,
     _graph_publication_status,
     _import_monitor_row,
+    monitor_job_stats,
+    monitor_jobs,
     router as admin_jobs_router,
 )
 from app.api.health import _check_ocr
@@ -302,6 +305,65 @@ def test_monitor_routes_are_registered_before_dynamic_retry_route():
     assert "/admin/jobs/monitor" in paths
     assert "/admin/jobs/monitor/stats" in paths
     assert paths.index("/admin/jobs/monitor") < paths.index("/admin/jobs/{job_id}/retry")
+
+
+async def test_monitor_list_bounds_each_task_query_before_combining_rows():
+    db = AsyncMock()
+    with patch(
+        "app.api.admin_jobs._load_monitor_tasks",
+        new=AsyncMock(return_value=[]),
+    ) as load_tasks:
+        result = await monitor_jobs(
+            task_type=None,
+            status_filter=None,
+            library_id=None,
+            limit=1500,
+            offset=10,
+            _=MagicMock(),
+            db=db,
+        )
+
+    assert result == []
+    load_tasks.assert_awaited_once_with(
+        db,
+        library_id=None,
+        per_type_limit=1510,
+        task_types=None,
+    )
+
+
+async def test_monitor_stats_aggregates_embedding_jobs_without_loading_their_rows():
+    db = AsyncMock()
+    embedding_counts = MagicMock()
+    embedding_counts.all.return_value = [("done", 75_914), ("failed", 1_639)]
+    retryable_count = MagicMock()
+    retryable_count.scalar_one.return_value = 1_639
+    db.execute = AsyncMock(side_effect=[embedding_counts, retryable_count])
+    context_rows = [
+        SimpleNamespace(status="done", retryable=False, retry_target_type="import"),
+        SimpleNamespace(status="failed", retryable=True, retry_target_type="graph"),
+    ]
+
+    with patch(
+        "app.api.admin_jobs._load_monitor_tasks",
+        new=AsyncMock(return_value=context_rows),
+    ) as load_tasks:
+        result = await monitor_job_stats(
+            library_id=None,
+            _=MagicMock(),
+            db=db,
+        )
+
+    load_tasks.assert_awaited_once_with(
+        db,
+        library_id=None,
+        task_types={"import", "graph"},
+    )
+    assert result.done == 75_915
+    assert result.failed == 1_640
+    assert result.total == 77_555
+    assert result.retryable_failed == 1_640
+    assert result.retryable_embedding_failed == 1_639
 
 
 def test_graph_monitor_exposes_frozen_mode_and_unit_progress():
