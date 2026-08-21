@@ -138,10 +138,49 @@ export function schemaStatusTag(status) {
     return ({ draft: 'warning', active: 'success', disabled: 'info' })[status] || 'info';
 }
 
+export function schemaDirectionLabel(value) {
+    return ({ directed: '有方向', undirected: '无方向' })[value] || '未设置';
+}
+
+export function schemaReviewPolicyLabel(value) {
+    return ({
+        auto_active: '自动生效',
+        pending_review: '需要审核',
+        manual_only: '仅人工处理',
+    })[value] || '未设置';
+}
+
+export function schemaOwnerKindLabel(value) {
+    return ({ entity_type: '对象类型', relation_type: '关系类型' })[value] || '未设置';
+}
+
+export function schemaValueTypeLabel(value) {
+    return ({
+        string: '短文本',
+        text: '长文本',
+        integer: '整数',
+        number: '数字',
+        boolean: '是/否',
+        date: '日期',
+        datetime: '日期和时间',
+        enum: '固定选项',
+        json: '结构化数据',
+    })[value] || '未设置';
+}
+
+export function schemaCardinalityLabel(value) {
+    return ({
+        one_to_one: '一对一',
+        one_to_many: '一对多',
+        many_to_one: '多对一',
+        many_to_many: '多对多',
+    })[value] || '未设置';
+}
+
 const ISSUE_LABELS = {
     ontology_version_not_draft: '当前版本不是可编辑草稿',
-    item_scope_invalid: 'Schema 项不属于当前知识库版本',
-    item_status_invalid: 'Schema 项状态无效',
+    item_scope_invalid: '知识结构项不属于当前知识库版本',
+    item_status_invalid: '知识结构项状态无效',
     entity_type_required: '至少需要一个启用的实体类型',
     type_key_invalid: '类型标识格式无效',
     type_label_required: '类型名称不能为空',
@@ -165,7 +204,7 @@ const ISSUE_LABELS = {
 };
 
 export function schemaIssueLabel(issue) {
-    return ISSUE_LABELS[issue?.code] || 'Schema 校验未通过';
+    return ISSUE_LABELS[issue?.code] || '知识结构检查未通过';
 }
 
 export function schemaErrorKind(error) {
@@ -180,12 +219,12 @@ export function schemaErrorKind(error) {
 
 export function schemaErrorMessage(kind) {
     return ({
-        forbidden: '当前账号没有管理这个知识库 Schema 的权限',
-        dependency: '该 Schema 仍被图谱数据、任务或其他版本引用，不能删除或停用',
-        conflict: 'Schema 已发生变化，请检查最新版本后重新操作',
-        invalid: '提交内容不符合 Schema 约束',
-        unavailable: 'Schema 生命周期功能当前不可用',
-        malformed: '服务器返回的 Schema 数据不完整',
+        forbidden: '当前账号没有管理这个知识库知识结构的权限',
+        dependency: '该知识结构仍被图谱数据、任务或其他版本引用，不能删除或停用',
+        conflict: '知识结构已发生变化，请检查最新版本后重新操作',
+        invalid: '提交内容不符合知识结构要求',
+        unavailable: '知识结构管理功能当前不可用',
+        malformed: '服务器返回的知识结构数据不完整',
         failed: '操作未完成，请稍后重试',
     })[kind] || '操作未完成，请稍后重试';
 }

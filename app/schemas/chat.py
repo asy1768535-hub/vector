@@ -20,6 +20,7 @@ class ChatMessageRequest(BaseModel):
     library_slug: str = Field(..., min_length=1)
     query: str = Field(..., max_length=2000)
     top_k: int = Field(default=5, ge=1, le=20)
+    use_graph: bool = True
     show_debug: bool = False
     # 可选：续聊已有会话。无 → 自动新建会话。
     conversation_id: Optional[uuid.UUID] = None
@@ -52,6 +53,7 @@ class ChatGraphEvidence(BaseModel):
     source_entity_name: str = Field(max_length=512)
     relation_type_key: str = Field(max_length=128)
     relation_label: str = Field(max_length=255)
+    depth: int = Field(default=1, ge=1, le=3)
     target_entity_id: uuid.UUID
     target_entity_name: str = Field(max_length=512)
     evidence_id: uuid.UUID

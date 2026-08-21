@@ -56,7 +56,9 @@ class AdminResetPassword(StrictBaseModel):
 
 class AdminUserRead(BaseModel):
     id: uuid.UUID
-    email: EmailStr
+    # Existing service principals may use reserved internal domains such as `.local`.
+    # Creation still requires EmailStr; reads must be able to represent all persisted users.
+    email: str
     username: Optional[str] = None
     display_name: Optional[str] = None
     is_active: bool

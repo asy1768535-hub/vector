@@ -79,14 +79,14 @@ def _upload_response() -> ImportFileResponse:
 
 
 def test_mcp_settings_are_default_off_and_require_secret_when_enabled() -> None:
-    settings = MCPAdapterSettings()
+    settings = MCPAdapterSettings(_env_file=None)
     assert settings.enabled is False
     assert settings.transport == "stdio"
     assert settings.upload_enabled is False
     assert settings.max_upload_bytes == 10 * 1024 * 1024
 
     with pytest.raises(ValidationError, match="API key"):
-        MCPAdapterSettings(enabled=True)
+        MCPAdapterSettings(_env_file=None, enabled=True)
 
     configured = _settings()
     assert "vkb_secret_value" not in repr(configured)

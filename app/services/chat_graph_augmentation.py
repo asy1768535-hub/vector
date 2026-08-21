@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -21,14 +22,9 @@ from app.services import chat_graph_context
 
 
 log = logging.getLogger(__name__)
-MAX_CHAT_GRAPH_CHUNKS = 5
+MAX_CHAT_GRAPH_CHUNKS = 10
 MAX_CHAT_GRAPH_EVIDENCE = 8
 
-_RELATION_TERMS = (
-    "关系", "关联", "负责", "属于", "隶属", "参与", "依赖", "影响", "包含",
-    "组成", "连接", "上下游", "管理", "审批", "执行", "监督", "适用于", "引用",
-    "related", "belong", "depend", "responsible", "manage", "contain", "affect",
-)
 _RELATION_LABELS = {
     "related_to": "关联", "relates_to": "关联", "belongs_to": "属于",
     "part_of": "属于", "has_part": "包含", "contains": "包含", "requires": "需要",
@@ -52,11 +48,6 @@ class ChatGraphAugmentation:
         return sum(len(row.title) + len(row.content) + 16 for row in self.records)
 
 
-def is_relationship_query(query: str) -> bool:
-    normalized = " ".join((query or "").lower().split())
-    return bool(normalized) and any(term in normalized for term in _RELATION_TERMS)
-
-
 def _chunk_ids(records: Sequence[object]) -> tuple[uuid.UUID, ...]:
     out: list[uuid.UUID] = []
     for record in records:
@@ -76,6 +67,41 @@ def _relation_label(key: str, label: str) -> str:
     if any("\u4e00" <= char <= "\u9fff" for char in label):
         return label
     return _RELATION_LABELS.get(key.lower().replace("-", "_"), "关联")
+
+
+def _shortest_path_relation_ids(graph) -> set[uuid.UUID]:
+    seed_ids = sorted({row.entity_id for row in graph.seed_matches}, key=str)
+    if len(seed_ids) < 2:
+        return set()
+    adjacency: dict[uuid.UUID, list[tuple[uuid.UUID, uuid.UUID]]] = {}
+    for relation in graph.relations:
+        adjacency.setdefault(relation.source_entity_id, []).append(
+            (relation.target_entity_id, relation.id)
+        )
+        adjacency.setdefault(relation.target_entity_id, []).append(
+            (relation.source_entity_id, relation.id)
+        )
+    for edges in adjacency.values():
+        edges.sort(key=lambda item: (str(item[1]), str(item[0])))
+
+    selected: set[uuid.UUID] = set()
+    for index, source_id in enumerate(seed_ids):
+        for target_id in seed_ids[index + 1:]:
+            parents: dict[uuid.UUID, tuple[uuid.UUID, uuid.UUID] | None] = {source_id: None}
+            queue = deque([source_id])
+            while queue and target_id not in parents:
+                current = queue.popleft()
+                for neighbor_id, relation_id in adjacency.get(current, []):
+                    if neighbor_id in parents:
+                        continue
+                    parents[neighbor_id] = (current, relation_id)
+                    queue.append(neighbor_id)
+            current = target_id
+            while parents.get(current) is not None:
+                parent_id, relation_id = parents[current]
+                selected.add(relation_id)
+                current = parent_id
+    return selected
 
 
 async def _hydrate_relation_evidence(
@@ -134,6 +160,7 @@ async def _hydrate_relation_evidence(
     row_by_pair = {(row.relation_id, row.evidence_id): row for row in rows}
     node_by_id = {node.id: node for node in graph.nodes}
     chunk_rank = {chunk_id: rank for rank, chunk_id in enumerate(retrieved_chunk_ids)}
+    shortest_path_relation_ids = _shortest_path_relation_ids(graph)
     candidates: list[tuple[tuple, ChatGraphEvidence]] = []
     for relation in graph.relations:
         source = node_by_id.get(relation.source_entity_id)
@@ -154,6 +181,7 @@ async def _hydrate_relation_evidence(
                 source_entity_name=source.canonical_name,
                 relation_type_key=relation.relation_type.key,
                 relation_label=_relation_label(relation.relation_type.key, relation.relation_type.label),
+                depth=relation.depth,
                 target_entity_id=target.id,
                 target_entity_name=target.canonical_name,
                 evidence_id=row.evidence_id,
@@ -166,7 +194,9 @@ async def _hydrate_relation_evidence(
                 content=content[:4000],
             )
             rank = (
+                0 if relation.id in shortest_path_relation_ids else 1,
                 chunk_rank.get(row.chunk_id, len(chunk_rank)),
+                relation.depth,
                 -(relation.confidence or 0.0),
                 str(relation.id),
                 str(row.evidence_id),
@@ -193,8 +223,9 @@ def _as_record(evidence: ChatGraphEvidence) -> DifyRecord:
     return DifyRecord(
         title=f"知识图谱关系：{relation}",
         content=(
-            "知识图谱关联证据：仅在与直接检索证据一致时使用；如有冲突，以直接原文为准。\n"
-            f"关系：{relation}\n原文证据：{evidence.content}"
+            "知识图谱路径证据：每条关系均有原文依据，可与共享实体的相邻关系连接推理；"
+            "如有冲突，以直接原文为准。\n"
+            f"路径深度：第 {evidence.depth} 跳\n关系：{relation}\n原文证据：{evidence.content}"
         ),
         score=1.0,
         metadata={"chat_graph_evidence": evidence.model_dump(mode="json")},
@@ -207,9 +238,12 @@ async def prepare_chat_graph_augmentation(
     query: str,
     records: Sequence[object],
     *,
+    request_enabled: bool = True,
     config: Settings = settings,
 ) -> ChatGraphAugmentation:
     started = time.monotonic()
+    if not request_enabled:
+        return ChatGraphAugmentation(reason_code="request_disabled")
     mode = getattr(library, "graph_assisted_chat_mode", "off") or "off"
     reason = "disabled"
     candidates: list[ChatGraphEvidence] = []
@@ -220,17 +254,18 @@ async def prepare_chat_graph_augmentation(
             or mode == "off"
         ):
             return ChatGraphAugmentation(reason_code=reason)
-        if not is_relationship_query(query):
-            return ChatGraphAugmentation(reason_code="not_relationship_query")
         chunk_ids = _chunk_ids(records)
-        if not chunk_ids:
-            return ChatGraphAugmentation(reason_code="no_chunk_ids")
         async with asyncio.timeout(config.graph_retrieval_timeout_seconds):
-            result = await chat_graph_context.query_chat_graph_for_chunks(
-                db, library, chunk_ids, config=config,
-            )
+            if chunk_ids:
+                result = await chat_graph_context.query_chat_graph_for_chunks(
+                    db, library, chunk_ids, config=config,
+                )
+            else:
+                result = await chat_graph_context.query_chat_graph_for_query_entities(
+                    db, library, query, config=config,
+                )
             if result.graph is None:
-                reason = "no_seeds"
+                reason = "no_seeds" if chunk_ids else "no_query_entities"
             elif not result.graph.relations:
                 reason = "no_relations"
             else:
@@ -249,7 +284,7 @@ async def prepare_chat_graph_augmentation(
         "chat_graph_augmentation: library_id=%s mode=%s reason=%s candidates=%d latency_ms=%d",
         library.id, mode, reason, len(candidates), latency_ms,
     )
-    if mode != "enabled" or not config.chat_graph_answer_enabled or not candidates:
+    if mode != "enabled" or not candidates:
         return ChatGraphAugmentation(
             reason_code=reason, candidate_count=len(candidates), latency_ms=latency_ms,
         )

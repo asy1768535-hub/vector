@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.api import chat_graph_context as api_module
@@ -103,6 +104,74 @@ def test_evidence_identity_selection_is_deterministic_and_bounded():
         assert exc.code == "graph_retrieval_limit_exceeded"
     else:
         raise AssertionError("oversized evidence identity sets must fail closed")
+
+
+@pytest.mark.asyncio
+async def test_chunk_anchored_chat_graph_requests_three_hops():
+    evidence_id = uuid.uuid4()
+    db = AsyncMock()
+    db.execute.return_value = SimpleNamespace(all=lambda: [
+        _row(PUBLICATION_A, item_kind="entity", entity_id=ENTITY_A),
+    ])
+    config = SimpleNamespace(graph_retrieval_max_seeds=10)
+    graph = SimpleNamespace(relations=[])
+    execute = AsyncMock(return_value=graph)
+
+    with (
+        patch.object(chat_graph_context, "_load_visible_chunk", new=AsyncMock(return_value=object())),
+        patch.object(
+            chat_graph_context,
+            "_chunk_evidence_ids",
+            new=AsyncMock(return_value=(evidence_id,)),
+        ),
+        patch.object(chat_graph_context.graph_retrieval, "execute_graph_retrieval_query", execute),
+    ):
+        result = await chat_graph_context.query_chat_graph_for_chunks(
+            db, _library(), [CHUNK], config=config,
+        )
+
+    request = execute.await_args.args[2]
+    assert request.max_hops == 3
+    assert request.include_evidence_locators is True
+    assert result.graph is graph
+
+
+@pytest.mark.asyncio
+async def test_query_entity_fallback_uses_published_names_and_aliases_as_seeds():
+    target = uuid.uuid4()
+    publication_row = SimpleNamespace(
+        publication_id=PUBLICATION_A,
+        ontology_version_id=ONTOLOGY,
+        publication_status="active",
+    )
+    db = AsyncMock()
+    db.execute.side_effect = [
+        SimpleNamespace(first=lambda: publication_row),
+        SimpleNamespace(
+            scalars=lambda: SimpleNamespace(all=lambda: [ENTITY_A, target]),
+        ),
+    ]
+    config = SimpleNamespace(graph_retrieval_max_seeds=10)
+    graph = SimpleNamespace(relations=[])
+    execute = AsyncMock(return_value=graph)
+
+    with patch.object(
+        chat_graph_context.graph_retrieval,
+        "execute_graph_retrieval_query",
+        execute,
+    ):
+        result = await chat_graph_context.query_chat_graph_for_query_entities(
+            db,
+            _library(),
+            "从远山资本出发，找到它与海岳电力之间的关系链",
+            config=config,
+        )
+
+    request = execute.await_args.args[2]
+    assert [seed.entity_id for seed in request.seeds] == [ENTITY_A, target]
+    assert request.max_hops == 3
+    assert result.exact_seed_count == 2
+    assert result.graph is graph
 
 
 def _library() -> Library:

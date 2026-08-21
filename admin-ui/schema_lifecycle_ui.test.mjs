@@ -4,12 +4,17 @@ import test from 'node:test';
 import {
     normalizeSchemaRoute,
     schemaCanEdit,
+    schemaCardinalityLabel,
+    schemaDirectionLabel,
     schemaErrorKind,
     schemaErrorMessage,
     schemaImpactMatches,
     schemaIssueLabel,
+    schemaOwnerKindLabel,
+    schemaReviewPolicyLabel,
     schemaRouteQuery,
     schemaStatusLabel,
+    schemaValueTypeLabel,
     schemaValidationMatches,
     schemaVersionDeletionMatches,
     schemaVersionDetailMatches,
@@ -155,11 +160,25 @@ test('Schema state and errors use fixed labels without raw server content', () =
         status: 409,
         body: { detail: 'schema_lifecycle_dependency_conflict' },
     }), 'dependency');
-    assert.equal(schemaErrorMessage('dependency'), '该 Schema 仍被图谱数据、任务或其他版本引用，不能删除或停用');
+    assert.equal(schemaErrorMessage('dependency'), '该知识结构仍被图谱数据、任务或其他版本引用，不能删除或停用');
     for (const [status, kind] of [[404, 'unavailable'], [403, 'forbidden'], [409, 'conflict'], [422, 'invalid'], [503, 'unavailable']]) {
         const error = { status, message: 'raw secret prompt storage_url' };
         assert.equal(schemaErrorKind(error), kind);
         assert.equal(schemaErrorMessage(kind).includes('secret'), false);
         assert.equal(schemaErrorMessage(kind).includes('storage_url'), false);
     }
+});
+
+test('technical Schema values have fixed Chinese display labels', () => {
+    assert.equal(schemaDirectionLabel('directed'), '有方向');
+    assert.equal(schemaDirectionLabel('undirected'), '无方向');
+    assert.equal(schemaReviewPolicyLabel('auto_active'), '自动生效');
+    assert.equal(schemaReviewPolicyLabel('pending_review'), '需要审核');
+    assert.equal(schemaOwnerKindLabel('entity_type'), '对象类型');
+    assert.equal(schemaOwnerKindLabel('relation_type'), '关系类型');
+    assert.equal(schemaValueTypeLabel('string'), '短文本');
+    assert.equal(schemaValueTypeLabel('datetime'), '日期和时间');
+    assert.equal(schemaValueTypeLabel('json'), '结构化数据');
+    assert.equal(schemaCardinalityLabel('one_to_many'), '一对多');
+    assert.equal(schemaCardinalityLabel('unknown'), '未设置');
 });

@@ -444,6 +444,7 @@ def test_discovery_batches_include_prompt_schema_and_output_in_budget():
     messages = build_schema_discovery_messages(batches[0])
     assert "protocol_schema" in messages[1]["content"]
     for rule in (
+        "labels and descriptions in Simplified Chinese",
         "source_type_key and target_type_key must reference",
         "relation_type_key must reference",
         "string_literal, text, or",

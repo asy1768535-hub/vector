@@ -24,6 +24,13 @@ DEEPSEEK_MODEL_NAMES = frozenset({DEEPSEEK_MODEL_NAME, "deepseek-v4-flash"})
 LOCAL_PROVIDER_NAME = "openai-compatible"
 LOCAL_BASE_URL = "http://10.0.10.2:8113/v1"
 LOCAL_MODEL_NAME = "qwen3.5-9b"
+GEMMA_PROVIDER_NAME = "gemma4"
+GEMMA_BASE_URL = "https://model.rhzy.ai/v1"
+GEMMA_DIRECT_BASE_URL = "http://10.0.10.2:8114/v1"
+GEMMA_MODEL_NAME = "gemma4-31b-uncensored-bf16-256k-seq4"
+QWEN38_PROVIDER_NAME = "qwen3.8"
+QWEN38_BASE_URL = "https://model.rhzy.ai/v1"
+QWEN38_MODEL_NAME = "qwen3.8-27b-uncensored-fp8"
 
 
 def graph_extraction_provider_name(*, base_url: str, model: str) -> str:
@@ -32,6 +39,10 @@ def graph_extraction_provider_name(*, base_url: str, model: str) -> str:
         return DEEPSEEK_PROVIDER_NAME
     if contract == (LOCAL_BASE_URL, LOCAL_MODEL_NAME):
         return LOCAL_PROVIDER_NAME
+    if model == GEMMA_MODEL_NAME and base_url in {GEMMA_BASE_URL, GEMMA_DIRECT_BASE_URL}:
+        return GEMMA_PROVIDER_NAME
+    if contract == (QWEN38_BASE_URL, QWEN38_MODEL_NAME):
+        return QWEN38_PROVIDER_NAME
     raise ValueError("unsupported graph extraction provider contract")
 
 
@@ -167,7 +178,7 @@ class OpenAICompatibleGraphExtractor:
         }
         if include_response_format:
             payload["response_format"] = {"type": "json_object"}
-        if "qwen" in self._model.lower():
+        if any(marker in self._model.lower() for marker in ("qwen", "gemma")):
             payload["chat_template_kwargs"] = {"enable_thinking": False}
         if self._model.lower() == "deepseek-v4-flash":
             payload["thinking"] = {"type": "disabled"}

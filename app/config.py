@@ -478,7 +478,7 @@ class Settings(BaseSettings):
     graph_retrieval_enabled: bool = False
     graph_retrieval_contract_version: str = "v1"
     graph_retrieval_max_seeds: int = 10
-    graph_retrieval_max_hops: int = 2
+    graph_retrieval_max_hops: int = 3
     graph_retrieval_max_nodes: int = 100
     graph_retrieval_max_relations: int = 200
     graph_retrieval_max_evidence_per_fact: int = 20
@@ -658,6 +658,8 @@ def validate_classification_runtime_startup(config: Settings) -> None:
         ("https://api.deepseek.com/v1", "deepseek-v4-pro"),
         ("https://api.deepseek.com/v1", "deepseek-v4-flash"),
         ("http://10.0.10.2:8113/v1", "qwen3.5-9b"),
+        ("https://model.rhzy.ai/v1", "gemma4-31b-uncensored-bf16-256k-seq4"),
+        ("http://10.0.10.2:8114/v1", "gemma4-31b-uncensored-bf16-256k-seq4"),
     }:
         raise RuntimeError("[security] classification requires an approved provider identity")
     if not config.classification_api_key.get_secret_value().strip():
@@ -971,7 +973,7 @@ def validate_graph_retrieval_startup(config: Settings) -> None:
 
     limits = (
         ("max seeds", config.graph_retrieval_max_seeds, 10),
-        ("max hops", config.graph_retrieval_max_hops, 2),
+        ("max hops", config.graph_retrieval_max_hops, 3),
         ("max nodes", config.graph_retrieval_max_nodes, 100),
         ("max relations", config.graph_retrieval_max_relations, 200),
         ("max Evidence per fact", config.graph_retrieval_max_evidence_per_fact, 20),

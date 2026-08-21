@@ -8,15 +8,20 @@ import { manageableLibraries } from '../menu_access.js';
 import {
     normalizeSchemaRoute,
     schemaCanEdit,
+    schemaCardinalityLabel,
+    schemaDirectionLabel,
     schemaErrorKind,
     schemaErrorMessage,
     schemaImpactMatches,
     schemaIntentKey,
     schemaIssueLabel,
+    schemaOwnerKindLabel,
+    schemaReviewPolicyLabel,
     schemaOwnerOptions,
     schemaRouteQuery,
     schemaStatusLabel,
     schemaStatusTag,
+    schemaValueTypeLabel,
     schemaValidationMatches,
     schemaVersionDeletionMatches,
     schemaVersionDetailMatches,
@@ -38,6 +43,9 @@ const CHILD_PATHS = {
     attribute: 'attributes',
     constraint: 'constraints',
 };
+const VALUE_TYPE_OPTIONS = [
+    'string', 'text', 'integer', 'number', 'boolean', 'date', 'datetime', 'enum', 'json',
+];
 
 function jsonText(value) {
     return value == null ? '' : JSON.stringify(value, null, 2);
@@ -51,6 +59,10 @@ function parseObject(value, label) {
         throw new Error(`${label}必须是 JSON 对象`);
     }
     return parsed;
+}
+
+function schemaTypeLabel(items, key) {
+    return items?.find((item) => item.key === key)?.label || key || '未设置';
 }
 
 export default {
@@ -423,7 +435,7 @@ export default {
             if (!canEdit.value) return;
             try {
                 await ElMessageBox.confirm(
-                    `确认激活 ${detail.data.version_key} v${detail.data.version_no}？历史图谱和发布版本会保留在原版本。`,
+                    `确认将第 ${detail.data.version_no} 版设为当前使用？历史图谱和发布版本会保留在原版本。`,
                     '激活知识结构版本',
                     { confirmButtonText: '确认激活', cancelButtonText: '取消', type: 'warning' },
                 );
@@ -445,7 +457,7 @@ export default {
             if (!version || version.status !== 'draft' || mutation.loading) return;
             try {
                 await ElMessageBox.confirm(
-                    `确认删除草稿 ${version.version_key} v${version.version_no}？删除后无法恢复。`,
+                    `确认删除第 ${version.version_no} 版草稿？删除后无法恢复。`,
                     '删除知识结构草稿',
                     { confirmButtonText: '确认删除', cancelButtonText: '取消', type: 'warning' },
                 );
@@ -495,7 +507,7 @@ export default {
             if (!version || version.status !== 'active') return;
             try {
                 await ElMessageBox.confirm(
-                    `确认停用 ${version.version_key} v${version.version_no}？历史图谱和发布版本会保留，但该版本不再作为当前可用知识结构。`,
+                    `确认停用第 ${version.version_no} 版？历史图谱和发布版本会保留，但该版本不再作为当前可用知识结构。`,
                     '停用知识结构',
                     { confirmButtonText: '确认停用', cancelButtonText: '取消', type: 'warning' },
                 );
@@ -682,6 +694,7 @@ export default {
 
         return {
             TAB_NAMES,
+            VALUE_TYPE_OPTIONS,
             libraries,
             scope,
             versions,
@@ -701,6 +714,12 @@ export default {
             formatTime,
             schemaStatusLabel,
             schemaStatusTag,
+            schemaCardinalityLabel,
+            schemaDirectionLabel,
+            schemaOwnerKindLabel,
+            schemaReviewPolicyLabel,
+            schemaTypeLabel,
+            schemaValueTypeLabel,
             schemaIssueLabel,
             selectLibrary,
             selectVersion,
@@ -726,7 +745,7 @@ export default {
       <header class="schema-lifecycle-header">
         <div class="schema-lifecycle-heading">
           <span class="schema-lifecycle-heading-icon"><local-icon icon="mdi:cog-sync-outline"></local-icon></span>
-          <div><h2>知识结构（Schema）管理</h2><p>结构版本（Ontology）、类型、约束与激活</p></div>
+          <div><h2>知识结构管理</h2><p>定义系统需要识别的对象、关系和字段</p></div>
         </div>
         <div class="schema-lifecycle-header-actions">
           <el-select class="schema-lifecycle-library" :model-value="scope.librarySlug"
@@ -768,7 +787,7 @@ export default {
                   class="schema-version-row"
                   :class="{ 'is-selected': String(version.id) === scope.versionId }"
                   @click="selectVersion(version.id)">
-            <span><strong>{{ version.version_key }} v{{ version.version_no }}</strong>
+            <span><strong>第 {{ version.version_no }} 版</strong>
               <small>{{ formatTime(version.updated_at || version.created_at) }}</small></span>
             <el-tag size="small" :type="schemaStatusTag(version.status)">
               {{ schemaStatusLabel(version.status) }}
@@ -788,7 +807,7 @@ export default {
           </div>
           <template v-else>
             <div class="schema-lifecycle-version-head">
-              <div><span>结构版本（Ontology）</span><h3>{{ detail.data.version_key }} v{{ detail.data.version_no }}</h3>
+              <div><span>知识结构版本</span><h3>第 {{ detail.data.version_no }} 版</h3>
                 <p>{{ detail.data.description || '未填写版本说明' }}</p></div>
               <div class="schema-lifecycle-version-actions">
                 <el-tag :type="schemaStatusTag(detail.data.status)">
@@ -796,18 +815,18 @@ export default {
                 </el-tag>
                 <el-button v-if="detail.data.status === 'active'"
                            :disabled="mutation.loading" @click="cloneActive">
-                  <local-icon icon="mdi:content-copy"></local-icon>克隆草稿
+                  <local-icon icon="mdi:content-copy"></local-icon>复制为新草稿
                 </el-button>
                 <el-button v-if="detail.data.status === 'active'" type="danger" plain
                            :loading="mutation.kind === 'disable-version'" @click="disableActiveSchema">
                   <local-icon icon="mdi:archive-arrow-down-outline"></local-icon>停用知识结构
                 </el-button>
                 <el-button v-if="canEdit" :loading="validation.loading" @click="runValidation">
-                  <local-icon icon="mdi:certificate-outline"></local-icon>校验
+                  <local-icon icon="mdi:certificate-outline"></local-icon>检查是否可用
                 </el-button>
                 <el-button v-if="canEdit" type="primary"
                            :loading="mutation.kind === 'activate'" @click="activateDraft">
-                  <local-icon icon="mdi:publish"></local-icon>激活
+                  <local-icon icon="mdi:publish"></local-icon>设为当前使用
                 </el-button>
                 <el-button v-if="canEdit" type="danger" plain
                            :loading="mutation.kind === 'delete'" @click="deleteDraft">
@@ -830,10 +849,10 @@ export default {
                 <div><dt>约束</dt><dd>{{ detail.data.constraint_count }}</dd></div>
               </dl>
               <dl class="schema-lifecycle-identity">
-                <div><dt>版本 ID</dt><dd>{{ detail.data.id }}</dd></div>
-                <div><dt>父版本</dt><dd>{{ detail.data.parent_version_id || '无' }}</dd></div>
+                <div><dt>版本号</dt><dd>第 {{ detail.data.version_no }} 版</dd></div>
+                <div><dt>版本来源</dt><dd>{{ detail.data.parent_version_id ? '由上一版本复制' : '初始版本' }}</dd></div>
+                <div><dt>更新时间</dt><dd>{{ formatTime(detail.data.updated_at) || '暂无' }}</dd></div>
                 <div><dt>激活时间</dt><dd>{{ formatTime(detail.data.published_at) || '未激活' }}</dd></div>
-                <div><dt>状态哈希</dt><dd><code>{{ detail.data.state_hash }}</code></dd></div>
               </dl>
               <div v-if="validation.data || validation.error" class="schema-validation-block">
                 <el-alert v-if="validation.error" :title="validation.error"
@@ -860,7 +879,6 @@ export default {
               </div>
               <div class="schema-lifecycle-table-shell">
                 <el-table :data="detail.data.entity_types" row-key="id">
-                  <el-table-column prop="key" label="标识" min-width="150" />
                   <el-table-column prop="label" label="名称" min-width="160" />
                   <el-table-column label="状态" width="100"><template #default="{ row }">
                     <el-tag size="small" :type="schemaStatusTag(row.status)">{{ schemaStatusLabel(row.status) }}</el-tag>
@@ -884,10 +902,9 @@ export default {
               </div>
               <div class="schema-lifecycle-table-shell">
                 <el-table :data="detail.data.relation_types" row-key="id">
-                  <el-table-column prop="key" label="标识" min-width="150" />
                   <el-table-column prop="label" label="名称" min-width="150" />
-                  <el-table-column prop="direction" label="方向" width="100" />
-                  <el-table-column prop="default_review_policy" label="审核策略" min-width="150" />
+                  <el-table-column label="方向" width="100"><template #default="{ row }">{{ schemaDirectionLabel(row.direction) }}</template></el-table-column>
+                  <el-table-column label="审核方式" min-width="150"><template #default="{ row }">{{ schemaReviewPolicyLabel(row.default_review_policy) }}</template></el-table-column>
                   <el-table-column label="状态" width="100"><template #default="{ row }">
                     <el-tag size="small" :type="schemaStatusTag(row.status)">{{ schemaStatusLabel(row.status) }}</el-tag>
                   </template></el-table-column>
@@ -910,10 +927,9 @@ export default {
               </div>
               <div class="schema-lifecycle-table-shell">
                 <el-table :data="detail.data.attributes" row-key="id">
-                  <el-table-column prop="key" label="标识" min-width="140" />
                   <el-table-column prop="label" label="名称" min-width="150" />
-                  <el-table-column prop="owner_kind" label="所属" width="120" />
-                  <el-table-column prop="value_type" label="值类型" width="110" />
+                  <el-table-column label="所属" width="120"><template #default="{ row }">{{ schemaOwnerKindLabel(row.owner_kind) }}</template></el-table-column>
+                  <el-table-column label="内容类型" width="120"><template #default="{ row }">{{ schemaValueTypeLabel(row.value_type) }}</template></el-table-column>
                   <el-table-column label="状态" width="100"><template #default="{ row }">
                     <el-tag size="small" :type="schemaStatusTag(row.status)">{{ schemaStatusLabel(row.status) }}</el-tag>
                   </template></el-table-column>
@@ -936,10 +952,10 @@ export default {
               </div>
               <div class="schema-lifecycle-table-shell">
                 <el-table :data="detail.data.constraints" row-key="id">
-                  <el-table-column prop="source_entity_type_key" label="源类型" min-width="140" />
-                  <el-table-column prop="relation_type_key" label="关系" min-width="140" />
-                  <el-table-column prop="target_entity_type_key" label="目标类型" min-width="140" />
-                  <el-table-column prop="cardinality" label="基数" width="130" />
+                  <el-table-column label="起点对象" min-width="140"><template #default="{ row }">{{ schemaTypeLabel(detail.data.entity_types, row.source_entity_type_key) }}</template></el-table-column>
+                  <el-table-column label="关系" min-width="140"><template #default="{ row }">{{ schemaTypeLabel(detail.data.relation_types, row.relation_type_key) }}</template></el-table-column>
+                  <el-table-column label="终点对象" min-width="140"><template #default="{ row }">{{ schemaTypeLabel(detail.data.entity_types, row.target_entity_type_key) }}</template></el-table-column>
+                  <el-table-column label="数量关系" width="130"><template #default="{ row }">{{ schemaCardinalityLabel(row.cardinality) }}</template></el-table-column>
                   <el-table-column label="状态" width="100"><template #default="{ row }">
                     <el-tag size="small" :type="schemaStatusTag(row.status)">{{ schemaStatusLabel(row.status) }}</el-tag>
                   </template></el-table-column>
@@ -1015,8 +1031,8 @@ export default {
                  :close-on-click-modal="false">
         <el-form label-position="top" :disabled="mutation.loading">
           <template v-if="dialog.kind === 'entity_type' || dialog.kind === 'relation_type'">
-            <el-form-item v-if="dialog.mode === 'create'" label="标识">
-              <el-input v-model="dialog.key" maxlength="128" />
+            <el-form-item v-if="dialog.mode === 'create'" label="内部标识（英文）">
+              <el-input v-model="dialog.key" maxlength="128" placeholder="例如 project_name" />
             </el-form-item>
             <el-form-item label="名称"><el-input v-model="dialog.label" maxlength="255" /></el-form-item>
             <el-form-item label="说明">
@@ -1038,7 +1054,7 @@ export default {
             <el-form-item v-if="dialog.kind === 'relation_type'" label="必须绑定证据">
               <el-switch v-model="dialog.requiresEvidence" />
             </el-form-item>
-            <el-form-item label="属性结构">
+            <el-form-item label="高级属性规则（可选）">
               <el-input v-model="dialog.propertiesSchema" type="textarea" :rows="5" />
             </el-form-item>
           </template>
@@ -1050,14 +1066,14 @@ export default {
                            :label="item.label" :value="item.id" />
               </el-select>
             </el-form-item>
-            <el-form-item v-if="dialog.mode === 'create'" label="标识">
-              <el-input v-model="dialog.key" maxlength="128" />
+            <el-form-item v-if="dialog.mode === 'create'" label="内部标识（英文）">
+              <el-input v-model="dialog.key" maxlength="128" placeholder="例如 start_date" />
             </el-form-item>
             <el-form-item label="名称"><el-input v-model="dialog.label" maxlength="255" /></el-form-item>
-            <el-form-item label="值类型">
+            <el-form-item label="内容类型">
               <el-select v-model="dialog.valueType">
-                <el-option v-for="item in ['string','text','integer','number','boolean','date','datetime','enum','json']"
-                           :key="item" :label="item" :value="item" />
+                <el-option v-for="item in VALUE_TYPE_OPTIONS"
+                           :key="item" :label="schemaValueTypeLabel(item)" :value="item" />
               </el-select>
             </el-form-item>
             <el-form-item v-if="dialog.valueType === 'enum'" label="枚举值">
@@ -1067,7 +1083,7 @@ export default {
               <label><span>必填</span><el-switch v-model="dialog.required" /></label>
               <label><span>建立索引</span><el-switch v-model="dialog.indexed" /></label>
             </div>
-            <el-form-item label="校验规则">
+            <el-form-item label="高级校验规则（可选）">
               <el-input v-model="dialog.validationSchema" type="textarea" :rows="5" />
             </el-form-item>
           </template>
@@ -1091,7 +1107,7 @@ export default {
                            :label="item.label" :value="String(item.id)" />
               </el-select>
             </el-form-item>
-            <el-form-item label="关系基数">
+            <el-form-item label="数量关系">
               <el-select v-model="dialog.cardinality" clearable>
                 <el-option label="一对一" value="one_to_one" />
                 <el-option label="一对多" value="one_to_many" />

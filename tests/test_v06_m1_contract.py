@@ -112,7 +112,7 @@ def test_v06_seed_contract_rejects_missing_ambiguous_or_blank_selectors(seed):
         ("seeds", [{"entity_id": str(ENTITY_ID)} for _ in range(11)]),
         ("relation_type_keys", [f"type_{index}" for index in range(65)]),
         ("max_hops", -1),
-        ("max_hops", 3),
+        ("max_hops", 4),
         ("max_nodes", 0),
         ("max_nodes", 101),
         ("max_relations", 0),
@@ -273,7 +273,7 @@ def test_v06_config_defaults_and_startup_validation():
     assert config.graph_retrieval_enabled is False
     assert config.graph_retrieval_contract_version == "v1"
     assert config.graph_retrieval_max_seeds == 10
-    assert config.graph_retrieval_max_hops == 2
+    assert config.graph_retrieval_max_hops == 3
     assert config.graph_retrieval_max_nodes == 100
     assert config.graph_retrieval_max_relations == 200
     assert config.graph_retrieval_max_evidence_per_fact == 20
@@ -288,7 +288,7 @@ def test_v06_config_docs_and_env_example_match_defaults():
         "GRAPH_RETRIEVAL_ENABLED": "false",
         "GRAPH_RETRIEVAL_CONTRACT_VERSION": "v1",
         "GRAPH_RETRIEVAL_MAX_SEEDS": "10",
-        "GRAPH_RETRIEVAL_MAX_HOPS": "2",
+        "GRAPH_RETRIEVAL_MAX_HOPS": "3",
         "GRAPH_RETRIEVAL_MAX_NODES": "100",
         "GRAPH_RETRIEVAL_MAX_RELATIONS": "200",
         "GRAPH_RETRIEVAL_MAX_EVIDENCE_PER_FACT": "20",
@@ -311,7 +311,7 @@ def test_v06_config_docs_and_env_example_match_defaults():
         {"graph_retrieval_max_seeds": 0},
         {"graph_retrieval_max_seeds": 11},
         {"graph_retrieval_max_hops": 0},
-        {"graph_retrieval_max_hops": 3},
+        {"graph_retrieval_max_hops": 4},
         {"graph_retrieval_max_nodes": 0},
         {"graph_retrieval_max_nodes": 101},
         {"graph_retrieval_max_relations": 0},

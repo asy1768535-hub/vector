@@ -575,7 +575,7 @@ async def job_projection(db: AsyncSession, job: DocumentImportJob) -> dict:
         # ready; a projection may only report that coordination state.
         projection["schema_discovery_state"] = "waiting_schema"
         return projection
-    if graph_job.status in {"queued", "processing"}:
+    if graph_job.status in {"waiting_schema", "queued", "processing"}:
         projection.update(
             status="processing",
             last_error=None,

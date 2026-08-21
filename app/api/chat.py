@@ -224,7 +224,7 @@ async def chat_messages(
     conv = await _resolve_conversation(db, user, body) if body.conversation_id is not None else None
     lib, records, retrieval_debug = await _retrieve_for_chat(body, user, db)
     augmentation = await chat_graph_augmentation.prepare_chat_graph_augmentation(
-        db, lib, body.query, records, config=settings,
+        db, lib, body.query, records, request_enabled=body.use_graph, config=settings,
     )
     answer_records = [*records, *augmentation.records]
     context_chars = settings.chat_max_context_chars + augmentation.context_chars
@@ -317,7 +317,7 @@ async def chat_stream(
     conv = await _resolve_conversation(db, user, body) if body.conversation_id is not None else None
     lib, records, retrieval_debug = await _retrieve_for_chat(body, user, db)
     augmentation = await chat_graph_augmentation.prepare_chat_graph_augmentation(
-        db, lib, body.query, records, config=settings,
+        db, lib, body.query, records, request_enabled=body.use_graph, config=settings,
     )
     answer_records = [*records, *augmentation.records]
     context_chars = settings.chat_max_context_chars + augmentation.context_chars

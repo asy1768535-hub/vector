@@ -131,6 +131,8 @@ async def generate_answer(
         "temperature": temperature,
         "stream": False,
     }
+    if "gemma" in model.lower():
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
     headers = _headers(api_key)
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
@@ -175,6 +177,8 @@ async def stream_answer(
         "temperature": temperature,
         "stream": True,
     }
+    if "gemma" in model.lower():
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
     headers = _headers(api_key)
     output_length = 0
     try:

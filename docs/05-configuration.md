@@ -121,8 +121,16 @@ M1 只冻结 DTO、配置和启动校验，不挂载 `/v06` 路由，也不执�
 | 组 | 变量与默认值 |
 |---|---|
 | switch/version | `GRAPH_RETRIEVAL_ENABLED=false`; `GRAPH_RETRIEVAL_CONTRACT_VERSION=v1` |
-| traversal limits | `GRAPH_RETRIEVAL_MAX_SEEDS=10`; `GRAPH_RETRIEVAL_MAX_HOPS=2`; `GRAPH_RETRIEVAL_MAX_NODES=100`; `GRAPH_RETRIEVAL_MAX_RELATIONS=200` |
+| traversal limits | `GRAPH_RETRIEVAL_MAX_SEEDS=10`; `GRAPH_RETRIEVAL_MAX_HOPS=3`; `GRAPH_RETRIEVAL_MAX_NODES=100`; `GRAPH_RETRIEVAL_MAX_RELATIONS=200` |
 | evidence/timeout | `GRAPH_RETRIEVAL_MAX_EVIDENCE_PER_FACT=20`; `GRAPH_RETRIEVAL_TIMEOUT_SECONDS=3.0` |
+
+对话图谱增强先使用问答请求的 `top_k`（范围 1–20）完成向量/混合检索，再从排名最靠前的最多
+10 个命中切片中读取 `chunk_id` 和 Evidence 锚点。系统只在当前已发布图谱中围绕这些种子扩展
+最多 3 跳，并只把带有效原文证据的关系送入回答模型；不会把整个知识库图谱加入上下文。
+知识库的图谱辅助问答模式为 `enabled` 时，图谱证据才会实际参与回答；`shadow` 只记录候选
+结果，`off` 不执行对话图谱检索。问答请求可通过 `use_graph` 控制本次是否启用图谱辅助，默认
+为 `true`；设为 `false` 时不查询图谱。该请求字段不能绕过知识库模式，
+`GRAPH_RETRIEVAL_ENABLED=false` 也仍会全局关闭这条链路。
 
 ### 切分默认值
 

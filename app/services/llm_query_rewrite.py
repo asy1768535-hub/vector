@@ -103,6 +103,8 @@ async def generate(
         "temperature": 0.2,
         "stream": False,
     }
+    if "gemma" in model.lower():
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:

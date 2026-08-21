@@ -56,6 +56,38 @@ test('keeps one unified graph workspace plus publication history', () => {
     assert.ok(!view.includes('<el-tab-pane label="待审核" name="review"'));
 });
 
+test('summarizes graph extraction in Chinese without listing source documents', () => {
+    for (const token of [
+        '抽取状态：',
+        '来源文档：',
+        '知识结构版本已固定',
+        '查看 / 编辑知识结构',
+    ]) assert.ok(view.includes(token), `missing graph summary copy ${token}`);
+    for (const token of [
+        'source set',
+        '个 revision',
+        'graph-discovery-document-jobs',
+        'graphJobState.data.document_jobs',
+    ]) assert.equal(view.includes(token), false, `source document detail must stay out of graph page: ${token}`);
+});
+
+test('uses plain Chinese for visible graph knowledge-structure copy', () => {
+    for (const token of [
+        '等待发现 Schema',
+        '正在发现 Schema',
+        'AI Schema 待确认',
+        'Schema discovery',
+        '当前知识库的 Schema',
+        'Schema 管理',
+        '同一 Ontology',
+        '<span>Ontology 版本</span>',
+        '当前 Ontology 暂无可发布操作',
+        '<dt>Ontology</dt>',
+        '<el-form-item label="Ontology">',
+        '<dt>Revision</dt>',
+    ]) assert.equal(view.includes(token), false, `technical display copy must be removed: ${token}`);
+});
+
 test('uses strict Graph Catalog responses and independent stale-response fences', () => {
     for (const token of [
         'api.searchGraphEntities',

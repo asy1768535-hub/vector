@@ -108,7 +108,7 @@ const routes = [
                         meta: {
                             domain: 'knowledgeUse',
                             domainTitle: '知识使用',
-                            title: '联邦检索诊断',
+                            title: '多库检索',
                             organizationAdmin: true,
                         },
                     },

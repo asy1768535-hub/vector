@@ -80,6 +80,7 @@ export default {
         const streamRef = ref(null);
         const mobileHistoryOpen = ref(false);
         const topK = ref(5);
+        const graphAssist = ref(true);
         const recalledChunkDialog = ref({ open: false, source: null });
         const sourceLocationDialog = ref({ open: false, loading: false, source: null, data: null, error: '' });
         const citationGraphDialog = ref({
@@ -567,7 +568,13 @@ export default {
             scrollToBottom();
             if (_abortController) { _abortController.abort(); }
             _abortController = new AbortController();
-            const payload = { library_slug: currentSlug.value, query: q, top_k: topK.value, show_debug: false };
+            const payload = {
+                library_slug: currentSlug.value,
+                query: q,
+                top_k: topK.value,
+                use_graph: graphAssist.value,
+                show_debug: false,
+            };
             if (currentConvId.value) payload.conversation_id = currentConvId.value;
             try {
                 await api.streamChatMessage(payload, {
@@ -640,7 +647,7 @@ export default {
         return {
             libs, currentSlug, conversations, convsForLib, currentConvId, messages, input,
             loadingEarlierMessages, hasEarlierMessages,
-            loading, chatDisabled, streamRef, mobileHistoryOpen, topK,
+            loading, chatDisabled, streamRef, mobileHistoryOpen, topK, graphAssist,
             onLibChange, newChat, selectConversation, loadEarlierMessages, archiveConv, deleteConv, send, copyAnswer,
             copySourceText, openCitationChunk, handleCitationClick, handleCitationKeydown,
             openDocDetail, loadLibs, chatWelcome, recalledChunkDialog, sourceLocationDialog,
@@ -929,6 +936,10 @@ export default {
                                 <el-option :value="10" label="10" />
                                 <el-option :value="20" label="20" />
                             </el-select>
+                            <span class="chat-graph-toggle">
+                                <span class="chat-input-hint">图谱辅助检索</span>
+                                <el-switch v-model="graphAssist" size="small" />
+                            </span>
                         </div>
                         <el-button type="primary" :loading="loading"
                                    @click="send" class="chat-send-btn">

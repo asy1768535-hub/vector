@@ -22,12 +22,12 @@ import { store } from '../store.js';
 import RetrievalModeSwitch from '../components/RetrievalModeSwitch.js';
 
 function fixedRequestError(error) {
-    if (error?.status === 403) return '你没有运行该组织检索诊断的权限';
-    if (error?.status === 404) return '检索诊断暂未启用';
+    if (error?.status === 403) return '你没有运行该组织多库检索的权限';
+    if (error?.status === 404) return '多库检索暂未启用';
     if (error?.status === 409) return '当前知识库范围不兼容';
     if (error?.status === 422) return '检索范围或参数不符合要求';
     if (error?.status === 502) return '检索分支执行失败，请稍后重试';
-    return '检索诊断请求失败，请稍后重试';
+    return '多库检索请求失败，请稍后重试';
 }
 
 function sameOrderedValues(left, right) {
@@ -319,7 +319,7 @@ export default {
       <retrieval-mode-switch :query-text="query" :library-slugs="librarySlugs" />
       <header class="retrieval-test-header">
         <div>
-          <h2>检索诊断</h2>
+          <h2>多库检索</h2>
           <p>{{ selectedOrganization ? selectedOrganization.name : '未选择组织' }}</p>
         </div>
         <el-tag type="info" effect="plain">文本检索</el-tag>

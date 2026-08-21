@@ -173,6 +173,23 @@ def test_admin_user_update_schema_drops_password():
         AdminUserUpdate(username="x", password="should-be-ignored")  # type: ignore[call-arg]
 
 
+def test_admin_user_list_allows_internal_service_principal_email():
+    actor = _user(is_superuser=True, email="boss@example.com")
+    service = _user(email="mcp-service@internal.local")
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = [service]
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=result)
+    app.dependency_overrides[current_superuser] = lambda: actor
+    app.dependency_overrides[get_db] = lambda: db
+    try:
+        r = TestClient(app).get("/admin/users")
+        assert r.status_code == 200
+        assert r.json()[0]["email"] == "mcp-service@internal.local"
+    finally:
+        app.dependency_overrides.clear()
+
+
 # ── W2-5：/me/permissions 带 library_name 且过滤已删除库 ─────────────────────
 def test_me_permissions_attaches_name_and_filters_deleted():
     user = _user()

@@ -60,7 +60,7 @@ export const DOMAIN_TABS = Object.freeze({
         },
         {
             key: 'retrievalTest',
-            label: '联邦检索诊断',
+            label: '多库检索',
             path: APP_PATHS.retrievalTest,
             access: 'retrievalTest',
             icon: 'mdi:text-search',
@@ -264,7 +264,7 @@ export function sidebarItems(domain, access) {
     if (access?.search || access?.retrievalTest) {
         items.push({
             key: 'searchDiagnostics',
-            label: '检索诊断',
+            label: '多库检索',
             path: access?.search ? APP_PATHS.search : APP_PATHS.retrievalTest,
             activePaths: [APP_PATHS.search, APP_PATHS.retrievalTest],
             access: 'searchDiagnostics',

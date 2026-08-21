@@ -82,13 +82,26 @@ function statusTag(value) {
 
 function graphSchemaStateLabel(value) {
     return {
-        waiting_schema: '等待发现 Schema',
-        discovering_schema: '正在发现 Schema',
-        ai_draft_pending_confirmation: 'AI Schema 待确认',
-        confirmed_schema: '使用已确认 Schema',
-        failed: 'Schema discovery 失败',
-        cancelled: 'Schema discovery 已取消',
+        waiting_schema: '等待识别知识结构',
+        discovering_schema: '正在识别知识结构',
+        ai_draft_pending_confirmation: '智能识别结果待确认',
+        confirmed_schema: '使用已确认的知识结构',
+        failed: '知识结构识别失败',
+        cancelled: '知识结构识别已取消',
     }[value] || '图谱任务状态未知';
+}
+
+function graphExtractionStatusLabel(value) {
+    return {
+        waiting_schema: '等待知识结构',
+        queued: '等待抽取',
+        processing: '正在抽取',
+        partially_succeeded: '部分完成',
+        succeeded: '已完成',
+        failed: '失败',
+        cancelled: '已取消',
+        superseded: '已被新版本替代',
+    }[value] || '状态未知';
 }
 
 export default {
@@ -1078,11 +1091,11 @@ export default {
             if (!canWrite.value) return;
             const context = await loadWriteContext();
             if (!context) {
-                ElMessage.warning(writeContext.error?.message || '暂时无法读取当前知识库的 Schema，请刷新后重试');
+                ElMessage.warning(writeContext.error?.message || '暂时无法读取当前知识库的知识结构，请刷新后重试');
                 return;
             }
             if (!context.ontology_versions?.length) {
-                ElMessage.warning('当前知识库还没有可编辑的 Schema，请先在 Schema 管理中启用实体和关系类型');
+                ElMessage.warning('当前知识库还没有可编辑的知识结构，请先在知识结构管理中启用对象和关系类型');
                 return;
             }
             const ontology = context.ontology_versions.find(
@@ -1461,7 +1474,7 @@ export default {
                 publications.selectedActionIds,
             );
             if (!selection || selection.ontologyVersionId !== publications.ontologyId) {
-                ElMessage.warning('请选择同一 Ontology 下的已批准操作');
+                ElMessage.warning('请选择同一知识结构版本下的已批准操作');
                 return;
             }
             const token = ++publicationMutationSeq;
@@ -1799,6 +1812,7 @@ export default {
             graphReviewLabel,
             graphPublicationLabel,
             graphSchemaStateLabel,
+            graphExtractionStatusLabel,
             graphPropertyRows,
             formatCatalogConfidence,
             formatCatalogTime,
@@ -1852,7 +1866,7 @@ export default {
       <el-alert v-if="mutation.error && !mergeDialog.open" class="graph-command-error"
                 :title="mutation.error.message" type="warning" :closable="false" show-icon />
 
-      <el-alert v-if="graphJobState.loading" title="正在读取最近一次 Schema discovery run…"
+      <el-alert v-if="graphJobState.loading" title="正在读取最近一次知识结构识别任务..."
                 type="info" :closable="false" show-icon />
       <el-alert v-else-if="graphJobState.error" :title="graphJobState.error.message"
                 type="warning" :closable="false" show-icon />
@@ -1861,21 +1875,14 @@ export default {
                 :closable="false" show-icon>
         <template #title>
           {{ graphSchemaStateLabel(graphJobState.data.schema_state) }} ·
-          {{ graphJobState.data.status }} · source set {{ graphJobState.data.source_set_key }}
-          · {{ graphJobState.data.source_revision_ids?.length || 0 }} 个 revision
+          抽取状态：{{ graphExtractionStatusLabel(graphJobState.data.status) }} ·
+          来源文档：{{ graphJobState.data.source_revision_ids?.length || 0 }} 个
           <span v-if="graphJobState.data.error_code"> · 失败原因：{{ graphJobState.data.error_code }}</span>
-          <span v-if="graphJobState.data.ontology_snapshot_hash"> · Schema snapshot 已冻结</span>
+          <span v-if="graphJobState.data.ontology_snapshot_hash"> · 知识结构版本已固定</span>
           <el-button v-if="graphJobState.data.ontology_version_id"
-                     link type="primary" @click="openSchemaDraft">查看 / 编辑 Schema</el-button>
+                     link type="primary" @click="openSchemaDraft">查看 / 编辑知识结构</el-button>
         </template>
       </el-alert>
-      <el-table v-if="graphJobState.data?.document_jobs?.length" :data="graphJobState.data.document_jobs"
-                size="small" class="graph-discovery-document-jobs">
-        <el-table-column prop="document_id" label="文档" min-width="180" />
-        <el-table-column prop="schema_state" label="Schema" min-width="150" />
-        <el-table-column prop="status" label="抽取状态" min-width="120" />
-        <el-table-column prop="error_code" label="失败原因" min-width="160" />
-      </el-table>
 
       <section v-if="scope.tab === 'browse'" class="graph-browser-workspace"
                :class="{ 'has-inspector': relationDetail.open }">
@@ -2103,11 +2110,11 @@ export default {
       <section v-else-if="scope.tab === 'publications'" class="graph-publication-workspace">
         <div class="graph-publication-toolbar">
           <label class="graph-field">
-            <span>Ontology 版本</span>
+            <span>知识结构版本</span>
             <el-select :model-value="publications.ontologyId" :disabled="publications.loading || !!publications.mutationKind"
                        @change="changePublicationOntology">
               <el-option v-for="item in writeContext.data?.ontology_versions || []" :key="item.id"
-                         :label="item.version_key + ' v' + item.version_no" :value="String(item.id)" />
+                         :label="'第 ' + item.version_no + ' 版'" :value="String(item.id)" />
             </el-select>
           </label>
           <div class="graph-publication-current">
@@ -2150,7 +2157,7 @@ export default {
                 </span>
               </el-checkbox>
             </el-checkbox-group>
-            <div v-else class="graph-inline-empty">当前 Ontology 暂无可发布操作</div>
+            <div v-else class="graph-inline-empty">当前知识结构版本暂无可发布操作</div>
 
             <div class="graph-publication-plan-actions">
               <el-button type="primary" plain
@@ -2246,7 +2253,7 @@ export default {
             </div>
             <dl class="graph-identity-grid">
               <div><dt>知识库</dt><dd>{{ entityDetail.data.entity.library.name }}</dd></div>
-              <div><dt>Ontology</dt><dd :title="entityDetail.data.entity.ontology_version_id">{{ shortCatalogId(entityDetail.data.entity.ontology_version_id) }}</dd></div>
+              <div><dt>知识结构版本</dt><dd :title="entityDetail.data.entity.ontology_version_id">{{ shortCatalogId(entityDetail.data.entity.ontology_version_id) }}</dd></div>
               <div><dt>来源</dt><dd>{{ sourceTypeLabel(entityDetail.data.entity.source_type) }}</dd></div>
               <div><dt>可信度</dt><dd>{{ formatCatalogConfidence(entityDetail.data.entity.confidence) }}</dd></div>
             </dl>
@@ -2360,7 +2367,7 @@ export default {
             <div class="graph-tag-stack"><el-tag :type="statusTag(relationDetail.data.relation.status)">{{ graphFactLabel(relationDetail.data.relation.status) }}</el-tag><el-tag :type="statusTag(relationDetail.data.relation.review_status)" effect="plain">{{ graphReviewLabel(relationDetail.data.relation.review_status) }}</el-tag></div>
             <dl class="graph-identity-grid">
               <div><dt>知识库</dt><dd>{{ relationDetail.data.relation.library.name }}</dd></div>
-              <div><dt>Ontology</dt><dd :title="relationDetail.data.relation.ontology_version_id">{{ shortCatalogId(relationDetail.data.relation.ontology_version_id) }}</dd></div>
+              <div><dt>知识结构版本</dt><dd :title="relationDetail.data.relation.ontology_version_id">{{ shortCatalogId(relationDetail.data.relation.ontology_version_id) }}</dd></div>
               <div><dt>方向</dt><dd>{{ relationDetail.data.relation.direction === 'directed' ? '有向' : '无向' }}</dd></div>
               <div><dt>可信度</dt><dd>{{ formatCatalogConfidence(relationDetail.data.relation.confidence) }}</dd></div>
             </dl>
@@ -2411,11 +2418,11 @@ export default {
         <el-alert v-if="writeContext.error" :title="writeContext.error.message"
                   type="warning" :closable="false" show-icon />
         <el-form label-position="top" @submit.prevent="submitFact">
-          <el-form-item label="Ontology">
+          <el-form-item label="知识结构版本">
             <el-select :model-value="factDialog.ontologyId" :disabled="mutation.loading"
                        @change="changeFactOntology">
               <el-option v-for="item in writeContext.data?.ontology_versions || []" :key="item.id"
-                         :label="item.version_key + ' v' + item.version_no" :value="String(item.id)" />
+                         :label="'第 ' + item.version_no + ' 版'" :value="String(item.id)" />
             </el-select>
           </el-form-item>
           <el-form-item :label="factDialog.kind === 'entity' ? '实体类型' : '关系类型'">
@@ -2522,8 +2529,8 @@ export default {
           <blockquote v-if="evidence.data.text_quote" class="graph-evidence-quote">{{ evidence.data.text_quote }}</blockquote>
           <pre v-if="evidenceParts.length" class="graph-evidence-window"><template v-for="(part, index) in evidenceParts" :key="index"><mark v-if="part.highlight">{{ part.text }}</mark><span v-else>{{ part.text }}</span></template></pre>
           <dl class="graph-evidence-ids">
-            <div><dt>Evidence</dt><dd :title="evidence.data.evidence_id">{{ shortCatalogId(evidence.data.evidence_id) }}</dd></div>
-            <div><dt>Revision</dt><dd :title="evidence.data.document_revision_id">{{ shortCatalogId(evidence.data.document_revision_id) }}</dd></div>
+            <div><dt>证据编号</dt><dd :title="evidence.data.evidence_id">{{ shortCatalogId(evidence.data.evidence_id) }}</dd></div>
+            <div><dt>文档版本</dt><dd :title="evidence.data.document_revision_id">{{ shortCatalogId(evidence.data.document_revision_id) }}</dd></div>
           </dl>
           <div class="graph-evidence-actions"><el-button type="primary" @click="openEvidenceDocument"><local-icon icon="mdi:file-document-outline"></local-icon>查看来源文档</el-button></div>
         </template>

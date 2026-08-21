@@ -915,7 +915,7 @@ async def traverse_published_graph(
         or not seeds
         or direction not in {"outbound", "inbound", "both"}
         or max_hops < 0
-        or max_hops > 2
+        or max_hops > 3
         or max_nodes < 1
         or max_relations < 1
     ):

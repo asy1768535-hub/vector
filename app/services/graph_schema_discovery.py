@@ -159,8 +159,9 @@ Return only JSON matching the requested protocol shape. Invent no facts not supp
 by the excerpts. Propose domain-specific entity types, relation types, directions,
 source_type -> relation_type -> target_type constraints, and only attributes that
 are repeatedly useful or explicitly required. There is no fixed allowlist of names.
-Use stable lowercase snake_case identifiers for every key; labels may remain natural
-language. Use the exact same key spelling in definitions and constraints.
+Use stable lowercase snake_case identifiers for every key. Write all user-facing
+labels and descriptions in Simplified Chinese. Use the exact same key spelling in
+definitions and constraints.
 Use the most specific stable concept supported by the corpus: do not collapse
 distinct concepts into an umbrella type when they have different relation roles,
 attributes, lifecycle behavior, or textual definitions. Keep an umbrella type only
@@ -469,8 +470,9 @@ def build_schema_discovery_refinement_messages(
             "role": "system",
             "content": (
                 "Refine a domain-neutral Schema using the supplied untrusted excerpts. "
-                "Return only the protocol JSON. Use lowercase snake_case keys, keep "
-                "only evidence-backed types and relations, split distinct concepts, "
+                "Return only the protocol JSON. Use lowercase snake_case keys and "
+                "Simplified Chinese labels and descriptions. Keep only evidence-backed "
+                "types and relations, split distinct concepts, "
                 "and make constraint endpoints and predicate voice agree. Preserve "
                 "existing evidence-backed relation keys and direction unless the "
                 "excerpts clearly support a different meaning; do not rename a "

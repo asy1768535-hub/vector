@@ -16,7 +16,7 @@ export default {
         const access = computed(() => menuAccess(store.user, store.permissions, store.organizations));
         const views = computed(() => [
             access.value.search ? { value: APP_PATHS.search, label: '单库检索' } : null,
-            access.value.retrievalTest ? { value: APP_PATHS.retrievalTest, label: '多库诊断' } : null,
+            access.value.retrievalTest ? { value: APP_PATHS.retrievalTest, label: '多库检索' } : null,
         ].filter(Boolean));
 
         function switchMode(path) {

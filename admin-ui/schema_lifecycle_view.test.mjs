@@ -65,3 +65,32 @@ test('Schema lifecycle layout has stable desktop and narrow constraints', () => 
     assert.ok(style.includes('.schema-lifecycle-table-shell'));
     assert.ok(style.includes('overflow-x: auto'));
 });
+
+test('knowledge structure page uses non-technical Chinese display copy', () => {
+    for (const token of [
+        '<h2>知识结构管理</h2>',
+        '定义系统需要识别的对象、关系和字段',
+        '检查是否可用',
+        '设为当前使用',
+        '内部标识（英文）',
+        '高级属性规则（可选）',
+        '高级校验规则（可选）',
+        'schemaValueTypeLabel(row.value_type)',
+        'schemaDirectionLabel(row.direction)',
+        'schemaReviewPolicyLabel(row.default_review_policy)',
+        'schemaCardinalityLabel(row.cardinality)',
+    ]) assert.ok(view.includes(token), `missing plain-language Schema copy ${token}`);
+    for (const token of [
+        '知识结构（Schema）管理',
+        '结构版本（Ontology）',
+        '<dt>版本 ID</dt>',
+        '<dt>状态哈希</dt>',
+        ':label="item" :value="item"',
+        '确认激活 ${detail.data.version_key}',
+        '确认删除草稿 ${version.version_key}',
+        '确认停用 ${version.version_key}',
+    ]) assert.equal(view.includes(token), false, `technical display copy must be removed: ${token}`);
+    for (const token of [
+        '<el-table-column prop="key" label="内部标识"',
+    ]) assert.equal(view.includes(token), false, `technical table column must be hidden: ${token}`);
+});

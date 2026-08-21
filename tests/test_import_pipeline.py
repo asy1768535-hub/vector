@@ -145,7 +145,8 @@ def test_job_projection_reports_schema_wait_when_graph_job_is_not_created_yet():
     )
 
 
-def test_job_projection_keeps_processing_when_graph_job_already_exists():
+@pytest.mark.parametrize("graph_status", ["queued", "processing", "waiting_schema"])
+def test_job_projection_keeps_processing_when_graph_job_already_exists(graph_status):
     now = datetime.now(timezone.utc)
     job = _processing_import_job()
     embedding_job = SimpleNamespace(
@@ -156,7 +157,7 @@ def test_job_projection_keeps_processing_when_graph_job_already_exists():
     )
     graph_job = SimpleNamespace(
         id=uuid.uuid4(),
-        status="processing",
+        status=graph_status,
         finished_at=None,
         error_message=None,
     )

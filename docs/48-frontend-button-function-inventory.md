@@ -65,6 +65,7 @@
 | 加载更早消息 | 向前读取历史消息 | 同上，使用游标参数 |
 | 归档 | 从活动会话列表归档该会话 | `POST /chat/conversations/{id}/archive` |
 | 删除 | 确认后删除该会话 | `DELETE /chat/conversations/{id}` |
+| 图谱辅助检索 | 控制本次问题是否使用知识库允许的图谱关系证据，默认开启 | 随 `POST /chat/stream` 发送 `use_graph` |
 | 发送 | 流式生成基于所选知识库的回答和引用 | `POST /chat/stream` |
 | 复制回答 / 复制片段 | 写入系统剪贴板 | 纯前端 |
 | 查看出处 | 打开引用在源文档中的精确位置 | `GET /libraries/{slug}/documents/{id}/source` |

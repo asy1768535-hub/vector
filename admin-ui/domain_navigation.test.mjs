@@ -45,7 +45,7 @@ test('sidebar leaf pages follow fine-grained access', () => {
         retrievalTest: true,
     }).map((item) => item.label), [
         '智能问答',
-        '检索诊断',
+        '多库检索',
     ]);
     assert.deepEqual(domainTabs('knowledgeAssets', READER_ACCESS).map((item) => item.key), [
         'catalog',
@@ -132,7 +132,7 @@ test('default routes and domain roots choose the first accessible leaf', () => {
         retrievalTest: true,
     }), [{
         key: 'searchDiagnostics',
-        label: '检索诊断',
+        label: '多库检索',
         path: APP_PATHS.retrievalTest,
         activePaths: [APP_PATHS.search, APP_PATHS.retrievalTest],
         access: 'searchDiagnostics',

@@ -10,9 +10,14 @@ from app.services.graph_extraction_prompt import (
     graph_extraction_prompt_hash,
 )
 from app.services.graph_extraction_provider import (
+    GEMMA_BASE_URL,
+    GEMMA_DIRECT_BASE_URL,
+    GEMMA_MODEL_NAME,
     GraphExtractionProviderError,
     MockGraphExtractor,
     OpenAICompatibleGraphExtractor,
+    QWEN38_BASE_URL,
+    QWEN38_MODEL_NAME,
     graph_extraction_provider_name,
 )
 
@@ -35,6 +40,36 @@ def test_deepseek_provider_identity_accepts_supported_models(model):
             model=model,
         )
         == "deepseek"
+    )
+
+
+def test_gemma_provider_identity_accepts_deployed_model():
+    assert (
+        graph_extraction_provider_name(
+            base_url=GEMMA_BASE_URL,
+            model=GEMMA_MODEL_NAME,
+        )
+        == "gemma4"
+    )
+
+
+def test_gemma_provider_identity_accepts_direct_private_endpoint():
+    assert (
+        graph_extraction_provider_name(
+            base_url=GEMMA_DIRECT_BASE_URL,
+            model=GEMMA_MODEL_NAME,
+        )
+        == "gemma4"
+    )
+
+
+def test_qwen38_provider_identity_accepts_deployed_model():
+    assert (
+        graph_extraction_provider_name(
+            base_url=QWEN38_BASE_URL,
+            model=QWEN38_MODEL_NAME,
+        )
+        == "qwen3.8"
     )
 
 
@@ -145,7 +180,11 @@ async def test_deepseek_adapter_uses_exact_openai_compatible_contract():
 
 
 @pytest.mark.asyncio
-async def test_qwen_adapter_disables_thinking_by_default():
+@pytest.mark.parametrize(
+    "model",
+    ["Huihui-Qwen3.6-27B-abliterated", GEMMA_MODEL_NAME, QWEN38_MODEL_NAME],
+)
+async def test_reasoning_models_disable_thinking_by_default(model):
     captured: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -164,7 +203,7 @@ async def test_qwen_adapter_disables_thinking_by_default():
 
     extractor = OpenAICompatibleGraphExtractor(
         base_url="http://127.0.0.1:8002/v1",
-        model="Huihui-Qwen3.6-27B-abliterated",
+        model=model,
         api_key="",
         transport=httpx.MockTransport(handler),
     )

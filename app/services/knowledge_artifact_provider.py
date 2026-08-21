@@ -83,6 +83,8 @@ class OpenAICompatibleSummaryProvider:
             "stream": False,
             "response_format": {"type": "json_object"},
         }
+        if "gemma" in self._model.lower():
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
         payload_hash = hashlib.sha256(
             _canonical_json(payload).encode("utf-8")
         ).hexdigest()

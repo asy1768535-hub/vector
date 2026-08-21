@@ -32,6 +32,13 @@ test('allows top_k selector and refresh; rejects forbidden features', () => {
     }
 });
 
+test('offers per-question graph assistance and sends the choice to the API', () => {
+    for (const token of ['graphAssist', '图谱辅助检索', 'el-switch']) {
+        assert.ok(chat.includes(token), `missing graph assistance control: ${token}`);
+    }
+    assert.ok(chat.includes('use_graph: graphAssist.value'));
+});
+
 test('conversation history is paged and can load earlier messages without jumping', () => {
     for (const token of [
         'loadEarlierMessages', 'hasEarlierMessages', 'loadingEarlierMessages',
