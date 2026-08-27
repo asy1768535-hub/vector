@@ -13,8 +13,8 @@ venv/
 # 本机 OCR 验收脚本（建库/生命周期）——仅本机用，不入库
 /scripts/create_pdf_ocr_test_lib.py
 /scripts/ocr_lifecycle.py
-/.env
-/.env.local
+.env*
+!.env.example
 .env.bak*
 *.bak
 .pytest_cache/
@@ -26,6 +26,13 @@ pytest_tmp*/
 .idea/
 .vscode/
 *.log
+.run_logs/
+.tmp/
+.worktrees/
+.superpowers/
+.trellis/
+.gitnexus/
+.claude/settings.local.json
 node_modules/
 admin-ui/dist/
 admin-ui/.vite/
@@ -51,6 +58,7 @@ storage/document_files/
 /eval/dataset*.jsonl
 !/eval/dataset.example.jsonl
 /eval/report*.md
+/eval/graph_extraction/results/
 
 # 本机工具与含业务数据/绕权限的开发脚本——不入库
 # （.gitignore 不支持行尾注释，patterns 必须独占一行）
