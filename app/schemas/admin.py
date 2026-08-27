@@ -43,7 +43,7 @@ class AdminResetPassword(StrictBaseModel):
 
 class AdminUserRead(BaseModel):
     id: uuid.UUID
-    email: EmailStr
+    email: str
     username: Optional[str] = None
     display_name: Optional[str] = None
     is_active: bool
