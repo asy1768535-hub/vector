@@ -30,6 +30,7 @@ from app.services.graph_schema_discovery import (
     discover_business_schema,
     persist_business_schema_draft,
 )
+from app.services.schema_lifecycle_read import resolve_current_ontology
 
 
 def _now() -> datetime:
@@ -120,6 +121,11 @@ def _revision_source_hash(pairs: list[tuple[Document, DocumentRevision]]) -> str
 
 async def _create_draft_ontology(db: AsyncSession, library: Library, source_hash: str) -> OntologyVersion:
     version_key = "ai-discovery"
+    current = await resolve_current_ontology(
+        db,
+        library=library,
+        required=False,
+    )
     version_no = (
         await db.execute(
             select(func.max(OntologyVersion.version_no)).where(
@@ -136,6 +142,7 @@ async def _create_draft_ontology(db: AsyncSession, library: Library, source_hash
         description=f"AI Schema discovery draft for source set {source_hash[:12]}",
         origin="ai_discovery",
         confirmed=False,
+        parent_version_id=current.id if current is not None else None,
     )
     db.add(ontology)
     await db.flush()
@@ -178,7 +185,7 @@ async def ensure_schema_discovery_run_for_batch(
         )
     ).scalar_one_or_none()
     if run is None:
-        ontology_version = await _create_draft_ontology(db, library, source_hash)
+        ontology_version = await _create_draft_ontology(db, locked_library, source_hash)
         run = SchemaDiscoveryRun(
             library_id=library.id,
             source_set_key=source_set_key,
@@ -291,7 +298,7 @@ async def ensure_schema_discovery_run_for_revision(
         )
     ).scalar_one_or_none()
     if run is None:
-        ontology_version = await _create_draft_ontology(db, library, source_hash)
+        ontology_version = await _create_draft_ontology(db, locked_library, source_hash)
         run = SchemaDiscoveryRun(
             library_id=library.id,
             source_set_key=source_set_key,
@@ -642,14 +649,12 @@ async def process_next_schema_discovery_run(*, session_factory, provider=None) -
                 draft_bundle = await load_schema_version_bundle(
                     db, library, ontology_version.id, for_update=True
                 )
-                active_id = (
-                    await db.execute(
-                        select(OntologyVersion.id).where(
-                            OntologyVersion.library_id == library.id,
-                            OntologyVersion.status == "active",
-                        ).limit(1)
-                    )
-                ).scalar_one_or_none()
+                current = await resolve_current_ontology(
+                    db,
+                    library=library,
+                    required=False,
+                )
+                active_id = current.id if current is not None else None
                 command = SchemaLifecycleCommand(
                     library_id=library.id,
                     ontology_version_id=ontology_version.id,

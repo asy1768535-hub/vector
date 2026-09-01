@@ -36,6 +36,10 @@ from app.services.graph_extraction_prompt import (
     graph_extraction_prompt_version,
 )
 from app.services.graph_extraction_provider import graph_extraction_provider_name
+from app.services.schema_lifecycle_read import (
+    CurrentOntologyError,
+    resolve_current_ontology,
+)
 
 
 _ACTIVE = "active"
@@ -360,28 +364,12 @@ async def build_ontology_rule_snapshot(
 
 
 async def select_active_ontology(db, *, library: Library) -> OntologyVersion:
-    result = await db.execute(
-        select(OntologyVersion)
-        .where(
-            OntologyVersion.library_id == library.id,
-            OntologyVersion.status == _ACTIVE,
-        )
-        .order_by(
-            OntologyVersion.version_key.asc(),
-            OntologyVersion.version_no.desc(),
-            OntologyVersion.id.asc(),
-        )
-        .limit(2)
-    )
-    rows = [row for row in result.scalars().all() if row.library_id == library.id and row.status == _ACTIVE]
-    if not rows:
-        _fail("active_ontology_required", "Library has no active ontology")
-    if len(rows) != 1:
-        _fail(
-            "ambiguous_active_ontology",
-            "Library must have exactly one active ontology for graph extraction",
-        )
-    return rows[0]
+    try:
+        ontology = await resolve_current_ontology(db, library=library)
+    except CurrentOntologyError as exc:
+        _fail(exc.code, str(exc))
+    assert ontology is not None
+    return ontology
 
 
 def _same_evidence_scope(

@@ -31,8 +31,10 @@ from app.services.schema_lifecycle_contracts import (
     deterministic_schema_import_id,
 )
 from app.services.schema_lifecycle_read import (
+    CurrentOntologyError,
     SchemaVersionBundle,
     load_schema_version_bundle,
+    resolve_current_ontology,
     schema_version_state_hash,
 )
 from app.services.schema_lifecycle_validation import validate_schema_draft_bundle
@@ -401,6 +403,10 @@ async def import_schema_version(
     replay = await _replay(db, library, command)
     if replay is not None:
         return replay
+    try:
+        current = await resolve_current_ontology(db, library=library)
+    except CurrentOntologyError as exc:
+        raise SchemaLifecycleError(exc.code, str(exc)) from exc
 
     family = (
         await db.execute(
@@ -424,7 +430,7 @@ async def import_schema_version(
         version_no=max((row.version_no for row in family), default=0) + 1,
         status=_DRAFT,
         description=spec.description,
-        parent_version_id=active_versions[0].id if active_versions else None,
+        parent_version_id=current.id,
     )
     entity_keys = [row.key for row in spec.entity_types]
     relation_keys = [row.key for row in spec.relation_types]
@@ -1062,6 +1068,7 @@ async def activate_schema_version(
     draft.version.status = _ACTIVE
     draft.version.confirmed = True
     draft.version.published_at = datetime.now(timezone.utc)
+    library.current_ontology_version_id = draft.version.id
     await db.flush()
     activated = await load_schema_version_bundle(db, library, draft.version.id)
     if getattr(draft.version, "origin", "user") == "ai_discovery":
@@ -1232,6 +1239,11 @@ async def disable_schema_version(
     ):
         raise SchemaLifecycleError(
             "schema_lifecycle_state_changed", "Only the active Schema can be disabled"
+        )
+    if getattr(library, "current_ontology_version_id", None) == bundle.version.id:
+        raise SchemaLifecycleError(
+            "current_ontology_cannot_disable",
+            "Current Ontology must be switched before it can be disabled",
         )
 
     bundle.version.status = _DISABLED

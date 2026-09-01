@@ -34,6 +34,54 @@ _HIDDEN = "deleted"
 _MAX_VERSIONS = 100
 
 
+class CurrentOntologyError(RuntimeError):
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(message)
+
+
+async def resolve_current_ontology(
+    db: AsyncSession,
+    *,
+    library: Library,
+    required: bool = True,
+    for_update: bool = False,
+) -> OntologyVersion | None:
+    """Resolve the library's explicit current ontology pointer.
+
+    A missing pointer is allowed only for flows that explicitly opt into
+    ``required=False`` (for example, first-time schema discovery).  A present
+    pointer must resolve to an active ontology owned by the same library.
+    """
+
+    current_id = getattr(library, "current_ontology_version_id", None)
+    if current_id is None:
+        if required:
+            raise CurrentOntologyError(
+                "current_ontology_missing",
+                "library current ontology version is not configured",
+            )
+        return None
+
+    statement = select(OntologyVersion).where(
+        OntologyVersion.id == current_id,
+        OntologyVersion.library_id == library.id,
+    )
+    if for_update:
+        statement = statement.with_for_update()
+    ontology = (await db.execute(statement)).scalar_one_or_none()
+    if (
+        ontology is None
+        or ontology.library_id != library.id
+        or ontology.status != "active"
+    ):
+        raise CurrentOntologyError(
+            "current_ontology_invalid",
+            "library current ontology version is missing or not active",
+        )
+    return ontology
+
+
 @dataclass(frozen=True, slots=True)
 class SchemaVersionBundle:
     version: OntologyVersion

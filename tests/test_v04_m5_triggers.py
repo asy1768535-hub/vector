@@ -189,14 +189,21 @@ def test_upload_requested_trigger_bypasses_only_the_global_auto_switch(monkeypat
 def test_upload_configuration_requires_runtime_library_security_and_ontology(monkeypatch):
     monkeypatch.setattr(settings, "graph_extraction_enabled", True)
     monkeypatch.setattr(settings, "graph_extraction_api_key", SecretStr("test-key"))
+    ontology = SimpleNamespace(
+        id=uuid.uuid4(),
+        library_id=LIB_ID,
+        status="active",
+        version_key="confirmed-v1",
+    )
     library = SimpleNamespace(
         id=LIB_ID,
+        current_ontology_version_id=ontology.id,
         graph_extraction_enabled=True,
         external_llm_enabled=True,
         graph_extraction_allowed_security_levels=["internal"],
     )
     db = AsyncMock()
-    db.execute = AsyncMock(return_value=_Scalar(uuid.uuid4()))
+    db.execute = AsyncMock(return_value=_Scalar(ontology))
 
     result = asyncio.run(graph_extraction_upload_configuration(db, library))
 
@@ -245,15 +252,17 @@ def test_explore_upload_with_confirmed_active_schema_starts_new_discovery_run(mo
     library.external_llm_enabled = True
     library.graph_extraction_allowed_security_levels = ["internal"]
     library.schema_mode = "explore"
-
-    configured = MagicMock()
-    configured.scalars.return_value.first.return_value = SimpleNamespace(
+    ontology = SimpleNamespace(
+        id=uuid.uuid4(),
+        library_id=LIB_ID,
         version_key="confirmed-v1",
         status="active",
         confirmed=True,
     )
+    library.current_ontology_version_id = ontology.id
+
     config_db = AsyncMock()
-    config_db.execute = AsyncMock(return_value=configured)
+    config_db.execute = AsyncMock(return_value=_Scalar(ontology))
     config = asyncio.run(graph_extraction_upload_configuration(config_db, library))
     assert config["available"] is True
     assert config["exploration_available"] is True

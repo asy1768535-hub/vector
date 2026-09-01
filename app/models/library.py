@@ -139,6 +139,18 @@ class Library(Base):
     )
     qdrant_collection: Mapped[str] = mapped_column(String(128), nullable=False)
 
+    current_ontology_version_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey(
+            "ontology_versions.id",
+            ondelete="RESTRICT",
+            use_alter=True,
+            name="fk_lib_current_ontology",
+        ),
+        nullable=True,
+        index=True,
+    )
+
     graph_extraction_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )

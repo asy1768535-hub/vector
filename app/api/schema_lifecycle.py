@@ -119,6 +119,9 @@ def _http_error(exc: SchemaLifecycleError) -> HTTPException:
         "schema_lifecycle_idempotency_conflict",
         "schema_lifecycle_invalid_draft",
         "schema_lifecycle_dependency_conflict",
+        "current_ontology_missing",
+        "current_ontology_invalid",
+        "current_ontology_cannot_disable",
     }:
         return HTTPException(status.HTTP_409_CONFLICT, exc.code)
     return HTTPException(

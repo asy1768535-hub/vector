@@ -11,12 +11,15 @@ from app.models.document import Document
 from app.models.document_import_job import DocumentImportJob
 from app.models.document_revision import DocumentRevision
 from app.models.library import Library
-from app.models.ontology_version import OntologyVersion
 from app.services.graph_extraction_jobs import (
     GraphExtractionJobError,
     create_graph_extraction_job,
 )
 from app.services.schema_discovery_runs import ensure_schema_discovery_run_for_batch
+from app.services.schema_lifecycle_read import (
+    CurrentOntologyError,
+    resolve_current_ontology,
+)
 
 
 class GraphExtractionTriggerError(RuntimeError):
@@ -73,16 +76,14 @@ async def graph_extraction_upload_configuration(db, library: Library) -> dict:
     )
     if not levels:
         reasons.append("security_levels_missing")
-    ontology_result = await db.execute(
-        select(OntologyVersion).where(
-            OntologyVersion.library_id == library.id,
-            OntologyVersion.status == "active",
-        ).limit(1)
-    )
-    if hasattr(ontology_result, "scalars"):
-        active_ontology = ontology_result.scalars().first()
-    else:
-        active_ontology = ontology_result.scalar_one_or_none()
+    try:
+        active_ontology = await resolve_current_ontology(
+            db,
+            library=library,
+            required=False,
+        )
+    except CurrentOntologyError:
+        active_ontology = None
     ai_draft = bool(
         active_ontology is not None
         and str(getattr(active_ontology, "version_key", "")).startswith("ai-draft")
@@ -109,13 +110,11 @@ async def graph_extraction_upload_configuration(db, library: Library) -> dict:
 
 
 async def _ensure_graph_extraction_ontology(db, library: Library) -> None:
-    result = await db.execute(
-        select(OntologyVersion.id).where(
-            OntologyVersion.library_id == library.id,
-            OntologyVersion.status == "active",
-        ).limit(1)
+    active = await resolve_current_ontology(
+        db,
+        library=library,
+        required=False,
     )
-    active = result.scalar_one_or_none() if hasattr(result, "scalar_one_or_none") else None
     if active is not None:
         return
     # Historical exploration ontology rows remain available for replay, but

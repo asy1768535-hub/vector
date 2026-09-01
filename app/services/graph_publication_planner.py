@@ -44,6 +44,10 @@ from app.services.graph_schema_validator import (
     validate_entity_shape,
     validate_relation_shape,
 )
+from app.services.schema_lifecycle_read import (
+    CurrentOntologyError,
+    resolve_current_ontology,
+)
 
 
 PUBLICATION_CURRENT_STATUSES = ("active", "degraded")
@@ -282,18 +286,11 @@ async def _active_ontology(
         ):
             raise GraphPublicationPlanError("ontology_not_active", "ontology version is not active")
         return ontology
-    result = await db.execute(
-        select(OntologyVersion)
-        .where(
-            OntologyVersion.library_id == library.id,
-            OntologyVersion.status == ONTOLOGY_STATUS_ACTIVE,
-        )
-        .order_by(OntologyVersion.created_at.desc())
-        .limit(1)
-    )
-    ontology = result.scalars().first()
-    if ontology is None:
-        raise GraphPublicationPlanError("active_ontology_not_found", "active ontology version not found")
+    try:
+        ontology = await resolve_current_ontology(db, library=library)
+    except CurrentOntologyError as exc:
+        raise GraphPublicationPlanError(exc.code, str(exc)) from exc
+    assert ontology is not None
     return ontology
 
 

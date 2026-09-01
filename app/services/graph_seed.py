@@ -453,6 +453,8 @@ async def _seed_ontology(
         status=ONTOLOGY_STATUS_ACTIVE,
         published_at=datetime.now(timezone.utc),
     )
+    if label == "enterprise":
+        library.current_ontology_version_id = ontology_version.id
     return SeedEnterpriseOntologyResult(ontology_version, created_counts, existing_counts)
 
 
