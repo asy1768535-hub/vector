@@ -3,6 +3,7 @@ from app.models.api_key import ApiKey
 from app.models.audit import AuditLog
 from app.models.attribute_definition import AttributeDefinition
 from app.models.chat_history import ChatConversation, ChatMessage, ChatMessageSource
+from app.models.canonical_entity import CanonicalEntity
 from app.models.classification_taxonomy import (
     ClassificationLabel,
     ClassificationTaxonomy,
@@ -33,6 +34,7 @@ from app.models.embedding_job import EmbeddingJob
 from app.models.entity import Entity
 from app.models.entity_alias import EntityAlias
 from app.models.entity_mention import EntityMention
+from app.models.entity_resolution_decision import EntityResolutionDecision
 from app.models.entity_type import EntityType
 from app.models.evidence_unit import EvidenceUnit
 from app.models.external_graph_sync import (
@@ -96,6 +98,7 @@ __all__ = [
     "ChatConversation",
     "ChatMessage",
     "ChatMessageSource",
+    "CanonicalEntity",
     "ClassificationLabel",
     "ClassificationTaxonomy",
     "DocumentClassificationDecision",
@@ -120,6 +123,7 @@ __all__ = [
     "Entity",
     "EntityAlias",
     "EntityMention",
+    "EntityResolutionDecision",
     "EntityType",
     "EvidenceUnit",
     "GraphExternalFactMapping",

@@ -59,7 +59,7 @@ def test_entities_reuse_m1_ontology_schema_models():
         assert name in cols
 
     assert cols.library_id.nullable is False
-    assert _foreign_key_targets(cols.library_id) == {"sys_libraries.id"}
+    assert "sys_libraries.id" in _foreign_key_targets(cols.library_id)
     assert _foreign_key_targets(cols.ontology_version_id) == {"ontology_versions.id"}
     assert _foreign_key_targets(cols.entity_type_id) == {"entity_types.id"}
     assert isinstance(cols.properties.type, JSONB)

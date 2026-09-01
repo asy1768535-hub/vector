@@ -4,7 +4,17 @@ import uuid
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import CheckConstraint, DateTime, Float, ForeignKey, Index, String, UniqueConstraint, func
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    Float,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    String,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -42,8 +52,16 @@ class Entity(Base):
             "normalized_name",
             name="uq_entities_library_ontology_type_normalized",
         ),
+        UniqueConstraint("id", "library_id", name="uq_entities_id_library"),
+        ForeignKeyConstraint(
+            ["canonical_entity_id", "library_id"],
+            ["canonical_entities.id", "canonical_entities.library_id"],
+            ondelete="RESTRICT",
+            name="fk_entities_canonical_entity",
+        ),
         Index("ix_entities_library_ontology_status", "library_id", "ontology_version_id", "status"),
         Index("ix_entities_library_type_status", "library_id", "entity_type_id", "status"),
+        Index("ix_entities_canonical_entity_id", "canonical_entity_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -64,6 +82,9 @@ class Entity(Base):
         ForeignKey("entity_types.id", ondelete="RESTRICT"),
         nullable=False,
         index=True,
+    )
+    canonical_entity_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PgUUID(as_uuid=True), nullable=True
     )
     canonical_name: Mapped[str] = mapped_column(String(512), nullable=False)
     normalized_name: Mapped[str] = mapped_column(String(512), nullable=False)
