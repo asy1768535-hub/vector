@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Show local four-process status, port 8100, and /health
+  Show local project process status, port 8100, and /health
 .DESCRIPTION
   Checks PID files for process liveness, port occupancy, and calls /health.
   Does not print passwords, API keys, or JWT_SECRET.
@@ -8,6 +8,7 @@
 $ErrorActionPreference = "Continue"
 $projectDir = $PSScriptRoot | Split-Path -Parent
 $pidDir = Join-Path $projectDir ".run_logs"
+$venvPython = Join-Path $projectDir ".venv\Scripts\python.exe"
 
 # Read API_PORT from .env
 $apiPort = 8100
@@ -27,20 +28,40 @@ $graphEnabledText = if ($env:GRAPH_EXTRACTION_ENABLED) {
     }
 }
 $graphExtractionEnabled = $graphEnabledText -match '(?i)^(true|1|yes|on)$'
+$artifactEnabledText = if ($env:KNOWLEDGE_ARTIFACT_RUNTIME_ENABLED) {
+    $env:KNOWLEDGE_ARTIFACT_RUNTIME_ENABLED
+} elseif (Test-Path $envPath) {
+    $match = Select-String -Path $envPath -Pattern '^\s*KNOWLEDGE_ARTIFACT_RUNTIME_ENABLED\s*=\s*(.*)' | Select-Object -First 1
+    if ($match -and $match.Matches.Groups[1].Value) {
+        $match.Matches.Groups[1].Value.Trim()
+    }
+}
+$knowledgeArtifactEnabled = $artifactEnabledText -match '(?i)^(true|1|yes|on)$'
+$classificationEnabledText = if ($env:CLASSIFICATION_RUNTIME_ENABLED) {
+    $env:CLASSIFICATION_RUNTIME_ENABLED
+} elseif (Test-Path $envPath) {
+    $match = Select-String -Path $envPath -Pattern '^\s*CLASSIFICATION_RUNTIME_ENABLED\s*=\s*(.*)' | Select-Object -First 1
+    if ($match -and $match.Matches.Groups[1].Value) {
+        $match.Matches.Groups[1].Value.Trim()
+    }
+}
+$classificationEnabled = $classificationEnabledText -match '(?i)^(true|1|yes|on)$'
 
-function Test-PidAlive($pidFile, $label) {
+
+function Test-PidAlive($pidFile, $label, $module) {
     if (-not (Test-Path $pidFile)) {
         Write-Host "  $label : DOWN (no PID file)" -ForegroundColor Red
         return $false
     }
     $procId = (Get-Content $pidFile -Raw).Trim()
     try {
-        $p = Get-Process -Id $procId -ErrorAction Stop
-        if (-not $p.HasExited) {
+        $process = Get-CimInstance Win32_Process -Filter "ProcessId = $procId" -ErrorAction Stop
+        $command = [string]$process.CommandLine
+        if ($command -like "*$venvPython*" -and $command -match "(?i)(^|\s)-m\s+$([regex]::Escape($module))(\s|$)") {
             Write-Host "  $label : UP (PID $procId)" -ForegroundColor Green
             return $true
         } else {
-            Write-Host "  $label : DOWN (PID $procId exited)" -ForegroundColor Red
+            Write-Host "  $label : DOWN (PID $procId identity mismatch)" -ForegroundColor Red
             return $false
         }
     } catch {
@@ -54,14 +75,27 @@ Write-Host "Time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 Write-Host ""
 
 Write-Host "--- Project processes ---" -ForegroundColor White
-$apiAlive = Test-PidAlive (Join-Path $pidDir "api.pid") "API"
-$embedAlive = Test-PidAlive (Join-Path $pidDir "embedder.pid") "Embedder Worker"
-$cleanAlive = Test-PidAlive (Join-Path $pidDir "cleanup.pid") "Cleanup Worker"
+$apiAlive = Test-PidAlive (Join-Path $pidDir "api.pid") "API" "app.main"
+$docConverterAlive = Test-PidAlive (Join-Path $pidDir "doc_converter.pid") "DOC Converter" "app.workers.doc_converter"
+$importAlive = Test-PidAlive (Join-Path $pidDir "importer.pid") "Import Worker" "app.workers.importer"
+$embedAlive = Test-PidAlive (Join-Path $pidDir "embedder.pid") "Embedder Worker" "app.workers.embedder"
+$cleanAlive = Test-PidAlive (Join-Path $pidDir "cleanup.pid") "Cleanup Worker" "app.workers.cleanup"
 if ($graphExtractionEnabled) {
-    $graphAlive = Test-PidAlive (Join-Path $pidDir "graph_extractor.pid") "Graph Extractor"
+    $graphAlive = Test-PidAlive (Join-Path $pidDir "graph_extractor.pid") "Graph Extractor" "app.workers.graph_extractor"
 } else {
     Write-Host "  Graph Extractor : DISABLED" -ForegroundColor DarkGray
 }
+if ($knowledgeArtifactEnabled) {
+    $artifactAlive = Test-PidAlive (Join-Path $pidDir "knowledge_artifacts.pid") "Knowledge Artifact Worker" "app.workers.knowledge_artifacts"
+} else {
+    Write-Host "  Knowledge Artifact Worker : DISABLED" -ForegroundColor DarkGray
+}
+if ($classificationEnabled) {
+    $classificationAlive = Test-PidAlive (Join-Path $pidDir "classifications.pid") "Classification Worker" "app.workers.classifications"
+} else {
+    Write-Host "  Classification Worker : DISABLED" -ForegroundColor DarkGray
+}
+
 
 Write-Host ""
 

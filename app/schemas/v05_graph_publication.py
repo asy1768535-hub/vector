@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -16,7 +16,12 @@ GraphPublicationStatus = Literal[
     "cancelled",
     "failed",
 ]
-GraphPublicationSourceMode = Literal["initial_seed", "manual_plan", "rollback"]
+GraphPublicationSourceMode = Literal[
+    "initial_seed",
+    "manual_plan",
+    "rollback",
+    "coordinated_purge",
+]
 GraphPublicationPlanSourceMode = Literal["initial_seed", "manual_plan"]
 GraphPublicationItemKind = Literal["entity", "relation"]
 GraphPublicationItemStatus = Literal["planned", "active", "stale", "degraded", "superseded"]
@@ -116,6 +121,7 @@ class GraphPublicationItemRead(BaseModel):
     support_evidence_ids: list[uuid.UUID]
     support_counts: dict[str, int]
     source_job_ids: list[uuid.UUID]
+    fact_snapshot: dict[str, Any]
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

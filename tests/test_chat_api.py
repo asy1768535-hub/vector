@@ -38,6 +38,26 @@ def _rec(content="片段正文", *, doc="d1", chunk="c1", score=0.88, md=None):
     return DifyRecord(content=content, score=score, title="标题", metadata=meta)
 
 
+@pytest.mark.parametrize(
+    ("metadata", "score_type", "display_score"),
+    [
+        ({"rerank_score": 0.863, "vector_score": 0.724, "rrf_score": 0.0164}, "rerank", 0.863),
+        ({"vector_score": 0.724, "rrf_score": 0.0164}, "vector", 0.724),
+        ({"rrf_score": 0.0164}, "rrf", None),
+    ],
+)
+def test_chat_source_uses_only_reliable_display_scores(metadata, score_type, display_score):
+    record = DifyRecord(
+        content="source", score=0.0164, title="source",
+        metadata={"document_id": "d1", "chunk_id": "c1", **metadata},
+    )
+    source = chat_api._to_source(record)
+
+    assert source.score == 0.0164
+    assert source.score_type == score_type
+    assert source.display_score == display_score
+
+
 class _Conv:
     def __init__(self):
         self.id = uuid.uuid4()
@@ -171,6 +191,19 @@ def test_messages_empty_query_422():
     assert r.status_code == 422
 
 
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("合同金额和供应商是谁？只根据材料回答。", "合同金额和供应商是谁"),
+        ("合同金额和供应商是谁，请仅依据原文回答", "合同金额和供应商是谁"),
+        ("只根据材料回答", "只根据材料回答"),
+        ("根据材料回答的内容是什么", "根据材料回答的内容是什么"),
+    ],
+)
+def test_retrieval_query_removes_only_explicit_answer_constraint(query, expected):
+    assert chat_api._retrieval_query(query) == expected
+
+
 def test_messages_top_k_out_of_range_422():
     _override(mock_user, AsyncMock())
     with patch.object(chat_api.settings, "chat_enabled", True):
@@ -194,6 +227,31 @@ def _patch_pipeline(records, *, answer="答案"):
         patch.object(chat_api.chat_answer, "generate_answer", new=gen),
     ]
     return base + _history_patches(), retr, gen
+
+
+def test_messages_return_rerank_display_score():
+    records = [DifyRecord(
+        content="source", score=0.0164, title="source",
+        metadata={"document_id": "d1", "chunk_id": "c1", "rerank_score": 0.863},
+    )]
+    _override(mock_user, AsyncMock())
+    patches, retr, gen = _patch_pipeline(records)
+    for p in patches:
+        p.start()
+    try:
+        query = "合同金额和供应商是谁？只根据材料回答。"
+        response = TestClient(app).post(
+            "/chat/messages", json={"library_slug": "medical", "query": query}
+        )
+    finally:
+        for p in reversed(patches):
+            p.stop()
+
+    assert response.status_code == 200
+    assert response.json()["sources"][0]["score_type"] == "rerank"
+    assert response.json()["sources"][0]["display_score"] == 0.863
+    assert retr.await_args.kwargs["request"].query == "合同金额和供应商是谁"
+    assert gen.await_args.args[0] == query
 
 
 def test_messages_calls_retrieval_and_returns_sources():
@@ -258,6 +316,25 @@ def test_messages_debug_toggle():
     assert dbg["matched_queries"] == ["q1", "q2"]
     assert dbg["rerank_scores"] == [0.8]
     assert r_off.json()["debug"] is None
+
+
+def test_chat_debug_includes_bounded_retrieval_observation():
+    records = [_rec("片段A", md={"rerank_score": 0.8})]
+    retrieval_debug = {
+        "rerank": {
+            "effective": "fallback",
+            "provider": "tei",
+            "candidate_count": 50,
+            "scored_count": 0,
+            "fallback_reason": "provider_error",
+        },
+        "duplicate_suppressed": 2,
+        "evidence": {"status": "insufficient", "reason": "dense_score_below_minimum"},
+    }
+
+    debug = chat_api._build_debug(records, 5, retrieval_debug)
+
+    assert debug["retrieval"] == retrieval_debug
 
 
 def test_messages_llm_failure_returns_502():
@@ -337,6 +414,30 @@ def test_stream_emits_sources_then_deltas_then_done():
     assert '"type": "done"' in body
     # sources 事件必须在 delta 之前
     assert body.index('"sources"') < body.index('"delta"')
+
+
+def test_stream_emits_vector_display_score():
+    records = [DifyRecord(
+        content="source", score=0.0164, title="source",
+        metadata={"document_id": "d1", "chunk_id": "c1", "vector_score": 0.724},
+    )]
+    _override(mock_user, AsyncMock())
+
+    async def fake_stream(*_args, **_kwargs):
+        yield "answer"
+
+    patches = _stream_patches(records, fake_stream)
+    for p in patches:
+        p.start()
+    try:
+        response = TestClient(app).post("/chat/stream", json={"library_slug": "medical", "query": "q"})
+    finally:
+        for p in reversed(patches):
+            p.stop()
+
+    assert response.status_code == 200
+    assert '"score_type": "vector"' in response.text
+    assert '"display_score": 0.724' in response.text
 
 
 def test_stream_emits_error_event_on_chat_error():

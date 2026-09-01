@@ -77,6 +77,7 @@ _ENTERPRISE_RELATION_CONSTRAINT_GROUPS = {
     "references": (("policy", "document"), ("policy", "document")),
     "approves": (("person", "position", "department"), ("process",)),
     "owns": (("department",), ("product", "project")),
+    "contains": (("document", "product", "project"), ("document", "process", "product")),
     "related_to": (
         tuple(sorted(_ENTERPRISE_ENTITY_TYPE_KEYS)),
         tuple(sorted(_ENTERPRISE_ENTITY_TYPE_KEYS)),
@@ -299,6 +300,61 @@ class GraphEvalMetricReport(_StrictModel):
     eval_formal_write_count: int = Field(ge=0)
 
 
+class GraphEvalLatencySummary(_StrictModel):
+    count: int = Field(ge=0)
+    min_ms: int | None = Field(default=None, ge=0)
+    p50_ms: int | None = Field(default=None, ge=0)
+    p95_ms: int | None = Field(default=None, ge=0)
+    max_ms: int | None = Field(default=None, ge=0)
+    mean_ms: float | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _values_match_count(self) -> GraphEvalLatencySummary:
+        values = (self.min_ms, self.p50_ms, self.p95_ms, self.max_ms, self.mean_ms)
+        if self.count == 0 and any(value is not None for value in values):
+            raise ValueError("empty latency summary must not contain values")
+        if self.count > 0 and any(value is None for value in values):
+            raise ValueError("non-empty latency summary requires every value")
+        if self.count > 0 and not (
+            self.min_ms <= self.p50_ms <= self.p95_ms <= self.max_ms
+        ):
+            raise ValueError("latency percentiles must be ordered")
+        return self
+
+
+class GraphEvalPerformanceReport(_StrictModel):
+    wall_time_ms: int = Field(ge=0)
+    unit_count: int = Field(ge=0)
+    succeeded_unit_count: int = Field(ge=0)
+    units_per_minute: float | None = Field(default=None, ge=0)
+    model_attempt_count: int = Field(ge=0)
+    retry_count: int = Field(ge=0)
+    truncated_attempt_count: int = Field(ge=0)
+    input_token_count: int = Field(ge=0)
+    output_token_count: int = Field(ge=0)
+    token_usage_attempt_count: int = Field(ge=0)
+    token_usage_coverage: GraphEvalRate
+    provider_latency_ms: GraphEvalLatencySummary
+
+    @model_validator(mode="after")
+    def _counts_are_consistent(self) -> GraphEvalPerformanceReport:
+        if self.succeeded_unit_count > self.unit_count:
+            raise ValueError("succeeded Unit count exceeds Unit count")
+        if self.retry_count > self.model_attempt_count:
+            raise ValueError("retry count exceeds model Attempt count")
+        if self.truncated_attempt_count > self.model_attempt_count:
+            raise ValueError("truncated Attempt count exceeds model Attempt count")
+        if self.token_usage_attempt_count > self.model_attempt_count:
+            raise ValueError("token usage count exceeds model Attempt count")
+        if self.token_usage_coverage.numerator != self.token_usage_attempt_count:
+            raise ValueError("token usage coverage numerator is inconsistent")
+        if self.token_usage_coverage.denominator != self.model_attempt_count:
+            raise ValueError("token usage coverage denominator is inconsistent")
+        if self.provider_latency_ms.count > self.model_attempt_count:
+            raise ValueError("latency count exceeds model Attempt count")
+        return self
+
+
 class GraphEvalRunArtifact(_StrictModel):
     schema_version: Literal["graph-extraction-eval-result-v1"]
     run_id: str
@@ -327,6 +383,7 @@ class GraphEvalRunArtifact(_StrictModel):
     provider_request_id_count: int = Field(ge=0)
     provider_request_id_sha256: str | None
     metrics: GraphEvalMetricReport
+    performance: GraphEvalPerformanceReport | None = None
     stable_error_code_counts: dict[str, int]
     policy_id: str | None = None
     policy_sha256: str | None = None
@@ -379,6 +436,11 @@ class GraphEvalRunArtifact(_StrictModel):
             raise ValueError("finished_at must not precede started_at")
         if self.model_attempt_count != sum(self.attempt_status_counts.values()):
             raise ValueError("model_attempt_count must equal Attempt status counts")
+        if (
+            self.performance is not None
+            and self.performance.model_attempt_count != self.model_attempt_count
+        ):
+            raise ValueError("performance Attempt count is inconsistent")
         expected_real_calls = self.model_attempt_count if self.real_provider else 0
         if self.real_model_call_count != expected_real_calls:
             raise ValueError("real_model_call_count is inconsistent with Provider mode")
@@ -551,6 +613,14 @@ class GraphEvalAttemptMetric:
 
 
 @dataclass(frozen=True, slots=True)
+class GraphEvalAttemptPerformance:
+    latency_ms: int | None
+    input_token_count: int | None
+    output_token_count: int | None
+    finish_reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class LoadedGraphEvalDataset:
     manifest: GraphEvalManifest
     documents: tuple[GraphEvalDocument, ...]
@@ -562,6 +632,18 @@ class LoadedGraphEvalDataset:
 def canonical_graph_eval_hash(value: Any) -> str:
     payload = canonical_graph_json_v1(value).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _artifact_sha256_variants(payload: bytes) -> frozenset[str]:
+    normalized = payload.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    return frozenset(
+        (hashlib.sha256(payload).hexdigest(), hashlib.sha256(normalized).hexdigest())
+    )
+
+
+def _normalized_artifact_sha256(payload: bytes) -> str:
+    normalized = payload.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    return hashlib.sha256(normalized).hexdigest()
 
 
 def _load_json(path: Path) -> Any:
@@ -817,6 +899,70 @@ def rate(numerator: int, denominator: int) -> GraphEvalRate:
     )
 
 
+def _nearest_rank(values: tuple[int, ...], percentile: float) -> int:
+    if not values:
+        raise ValueError("cannot calculate a percentile for an empty population")
+    index = max(0, math.ceil(percentile * len(values)) - 1)
+    return values[index]
+
+
+def build_performance_report(
+    *,
+    started_at: datetime,
+    finished_at: datetime,
+    unit_count: int,
+    succeeded_unit_count: int,
+    attempted_unit_count: int,
+    attempts: tuple[GraphEvalAttemptPerformance, ...],
+) -> GraphEvalPerformanceReport:
+    if finished_at < started_at:
+        raise ValueError("finished_at must not precede started_at")
+    if min(unit_count, succeeded_unit_count, attempted_unit_count) < 0:
+        raise ValueError("performance counts must be non-negative")
+    if succeeded_unit_count > unit_count or attempted_unit_count > unit_count:
+        raise ValueError("processed Unit count exceeds Unit count")
+
+    wall_time_ms = round((finished_at - started_at).total_seconds() * 1000)
+    latencies = tuple(
+        sorted(row.latency_ms for row in attempts if row.latency_ms is not None)
+    )
+    if latencies:
+        latency_summary = GraphEvalLatencySummary(
+            count=len(latencies),
+            min_ms=latencies[0],
+            p50_ms=_nearest_rank(latencies, 0.50),
+            p95_ms=_nearest_rank(latencies, 0.95),
+            max_ms=latencies[-1],
+            mean_ms=sum(latencies) / len(latencies),
+        )
+    else:
+        latency_summary = GraphEvalLatencySummary(count=0)
+    token_attempts = tuple(
+        row
+        for row in attempts
+        if row.input_token_count is not None and row.output_token_count is not None
+    )
+    units_per_minute = (
+        None
+        if wall_time_ms == 0
+        else succeeded_unit_count / (wall_time_ms / 60_000)
+    )
+    return GraphEvalPerformanceReport(
+        wall_time_ms=wall_time_ms,
+        unit_count=unit_count,
+        succeeded_unit_count=succeeded_unit_count,
+        units_per_minute=units_per_minute,
+        model_attempt_count=len(attempts),
+        retry_count=max(0, len(attempts) - attempted_unit_count),
+        truncated_attempt_count=sum(row.finish_reason == "length" for row in attempts),
+        input_token_count=sum(row.input_token_count or 0 for row in attempts),
+        output_token_count=sum(row.output_token_count or 0 for row in attempts),
+        token_usage_attempt_count=len(token_attempts),
+        token_usage_coverage=rate(len(token_attempts), len(attempts)),
+        provider_latency_ms=latency_summary,
+    )
+
+
 def classify(gold: list[Any], predicted: list[Any]) -> GraphEvalClassification:
     gold_set = set(gold)
     predicted_set = set(predicted)
@@ -922,8 +1068,7 @@ def load_graph_eval_policy(
         calibration_bytes = calibration_path.read_bytes()
     except OSError as exc:
         raise ValueError("cannot load frozen calibration result") from exc
-    calibration_sha256 = hashlib.sha256(calibration_bytes).hexdigest()
-    if calibration_sha256 != policy.calibration_result_sha256:
+    if policy.calibration_result_sha256 not in _artifact_sha256_variants(calibration_bytes):
         raise ValueError("calibration result SHA-256 does not match Eval Policy")
 
     calibration = GraphEvalRunArtifact.model_validate_json(calibration_bytes)
@@ -944,7 +1089,7 @@ def load_graph_eval_policy(
         raise ValueError("Eval Policy approval must follow calibration completion")
 
     try:
-        policy_sha256 = hashlib.sha256(resolved_policy.read_bytes()).hexdigest()
+        policy_sha256 = _normalized_artifact_sha256(resolved_policy.read_bytes())
     except OSError as exc:
         raise ValueError("cannot hash Eval Policy") from exc
     return LoadedGraphEvalPolicy(policy, calibration, policy_sha256)
@@ -975,7 +1120,7 @@ def _load_evidence_reference(
         payload = path.read_bytes()
     except OSError as exc:
         raise ValueError("cannot load release evidence reference") from exc
-    if hashlib.sha256(payload).hexdigest() != reference.sha256:
+    if reference.sha256 not in _artifact_sha256_variants(payload):
         raise ValueError(f"release evidence SHA-256 mismatch: {reference.path}")
     return path, payload
 
@@ -1064,7 +1209,10 @@ def load_graph_eval_release_evidence(
         reference=evidence.policy,
     )
     policy = load_graph_eval_policy(repository_root=root, policy_path=policy_path)
-    if evidence.policy.sha256 != policy.policy_sha256:
+    if (
+        evidence.policy.sha256 not in _artifact_sha256_variants(_policy_bytes)
+        or policy.policy_sha256 not in _artifact_sha256_variants(_policy_bytes)
+    ):
         raise ValueError("release evidence policy SHA-256 is inconsistent")
 
     if evidence.calibration.path != policy.policy.calibration_result_path:
@@ -1114,7 +1262,7 @@ def load_graph_eval_release_evidence(
 
     return LoadedGraphEvalReleaseEvidence(
         evidence=evidence,
-        evidence_sha256=hashlib.sha256(evidence_bytes).hexdigest(),
+        evidence_sha256=_normalized_artifact_sha256(evidence_bytes),
         policy=policy,
         calibration=calibration,
         post_freeze_runs=(

@@ -11,6 +11,12 @@ from app.services.graph_candidate_aggregation import (
     aggregate_entity_occurrence_payloads,
     aggregate_relation_occurrence_payloads,
 )
+from app.services.graph_normalization import canonicalize_extracted_entity_name_v1
+
+
+def test_entity_name_canonicalization_does_not_apply_business_suffix_rules():
+    assert canonicalize_extracted_entity_name_v1("project", "青岩光伏电站项目") == "青岩光伏电站项目"
+    assert canonicalize_extracted_entity_name_v1("company", "项目管理公司") == "项目管理公司"
 
 
 def _entity_occurrences():
@@ -41,9 +47,7 @@ def _entity_occurrences():
                 "entity_type_key": "department",
                 "aliases": ["hr", "People   Team", ""],
                 "properties": {"owner": "Alice", "floor": 3},
-                "external_mapping_hints": [
-                    {"key": "D-1", "system": "erp"}
-                ],
+                "external_mapping_hints": [{"key": "D-1", "system": "erp"}],
             },
         ),
     ]

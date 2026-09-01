@@ -35,7 +35,7 @@
 - 筛选支持知识库、状态、Worker、文档 ID 和时间范围。
 - 表格展示文档 ID/版本、知识库、状态、Worker、尝试次数、耗时、错误、创建时间和操作。
 - 详情抽屉只展示当前接口已有的任务字段。
-- 保持 `listJobs / jobStats / retryJob / resetFailedJobs` 接口不变。
+- 任务页使用 `listMonitoredTasks / monitoredTaskStats / retryMonitoredTasks / resetFailedJobs`；不要恢复已删除的旧前端封装。
 - 使用现有 `listLibraries` 映射知识库名称，不新增后端接口。
 - 最多加载 500 条并前端筛选分页，达到上限时明确提示。
 - 可新增 `admin-ui/src/jobs_ui.js` 承载状态、耗时、筛选和分页纯函数。

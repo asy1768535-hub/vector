@@ -1,234 +1,187 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
-import { STATUS_LABEL, STATUS_TAG, STATUS_ICON, formatJobTime, jobDuration, shortId, filterJobs, paginateJobs, libraryName } from './src/jobs_ui.js';
+import {
+    STATUS_LABEL, STATUS_TAG, STATUS_ICON, TASK_TYPE_LABEL, STAGE_LABEL,
+    formatJobTime, jobDuration, shortId, filterJobs, paginateJobs, libraryName,
+    jobErrorText, jobStageLabel, retryReasonLabel, statsStatusTotal,
+    retryTargetKey, isRetrySelectable, uniqueRetryRows, retryItem, retryTypeSummary,
+    queueHealthRows, formatQueueAge, formatQueueRate, formatQueueThroughput,
+    monitorListParams,
+} from './src/jobs_ui.js';
 
-// ── Unit tests ──
-test('STATUS_LABEL maps all statuses', () => {
-    assert.equal(STATUS_LABEL.pending, '待处理');
-    assert.equal(STATUS_LABEL.processing, '处理中');
+const src = readFileSync(new URL('./src/views/Jobs.js', import.meta.url), 'utf8');
+const uiSrc = readFileSync(new URL('./src/jobs_ui.js', import.meta.url), 'utf8');
+const css = readFileSync(new URL('./style.css', import.meta.url), 'utf8');
+
+test('job labels and pure helpers remain stable', () => {
     assert.equal(STATUS_LABEL.done, '已完成');
-    assert.equal(STATUS_LABEL.failed, '已失败');
-});
-
-test('STATUS_ICON maps statuses correctly', () => {
-    assert.equal(STATUS_ICON.pending, 'status:pending');
-    assert.equal(STATUS_ICON.processing, 'status:processing');
-    assert.equal(STATUS_ICON.done, 'status:success');
-    assert.equal(STATUS_ICON.failed, 'status:failed');
-});
-
-test('STATUS_TAG maps tag types', () => {
-    assert.equal(STATUS_TAG.done, 'success');
     assert.equal(STATUS_TAG.failed, 'danger');
-});
-
-test('formatJobTime: valid ISO and null', () => {
+    assert.equal(STATUS_ICON.processing, 'status:processing');
+    assert.equal(TASK_TYPE_LABEL.graph, '知识图谱');
+    assert.equal(STAGE_LABEL.extracting, '抽取实体与关系');
     assert.ok(formatJobTime('2026-06-15T08:30:00Z').includes('2026'));
     assert.equal(formatJobTime(null), '—');
-});
-
-test('jobDuration: uses claimed_at before created_at', () => {
-    const recent = new Date(Date.now() - 65000).toISOString();
-    const old = new Date(Date.now() - 3600000).toISOString();
-    const dur1 = jobDuration({ claimed_at: recent, created_at: old });
-    assert.ok(dur1.includes('m') || dur1.includes('s'), `claimed_at ~1m, got ${dur1}`);
-    const dur2 = jobDuration({ created_at: recent });
-    assert.ok(dur2.includes('m') || dur2.includes('s'), `created_at ~1m, got ${dur2}`);
     assert.equal(jobDuration({ created_at: 'bad' }), '—');
-});
-
-test('jobDuration: 非空但非法的 finished_at 必须返回 —', () => {
-    const recent = new Date(Date.now() - 60000).toISOString();
-    // finished_at is a non-empty garbage string — must return '—', NOT fallback to Date.now()
-    const dur = jobDuration({ claimed_at: recent, finished_at: 'not-a-date' });
-    assert.equal(dur, '—', `invalid finished_at must return '—', got "${dur}"`);
-});
-
-test('shortId: truncates long IDs', () => {
-    assert.equal(shortId('abc123'), 'abc123');
     assert.equal(shortId('abcdefghijklmno'), 'abcdefgh…');
-    assert.equal(shortId(null), '—');
+    assert.equal(libraryName([{ id: 'l1', name: '法规库', slug: 'law' }], 'l1'), '法规库 (law)');
 });
 
-test('filterJobs filters correctly', () => {
+test('job filters and pagination preserve result meaning', () => {
     const jobs = [
-        { id: '1', status: 'pending', library_id: 'l1', worker_id: 'w1', document_id: 'd1', created_at: '2026-06-01T00:00:00Z' },
-        { id: '2', status: 'done', library_id: 'l2', worker_id: 'w2', document_id: 'd2', created_at: '2026-07-01T00:00:00Z' },
+        { id: '1', task_type: 'import', status: 'pending', library_id: 'l1', worker_id: 'w1', document_id: 'd1', created_at: '2026-06-01T00:00:00Z' },
+        { id: '2', task_type: 'graph', status: 'done', library_id: 'l2', worker_id: 'w2', document_id: 'd2', created_at: '2026-07-01T00:00:00Z' },
     ];
     assert.equal(filterJobs(jobs, { status: 'pending' }).length, 1);
-    assert.equal(filterJobs(jobs, { library_id: 'l2' }).length, 1);
-    assert.equal(filterJobs(jobs, { dateFrom: '2026-07-01' }).length, 1);
+    assert.equal(filterJobs(jobs, { task_type: 'graph' }).length, 1);
+    assert.equal(paginateJobs(Array.from({ length: 25 }, (_, i) => ({ id: String(i) })), 1, 10).total, 25);
 });
 
-test('paginateJobs paginates correctly', () => {
-    const jobs = Array.from({ length: 25 }, (_, i) => ({ id: String(i) }));
-    const p = paginateJobs(jobs, 1, 10);
-    assert.equal(p.items.length, 10);
-    assert.equal(p.total, 25);
-    assert.equal(p.pageCount, 3);
+test('failure and retry semantics are explicit', () => {
+    assert.equal(jobErrorText({ status: 'failed', task_type: 'graph', last_error: null }), '图谱抽取失败，未记录详细错误');
+    assert.equal(jobErrorText({ status: 'failed', task_type: 'import', last_error: null }), '文件导入失败，未记录详细错误');
+    assert.equal(jobErrorText({ status: 'failed', task_type: 'embedding', last_error: 'upstream' }), 'upstream');
+    assert.equal(jobErrorText({ status: 'failed', task_type: 'legacy', last_error: null }), '历史任务未记录错误');
+    assert.equal(jobStageLabel({ status: 'failed', stage: 'finalizing' }), '收尾阶段失败');
+    assert.equal(retryReasonLabel({ retry_capability: 'unsupported' }), '当前任务类型暂不支持');
+    assert.equal(retryReasonLabel({ retry_capability: 'exhausted' }), '尝试次数耗尽');
 });
 
-test('libraryName maps library_id to name', () => {
-    const libs = [{ id: 'l1', name: '法规库', slug: 'law' }];
-    assert.ok(libraryName(libs, 'l1').includes('法规库'));
-    assert.ok(libraryName(libs, 'unknown').includes('unknown'));
+test('stats status counts close over total', () => {
+    const stats = { pending: 2, processing: 3, done: 10, failed: 4, cancelled: 1, superseded: 2, total: 22 };
+    assert.equal(statsStatusTotal(stats), stats.total);
 });
 
-// ── Template regression ──
-const src = readFileSync(new URL('./src/views/Jobs.js', import.meta.url), 'utf8');
-const css = readFileSync(new URL('./style.css', import.meta.url), 'utf8');
-const uiSrc = readFileSync(new URL('./src/jobs_ui.js', import.meta.url), 'utf8');
-
-test('No inline style attributes in template', () => {
-    const tpl = src.slice(src.indexOf('template:'));
-    assert.equal((tpl.match(/\sstyle="/g) || []).length, 0, 'zero inline style');
+test('monitor filters are applied before the 1500-row server limit', () => {
+    assert.deepEqual(monitorListParams({
+        task_type: 'import',
+        status: 'processing',
+        library_id: 'l1',
+        worker_id: 'worker-local-only',
+    }), {
+        limit: 1500,
+        task_type: 'import',
+        status: 'processing',
+        library_id: 'l1',
+    });
+    assert.ok(src.includes('const requestParams = monitorListParams(filters)'));
+    assert.ok(src.includes('api.listMonitoredTasks(requestParams, forceRefresh)'));
+    assert.ok(src.includes('() => filters.status'));
 });
 
-test('CSS defines jobs-* classes', () => {
-    for (const c of ['jobs-workspace', 'jobs-stats', 'jobs-toolbar', 'jobs-table-card']) {
-        assert.ok(css.includes(c), `${c} in CSS`);
-    }
+test('queue health keeps unavailable metrics explicit', () => {
+    const rows = queueHealthRows({
+        queues: {
+            import: { pending_count: 3, oldest_pending_age_seconds: 90, processing_count: 1, throughput_per_minute: 1, failure_rate: 0.125, window_seconds: 900 },
+            doc_conversion: { pending_count: 2, oldest_pending_age_seconds: null, processing_count: 0, throughput_per_minute: null, failure_rate: null, window_seconds: 900 },
+        },
+    });
+    assert.equal(rows.length, 4);
+    assert.equal(rows[0].label, '文件导入');
+    assert.equal(rows[1].label, 'DOC 转换');
+    assert.equal(formatQueueAge(rows[0].oldest_pending_age_seconds), '1 分 30 秒');
+    assert.equal(formatQueueAge(rows[1].oldest_pending_age_seconds), '—');
+    assert.equal(formatQueueThroughput(rows[0].throughput_per_minute), '1.00');
+    assert.equal(formatQueueThroughput(rows[1].throughput_per_minute), '—');
+    assert.equal(formatQueueRate(rows[0].failure_rate), '12.5%');
+    assert.equal(formatQueueRate(rows[1].failure_rate), '—');
 });
 
-test('默认每页 10 条', () => {
-    assert.ok(src.includes('ref(10)') || src.includes('= 10'), 'default pageSize 10');
+test('retry targets support all task types and deduplicate underlying jobs', () => {
+    const rows = [
+        { status: 'failed', retryable: true, retry_target_type: 'embedding', retry_target_id: 'e1', retry_generation: 3 },
+        { status: 'failed', retryable: true, retry_target_type: 'graph', retry_target_id: 'g1', retry_generation: 2 },
+        { status: 'failed', retryable: true, retry_target_type: 'import', retry_target_id: 'i1', retry_generation: 1 },
+        { status: 'failed', retryable: true, retry_target_type: 'embedding', retry_target_id: 'e1', retry_generation: 3 },
+        { status: 'failed', retryable: false, retry_target_type: 'graph', retry_target_id: 'g2', retry_generation: 1 },
+        { status: 'processing', retryable: true, retry_target_type: 'import', retry_target_id: 'i2', retry_generation: 1 },
+    ];
+    assert.equal(retryTargetKey(rows[0]), 'embedding:e1');
+    assert.equal(isRetrySelectable(rows[0]), true);
+    assert.equal(isRetrySelectable(rows[4]), false);
+    assert.deepEqual(uniqueRetryRows(rows).map((row) => retryTargetKey(row)), ['embedding:e1', 'graph:g1', 'import:i1']);
+    assert.deepEqual(retryItem(rows[1]), { task_type: 'graph', job_id: 'g1', observed_generation: 2 });
+    assert.equal(retryTypeSummary(rows), '向量 1 条、图谱 1 条、导入 1 条');
 });
 
-test('四项统计为独立卡片', () => {
-    assert.ok(src.includes('jobs-stat-body'), 'jobs-stat-body for horizontal layout');
+test('details use a dialog and never force page scrolling', () => {
+    assert.ok(src.includes('el-dialog'));
+    assert.ok(src.includes('v-model="detailOpen"'));
+    assert.ok(src.includes('@closed="clearDetail"'));
+    assert.ok(!src.includes('el-drawer'));
+    assert.ok(!src.includes('jobs-detail-card'));
+    assert.ok(!src.includes('nextTick'));
+    assert.ok(!src.includes('detailCardRef'));
+    assert.ok(!src.includes('scrollIntoView'));
+    assert.ok(src.includes('detailOpen.value = true'));
+    assert.ok(src.includes('function clearDetail'));
 });
 
-test('筛选控件有顶部标签', () => {
-    assert.ok(src.includes('jobs-toolbar-label'), 'toolbar labels');
+test('stale detail closes after filters, pages, or refresh', () => {
+    assert.ok(src.includes('watch([filtered, paged]'));
+    assert.ok(src.includes('!paged.value.items.some'));
+    assert.ok(src.includes('selectedJob.value = fresh'));
+    assert.ok(src.includes('else closeDetail()'));
+    assert.ok(src.includes('page.value = 1'));
 });
 
-test('表格操作有查看详情和重试', () => {
-    assert.ok(src.includes('查看详情'), 'view detail button');
-    assert.ok(src.includes('status:retry'), 'retry icon');
+test('task refresh is single-flight, visibility-aware, and active-only', () => {
+    assert.ok(src.includes('let refreshInFlight = null'));
+    assert.ok(src.includes('let statsInFlight = null'));
+    assert.ok(src.includes('if (refreshInFlight)'));
+    assert.ok(src.includes('if (statsInFlight)'));
+    assert.ok(src.includes('window.setTimeout'));
+    assert.ok(src.includes('30000'));
+    assert.ok(src.includes("document.visibilityState !== 'visible'"));
+    assert.ok(src.includes('stats.value.pending + stats.value.processing'));
+    assert.ok(src.includes("document.addEventListener('visibilitychange'"));
+    assert.ok(src.includes("document.removeEventListener('visibilitychange'"));
+    assert.ok(!src.includes('window.setInterval(() => load(true, true), 10000)'));
+    assert.ok(!src.includes('Promise.allSettled'));
 });
 
-test('内嵌详情卡而非 el-drawer', () => {
-    assert.ok(!src.includes('el-drawer'), 'no el-drawer');
-    assert.ok(src.includes('jobs-detail-card'), 'inline detail card');
+test('retry actions are capability-gated and never call embedding for other types', () => {
+    assert.ok(src.includes('v-if="row.retryable"'));
+    assert.ok(src.includes('jobs-retry-unavailable'));
+    assert.ok(!src.includes(':title="retryReasonLabel(row)"'));
+    assert.ok(!src.includes('{{ retryReasonLabel(row) }}'));
+    assert.ok(src.includes('retryReasonLabel(selectedJob)'));
+    assert.ok(!src.includes(':disabled="!row.retryable"'));
+    assert.ok(src.includes('api.retryMonitoredTasks'));
+    assert.ok(src.includes('retryTargetKey'));
+    assert.ok(src.includes('uniqueRetryRows'));
+    assert.ok(uiSrc.includes('retry_target_type'));
+    assert.ok(uiSrc.includes('retry_target_id'));
+    assert.ok(uiSrc.includes('observed_generation'));
+    assert.ok(src.includes('retryTypeSummary'));
+    assert.ok(src.includes('retryResultSummary'));
+    assert.ok(!src.includes('api.retryJob'));
+    assert.ok(!src.includes('Promise.allSettled(rows.map((row) => api.retryJob(row.id)))'));
+    assert.ok(src.includes('retryableCount'));
+    assert.ok(src.includes('当前失败任务均不可重试'));
+    assert.ok(src.includes('canResetFailed'));
 });
 
-test('选中行高亮并可收起', () => {
-    assert.ok(src.includes('jobs-row-selected'), 'row highlight');
-    assert.ok(src.includes('closeDetail'), 'closeDetail function');
-    assert.ok(src.includes('收起'), 'collapse button');
+test('truncation threshold matches request limit and stats show all terminal states', () => {
+    assert.ok(src.includes('listMonitoredTasks(requestParams, forceRefresh)'));
+    assert.ok(src.includes('length >= 1500'));
+    assert.ok(src.includes('前1500条'));
+    assert.ok(src.includes('stats.cancelled'));
+    assert.ok(src.includes('stats.superseded'));
+    assert.ok(src.includes('statsStatusTotal(stats)'));
 });
 
-test('jobDuration 优先用 claimed_at', () => {
-    assert.ok(uiSrc.includes('claimed_at'), 'claimed_at in duration');
-    assert.ok(uiSrc.includes('row.claimed_at || row.created_at'), 'priority order');
-});
-
-test('jobDuration 校验非法 finished_at 返回 —', () => {
-    assert.ok(uiSrc.includes('Number.isNaN(t)'), 'validates finished_at date');
-    assert.ok(uiSrc.includes("return '—'"), 'returns — on invalid finished_at');
-});
-
-// ── 新回归：task 3 行为 ──
-test('使用 Promise.allSettled 独立加载 jobs 和 stats', () => {
-    assert.ok(src.includes('Promise.allSettled'), 'must use Promise.allSettled');
-});
-
-test('stats 失败不阻断任务列表（sr.status handled independently）', () => {
-    assert.ok(src.includes("sr.status === 'fulfilled'"), 'stats result handled independently');
-    // jr (jobs) failure is separate — must check jr first
-    assert.ok(src.includes("jr.status === 'fulfilled'"), 'jobs result handled independently');
-});
-
-test('刷新按钮同时重试知识库列表', () => {
-    assert.ok(src.includes('refreshAll'), 'refreshAll function');
-    assert.ok(src.includes('loadLibs'), 'loadLibs called on refresh');
-});
-
-test('每次 load 后刷新 selectedJob 引用', () => {
-    // After jobs loaded: find fresh reference
-    assert.ok(src.includes("selectedJob.value = fresh"), 'refresh selectedJob on reload');
-});
-
-test('selectedJob 不存在时关闭详情', () => {
-    assert.ok(src.includes('closeDetail()'), 'close detail if job gone');
-});
-
-// ── statsFailed 回归 ──
-test('statsFailed flag 存在并在 load 中管理', () => {
-    assert.ok(src.includes('statsFailed'), 'statsFailed ref exists');
-    assert.ok(src.includes('statsFailed.value = false'), 'statsFailed cleared on success');
-    assert.ok(src.includes('statsFailed.value = true'), 'statsFailed set on failure');
-});
-
-test('statsFailed 时统计卡显示 —', () => {
-    assert.ok(src.includes("statsFailed ? '—'"), 'stat cards show — when statsFailed');
-});
-
-test('statsFailed 时全局重置仍可用（不依赖不可靠数量）', () => {
-    // Button disabled excludes statsFailed
-    assert.ok(src.includes('!statsFailed'), 'button disabled allows statsFailed case');
-    // Confirm branches on statsFailed
-    assert.ok(src.includes('statsFailed.value'), 'resetFailed checks statsFailed');
-    assert.ok(src.includes('将重置全部失败任务'), 'confirm text without unreliable count');
-});
-
-// ── 新回归：task 2 重置范围 ──
-test('重置失败任务：未选知识库使用 stats.failed 精确数量', () => {
-    assert.ok(src.includes('stats.value.failed'), 'global uses stats.failed');
-});
-
-test('重置失败任务：已选知识库显示范围文案，不依赖前端筛选数', () => {
-    assert.ok(src.includes('重置该知识库中的所有失败任务'), 'scoped confirm text');
-});
-
-test('模板中无 filtered.filter 调用', () => {
-    const tpl = src.slice(src.indexOf('template:'));
-    assert.ok(!tpl.includes('filtered.filter'), 'no filtered.filter in template');
-});
-
-test('按钮禁用仅依赖 stats.failed/statsFailed，不依赖其他筛选条件', () => {
-    // :disabled="resetting || (!filters.library_id && !statsFailed && !stats.failed)"
-    assert.ok(src.includes('!statsFailed && !stats.failed'), 'disabled only on global + stats available + no failures');
-});
-
-test('按钮数量标签仅未选知识库且 stats 可用时显示', () => {
-    assert.ok(src.includes('!filters.library_id && !statsFailed && stats.failed'), 'count badge only when global and stats not failed');
-});
-
-// ── 详情交互回归 ──
-test('引入 nextTick 和 detailCardRef', () => {
-    assert.ok(src.includes('nextTick'), 'imports nextTick');
-    assert.ok(src.includes('detailCardRef'), 'has detailCardRef');
-});
-
-test('openDetail 打开后 nextTick + scrollIntoView', () => {
-    assert.ok(src.includes('nextTick()'), 'calls nextTick');
-    assert.ok(src.includes('scrollIntoView'), 'calls scrollIntoView');
-});
-
-test('详情卡绑定 ref="detailCardRef"', () => {
-    assert.ok(src.includes('ref="detailCardRef"'), 'detail card has ref');
-});
-
-test('动态按钮文案：选中行“收起详情”，其他行“查看详情”', () => {
-    assert.ok(src.includes('收起详情'), 'collapse text');
-    assert.ok(src.includes('查看详情'), 'expand text');
-    assert.ok(src.includes("isSelected(row) ? '收起详情' : '查看详情'"), 'dynamic button label');
-});
-
-test(':aria-expanded 反映展开状态', () => {
-    assert.ok(src.includes(':aria-expanded'), 'aria-expanded attribute');
-    assert.ok(src.includes("isSelected(row) ? 'true' : 'false'"), 'aria-expanded toggles on isSelected');
-});
-
-test('详情卡标题含文档短 ID', () => {
-    assert.ok(src.includes('任务详情 ·'), 'detail title includes separator');
-    assert.ok(src.includes('shortId(selectedJob.document_id)'), 'detail title shows doc shortId');
-});
-
-test('CSS 穿透 Element Plus td 高亮', () => {
-    assert.ok(css.includes('tr.jobs-row-selected > td.el-table__cell'), 'CSS targets td.el-table__cell');
+test('table layout keeps long values bounded and operation column scroll-safe', () => {
+    assert.ok(src.includes('jobs-library-name'));
+    assert.ok(src.includes(':title="libraryName(libs, row.library_id)"'));
+    assert.ok(src.includes(':title="jobErrorText(row)"'));
+    assert.ok(!src.includes('fixed="right"'));
+    assert.match(css, /\.jobs-table-shell \.el-table\s*\{[^}]*min-width:1500px/s);
+    assert.match(css, /\.jobs-table-actions\s*\{[^}]*display:flex/s);
+    assert.match(css, /\.jobs-retry-unavailable\s*\{[^}]*white-space:normal/s);
+    assert.ok(!css.includes('.jobs-retry-unavailable { color:var(--app-text-muted); font-size:12px; white-space:nowrap; }'));
+    assert.match(css, /\.jobs-detail-dialog \.el-dialog__body\s*\{[^}]*max-height:calc\(90vh/s);
+    assert.match(css, /\.jobs-detail-dialog\s*\{[^}]*max-width:calc\(100vw - 32px\)/s);
 });
 
 console.log('jobs redesign test passed');

@@ -37,6 +37,10 @@ from app.services import evidence_read as evidence_read_service
 from app.services import sync_documents as sync_documents_service
 from app.services import sync_sources as sync_sources_service
 from app.services.metadata_guard import MetadataValidationError
+from app.services.organization_authorization import (
+    OrganizationAuthorizationError,
+    resolve_loaded_library_access,
+)
 
 
 router = APIRouter(prefix="/libraries/{slug}", tags=["v0.2-m4"])
@@ -57,9 +61,25 @@ def _require_sync_source_api_enabled() -> None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "not found")
 
 
-def _require_batch_delete_permission(body: SyncBatchRequest, user: User, lib: Library) -> None:
+async def _require_batch_delete_permission(
+    body: SyncBatchRequest,
+    user: User,
+    lib: Library,
+    db: AsyncSession,
+) -> None:
     if not any(item.action == "delete" for item in body.items):
         return
+    if settings.organization_authorization_enabled:
+        try:
+            await resolve_loaded_library_access(
+                db,
+                user=user,
+                library=lib,
+                action="delete",
+            )
+            return
+        except OrganizationAuthorizationError as exc:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden") from exc
     if user.is_superuser:
         return
     if deps_module.has_permission(str(user.id), lib.slug, "delete"):
@@ -267,7 +287,7 @@ async def sync_source_batch(
     _require_sync_source_api_enabled()
     if len(body.items) > settings.sync_batch_max_items:
         raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "batch item limit exceeded")
-    _require_batch_delete_permission(body, user, lib)
+    await _require_batch_delete_permission(body, user, lib, db)
 
     results: list[SyncDocumentResult] = []
     errors: list[SyncBatchError] = []

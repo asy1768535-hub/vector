@@ -1,5 +1,96 @@
 # 文档索引
 
+## 当前真相与历史记录
+
+截至 **2026-08-29**，当前代码真相是：`pyproject.toml` package version 为 `0.1.0`；代码迁移 head 为 **`0062`**。向量摄入/检索是核心，代码还包含按 feature gate 或 rollout 控制的图谱、分类、知识产物、Evidence/claim shadow、公开 API/MCP 与组织能力。
+
+部署、架构、worker、schema、测试和内部试运行的当前说明以根目录 README 及 [02](./02-architecture.md)、[11](./11-worker.md)、[14](./14-database-schema.md)、[15](./15-deployment.md)、[16](./16-testing.md)、[22](./22-internal-pilot-checklist.md) 为准。下方“版本说明”中的 `v0.x`、`M*`、旧 head 和旧测试数字是历史设计/验收记录，保留其原始时点，不是当前 package version 或部署 head。
+
+当前 `docs/` 下共有 **64 个 Markdown 文件**（根目录 48 个、子目录 16 个；命令：`Get-ChildItem docs -File -Recurse -Filter *.md`，核对日期 2026-08-17）。本页是分组索引，不再使用旧的“24 篇”数量描述。
+
+> **v0.7 corrective G2.8 UTF-8 evidence correction (2026-07-21):** The initial
+> PowerShell-to-Python qualification encoded the two Chinese public probes incorrectly;
+> its `21c8f3...` output-set SHA is preserved but is not release authority. Direct UTF-8
+> source execution bound the ordered probe inputs to
+> `84e98f3ccece28683758bbf21c6272faa673a66ec1efc047937e2026f5d3e907` and produced
+> stable full-float32 output-set SHA
+> `688c070c4db9b8ccaf59161c1120e49ce8c2c7ded288169c305772f2d3b27c55`
+> across all `64/64` calls. Scope and fresh identities are unchanged.
+>
+> **v0.7 corrective G2.8 (2026-07-21):** The user restarted bge-m3 as a
+> deterministic single instance. The pre-registered eight public probes each produced
+> one identical full-float32 hash across eight repetitions (`64/64`), with probe-set SHA
+> `21c8f3f0749e0ffa4b6080c27045d8707f70eafc5293e86602f1bddd271a01f8`.
+> G2.8 adds that exact pre-resource fail-closed gate, preserves all v4/v11/v10 NO-GO
+> evidence, and authorizes fresh family-disjoint v5 data with v12 output identities.
+> Scorer, thresholds, retrieval bounds, product gates, privacy, and default-off rollout
+> remain unchanged.
+>
+> **v0.7 release-evidence v10 (2026-07-21):** All three post-freeze v11 runs
+> passed 26/26 gates, but release evidence v10 is immutable `NO_GO` because dense
+> and hybrid logical response hashes changed across runs. Candidate and exact-only
+> hashes were identical. Repeated public probes proved the reachable bge-m3 service
+> returns multiple float32 vectors for identical input; connection reuse, ternary/
+> binary projection, and fixed-batch median did not make a public probe suite stable.
+> Further calibration is blocked until a deterministic embedding endpoint passes the
+> full-float preflight contract. No v4 holdout result may tune that correction.
+>
+> **v0.7 corrective G2.7.1 (2026-07-21):** The first v10 calibration attempt
+> passed live dependency preflight and the non-skipped integration test, then failed
+> closed before artifact creation when hybrid exact retrieval could not recognize that
+> a cutoff tie cohort had completed inside an expanded probe. No holdout was opened and
+> all resources were removed. G2.7.1 corrects that bounded completion test without
+> changing Top 50, the 201 hard bound, scorer, thresholds, dataset, or gates, and reserves
+> fresh v11 run/database/policy identities. The corrected production client and its
+> regression test are explicitly LF-bound for reproducible clean-checkout hashes.
+>
+> **v0.7 corrective G2.7 (2026-07-21):** Calibration v9, policy v8, and all
+> three post-freeze v9 runs are immutable individually passing evidence, while
+> release-evidence v8 remains `NO_GO` because dense/hybrid response sets changed
+> across rebuilt Qdrant collections. G2.7 authorizes deterministic exact control
+> retrieval with a normal candidate pool of 50, bounded tie completion and stable
+> ordering, plus a fresh family-disjoint v4 benchmark and v10 workflow identities.
+> Scorer, thresholds, utility/safety/performance gates, privacy, and default-off
+> rollout remain unchanged.
+>
+> **v0.7 corrective G2.6.1 (2026-07-20):** The first v8 calibration attempt
+> failed closed before artifact creation because the fixed linked performance fixture
+> classified mentions by feature but did not verify the selected score/margin. G2.6.1
+> keeps the 2/4/4 fixture mix and all dataset/scorer/gate bytes fixed, filters fixture
+> rows by the selected calibration decision, and reserves fresh v9 identities.
+>
+> **v0.7 corrective G2.6 (2026-07-20):** Post-freeze v7 ordinal 1 passed
+> safety, privacy, latency, and SQL gates but failed the unchanged retrieval utility
+> claim because v2 decoys left both old controls at perfect Evidence Recall. G2.6
+> preserves the full v7 chain as `NO_GO` evidence and permits a fresh family-disjoint
+> v3 benchmark with genuinely retrieval-competitive ordinary decoys and fresh v8
+> identities. Scorer, thresholds, gates, and default-off rollout remain unchanged.
+>
+> **v0.7 corrective G2.5 (2026-07-20):** Calibration v6 passed safety and SQL
+> attribution but showed that rebuilding a 6,000-row immutable publication projection
+> still lacked latency margin, while near-zero embedding components crossed a sign-only
+> boundary. G2.5 permits a bounded manifest-keyed publication cache, a ternary dead-zone
+> probe signature, and fresh v7 identities. All release gates remain unchanged.
+>
+> **v0.7 corrective G2.4 (2026-07-20):** Calibration v5 validated stable embedding
+> identity but exposed insufficient linker latency margin and an SQL-budget attribution
+> defect. G2.4 permits a bounded canonical-feature cache, assigns the seven-statement
+> budget to the v0.7 linker only, preserves accepted v0.6 graph-query statement caps,
+> and uses fresh v6 identities. No quality or security gate is lowered.
+>
+> **v0.7 corrective G2.3 (2026-07-20):** Calibration v4 passed scorer, safety,
+> coverage, and latency checks but exposed two numerically equivalent embedding
+> replicas whose exact float hashes differ. G2.3 permits only a stable sign-bit probe
+> signature and fresh v5 workflow identities. All product and release gates remain
+> unchanged.
+>
+> **v0.7 corrective G2.2 (2026-07-20):** Calibration v3 is preserved as
+> non-authoritative audit evidence after exposing latency-measurement interference and
+> a phase-aware acceptance defect. G2.2 permits only bit-for-bit scorer optimization,
+> moving memory instrumentation outside latency samples, phase-aware artifact checks,
+> and fresh v4 run identities. Dataset v2, scorer v2 outputs, thresholds, gates,
+> holdout seal, security boundaries, and default-off rollout remain unchanged.
+
 按功能拆分；每篇都自洽，可独立阅读。建议新人按 1→4 的顺序读完核心概念后，再按需查阅。
 
 ## 项目总览
@@ -22,19 +113,20 @@
 | 08 | [库管理](./08-libraries.md) | 多租户隔离：每库一个 Qdrant collection |
 | 09 | [文档摄入](./09-document-ingest.md) | 切分 / 入队 / 幂等 / 异步 embed |
 | 10 | [检索接口](./10-retrieval-api.md) | Dify external knowledge base spec |
-| 11 | [Embedding Worker](./11-worker.md) | `FOR UPDATE SKIP LOCKED` 队列消费 |
+| 11 | [Worker](./11-worker.md) | Embedding / Cleanup / Importer 及按能力启用的 worker |
 | 12 | [管理后台 UI](./12-admin-ui.md) | 零构建 Vue 3 SPA |
+| 48 | [前端按钮功能清单](./48-frontend-button-function-inventory.md) | 按页面按钮核对功能、权限和真实 API |
 
 ## 参考资料
 
 | # | 文档 | 用途 |
 |---|---|---|
 | 13 | [API 完整参考](./13-api-reference.md) | 所有 endpoint 速查 |
-| 14 | [数据库 Schema](./14-database-schema.md) | 9 业务表 + casbin_rule（迁移至 0010） |
+| 14 | [数据库 Schema](./14-database-schema.md) | 初始表、能力表与当前迁移 head `0060` |
 | 15 | [部署 / 生产清单](./15-deployment.md) | 上线前要检查的项 |
 | 16 | [测试](./16-testing.md) | 跑测试 + 加测试 |
 | 17 | [常见问题](./17-faq.md) | 踩坑速查 |
-| 20 | [MCP Adapter](./20-mcp-adapter.md) | 内网 MCP 客户端接入检索与受控上传 |
+| 47 | [社区 / 学习 / 线索数据源规划](./47-community-learning-lead-sources.md) | 默认禁用的工程学习与行业线索来源，以及正式证据验证边界 |
 
 ## 一致性与发布
 
@@ -45,7 +137,9 @@
 | 21 | [批次 A 实施方案](./21-batch-a-implementation-plan.md) | 一致性实现记录 |
 | 22 | [内部试运行清单](./22-internal-pilot-checklist.md) | 上线门槛 + 六步验收 |
 
-## 版本说明
+## 历史版本与阶段记录（保留原时点）
+
+以下文档用于追溯设计、验收和阶段决策。它们可能出现当时的 package/version 标签、migration head、测试数字或“已实现/未实现”边界；不要将其直接用于当前部署。
 
 | # | 文档 | 主题 |
 |---|---|---|
@@ -53,30 +147,12 @@
 | 30 | [v0.2 Evidence acceptance runbook](./30-v0.2-evidence-acceptance-runbook.md) | M5 release gates, migration dry-run, rollback dry-run, PostgreSQL/Qdrant acceptance |
 | 31 | [v0.2 Evidence Foundation upgrade summary](./31-upgrade-summary-v0.2-evidence-foundation.md) | Compatibility fields, release scope, and v0.3 evidence handoff |
 | 32 | [v0.4 Graph Extraction evaluation runbook](./32-v0.4-graph-extraction-eval-runbook.md) | Synthetic Eval safety, real DeepSeek runs, immutable artifacts, verification and disposal |
-| 33 | [v0.4 Graph Extraction Pipeline upgrade summary](./33-upgrade-summary-v0.4-graph-extraction-pipeline.md) | M1-M6 changes, fail-closed rollout, compatibility, rollback and v0.5 boundary |
 | 34 | [v0.5 Active Graph Publication operator summary](./34-v0.5-active-graph-publication.md) | Feature gate, lifecycle, API roles, healthy/degraded reads, rollout and rollback |
-| 35 | [v0.6 Published Graph Retrieval operator guide](./35-v0.6-published-graph-retrieval.md) | Configuration, evaluation gates, staged rollout, stable observability, incidents, disable and rollback |
-| v0.4 Acceptance | [Graph Extraction Pipeline acceptance](./testing/acceptance/v0.4-graph-extraction-pipeline.md) | Exact commits, hashes, metrics, real PostgreSQL/Qdrant gates and release decision |
-| v0.5 Acceptance | [Active Graph Publication acceptance](./testing/acceptance/v0.5-active-graph-publication.md) | Dirty boundary, release gates, compatibility, privacy/scope audit and release decision |
-| v0.6 Acceptance | [Published Graph Retrieval acceptance](./testing/acceptance/v0.6-published-graph-retrieval.md) | Frozen M5 evidence, non-skipped PostgreSQL, compatibility, privacy/scope, rollback and release decision |
+| v0.9 MCP | [MCP knowledge adapter](./mcp-knowledge-adapter.md) | Read tools、可选受控文件上传、stdio/Streamable HTTP、凭据和回滚 |
+| v0.9 External Graph Sync | [External graph fact synchronization](./external-graph-sync.md) | SyncSource policy, entity/relation identity, authority conflicts, tombstones, snapshots, Publication safety, and rollback |
+| v0.9 Deployment | [Supported deployment runbook](./39-v0.9-supported-deployment.md) | Hosted/private initialization, readiness, Organization rollout, backup/restore, upgrade, and rollback |
 | v0.3 | [Graph Relation Foundation spec](./superpowers/specs/2026-07-09-v0.3-graph-relation-foundation.md) | Ontology, graph facts, evidence binding, lifecycle, API and acceptance contracts |
-| v0.4 | [Graph Extraction Pipeline Master Plan](./superpowers/plans/2026-07-10-v0.4-graph-extraction-pipeline.md) | M1-M6 boundaries, evidence/schema contracts, safety, evaluation and release gates |
-| v0.5 | [Active Graph Publication Master Plan](./superpowers/plans/2026-07-15-v0.5-active-graph-publication.md) | M1-M6 plan for graph publication schema, manifests, activation, API, reconciliation and acceptance |
-| v0.6 Design | [Published Graph Retrieval Master Design](./superpowers/specs/2026-07-16-v0.6-published-graph-retrieval.md) | Approved Master Design for exact seed resolution, bounded published-graph traversal, Evidence locators and fail-closed reads |
-| v0.6 M1 | [Contract, configuration and completion record](./superpowers/plans/2026-07-16-v0.6-published-graph-retrieval-m1.md) | Accepted strict DTOs, absolute v1 limits, startup validation, no route and no migration |
-| v0.6 M2 | [Snapshot loader, exact resolver and completion record](./superpowers/plans/2026-07-16-v0.6-published-graph-retrieval-m2.md) | Completed healthy membership aggregates, exact seed/type resolution, cross-scope errors, publication fences and PostgreSQL acceptance |
-| v0.6 M3 | [Deterministic bounded traversal and completion record](./superpowers/plans/2026-07-16-v0.6-published-graph-retrieval-m3.md) | Completed direction-aware BFS, stable ordering, atomic truncation, bounded per-hop SQL and PostgreSQL acceptance |
-| v0.6 M4 | [Evidence locator, REST API and completion record](./superpowers/plans/2026-07-16-v0.6-published-graph-retrieval-m4.md) | Completed bounded frozen-support hydration, current-ready locators, strict response assembly, read permission, sanitized errors, timeout and PostgreSQL acceptance |
-| v0.6 M5 | [Evaluation, performance and operations completion record](./superpowers/plans/2026-07-16-v0.6-published-graph-retrieval-m5.md) | Completed calibration, candidate-max policy freeze, three independent post-freeze runs and verified release evidence |
-| v0.6 M6 | [Release acceptance and completion record](./superpowers/plans/2026-07-17-v0.6-published-graph-retrieval-m6.md) | Completed immutable evidence, non-skipped PostgreSQL, inherited compatibility, privacy/scope, rollback and full-suite gates |
-| v0.7 Design | [Publication-Scoped Entity Linking Master Design](./superpowers/specs/2026-07-17-v0.7-publication-scoped-entity-linking.md) | G1 PASSED; single-scope entity-linking contract frozen and G2 feasibility planning authorized, with no evaluation or production implementation approval |
-| v0.7 G2 | [Entity Linking Feasibility Plan](./superpowers/plans/2026-07-17-v0.7-publication-scoped-entity-linking-g2.md) | G2 PASSED; 12-distribution contract frozen; G3 evaluation-only authorized through one calibration artifact, then mandatory stop for human policy approval |
-| v0.4 M1 | [M1 implementation and completion record](./superpowers/plans/2026-07-10-v0.4-graph-extraction-pipeline-m1.md) | Migration 0021, fail-closed configuration, Library safety controls, heartbeat and real PostgreSQL acceptance |
-| v0.4 M2 | [M2 implementation plan](./superpowers/plans/2026-07-13-v0.4-graph-extraction-pipeline-m2.md) | Evidence-aware Context Builder, strict Parser, Prompt, Provider adapter and fenced Attempt recording |
-| v0.4 M3 | [M3 implementation plan](./superpowers/plans/2026-07-13-v0.4-graph-extraction-pipeline-m3.md) | Candidate/Occurrence staging, exact Evidence binding, provenance and Migration 0022 |
-| v0.4 M4 | [M4 implementation plan](./superpowers/plans/2026-07-13-v0.4-graph-extraction-pipeline-m4.md) | Shared Validator, normalization_v1, deterministic Candidate aggregation, conflicts and confidence routing |
-| v0.4 M5 | [M5 implementation plan](./superpowers/plans/2026-07-14-v0.4-graph-extraction-pipeline-m5.md) | Operational Worker, Retry/Rerun, Materializer, API, triggers, compensation and purge |
-| v0.4 M6 | [M6 implementation and completion record](./superpowers/plans/2026-07-14-v0.4-graph-extraction-pipeline-m6.md) | Real DeepSeek evaluation, frozen release policy, PostgreSQL/compatibility gates and v0.4 acceptance |
+| v0.6 M1 | [Published graph retrieval contract](./superpowers/plans/2026-07-16-v0.6-published-graph-retrieval-m1.md) | Strict DTOs, limits, startup validation and configuration contract |
 
 ---
 

@@ -227,7 +227,7 @@ export default {
         <el-card v-if="currentUser?.is_superuser" shadow="never" class="permissions-super-warning">
           <div class="permissions-super-warning-body">
             <local-icon icon="sidebar:permission" class="permissions-super-warning-icon" />
-            <span>该用户为超级管理员，默认拥有全部知识库访问权限；下表设置仅作为显式记录。</span>
+            <span>超级管理员拥有平台管理权；知识库内容权限仍按下表生效，自己创建的知识库会自动获得全部权限。</span>
           </div>
         </el-card>
 

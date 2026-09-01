@@ -1,476 +1,192 @@
-# API Key API 接入说明
+# API Key 接入智能问答
 
-本文给外部系统、脚本、其他 AI / Agent 或外部开发者使用。你可以把这份文档单独发给接入方。
+本文给外部系统、脚本、Agent 和项目集成方使用。新的外部接入统一使用稳定的
+Public v1 合同；完整接口定义见 [Public Read API v1](./public-api-v1.md)，MCP
+接入见 [MCP Knowledge Adapter](./mcp-knowledge-adapter.md)。
 
-最重要的结论：API Key 默认用于调用知识库**检索接口**：
+## 1. 创建与权限
 
-```http
-POST /libraries/{LIBRARY_ID}/query
-Authorization: Bearer <API_KEY>
+在管理后台“我的 API Key”页面创建密钥时，必须选择所属组织。密钥只继承该用户
+在该组织内的知识库权限，不会因为持有 Key 自动获得更多权限。
+
+创建后只显示一次完整密钥。推荐每个接入系统使用独立 Key，并设置过期时间。
+
+```dotenv
+VECTOR_KB_BASE_URL=https://your-vector-kb.example.com
+VECTOR_KB_LIBRARY_ID=your_library_slug
+VECTOR_KB_API_KEY=创建后显示的完整密钥
 ```
 
-这个接口返回的是 `results` 检索切片，不是后端直接生成的最终 `answer`。如果你需要最终自然语言回答，请把 `results` 交给你自己的 LLM，由调用方自己生成答案。
+不要把真实 Key 放进前端代码、URL、日志、截图或 Git 仓库。
 
----
-
-## 1. 最常用：API Key 调用知识库检索接口
-
-### 接口
+## 2. 获取最终回答
 
 ```http
-POST /libraries/{LIBRARY_ID}/query
-```
-
-### 鉴权
-
-```http
+POST /api/v1/answers
 Authorization: Bearer <API_KEY>
 Content-Type: application/json
 ```
 
-### 请求体示例
+请求体：
 
 ```json
 {
-  "query": "你的问题",
-  "limit": 5
+  "scope": {
+    "library_slugs": ["your_library_slug"]
+  },
+  "query": "星盾 S3 的单套容量是多少？",
+  "top_k": 5,
+  "candidate_k": 20,
+  "score_threshold": 0.0
 }
 ```
 
-### 返回什么
+`library_slugs` 填知识库 slug，可选择同一组织内 1 到 20 个兼容知识库。服务会
+实时检查组织成员关系、知识库状态和 `read` 权限；任意一个库无权访问时整次请求
+失败，不会静默缩小范围。
 
-成功响应返回 `results`：
-
-```json
-{
-  "results": [
-    {
-      "text": "检索到的知识片段正文",
-      "similarity": 0.82,
-      "document_id": "文档 ID",
-      "chunk_id": "切片 ID",
-      "title": "来源文档标题",
-      "metadata": {
-        "vector_score": 0.82,
-        "rerank_score": 0.91
-      }
-    }
-  ]
-}
-```
-
-注意：
-
-- `/query` 返回的是检索切片列表 `results`。
-- `/query` **不直接返回最终回答**，不会默认生成 `answer`。
-- `results` 已经带来源标识，可用于引用展示、来源定位和后续 LLM 上下文拼接。
-
----
-
-## 2. `LIBRARY_ID` 实际填什么
-
-文档和示例里的 `LIBRARY_ID` 实际上填的是知识库的 **slug / 库唯一ID**。
-
-例如管理后台里知识库唯一 ID 是：
-
-```text
-deploy_acceptance_server
-```
-
-那么接口路径就是：
-
-```http
-POST /libraries/deploy_acceptance_server/query
-```
-
-它不是数据库自增 ID，也不是隐藏主键。
-
----
-
-## 3. 推荐配置方式：`.env`
-
-推荐把知识库地址、知识库 slug、API Key 和可选的调用方 LLM 配置放到脚本同目录的 `.env` 文件中，不要写死在代码里。
-
-```dotenv
-VECTOR_KB_BASE_URL=http://10.0.10.2:8100
-VECTOR_KB_LIBRARY_ID=deploy_acceptance_server
-VECTOR_KB_API_KEY=你的完整API_KEY
-
-# 可选：仅当你要在调用方脚本里自己接 LLM 时填写
-# 这些变量不会被知识库后端读取
-LOCAL_LLM_BASE_URL=可选
-LOCAL_LLM_API_KEY=可选
-LOCAL_LLM_MODEL=可选
-```
-
-说明：
-
-- `VECTOR_KB_BASE_URL`：知识库服务地址。
-- `VECTOR_KB_LIBRARY_ID`：目标知识库的 slug / 库唯一ID。
-- `VECTOR_KB_API_KEY`：在“我的 API Key”页面创建后复制的完整 Key，仅显示一次。
-- `LOCAL_LLM_*`：调用方自己的模型服务配置。知识库后端不会读取这些变量。
-
-安装 Python 依赖：
+curl 测试：
 
 ```bash
-pip install requests python-dotenv
-```
-
----
-
-## 4. Python 推荐接入脚本
-
-下面脚本的默认行为是：调用 `/query`，打印检索切片和来源字段。它不是最终问答接口。
-
-如果你需要最终回答，请把 `call_your_llm(prompt)` 替换成你自己的 LLM 调用，然后开启脚本里的 `use_llm=True`。这里的 `use_llm` 只是调用方脚本里的本地流程开关，**不是后端接口参数**。
-
-```python
-from pathlib import Path
-from typing import Any
-import os
-
-import requests
-from dotenv import load_dotenv
-
-load_dotenv(Path(__file__).with_name(".env"))
-
-VECTOR_KB_BASE_URL = os.getenv("VECTOR_KB_BASE_URL", "").rstrip("/")
-VECTOR_KB_LIBRARY_ID = os.getenv("VECTOR_KB_LIBRARY_ID", "")  # 知识库 slug / 库唯一ID
-VECTOR_KB_API_KEY = os.getenv("VECTOR_KB_API_KEY", "")
-
-LOCAL_LLM_BASE_URL = os.getenv("LOCAL_LLM_BASE_URL", "")
-LOCAL_LLM_API_KEY = os.getenv("LOCAL_LLM_API_KEY", "")
-LOCAL_LLM_MODEL = os.getenv("LOCAL_LLM_MODEL", "")
-
-
-def require_env(name: str, value: str) -> str:
-    if not value:
-        raise RuntimeError(f"请在 .env 中配置 {name}")
-    return value
-
-
-def auth_headers() -> dict[str, str]:
-    api_key = require_env("VECTOR_KB_API_KEY", VECTOR_KB_API_KEY)
-    return {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-
-
-def search_kb(question: str, limit: int = 5) -> list[dict[str, Any]]:
-    """调用知识库 /query，返回 results 检索切片，不是最终 answer。"""
-    base_url = require_env("VECTOR_KB_BASE_URL", VECTOR_KB_BASE_URL)
-    library_id = require_env("VECTOR_KB_LIBRARY_ID", VECTOR_KB_LIBRARY_ID)
-
-    response = requests.post(
-        f"{base_url}/libraries/{library_id}/query",
-        headers=auth_headers(),
-        json={"query": question, "limit": limit},
-        timeout=30,
-    )
-    response.raise_for_status()
-    return response.json().get("results", [])
-
-
-def get_chunk_source(document_id: str, chunk_id: str | None = None) -> dict[str, Any]:
-    """可选扩展：根据 document_id + chunk_id 查看命中切片在原文中的位置/窗口。"""
-    base_url = require_env("VECTOR_KB_BASE_URL", VECTOR_KB_BASE_URL)
-    library_id = require_env("VECTOR_KB_LIBRARY_ID", VECTOR_KB_LIBRARY_ID)
-
-    params = {"chunk_id": chunk_id} if chunk_id else None
-    response = requests.get(
-        f"{base_url}/libraries/{library_id}/documents/{document_id}/source",
-        headers=auth_headers(),
-        params=params,
-        timeout=30,
-    )
-    response.raise_for_status()
-    return response.json()
-
-
-def build_context(chunks: list[dict[str, Any]]) -> str:
-    """把检索切片拼成调用方 LLM 可读的上下文。"""
-    parts = []
-    for index, chunk in enumerate(chunks, start=1):
-        title = chunk.get("title") or "未知来源"
-        text = chunk.get("text") or ""
-        similarity = chunk.get("similarity")
-        document_id = chunk.get("document_id")
-        chunk_id = chunk.get("chunk_id")
-        metadata = chunk.get("metadata") or {}
-        parts.append(
-            f"[来源 {index}]\n"
-            f"标题：{title}\n"
-            f"相关性：{similarity}\n"
-            f"document_id：{document_id}\n"
-            f"chunk_id：{chunk_id}\n"
-            f"metadata：{metadata}\n"
-            f"正文：\n{text}"
-        )
-    return "\n\n---\n\n".join(parts)
-
-
-def call_your_llm(prompt: str) -> str:
-    """占位函数：请替换为你自己的大模型调用。"""
-    # 你可以在这里调用自己的模型服务，例如 Ollama、vLLM、LM Studio、
-    # OpenAI 兼容接口或公司内部模型网关。
-    # 建议从 .env 读取 LOCAL_LLM_BASE_URL / LOCAL_LLM_API_KEY / LOCAL_LLM_MODEL，
-    # 不要把大模型 API Key 写死在代码里。
-    raise NotImplementedError("请将 call_your_llm(prompt) 替换为自己的模型调用")
-
-
-def ask(question: str, limit: int = 5, use_llm: bool = False):
-    chunks = search_kb(question, limit=limit)
-
-    if not use_llm:
-        # 返回的是检索切片 results，不是最终 answer。
-        return chunks
-
-    context = build_context(chunks)
-    prompt = f"""请只根据以下知识库检索切片回答问题。若切片中没有答案，请说明无法从已给资料确认。
-
-问题：{question}
-
-知识库检索切片：
-{context}
-"""
-    answer = call_your_llm(prompt)
-    sources = [
-        {
-            "title": chunk.get("title"),
-            "document_id": chunk.get("document_id"),
-            "chunk_id": chunk.get("chunk_id"),
-            "similarity": chunk.get("similarity"),
-            "metadata": chunk.get("metadata"),
-        }
-        for chunk in chunks
-    ]
-    return {"answer": answer, "sources": sources}
-
-
-if __name__ == "__main__":
-    question = "你的问题"
-
-    print("=== use_llm=False：只返回 /query 的 results 检索切片，不是最终回答 ===")
-    chunks = ask(question, limit=5, use_llm=False)
-    for index, item in enumerate(chunks, start=1):
-        print(f"--- 结果 {index} ---")
-        print("title：", item.get("title"))
-        print("document_id：", item.get("document_id"))
-        print("chunk_id：", item.get("chunk_id"))
-        print("similarity：", item.get("similarity"))
-        print("metadata：", item.get("metadata"))
-        print("text：", item.get("text"))
-        print()
-
-    # 可选：根据第一条结果继续查看命中切片在原文中的位置/窗口
-    # if chunks and chunks[0].get("document_id"):
-    #     source = get_chunk_source(chunks[0]["document_id"], chunks[0].get("chunk_id"))
-    #     print("=== /source 原文定位 ===")
-    #     print(source)
-
-    # 替换 call_your_llm(prompt) 后，再打开下面两行：
-    # print("=== use_llm=True：调用方自己生成 answer + sources ===")
-    # print(ask(question, limit=5, use_llm=True))
-```
-
----
-
-## 5. 是否经过 LLM
-
-必须区分两层：
-
-| 模式 | 是否经过后端 LLM | 行为 | 返回 |
-|---|---:|---|---|
-| 默认文档模式 | 否 | 只调用 `POST /libraries/{LIBRARY_ID}/query` | `results` 检索切片列表 |
-| 调用方自己接 LLM | 否，仍不经过后端 LLM | 先 `/query` 获取切片，再由调用方把切片交给自己的 LLM | 调用方自行组织，例如 `{ "answer": "...", "sources": [...] }` |
-
-说明：
-
-- `/query` 不是“后端直接问答接口”。
-- `/query` 不会默认返回 `answer`。
-- Python 示例里的 `use_llm=True` 是调用方脚本里的本地流程，不是后端参数。
-- `call_your_llm(prompt)` 必须由接入方替换为自己的大模型调用。
-- 知识库服务不会读取你的 `LOCAL_LLM_API_KEY`，也不会因为你在请求体里传 `use_llm` 就生成回答。
-
----
-
-## 6. 返回字段说明
-
-| 字段 | 说明 | 常见用途 |
-|---|---|---|
-| `results[].text` | 检索切片正文。若知识库开启了全文源补全，它可能是回查 PGSQL 全文源后补全过的正文。 | 展示摘要；拼接给调用方 LLM |
-| `results[].similarity` | 相似度/相关性分数；开启 rerank 时可能是重排后的分数。 | 排序、调试召回质量 |
-| `results[].document_id` | 来源文档 ID。 | 后续调用 `/source`、`/source/full`、`/file` |
-| `results[].chunk_id` | 来源切片 ID。 | 定位具体命中切片 |
-| `results[].title` | 来源文档标题。 | 引用展示、结果列表标题 |
-| `results[].metadata` | 额外元数据，例如向量分数、重排分数或文档相关字段。 | 调试、筛选、展示补充信息 |
-
-当前 API Key 检索结果本身已经带来源标识：`title` / `document_id` / `chunk_id` / `metadata`。
-
----
-
-## 7. 引用 / 来源定位 / 原文 / 原文件
-
-如果你只需要展示“这条结果来自哪里”，通常直接使用 `/query` 返回的：
-
-- `title`
-- `document_id`
-- `chunk_id`
-- `metadata`
-
-如果你还需要更进一步查看来源，可以继续调用下面接口。
-
-### 7.1 查看命中切片在原文中的位置/窗口
-
-```http
-GET /libraries/{slug}/documents/{document_id}/source?chunk_id={chunk_id}
-Authorization: Bearer <API_KEY>
-```
-
-用途：根据 `document_id + chunk_id` 查看命中切片在原文中的位置、上下文窗口或定位信息。适合做“引用展开”“跳到原文附近”。
-
-### 7.2 查看该文档完整归一化原文
-
-```http
-GET /libraries/{slug}/documents/{document_id}/source/full
-Authorization: Bearer <API_KEY>
-```
-
-用途：查看该文档的完整归一化文本。适合做“查看全文”。
-
-### 7.3 下载原始文件
-
-```http
-GET /libraries/{slug}/documents/{document_id}/file
-Authorization: Bearer <API_KEY>
-```
-
-用途：下载该文档最初上传的原始文件。适合做“下载附件 / 原文件”。
-
-这里的 `{slug}` 与前文 `LIBRARY_ID` 是同一个含义：知识库 slug / 库唯一ID。
-
----
-
-## 8. 全文源补全（source enrichment）是什么
-
-大白话说明：有些知识库的向量库里只保存了较短文本或外键，真正完整正文在 PGSQL 表里。管理员可以在知识库层面开启“全文源补全”。开启后：
-
-- 调 `/query` 时，系统仍先做知识库检索。
-- 命中结果如果能关联到 PGSQL 全文源，会自动回查并补全正文。
-- 因此 `results[].text` 可能不是纯向量库原始 payload，而是补全后的正文。
-
-重要边界：
-
-- 这是**知识库级配置**，由管理员在新建/编辑知识库时控制。
-- 新建知识库默认开启。
-- 普通 API Key 调用方不能在单次 `/query` 请求里传参数动态开启或关闭。
-- 请求体里不要传类似 `source_enrichment_enabled`、`use_source_enrichment` 之类参数；这不是请求级能力。
-
----
-
-## 9. 使用判断表
-
-| 你想做什么 | 应该怎么做 |
-|---|---|
-| 我只想拿切片做搜索展示 | 调 `POST /libraries/{LIBRARY_ID}/query`，展示 `results` |
-| 我想自己接 LLM 生成最终回答 | 先调 `/query`，再把 `results` 拼成上下文交给你自己的 LLM |
-| 我想展示引用来源 | 使用 `results[].document_id` / `results[].chunk_id` / `results[].title` / `results[].metadata` |
-| 我想定位命中切片在原文中的位置 | 调 `GET /libraries/{slug}/documents/{document_id}/source?chunk_id={chunk_id}` |
-| 我想看某文档完整归一化原文 | 调 `GET /libraries/{slug}/documents/{document_id}/source/full` |
-| 我想下载原始文件 | 调 `GET /libraries/{slug}/documents/{document_id}/file` |
-| 我想按单次请求开关全文源补全 | 当前不支持；全文源补全是知识库级开关 |
-| 我想用 API Key 创建/管理 API Key | 当前说明不覆盖；API Key 不应用于创建/管理 API Key |
-
----
-
-## 10. JavaScript/Node 简版
-
-适合只取检索切片的 Node 脚本。它返回 `results`，不伪装成最终问答接口。
-
-```javascript
-const VECTOR_KB_BASE_URL = process.env.VECTOR_KB_BASE_URL;
-const VECTOR_KB_LIBRARY_ID = process.env.VECTOR_KB_LIBRARY_ID; // 知识库 slug / 库唯一ID
-const VECTOR_KB_API_KEY = process.env.VECTOR_KB_API_KEY;
-
-async function searchKb(question, limit = 5) {
-  const response = await fetch(`${VECTOR_KB_BASE_URL}/libraries/${VECTOR_KB_LIBRARY_ID}/query`, {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${VECTOR_KB_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({ query: question, limit })
-  });
-
-  if (!response.ok) {
-    throw new Error(`知识库请求失败：${response.status}`);
-  }
-
-  const data = await response.json();
-  return data.results || [];
-}
-
-searchKb("你的问题", 5).then((results) => {
-  for (const item of results) {
-    console.log({
-      title: item.title,
-      document_id: item.document_id,
-      chunk_id: item.chunk_id,
-      similarity: item.similarity,
-      metadata: item.metadata,
-      text: item.text
-    });
-  }
-});
-```
-
----
-
-## 11. curl 仅用于临时测试
-
-`curl` 适合临时验证 API Key、知识库 slug 和网络连通性，不建议作为生产集成方式。
-
-```bash
-curl -X POST "$VECTOR_KB_BASE_URL/libraries/$VECTOR_KB_LIBRARY_ID/query" \
+curl -X POST "$VECTOR_KB_BASE_URL/api/v1/answers" \
   -H "Authorization: Bearer $VECTOR_KB_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"query":"你的问题","limit":5}'
+  -d "{\"scope\":{\"library_slugs\":[\"$VECTOR_KB_LIBRARY_ID\"]},\"query\":\"你的问题\",\"top_k\":5,\"candidate_k\":20}"
 ```
 
-用途：确认这三件事是否正确：
+## 3. 返回内容
 
-- API Key 能鉴权。
-- `VECTOR_KB_LIBRARY_ID` 填的是正确的知识库 slug。
-- `/query` 能返回 `results`。
+同步问答固定返回：
 
----
+```json
+{
+  "contract_version": "public-answer-v1",
+  "request_id": "0123456789abcdef0123456789abcdef",
+  "answer": "根据资料，星盾 S3 的单套容量为 5MWh。[1]",
+  "sources": [
+    {
+      "rank": 1,
+      "library_slug": "your_library_slug",
+      "document_id": "文档 UUID",
+      "document_revision_id": "修订 UUID",
+      "chunk_id": "切片 UUID",
+      "seq": 3,
+      "page": 8,
+      "title_path": ["产品参数"],
+      "title": "产品说明书",
+      "score": 0.91,
+      "vector_score": 0.82,
+      "rerank_score": 0.91
+    }
+  ],
+  "chunks": [
+    {
+      "rank": 1,
+      "library_slug": "your_library_slug",
+      "document_id": "文档 UUID",
+      "document_revision_id": "修订 UUID",
+      "chunk_id": "切片 UUID",
+      "title": "产品说明书",
+      "content": "证据正文",
+      "content_truncated": false,
+      "score": 0.91
+    }
+  ],
+  "graph": {
+    "available": true,
+    "entities": [],
+    "relations": [],
+    "documents_examined": 1,
+    "truncated": false
+  }
+}
+```
 
-## 12. 常见错误
+字段含义：
 
-| HTTP 状态 | 常见原因 | 处理建议 |
+| 字段 | 内容 | 客户端用途 |
+|---|---|---|
+| `answer` | 最终自然语言回答 | 直接展示给用户 |
+| `sources` | 文档、修订、切片、页码、标题路径和检索分数 | 引用列表、定位来源 |
+| `chunks` | 与 `sources` 相同排名和身份的证据正文 | 引用展开、审计 |
+| `graph.entities` | 命中的已发布实体事实 | 图谱解释、关系展示 |
+| `graph.relations` | 命中的已发布关系事实 | 关系链展示 |
+| `request_id` | 本次请求标识 | 排查错误、关联服务日志 |
+
+`sources[n]` 与 `chunks[n]` 的排名及 Library、Document、Revision、Chunk 身份严格
+对应。客户端不要把向量分数、重排分数或模型文本当作权限判断依据。
+
+## 4. 图谱证据与文件位置
+
+图谱实体和关系的 `fact.evidence[]` 包含 `evidence_id`、`document_id`、
+`document_revision_id`、页码和字符区间。读取证据详情：
+
+```http
+GET /api/v1/libraries/{slug}/evidence/{evidence_id}
+Authorization: Bearer <API_KEY>
+```
+
+响应会给出证据引用、上下文窗口、页码、字符位置和关联事实。读取文档及当前修订
+信息：
+
+```http
+GET /api/v1/libraries/{slug}/documents/{document_id}
+Authorization: Bearer <API_KEY>
+```
+
+Public v1 不直接返回对象存储内部地址。这样可以保留权限检查，避免把长期文件地址
+暴露给外部客户端。
+
+## 5. 流式回答
+
+```http
+POST /api/v1/answers/stream
+Authorization: Bearer <API_KEY>
+Content-Type: application/json
+Accept: text/event-stream
+```
+
+请求体与同步问答相同。事件顺序为 `meta`、多个 `delta`、最后一个 `result`；
+`result` 使用与同步接口相同的 `answer`、`sources`、`chunks`、`graph` 合同。
+
+## 6. 只检索不回答
+
+不需要模型回答时使用：
+
+```http
+POST /api/v1/retrieval
+```
+
+请求体与 `/api/v1/answers` 相同，响应没有 `answer`，保留 `sources`、`chunks` 和
+`graph`。旧接口 `POST /libraries/{slug}/query` 仍只返回 `results` 检索切片。
+
+## 7. 旧 Chat 接口兼容说明
+
+`POST /chat/messages` 是已有 Web 聊天链路，不是新外部接入的首选稳定合同。使用该
+接口的旧客户端必须同时兼容：
+
+- 普通检索回答：`sources` 有内容；
+- 图谱增强回答：`graph_evidence` 有内容，`sources` 可能为空。
+
+Public v1 已把两类结果统一为固定的 `sources`、`chunks` 和 `graph`，新客户端不应
+再根据两套顶层字段猜测回答类型。
+
+## 8. 常见错误
+
+| HTTP | 原因 | 处理 |
 |---:|---|---|
-| 401 | API Key 缺失、错误或已失效 | 检查 `Authorization: Bearer <VECTOR_KB_API_KEY>` |
-| 403 | 当前账号没有目标知识库权限 | 在权限管理中授予对应知识库 read 权限 |
-| 404 | 知识库或资源不存在 | 检查 `VECTOR_KB_LIBRARY_ID` / `slug` 和路径 |
-| 413 | 上传文件超过大小限制 | 压缩或拆分文件后重试 |
-| 415 | 文件类型不支持 | 使用支持的文件格式 |
-| 503 | 知识库正在重建或服务暂不可用 | 稍后重试 |
+| 401 | Key 缺失、错误、过期或已撤销 | 检查 Bearer Key，必要时重发 Key |
+| 403 | 当前 Key 无权访问完整范围 | 检查组织成员关系和知识库 `read` 权限 |
+| 404 | Public v1 未启用或资源不存在 | 检查部署配置、slug 和资源 ID |
+| 409 | 多库范围不兼容 | 调用 `/api/v1/scopes/validate` 查看原因码 |
+| 422 | 请求不符合合同 | 检查 `scope`、query 和 top/candidate 参数 |
+| 503 | 问答模型或知识服务不可用 | 使用 `request_id` 排查服务状态 |
 
----
+## 9. MCP
 
-## 13. 常见误区
+MCP 客户端使用同一个组织绑定 API Key。`answer` 工具返回与
+`POST /api/v1/answers` 相同的回答、来源、证据正文和图谱结构；
+`get_evidence` 以及 `vector-kb://.../evidence/{evidence_id}` 可读取证据详情。
 
-- `/query` 不直接返回最终回答；它返回 `results` 检索切片。
-- `use_llm=True` 不是后端参数，只是示例脚本里的本地流程开关。
-- `LIBRARY_ID` 填的是知识库 slug / 库唯一ID，不是数据库自增 ID。
-- 全文源补全不是调用方按次开关；它是管理员配置的知识库级能力。
-- API Key 不应用于创建/管理 API Key；请在管理后台创建、查看前缀、撤销 API Key。
-- 不要把“调用方自己接 LLM”理解成“知识库后端会自动回答”。
-
-安全建议：
-
-- 不要在前端页面、URL、日志或截图中暴露真实 API Key。
-- 不要把 API Key、LLM API Key 或真实 `.env` 文件提交到 Git 仓库。
-- 为不同系统创建不同 API Key，便于审计和撤销。
-- 不再使用的 API Key 应及时撤销。
+若 `list_libraries` 或 `list_permissions` 为空，先检查配置的 Key 是否属于正确组织，
+以及该用户是否已获得目标库权限。这通常是权限配置问题，不是 MCP 连接故障。

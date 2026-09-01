@@ -8,6 +8,7 @@ import {
 
 const source = readFileSync(new URL('./src/views/ApiKeys.js', import.meta.url), 'utf8');
 const css = readFileSync(new URL('./style.css', import.meta.url), 'utf8');
+const apiUsageDoc = readFileSync(new URL('../docs/29-api-key-api-usage.md', import.meta.url), 'utf8');
 
 // ── Helpers ────────────────────────────────────────────────
 function mockKey(overrides = {}) {
@@ -111,30 +112,22 @@ test('API calls unchanged: listApiKeys, createApiKey, revokeApiKey', () => {
     assert.ok(source.includes('api.revokeApiKey'), 'revokeApiKey called');
 });
 
-test('API usage card focuses on retrieval chunks without new backend behavior', () => {
+test('API usage card documents the stable answer contract and grounding fields', () => {
     for (const token of [
-        'API 接入说明：检索知识库切片',
+        'API 接入说明：获取智能问答结果',
         'Authorization: Bearer',
-        '/libraries/{LIBRARY_ID}/query',
-        '/query</code> 返回召回切片，不是最终回答',
+        '/api/v1/answers',
+        '/api/v1/answers/stream',
         'VECTOR_KB_BASE_URL',
         'VECTOR_KB_LIBRARY_ID',
         'VECTOR_KB_API_KEY',
-        'LOCAL_LLM_BASE_URL',
-        'use_llm=False',
-        'use_llm=True',
-        'search_kb(question',
-        'call_your_llm',
-        'results',
+        'answer',
+        'sources',
+        'chunks',
+        'graph',
+        'evidence_id',
         '完整接入模板',
         'api-keys-doc-template-button',
-        'Python 完整接入脚本',
-        'build_context(chunks',
-        'ask(question',
-        'if __name__ == "__main__"',
-        'JavaScript/Node 简版',
-        'curl 仅用于临时测试',
-        'results[].text',
         'docDialog.open',
         'api-keys-doc-dialog',
         'openApiDoc',
@@ -148,8 +141,22 @@ test('API usage card focuses on retrieval chunks without new backend behavior', 
     assert.equal(/vk_[A-Za-z0-9_\-]{12,}/.test(source), false, 'no real-looking API key in source');
     assert.equal(/VECTOR_KB_API_KEY=(vk_|sk-|ak-)[A-Za-z0-9_\-]{8,}/.test(source), false, 'no hard-coded env API key in source');
 });
-test('createApiKey converts local datetime to ISO string', () => {
-    assert.ok(source.includes("api.createApiKey(name"), 'passes name');
+
+test('API usage document points API Key clients at public v1 answers', () => {
+    for (const token of [
+        'POST /api/v1/answers',
+        'answer',
+        'sources',
+        'chunks',
+        'graph',
+        'GET /api/v1/libraries/{slug}/evidence/{evidence_id}',
+    ]) assert.ok(apiUsageDoc.includes(token), `missing API usage doc token: ${token}`);
+});
+
+test('createApiKey selects an organization and converts local datetime to ISO string', () => {
+    assert.ok(source.includes("from '../store.js'"), 'reuses organization store');
+    assert.ok(source.includes('dialog.organizationId'), 'passes selected organization');
+    assert.ok(source.includes('el-select'), 'renders organization selector');
     assert.ok(source.includes('toISOString()'), 'converts to ISO string for timezone safety');
     assert.ok(source.includes('new Date(dialog.expiresAt)'), 'parses local time before conversion');
 });
@@ -209,6 +216,24 @@ test('CSS defines api-keys-* classes', () => {
 test('CSS includes api-keys responsive rules', () => {
     assert.match(css, /1199px[\s\S]*api-keys-result-right/, 'api-keys at 1199px');
     assert.match(css, /899px[\s\S]*api-keys-stats/, 'api-keys at 899px');
+});
+
+test('API documentation dialog fits narrow viewports', () => {
+    assert.match(
+        css,
+        /\.api-keys-doc-dialog\s*\{[^}]*width:\s*min\(860px,\s*calc\(100vw - 24px\)\)\s*!important/s,
+        'dialog width is capped by the viewport',
+    );
+    assert.match(
+        css,
+        /\.api-keys-doc-dialog \.el-dialog__body\s*\{[^}]*min-width:\s*0[^}]*overflow:\s*hidden/s,
+        'dialog body contains wide code blocks',
+    );
+    assert.match(
+        css,
+        /\.api-keys-doc-dialog-body section\s*\{[^}]*min-width:\s*0/s,
+        'flex sections can shrink below their content width',
+    );
 });
 
 console.log('api keys redesign test passed');

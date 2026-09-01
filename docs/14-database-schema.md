@@ -1,6 +1,6 @@
 # 14 · 数据库 Schema
 
-8 业务表 + Casbin 表，全部由 `alembic/versions/0001_initial_schema.py` 一次性建好。
+本页首先说明 `0001_initial_schema.py` 建立的基础表，不是当前完整 schema。后续迁移已增加 revision/file/import、Evidence、图谱与 publication、知识产物、分类、组织/授权、公开 API operations，以及 claim shadow / canonical mapping 等能力表。当前代码迁移 head 为 **`0062`**；目标数据库的实际 current 必须用 `alembic current` 单独核对。
 
 ## ER 关系
 
@@ -23,7 +23,7 @@ sys_users (1) ─── (N) sys_api_keys
 casbin_rule (独立)   ← Casbin SQLAlchemy adapter 维护
 ```
 
-## 表逐一说明
+## 0001 基础表逐一说明
 
 ### `sys_users`（继承 fastapi-users base）
 
@@ -198,6 +198,8 @@ WHERE k.key_prefix = 'vk_xxxxxxx';
 ```
 
 ## 迁移
+
+截至 2026-08-29，代码迁移 head 为 `0062`。不要把本页的基础表清单、旧 acceptance 文档中的 head 或 revision 编号当成完整当前 schema；部署前运行 `alembic heads`，升级后运行 `alembic current`。
 
 新增表 / 改字段：
 

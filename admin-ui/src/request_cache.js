@@ -51,11 +51,6 @@ export async function cachedRequest(key, fn, ttlMs, forceRefresh = false) {
     return promise.then(_clone);
 }
 
-export function invalidateCache(key) {
-    _store.delete(key);
-    _generation++;
-}
-
 export function invalidateByPrefix(prefix) {
     for (const key of _store.keys()) {
         if (key.startsWith(prefix)) _store.delete(key);

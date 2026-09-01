@@ -44,7 +44,17 @@ class Document(Base):
             "content_hash",
             unique=True,
             postgresql_where=text(
-                "sync_source_id IS NULL AND external_id IS NULL AND deleted_at IS NULL"
+                "sync_source_id IS NULL AND external_id IS NULL "
+                "AND source_path IS NULL AND deleted_at IS NULL"
+            ),
+        ),
+        Index(
+            "uq_documents_library_source_path_active",
+            "library_id",
+            "source_path",
+            unique=True,
+            postgresql_where=text(
+                "source_path IS NOT NULL AND deleted_at IS NULL"
             ),
         ),
         Index("ix_documents_folder", "folder_id"),
@@ -62,6 +72,7 @@ class Document(Base):
     folder_id: Mapped[Optional[uuid.UUID]] = mapped_column(PgUUID(as_uuid=True), nullable=True)
     sync_source_id: Mapped[Optional[uuid.UUID]] = mapped_column(PgUUID(as_uuid=True), nullable=True)
     external_id: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    source_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     title: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     display_name: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     doc_metadata: Mapped[Optional[dict[str, Any]]] = mapped_column("metadata", JSONB, nullable=True)

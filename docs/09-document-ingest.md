@@ -167,11 +167,35 @@ DELETE /libraries/{slug}/documents/{doc_id}
 
 各页按原页序合并，带 `【第 N 页】` 来源标记后作为一份文档（`splitter="text"`）入库。约束：
 
-- 只对低文字页渲染，每次只持有一页 PNG；OCR 在上传请求内**同步**执行。
+- 只对低文字页渲染，每次只持有一页 PNG；OCR 在异步 Import Worker 中执行。
 - 真正进 OCR 的页数超过 **`PDF_OCR_MAX_PAGES`** 立即 `400`，不再渲染（防 CPU 跑飞）。
 - 不还原图片表格行列结构、不做票据字段结构化、不接云 OCR。
 
 > 文字版 PDF 行为与之前一致，不触发 OCR。参数见 [05 配置](./05-configuration.md)。
+
+## 独立图片 OCR
+
+异步导入支持 `.bmp/.jpeg/.jpg/.png/.tif/.tiff/.webp`。知识库必须开启
+`ocr_enabled`，并安装 `.[ocr]` 依赖；否则任务会明确提示开启 OCR 或安装依赖。
+
+RapidOCR 返回的每个文字区域都会生成 `image_region` 解析单元，保存识别文字、
+像素坐标 `bbox`、置信度、父级段落和原文件 revision/SHA 绑定。OCR 文字按图片中的
+识别顺序进入 normalized text、chunk 和后续向量/图谱链路。当前不生成视觉向量，
+也不理解纯照片、图形关系或票据字段。原始文件名始终作为独立解析段进入 normalized
+text 和 chunk；因此 OCR 结果错误时仍可按文件名检索，没有可识别文字时则生成仅含
+文件名的文档，不生成伪造的 `image_region`。
+
+## 异步大文件与文件夹上传
+
+管理端通过 `POST /libraries/{slug}/import-sessions` 创建上传会话，随后按服务端返回的
+分块大小调用 `PUT /libraries/{slug}/import-sessions/{job_id}/content`，并使用
+`Upload-Offset` 续传。全部字节写入并 `fsync` 后，客户端调用
+`POST /libraries/{slug}/import-sessions/{job_id}/complete`。
+
+Complete 只有在文件大小、旧版 DOC 结构和 SHA-256 校验完成、任务提交为 `queued` 后
+才返回 `202`。页面显示“已接收/排队”后可以关闭浏览器；Importer、Embedding、图谱
+抽取和审核均由后台继续，不在上传请求内执行。`409` 或 `429` 响应可能带
+`Upload-Offset` 与 `Retry-After`，重试必须以服务端已提交 offset 为准，避免重复字节。
 
 ## 批量摄入
 

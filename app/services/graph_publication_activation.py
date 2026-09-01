@@ -7,12 +7,15 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, settings
 from app.models.entity import GRAPH_FACT_STATUS_ACTIVE, Entity
+from app.models.evidence_unit import EvidenceUnit
+from app.models.document_revision_file import DocumentRevisionFile
 from app.models.graph_publication import (
+    GRAPH_PUBLICATION_SOURCE_COORDINATED_PURGE,
     GRAPH_PUBLICATION_SOURCE_ROLLBACK,
     GRAPH_PUBLICATION_STATUS_ACTIVE,
     GRAPH_PUBLICATION_STATUS_ACTIVATING,
@@ -33,11 +36,24 @@ from app.models.graph_publication_item import (
 from app.models.knowledge_relation import KnowledgeRelation
 from app.models.library import Library
 from app.models.ontology_version import ONTOLOGY_STATUS_ACTIVE, OntologyVersion
+from app.models.schema_discovery_run import SchemaDiscoveryRun
+from app.models.graph_extraction_job import GraphExtractionJob
 from app.models.relation_evidence import RelationEvidence
+from app.models.revision_retention import RevisionRetentionRecord
+from app.models.revision_purge_operation import RevisionPurgeOperation
 from app.services import audit_log
+from app.services.graph_governance_contracts import GraphGovernanceError
+from app.services.graph_governance_publication import (
+    LoadedGraphGovernanceProjection,
+    apply_loaded_graph_governance_projection,
+    load_graph_governance_projection,
+    parse_graph_governance_plan,
+    release_graph_governance_publication,
+)
 from app.services.graph_publication_planner import (
     GraphPublicationPlanResult,
     GraphPublicationSnapshot,
+    GraphPublicationProjection,
     _manifest_hash,
     _sha256_json,
     build_graph_publication_snapshot,
@@ -163,10 +179,36 @@ async def _lock_active_ontology(
         .execution_options(populate_existing=True)
     )
     ontology = result.scalars().first()
+    explicit_draft = False
+    options = publication.plan_options or {}
+    run_id = options.get("schema_discovery_run_id")
+    if options.get("explicit_ai_draft") is True and isinstance(run_id, str):
+        try:
+            parsed_run_id = uuid.UUID(run_id)
+        except ValueError:
+            parsed_run_id = None
+        if parsed_run_id is not None:
+            run = await db.get(SchemaDiscoveryRun, parsed_run_id)
+            job_id = (
+                await db.execute(
+                    select(GraphExtractionJob.id)
+                    .where(
+                        GraphExtractionJob.schema_discovery_run_id == parsed_run_id,
+                        GraphExtractionJob.ontology_version_id == publication.ontology_version_id,
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            explicit_draft = bool(
+                run is not None
+                and run.status == "succeeded"
+                and run.ontology_version_id == publication.ontology_version_id
+                and job_id is not None
+            )
     if (
         ontology is None
         or ontology.library_id != publication.library_id
-        or ontology.status != ONTOLOGY_STATUS_ACTIVE
+        or (ontology.status != ONTOLOGY_STATUS_ACTIVE and not (explicit_draft and ontology.status == "draft"))
     ):
         raise GraphPublicationActivationError("ontology_not_active", "ontology version is not active")
     return ontology
@@ -204,9 +246,19 @@ def _validate_stored_snapshot(
         stored_by_key[key] = item
 
     candidate_by_key = {_item_key(item): item for item in candidate.items}
-    if publication.source_mode == GRAPH_PUBLICATION_SOURCE_ROLLBACK:
+    if publication.source_mode in {
+        GRAPH_PUBLICATION_SOURCE_ROLLBACK,
+        GRAPH_PUBLICATION_SOURCE_COORDINATED_PURGE,
+    }:
         if not set(stored_by_key).issubset(candidate_by_key):
-            raise GraphPublicationActivationError("rollback_item_ineligible", "rollback snapshot is no longer eligible")
+            code = (
+                "rollback_item_ineligible"
+                if publication.source_mode == GRAPH_PUBLICATION_SOURCE_ROLLBACK
+                else "coordinated_purge_item_ineligible"
+            )
+            raise GraphPublicationActivationError(
+                code, "publication snapshot is no longer eligible"
+            )
     else:
         if set(stored_by_key) != set(candidate_by_key):
             raise GraphPublicationActivationError("publication_snapshot_changed", "publication snapshot changed")
@@ -222,11 +274,12 @@ def _validate_stored_snapshot(
             or dict(stored.support_counts or {}) != dict(current.support_counts or {})
             or dict(stored.fact_snapshot or {}) != dict(current.fact_snapshot or {})
         ):
-            code = (
-                "rollback_item_ineligible"
-                if publication.source_mode == GRAPH_PUBLICATION_SOURCE_ROLLBACK
-                else "publication_item_changed"
-            )
+            if publication.source_mode == GRAPH_PUBLICATION_SOURCE_ROLLBACK:
+                code = "rollback_item_ineligible"
+            elif publication.source_mode == GRAPH_PUBLICATION_SOURCE_COORDINATED_PURGE:
+                code = "coordinated_purge_item_ineligible"
+            else:
+                code = "publication_item_changed"
             raise GraphPublicationActivationError(code, "publication item is no longer eligible")
 
     expected_manifest_hash = _manifest_hash(
@@ -239,9 +292,124 @@ def _validate_stored_snapshot(
         include_drafts=publication.include_drafts,
         items=stored_items,
         blocked_counts=dict(publication.blocked_counts or {}),
+        governance_action_set_hash=candidate.governance_action_set_hash,
     )
     if expected_manifest_hash != publication.manifest_hash:
         raise GraphPublicationActivationError("publication_manifest_mismatch", "publication manifest mismatch")
+
+
+async def _reject_retiring_support_evidence(
+    db: AsyncSession,
+    publication: GraphPublication,
+    items: list[GraphPublicationItem],
+) -> None:
+    support_ids: set[uuid.UUID] = set()
+    try:
+        for item in items:
+            support_ids.update(
+                uuid.UUID(str(value)) for value in (item.support_evidence_ids or [])
+            )
+    except (TypeError, ValueError, AttributeError):
+        raise GraphPublicationActivationError(
+            "publication_item_invalid", "publication support Evidence is invalid"
+        ) from None
+    if not support_ids:
+        return
+    retiring = (
+        await db.execute(
+            select(RevisionRetentionRecord.id)
+            .select_from(EvidenceUnit)
+            .join(
+                RevisionRetentionRecord,
+                RevisionRetentionRecord.document_revision_id
+                == EvidenceUnit.document_revision_id,
+            )
+            .join(
+                DocumentRevisionFile,
+                DocumentRevisionFile.id == RevisionRetentionRecord.revision_file_id,
+            )
+            .where(
+                EvidenceUnit.library_id == publication.library_id,
+                EvidenceUnit.id.in_(support_ids),
+                RevisionRetentionRecord.library_id == publication.library_id,
+                or_(
+                    RevisionRetentionRecord.status.in_(
+                        ("queued", "processing", "cleaned")
+                    ),
+                    DocumentRevisionFile.lifecycle_status != "available",
+                ),
+            )
+            .limit(1)
+        )
+    ).first()
+    if retiring is not None:
+        raise GraphPublicationActivationError(
+            "publication_evidence_retiring",
+            "publication support Evidence is retiring",
+        )
+
+
+async def _reject_coordinated_target_evidence(
+    db: AsyncSession,
+    publication: GraphPublication,
+    items: list[GraphPublicationItem],
+) -> None:
+    if publication.source_mode != GRAPH_PUBLICATION_SOURCE_COORDINATED_PURGE:
+        return
+    operation = (
+        await db.execute(
+            select(RevisionPurgeOperation).where(
+                RevisionPurgeOperation.replacement_publication_id == publication.id,
+                RevisionPurgeOperation.library_id == publication.library_id,
+            )
+        )
+    ).scalars().first()
+    if operation is None or operation.status not in {"planned", "processing"}:
+        raise GraphPublicationActivationError(
+            "coordinated_purge_operation_invalid",
+            "coordinated purge operation is unavailable",
+        )
+    options = dict(publication.plan_options or {})
+    impact = dict(operation.impact_snapshot or {})
+    if (
+        options.get("retention_record_id") != str(operation.retention_record_id)
+        or options.get("confirmation_hash") != operation.confirmation_hash
+        or options.get("target_evidence_hash") != impact.get("target_evidence_hash")
+        or publication.manifest_hash != operation.replacement_manifest_hash
+        or publication.parent_publication_id != operation.source_publication_id
+    ):
+        raise GraphPublicationActivationError(
+            "coordinated_purge_operation_changed",
+            "coordinated purge operation identity changed",
+        )
+    support_ids: set[uuid.UUID] = set()
+    try:
+        for item in items:
+            support_ids.update(
+                uuid.UUID(str(value)) for value in (item.support_evidence_ids or [])
+            )
+    except (TypeError, ValueError, AttributeError):
+        raise GraphPublicationActivationError(
+            "publication_item_invalid", "publication support Evidence is invalid"
+        ) from None
+    if not support_ids:
+        return
+    target = (
+        await db.execute(
+            select(EvidenceUnit.id)
+            .where(
+                EvidenceUnit.library_id == publication.library_id,
+                EvidenceUnit.document_revision_id == operation.document_revision_id,
+                EvidenceUnit.id.in_(support_ids),
+            )
+            .limit(1)
+        )
+    ).first()
+    if target is not None:
+        raise GraphPublicationActivationError(
+            "coordinated_purge_target_evidence",
+            "coordinated replacement still cites target Evidence",
+        )
 
 
 async def _supersede_previous_items(
@@ -314,6 +482,122 @@ async def _switch_formal_graph(
     await db.execute(stale_relations)
 
 
+async def _build_rollback_status_projection(
+    db: AsyncSession,
+    *,
+    publication: GraphPublication,
+    items: list[GraphPublicationItem],
+) -> GraphPublicationProjection:
+    entity_ids = tuple(
+        sorted({item.entity_id for item in items if item.entity_id is not None}, key=str)
+    )
+    relation_ids = tuple(
+        sorted(
+            {item.relation_id for item in items if item.relation_id is not None},
+            key=str,
+        )
+    )
+    entities: tuple[Entity, ...] = ()
+    relations: tuple[KnowledgeRelation, ...] = ()
+    initial_entity_values = []
+    for entity_id in entity_ids:
+        value = await db.get(Entity, entity_id)
+        if value is not None:
+            initial_entity_values.append(value)
+    initial_entities = tuple(initial_entity_values)
+    initial_relation_values = []
+    for relation_id in relation_ids:
+        value = await db.get(KnowledgeRelation, relation_id)
+        if value is not None:
+            initial_relation_values.append(value)
+    initial_relations = tuple(initial_relation_values)
+    restorable = {"active", "disabled", "stale"}
+    if (
+        len(initial_entities) != len(entity_ids)
+        or len(initial_relations) != len(relation_ids)
+        or any(
+            value.library_id != publication.library_id
+            or value.ontology_version_id != publication.ontology_version_id
+            or value.status not in restorable
+            for value in (*initial_entities, *initial_relations)
+        )
+    ):
+        raise GraphPublicationActivationError(
+            "rollback_item_ineligible",
+            "rollback fact state is not eligible",
+            persist_failure=False,
+        )
+    if entity_ids:
+        entities = tuple(
+            (
+                await db.execute(
+                    select(Entity)
+                    .where(
+                        Entity.library_id == publication.library_id,
+                        Entity.ontology_version_id == publication.ontology_version_id,
+                        Entity.id.in_(entity_ids),
+                    )
+                    .order_by(Entity.id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    if relation_ids:
+        relations = tuple(
+            (
+                await db.execute(
+                    select(KnowledgeRelation)
+                    .where(
+                        KnowledgeRelation.library_id == publication.library_id,
+                        KnowledgeRelation.ontology_version_id
+                        == publication.ontology_version_id,
+                        KnowledgeRelation.id.in_(relation_ids),
+                    )
+                    .order_by(KnowledgeRelation.id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    if len(entities) != len(entity_ids) or len(relations) != len(relation_ids):
+        raise GraphPublicationActivationError(
+            "rollback_item_ineligible",
+            "rollback fact is unavailable",
+            persist_failure=False,
+        )
+    if any(value.status not in restorable for value in (*entities, *relations)):
+        raise GraphPublicationActivationError(
+            "rollback_item_ineligible",
+            "rollback fact state is not eligible",
+            persist_failure=False,
+        )
+    return GraphPublicationProjection(
+        entity_states={
+            value.id: {"status": "active"}
+            for value in entities
+            if value.status != "active"
+        },
+        relation_states={
+            value.id: {"status": "active"}
+            for value in relations
+            if value.status != "active"
+        },
+    )
+
+
+def _snapshot_covers_items(
+    snapshot: GraphPublicationSnapshot,
+    items: list[GraphPublicationItem],
+) -> bool:
+    candidate_keys = {_item_key(item) for item in snapshot.items}
+    return all(_item_key(item) in candidate_keys for item in items)
+
+
 async def _activate_locked(
     db: AsyncSession,
     publication_id: uuid.UUID,
@@ -357,6 +641,7 @@ async def _activate_locked(
         raise GraphPublicationActivationError("publication_disabled", "graph publication is disabled")
 
     ontology = await _lock_active_ontology(db, publication)
+    allow_explicit_draft = ontology.status == "draft"
     previous = await _lock_current_publication(
         db,
         library_id=publication.library_id,
@@ -367,17 +652,77 @@ async def _activate_locked(
         raise GraphPublicationActivationError("publication_parent_changed", "current publication changed")
 
     items = await _lock_publication_items(db, publication.id)
+    governance: LoadedGraphGovernanceProjection | None = None
+    projection: GraphPublicationProjection | None = None
+    try:
+        governance_plan = parse_graph_governance_plan(publication)
+        if governance_plan is not None:
+            if not config.graph_governance_enabled:
+                raise GraphPublicationActivationError(
+                    "graph_governance_unavailable",
+                    "graph governance is disabled",
+                )
+            action_ids, expected_action_set_hash = governance_plan
+            governance = await load_graph_governance_projection(
+                db,
+                library_id=publication.library_id,
+                ontology_version_id=publication.ontology_version_id,
+                action_ids=action_ids,
+                publication_id=publication.id,
+                require_publication_binding=True,
+            )
+            if governance.projection.action_set_hash != expected_action_set_hash:
+                raise GraphPublicationActivationError(
+                    "graph_governance_publication_changed",
+                    "graph governance Publication changed",
+                )
+            projection = governance.projection
+    except GraphGovernanceError as exc:
+        raise GraphPublicationActivationError(exc.code, str(exc)) from exc
     candidate = await build_graph_publication_snapshot(
         db,
         library,
         ontology,
         include_drafts=publication.include_drafts,
+        allow_explicit_draft=allow_explicit_draft,
+        projection=projection,
         config=config,
     )
+    if (
+        governance is None
+        and publication.source_mode == GRAPH_PUBLICATION_SOURCE_ROLLBACK
+        and not _snapshot_covers_items(candidate, items)
+    ):
+        projection = await _build_rollback_status_projection(
+            db,
+            publication=publication,
+            items=items,
+        )
+        candidate = await build_graph_publication_snapshot(
+            db,
+            library,
+            ontology,
+            include_drafts=publication.include_drafts,
+            allow_explicit_draft=allow_explicit_draft,
+            projection=projection,
+            config=config,
+        )
     _validate_stored_snapshot(publication, items, candidate, config=config)
+    await _reject_coordinated_target_evidence(db, publication, items)
+    await _reject_retiring_support_evidence(db, publication, items)
 
     publication.status = GRAPH_PUBLICATION_STATUS_ACTIVATING
     await db.flush()
+    if governance is not None:
+        try:
+            await apply_loaded_graph_governance_projection(
+                db,
+                publication=publication,
+                loaded=governance,
+                actor_user_id=activated_by_user_id,
+            )
+        except GraphGovernanceError as exc:
+            raise GraphPublicationActivationError(exc.code, str(exc)) from exc
     await _switch_formal_graph(db, publication, items)
     await _supersede_previous_items(db, previous)
 
@@ -449,6 +794,10 @@ async def _persist_activation_failure(
     publication.error_code = error.code[:64]
     publication.error_message = str(error)[:255]
     publication.failed_at = _now()
+    try:
+        await release_graph_governance_publication(db, publication)
+    except GraphGovernanceError as exc:
+        raise GraphPublicationActivationError(exc.code, str(exc)) from exc
     await audit_log.record(
         db,
         None,
@@ -488,6 +837,7 @@ async def activate_graph_publication(
             config=config,
         )
         await db.commit()
+        await db.refresh(result.publication)
         log.info(
             "graph publication activation completed publication_id=%s previous_publication_id=%s idempotent=%s",
             result.publication.id,
@@ -589,6 +939,20 @@ async def plan_graph_publication_rollback(
         include_drafts=target.include_drafts,
         config=config,
     )
+    if not _snapshot_covers_items(candidate, target_items):
+        rollback_projection = await _build_rollback_status_projection(
+            db,
+            publication=target,
+            items=target_items,
+        )
+        candidate = await build_graph_publication_snapshot(
+            db,
+            library,
+            ontology,
+            include_drafts=target.include_drafts,
+            projection=rollback_projection,
+            config=config,
+        )
     candidate_by_key = {_item_key(item): item for item in candidate.items}
     for target_item in target_items:
         current_item = candidate_by_key.get(_item_key(target_item))

@@ -1,7 +1,8 @@
 import { computed, onMounted, reactive, ref } from 'vue';
 import { ElMessage } from 'element-plus';
 import * as api from '../api.js';
-import { actionLabel, targetSummary, targetTypeMeta, targetDisplay, fmtAuditTime, prettyTarget, ACTION_LABELS, actionTone } from '../admin_activity_ui.js';
+import { store } from '../store.js';
+import { actionLabel, actorDisplay, targetSummary, targetTypeMeta, targetDisplay, fmtAuditTime, prettyTarget, ACTION_LABELS, actionTone } from '../admin_activity_ui.js';
 import { dataEmpty } from '../illustrations.js';
 import { paginate, filterAuditLogs, downloadCSV } from '../logs_ui.js';
 
@@ -18,6 +19,7 @@ const TYPE_OPTIONS = [
 export default {
     setup() {
         const logs = ref([]);
+        const users = ref([]);
         const loading = ref(false);
         const loadError = ref(false);
         const filters = reactive({ range: null, action: '', targetType: '', actor: '', keyword: '' });
@@ -28,8 +30,13 @@ export default {
         async function load(forceRefresh = false) {
             loading.value = true;
             try {
-                const d = await api.listAudit({ limit: 500 }, forceRefresh);
-                logs.value = d || [];
+                const [auditResult, usersResult] = await Promise.allSettled([
+                    api.listAudit({ limit: 500 }, forceRefresh),
+                    api.listUsers({ include_deleted: 'true', limit: 500 }, forceRefresh),
+                ]);
+                if (auditResult.status === 'rejected') throw auditResult.reason;
+                logs.value = auditResult.value || [];
+                if (usersResult.status === 'fulfilled') users.value = usersResult.value || [];
                 const ids = new Set(logs.value.map((r) => r.id));
                 expandRowKeys.value = expandRowKeys.value.filter((k) => ids.has(k));
                 loadError.value = false;
@@ -79,10 +86,10 @@ export default {
 
         onMounted(() => load(false));
         return {
-            logs, loading, loadError, filters, page, pageSize, expandRowKeys,
+            logs, users, loading, loadError, filters, page, pageSize, expandRowKeys,
             filtered, paged, totalCount, actionOptions, TYPE_OPTIONS,
             load, resetFilters, toggleExpand, handleExpandChange, exportCSV,
-            actionLabel, targetSummary, targetTypeMeta, targetDisplay, fmtAuditTime, prettyTarget, actionTone, dataEmpty,
+            actionLabel, actorDisplay, targetSummary, targetTypeMeta, targetDisplay, fmtAuditTime, prettyTarget, actionTone, dataEmpty, store,
         };
     },
     template: `
@@ -93,7 +100,9 @@ export default {
           <p class="audit-desc">记录系统中的关键操作，便于追踪与审计</p>
         </div>
         <div class="audit-header-actions">
-          <el-button @click="load(true)" :loading="loading">刷新</el-button>
+          <el-button class="app-refresh-button" @click="load(true)" :loading="loading">
+            <span class="app-refresh-icon" aria-hidden="true"></span>刷新
+          </el-button>
           <el-button @click="exportCSV" :disabled="!filtered.length">导出 CSV</el-button>
         </div>
       </header>
@@ -105,7 +114,7 @@ export default {
           <div class="logs-filter-field"><span class="logs-toolbar-label">目标类型</span><el-select v-model="filters.targetType" class="logs-filter-select" placeholder="全部类型" clearable @change="page=1"><el-option v-for="t in TYPE_OPTIONS" :key="t.value" :label="t.label" :value="t.value" /></el-select></div>
         </div>
         <div class="logs-toolbar-row">
-          <div class="logs-filter-field"><span class="logs-toolbar-label">操作者 UUID</span><el-input v-model="filters.actor" class="logs-filter-input" placeholder="操作者 UUID" clearable @input="page=1" /></div>
+          <div class="logs-filter-field"><span class="logs-toolbar-label">操作者</span><el-input v-model="filters.actor" class="logs-filter-input" placeholder="用户名、邮箱或 ID" clearable @input="page=1" /></div>
           <div class="logs-filter-field"><span class="logs-toolbar-label">目标名称/ID</span><el-input v-model="filters.keyword" class="logs-filter-input" placeholder="搜索动作/操作者/目标" clearable @input="page=1" /></div>
           <el-button @click="resetFilters">重置筛选</el-button>
         </div>
@@ -118,6 +127,7 @@ export default {
             <el-table-column type="expand">
               <template #default="{row}">
                 <div class="logs-detail-grid">
+                  <div class="logs-detail-cell logs-detail-cell--full"><div class="logs-detail-label">技术详情</div><div class="logs-detail-value">以下内容保留原始动作码和完整标识，便于排查。</div></div>
                   <div class="logs-detail-cell"><div class="logs-detail-label">日志 ID</div><div class="logs-detail-value audit-detail-mono">{{ row.id || '—' }}</div></div>
                   <div class="logs-detail-cell"><div class="logs-detail-label">时间</div><div class="logs-detail-value">{{ fmtAuditTime(row.at) }}</div></div>
                   <div class="logs-detail-cell"><div class="logs-detail-label">操作者</div><div class="logs-detail-value audit-detail-mono">{{ row.actor_user_id || '—' }}</div></div>
@@ -130,7 +140,7 @@ export default {
               </template>
             </el-table-column>
             <el-table-column label="时间" width="170"><template #default="{row}"><span class="audit-time-cell">{{ fmtAuditTime(row.at) }}</span></template></el-table-column>
-            <el-table-column label="操作者" width="200"><template #default="{row}"><span class="audit-actor-cell">{{ row.actor_user_id || '—' }}</span></template></el-table-column>
+            <el-table-column label="操作者" width="200"><template #default="{row}"><span class="audit-actor-cell">{{ actorDisplay(row, users, store.user) }}</span></template></el-table-column>
             <el-table-column label="动作" width="140"><template #default="{row}"><span :class="'action-tone ' + actionTone(row.action)">{{ actionLabel(row.action) }}</span></template></el-table-column>
             <el-table-column label="目标" min-width="260">
               <template #default="{row}">
@@ -138,7 +148,7 @@ export default {
                   <local-icon :icon="targetTypeMeta(row.action).icon" class="audit-target-icon" />
                   <div class="audit-target-body">
                     <div class="audit-target-name">{{ targetDisplay(row.action, row.target) || '—' }}</div>
-                    <div class="audit-target-sub">{{ targetTypeMeta(row.action).type }} · {{ targetDisplay(row.action, row.target) || (row.target && row.target.id) || '—' }}</div>
+                    <div class="audit-target-sub">{{ targetSummary(row.action, row.target) || targetTypeMeta(row.action).type }}</div>
                   </div>
                 </div>
               </template>

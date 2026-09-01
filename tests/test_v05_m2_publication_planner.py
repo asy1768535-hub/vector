@@ -404,6 +404,52 @@ def test_persisted_plan_adds_publication_and_membership_items():
     assert all("quote_text" not in item.fact_snapshot for item in result.items)
 
 
+def test_persisted_plan_accepts_plain_plan_options_without_governance_projection():
+    db = FakeDB(
+        objects=_scope_objects(),
+        query_rows=_query_rows(include_reuse_query=True),
+    )
+
+    result = _plan(
+        db,
+        plan_options={"explicit_ai_draft": True, "schema_discovery_run_id": str(uuid.uuid4())},
+    )
+
+    assert result.publication.plan_options["explicit_ai_draft"] is True
+    assert "schema_discovery_run_id" in result.publication.plan_options
+    assert "graph_governance" not in result.publication.plan_options
+
+
+def test_planner_includes_evidenced_independent_entity_in_formal_snapshot():
+    orphan = Entity(
+        id=uuid.UUID("50000000-0000-0000-0000-000000000003"),
+        library_id=LIB_ID,
+        ontology_version_id=ONTOLOGY_ID,
+        entity_type_id=TEAM_TYPE_ID,
+        canonical_name="Orphan team",
+        normalized_name="orphan team",
+        properties={},
+        status="active",
+        source_type="manual",
+    )
+    db = FakeDB(
+        objects=_scope_objects(),
+        query_rows=_query_rows(
+            include_lock_query=False,
+            include_idempotency_query=False,
+            include_reuse_query=False,
+            entities=[*_entities(), orphan],
+        ),
+    )
+
+    result = _plan(db, dry_run=True)
+
+    assert result.publication.entity_count == 3
+    assert result.publication.relation_count == 1
+    assert "orphan_entity" not in result.blocked_counts
+    assert any(item.entity_id == orphan.id for item in result.items if item.item_kind == "entity")
+
+
 def test_initial_seed_can_include_draft_facts_and_records_blocked_counts():
     entities = _entities(person_status="draft", team_status="pending_review")
     relations = _relations(status="draft", review_status=None)
@@ -438,7 +484,25 @@ def test_initial_seed_can_include_draft_facts_and_records_blocked_counts():
     assert result.publication.entity_count == 1
     assert result.publication.relation_count == 0
     assert result.blocked_counts["entity_status_pending_review"] == 1
-    assert result.blocked_counts["relation_review_blocked"] == 1
+    assert result.blocked_counts["relation_endpoint_not_published"] == 1
+    assert "orphan_entity" not in result.blocked_counts
+
+
+def test_auto_active_relation_does_not_require_review_status():
+    db = FakeDB(
+        objects=_scope_objects(),
+        query_rows=_query_rows(
+            include_lock_query=False,
+            include_idempotency_query=False,
+            relations=_relations(status="draft", review_status=None),
+        ),
+    )
+
+    result = _plan(db, dry_run=True, include_drafts=True)
+
+    assert result.publication.entity_count == 2
+    assert result.publication.relation_count == 1
+    assert "relation_review_blocked" not in result.blocked_counts
 
 
 def test_idempotency_replay_returns_existing_planned_publication():
@@ -568,6 +632,7 @@ def test_relation_with_contradicting_evidence_is_blocked():
     assert result.publication.entity_count == 2
     assert result.publication.relation_count == 0
     assert result.blocked_counts["relation_contradicted"] == 1
+    assert "orphan_entity" not in result.blocked_counts
 
 
 def test_current_revision_unsafe_relation_evidence_blocks_relation():
@@ -590,6 +655,7 @@ def test_current_revision_unsafe_relation_evidence_blocks_relation():
     assert result.publication.entity_count == 2
     assert result.publication.relation_count == 0
     assert result.blocked_counts["relation_evidence_incomplete"] == 1
+    assert "orphan_entity" not in result.blocked_counts
 
 
 def test_missing_relation_constraint_blocks_relation_from_snapshot():
@@ -607,6 +673,7 @@ def test_missing_relation_constraint_blocks_relation_from_snapshot():
     assert result.publication.entity_count == 2
     assert result.publication.relation_count == 0
     assert result.blocked_counts["relation_schema_invalid"] == 1
+    assert "orphan_entity" not in result.blocked_counts
 
 
 def test_review_required_relation_constraint_requires_approved_review_status():
@@ -625,6 +692,7 @@ def test_review_required_relation_constraint_requires_approved_review_status():
     assert result.publication.entity_count == 2
     assert result.publication.relation_count == 0
     assert result.blocked_counts["relation_review_blocked"] == 1
+    assert "orphan_entity" not in result.blocked_counts
 
 
 def test_missing_extracted_confidence_blocks_entity_and_relation():
@@ -643,6 +711,7 @@ def test_missing_extracted_confidence_blocks_entity_and_relation():
     assert entity_result.publication.relation_count == 0
     assert entity_result.blocked_counts["entity_low_confidence"] == 1
     assert entity_result.blocked_counts["relation_endpoint_not_published"] == 1
+    assert "orphan_entity" not in entity_result.blocked_counts
 
     relation_db = FakeDB(
         objects=_scope_objects(),
@@ -658,6 +727,7 @@ def test_missing_extracted_confidence_blocks_entity_and_relation():
     assert relation_result.publication.entity_count == 2
     assert relation_result.publication.relation_count == 0
     assert relation_result.blocked_counts["relation_low_confidence"] == 1
+    assert "orphan_entity" not in relation_result.blocked_counts
 
 
 def test_expected_parent_fence_rejects_changed_current_before_snapshot_build():

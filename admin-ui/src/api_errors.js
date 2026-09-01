@@ -23,10 +23,18 @@ export function humanizeApiError(body, status = 0, fallback = '') {
 
     // 2) 字符串 detail
     const detail = body && typeof body.detail === 'string' ? body.detail : '';
+    const knownDetail = {
+        'organization_id is required': '请选择 API Key 所属组织',
+    }[detail];
+    if (knownDetail) return knownDetail;
 
-    // 3) 对象 detail（非标准响应）→ 尝试 message/error 字段
+    // 3) 对象 detail（FastAPI 结构）或普通对象 → 尝试安全 message/error 字段
     if (!detail && body && typeof body === 'object') {
-        const msg = body.message || body.error || body.msg || '';
+        const nestedDetail = body.detail && typeof body.detail === 'object'
+            && !Array.isArray(body.detail)
+            ? body.detail
+            : null;
+        const msg = nestedDetail?.message || body.message || body.error || body.msg || '';
         if (typeof msg === 'string' && msg.trim()) {
             // 安全中文 → 透传；否则给通用文案
             return /[一-鿿]/.test(msg) ? msg : (fallback || '操作失败，请稍后重试');
@@ -41,7 +49,6 @@ export function humanizeApiError(body, status = 0, fallback = '') {
     // 5) 安全中文 detail → 直接使用
     return detail;
 }
-
 const FIELD_CN = {
     email: '邮箱',
     password: '密码',
@@ -92,45 +99,4 @@ function format422(errors) {
         parts.push(`${cnField}：${msg}`);
     }
     return parts.join('；') || '请求参数不符合要求，请检查后重试';
-}
-
-/**
- * 合并 humanizeError（导入类 error）+ humanizeApiError → 按 status 优先匹配，
- * 用作 api.js request() 等统一错误出口。
- *
- * status → 中文映射表（按需扩展）。未在表中的 status 走 humanizeApiError。
- */
-const STATUS_MESSAGES = {
-    400: '请求参数不正确，请检查输入',
-    401: '登录已过期，请重新登录',
-    403: '你没有执行此操作的权限',
-    404: '请求的资源不存在',
-    409: null,  // 409 语义复杂，由调用方根据 detail 自行细分
-    413: '上传文件超过大小限制',
-    415: '不支持的文件类型',
-    422: null,  // 交给 humanizeApiError 的数组处理
-    429: '请求过于频繁，请稍后重试',
-    500: '服务器内部错误，请稍后重试',
-    502: '服务暂不可用，请稍后重试',
-    503: '服务暂不可用，请稍后重试',
-};
-
-export function humanizeFetchError(err) {
-    if (!err) return '发生未知错误';
-
-    // 如果已经是 humanizeError 处理过的（有 message 且是中文），优先用
-    const msg = err.message || '';
-    const status = err.status || 0;
-
-    // status 409/422 需特殊处理，不在此处覆盖
-    if (status === 409 || status === 422) {
-        // 尝试解析 body
-        return humanizeApiError(err.body, status, '请求发生冲突，请刷新后重试');
-    }
-
-    const statusMsg = STATUS_MESSAGES[status];
-    if (statusMsg) return statusMsg;
-
-    // 其他非 2xx：安全中文 detail 优先，否则通用
-    return humanizeApiError(err.body, status, `请求失败（HTTP ${status}），请稍后重试`);
 }

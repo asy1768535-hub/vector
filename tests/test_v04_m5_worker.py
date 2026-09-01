@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -9,8 +11,10 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from pydantic import SecretStr
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.exc import DBAPIError
 
 from app.models.graph_extraction_job import GraphExtractionJob
+from app.schemas.graph_extraction import GraphExtractionPayload
 from app.services.graph_extraction_provider import (
     GraphExtractionProviderError,
     ProviderResponse,
@@ -20,7 +24,10 @@ from app.services.graph_extraction_worker import (
     GraphExtractionWorkerError,
     PreparedGraphExtractionUnit,
     StaleUnitRecoveryResult,
+    _center_only_prompt,
+    _configured_draft_pool_provider,
     _configured_provider,
+    _validate_center_only_evidence,
     claim_graph_extraction_unit,
     lock_live_graph_extraction_claim,
     mark_claimed_unit_terminal,
@@ -28,6 +35,11 @@ from app.services.graph_extraction_worker import (
     recover_stale_graph_extraction_units,
     renew_graph_extraction_unit_lease,
     run_graph_extraction_worker,
+)
+from app.services.graph_candidate_aggregation import canonical_graph_value_hash_v1
+from app.services.graph_extraction_prompt import (
+    graph_extraction_prompt_hash,
+    graph_extraction_prompt_version,
 )
 
 
@@ -149,6 +161,32 @@ def test_claim_uses_skip_locked_and_sets_random_fenced_lease():
     assert db.flush_count == 1
 
 
+def test_claim_only_selects_review_profiles():
+    db = FakeDB(results=[_Result()])
+
+    asyncio.run(
+        claim_graph_extraction_unit(
+            db,
+            worker_id="worker-1",
+            lease_seconds=180,
+            max_attempts=3,
+            now=NOW,
+        )
+    )
+
+    claim_sql = str(
+        db.statements[0].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    ).lower()
+    assert "extraction_profile" in claim_sql
+    assert "batch_size" not in claim_sql
+    assert "'nuextract_review'" in claim_sql
+    assert "'minstral_review'" in claim_sql
+    assert "'draft_pool_review'" in claim_sql
+
+
 def test_claim_returns_none_without_mutation_when_queue_is_empty():
     db = FakeDB(results=[_Result()])
     assert (
@@ -207,8 +245,7 @@ def test_stale_recovery_abandons_attempts_then_fails_or_requeues_units():
             _Result(rowcount=1),
             _Result(rowcount=1),
             _Result([("failed", 1), ("queued", 1)]),
-        ]
-        ,
+        ],
         objects={(GraphExtractionJob, JOB_ID): job},
     )
 
@@ -307,7 +344,7 @@ def _prepared():
     )
 
 
-def _provider_response(content: str) -> ProviderResponse:
+def _provider_response(content: str, *, finish_reason: str = "stop") -> ProviderResponse:
     return ProviderResponse(
         content=content,
         provider_request_id="mock-request",
@@ -316,7 +353,7 @@ def _provider_response(content: str) -> ProviderResponse:
         input_token_count=1,
         output_token_count=2,
         latency_ms=3,
-        finish_reason="stop",
+        finish_reason=finish_reason,
     )
 
 
@@ -347,7 +384,100 @@ def test_configured_provider_builds_deepseek_adapter_without_http(monkeypatch):
         model="deepseek-v4-pro",
         api_key="DEEPSEEK-TEST-KEY",
         timeout_seconds=10.0,
+        max_output_tokens=None,
     )
+
+
+def test_configured_provider_builds_local_qwen_adapter_without_http(monkeypatch):
+    from app.services import graph_extraction_worker as worker
+
+    prepared = _prepared()
+    prepared.model_config_snapshot.update(
+        {
+            "provider": "openai-compatible",
+            "base_url": "http://10.0.10.2:8113/v1",
+            "model": "qwen3.5-9b",
+        }
+    )
+    monkeypatch.setattr(
+        worker.settings,
+        "graph_extraction_api_key",
+        SecretStr("LOCAL-TEST-KEY"),
+    )
+    with patch.object(worker, "OpenAICompatibleGraphExtractor") as adapter:
+        configured = _configured_provider(prepared)
+
+    assert configured is adapter.return_value
+    adapter.assert_called_once_with(
+        base_url="http://10.0.10.2:8113/v1",
+        model="qwen3.5-9b",
+        api_key="LOCAL-TEST-KEY",
+        timeout_seconds=10.0,
+        max_output_tokens=None,
+    )
+
+
+@pytest.mark.parametrize("center_only", [False, True])
+def test_worker_selects_prompt_from_frozen_policy(center_only):
+    policy = {"candidate_review_policy": "manual_review"}
+    if center_only:
+        policy["center_only"] = True
+    job = SimpleNamespace(
+        policy_config_snapshot=policy,
+        policy_config_hash=canonical_graph_value_hash_v1(policy),
+        prompt_version=graph_extraction_prompt_version(center_only=center_only),
+        prompt_content_hash=graph_extraction_prompt_hash(center_only=center_only),
+    )
+
+    assert _center_only_prompt(job) is center_only
+
+
+def test_worker_rejects_prompt_contract_mismatch_before_provider_call():
+    policy = {"candidate_review_policy": "manual_review", "center_only": True}
+    job = SimpleNamespace(
+        policy_config_snapshot=policy,
+        policy_config_hash=canonical_graph_value_hash_v1(policy),
+        prompt_version="v1",
+        prompt_content_hash=graph_extraction_prompt_hash(),
+    )
+
+    with pytest.raises(GraphExtractionWorkerError) as exc:
+        _center_only_prompt(job)
+
+    assert exc.value.code == "prompt_contract_mismatch"
+
+
+def test_configured_provider_forwards_frozen_output_budget(monkeypatch):
+    from app.services import graph_extraction_worker as worker
+
+    prepared = _prepared()
+    prepared.model_config_snapshot["max_output_tokens"] = 3500
+    monkeypatch.setattr(
+        worker.settings,
+        "graph_extraction_api_key",
+        SecretStr("DEEPSEEK-TEST-KEY"),
+    )
+    with patch.object(worker, "OpenAICompatibleGraphExtractor") as adapter:
+        _configured_provider(prepared)
+
+    assert adapter.call_args.kwargs["max_output_tokens"] == 3500
+
+
+@pytest.mark.parametrize("value", [True, 0, -1, "3500"])
+def test_configured_provider_rejects_invalid_frozen_output_budget(monkeypatch, value):
+    from app.services import graph_extraction_worker as worker
+
+    prepared = _prepared()
+    prepared.model_config_snapshot["max_output_tokens"] = value
+    monkeypatch.setattr(
+        worker.settings,
+        "graph_extraction_api_key",
+        SecretStr("DEEPSEEK-TEST-KEY"),
+    )
+    with pytest.raises(GraphExtractionWorkerError) as exc:
+        _configured_provider(prepared)
+
+    assert exc.value.code == "provider_not_configured"
 
 
 def test_configured_provider_rejects_retired_dashscope_snapshot_before_http(
@@ -442,9 +572,7 @@ def test_orchestration_calls_provider_outside_transactions_and_persists_valid_pa
     prepared = _prepared()
     attempt = SimpleNamespace(id=uuid.uuid4())
     provider = AsyncMock()
-    provider.extract.return_value = _provider_response(
-        '{"entities":[],"relations":[]}'
-    )
+    provider.extract.return_value = _provider_response('{"entities":[],"relations":[]}')
     sessions = _SessionFactory()
 
     with (
@@ -489,6 +617,293 @@ def test_orchestration_calls_provider_outside_transactions_and_persists_valid_pa
     assert completion.request_status == "succeeded"
     assert completion.parse_status == "valid"
     persist.assert_awaited_once()
+
+
+def test_nuextract_review_calls_draft_then_qwen_and_persists_qwen_payload_only():
+    prepared = replace(
+        _prepared(),
+        context_text='{"c0":{"text":"Acme owns Project Vector."}}',
+        ontology_snapshot={
+            "entity_types": [{"key": "organization"}],
+            "relation_types": [],
+        },
+    )
+    prepared.model_config_snapshot.update(
+        {
+            "extraction_profile": "nuextract_review",
+            "nuextract": {
+                "provider": "nuextract3",
+                "base_url": "http://nuextract3-gpu0:8000/v1",
+                "model": "nuextract3",
+                "timeout_seconds": 10.0,
+                "max_output_tokens": 1000,
+            },
+        }
+    )
+    attempt = SimpleNamespace(id=uuid.uuid4())
+    draft_provider = AsyncMock()
+    draft_provider.extract.return_value = _provider_response(
+        '{"entities":[],"relations":[]}'
+    )
+    review_provider = AsyncMock()
+    review_provider.extract.return_value = _provider_response(
+        '{"entities":[],"relations":[]}'
+    )
+    sessions = _SessionFactory()
+
+    with (
+        patch(
+            "app.services.graph_extraction_worker._prepare_graph_extraction_unit",
+            new=AsyncMock(return_value=prepared),
+        ),
+        patch(
+            "app.services.graph_extraction_worker._preflight_provider_call",
+            new=AsyncMock(),
+        ),
+        patch(
+            "app.services.graph_extraction_worker._configured_nuextract_provider",
+            return_value=draft_provider,
+        ),
+        patch(
+            "app.services.graph_extraction_worker.create_pending_attempt",
+            new=AsyncMock(return_value=attempt),
+        ),
+        patch(
+            "app.services.graph_extraction_worker.finalize_attempt",
+            new=AsyncMock(return_value=True),
+        ) as finalize,
+        patch(
+            "app.services.graph_extraction_worker._persist_candidate_result",
+            new=AsyncMock(return_value=True),
+        ) as persist,
+    ):
+        result = asyncio.run(
+            process_graph_extraction_unit(
+                sessions,
+                unit_id=UNIT_ID,
+                claim_token=CLAIM_TOKEN,
+                provider=review_provider,
+                lease_seconds=180,
+                renew_seconds=30,
+                max_attempts=3,
+            )
+        )
+
+    assert result.outcome == "succeeded"
+    draft_provider.extract.assert_awaited_once()
+    review_provider.extract.assert_awaited_once()
+    review_messages = review_provider.extract.await_args.args[0]
+    assert "untrusted_nuextract_draft" in review_messages[1]["content"]
+    completion = finalize.await_args.kwargs["completion"]
+    audit = json.loads(completion.raw_response)
+    assert audit["version"] == "nuextract-review-audit-v1"
+    assert completion.parsed_response == {"entities": [], "relations": []}
+    persist.assert_awaited_once()
+
+
+def test_minstral_review_calls_local_draft_then_qwen_and_persists_qwen_payload_only():
+    prepared = replace(
+        _prepared(),
+        context_text='{"c0":{"text":"Acme owns Project Vector."}}',
+        ontology_snapshot={
+            "entity_types": [{"key": "organization"}],
+            "relation_types": [],
+        },
+    )
+    prepared.model_config_snapshot.update(
+        {
+            "extraction_profile": "minstral_review",
+            "minstral": {
+                "provider": "minstral3b",
+                "base_url": "http://graph-minstral-3b:8000/v1",
+                "model": "graph-minstral-3b",
+                "timeout_seconds": 120.0,
+                "max_output_tokens": 2000,
+            },
+        }
+    )
+    attempt = SimpleNamespace(id=uuid.uuid4())
+    draft_provider = AsyncMock()
+    draft_provider.extract.return_value = _provider_response(
+        '{"entities":[],"relations":[]}'
+    )
+    review_provider = AsyncMock()
+    review_provider.extract.return_value = _provider_response(
+        '{"entities":[],"relations":[]}'
+    )
+    sessions = _SessionFactory()
+
+    with (
+        patch(
+            "app.services.graph_extraction_worker._prepare_graph_extraction_unit",
+            new=AsyncMock(return_value=prepared),
+        ),
+        patch(
+            "app.services.graph_extraction_worker._preflight_provider_call",
+            new=AsyncMock(),
+        ),
+        patch(
+            "app.services.graph_extraction_worker._configured_minstral_provider",
+            return_value=draft_provider,
+        ),
+        patch(
+            "app.services.graph_extraction_worker.create_pending_attempt",
+            new=AsyncMock(return_value=attempt),
+        ),
+        patch(
+            "app.services.graph_extraction_worker.finalize_attempt",
+            new=AsyncMock(return_value=True),
+        ) as finalize,
+        patch(
+            "app.services.graph_extraction_worker._persist_candidate_result",
+            new=AsyncMock(return_value=True),
+        ) as persist,
+    ):
+        result = asyncio.run(
+            process_graph_extraction_unit(
+                sessions,
+                unit_id=UNIT_ID,
+                claim_token=CLAIM_TOKEN,
+                provider=review_provider,
+                lease_seconds=180,
+                renew_seconds=30,
+                max_attempts=3,
+            )
+        )
+
+    assert result.outcome == "succeeded"
+    draft_provider.extract.assert_awaited_once_with(prepared.messages)
+    review_provider.extract.assert_awaited_once()
+    review_messages = review_provider.extract.await_args.args[0]
+    assert "untrusted_minstral_draft" in review_messages[1]["content"]
+    completion = finalize.await_args.kwargs["completion"]
+    audit = json.loads(completion.raw_response)
+    assert audit["version"] == "minstral-review-audit-v1"
+    assert completion.parsed_response == {"entities": [], "relations": []}
+    persist.assert_awaited_once()
+
+
+def test_draft_pool_configures_minstral_with_strict_graph_json_schema():
+    prepared = replace(_prepared(), unit_id=uuid.UUID(int=0))
+    prepared.model_config_snapshot["draft_pool"] = [
+        {
+            "provider": "minstral3b",
+            "base_url": "http://graph-minstral-3b:8000/v1",
+            "model": "graph-minstral-3b",
+            "timeout_seconds": 120.0,
+            "max_output_tokens": 1000,
+        },
+        {
+            "provider": "qwen3-draft-4b",
+            "base_url": "http://graph-qwen3-4b:8000/v1",
+            "model": "graph-qwen3-4b",
+            "timeout_seconds": 120.0,
+            "max_output_tokens": 1000,
+        },
+    ]
+
+    with patch(
+        "app.services.graph_extraction_worker.OpenAICompatibleGraphExtractor"
+    ) as extractor:
+        provider_name, _provider = _configured_draft_pool_provider(prepared)
+
+    assert provider_name == "minstral3b"
+    response_format = extractor.call_args.kwargs["response_format"]
+    assert response_format["type"] == "json_schema"
+    assert response_format["json_schema"]["schema"]["required"] == [
+        "entities",
+        "relations",
+    ]
+
+
+def test_retry_replays_first_valid_unit_payload_without_provider_call():
+    prepared = replace(_prepared(), has_prior_attempts=True)
+    replay = GraphExtractionPayload(entities=[], relations=[])
+    sessions = _SessionFactory()
+    provider = AsyncMock()
+
+    with (
+        patch(
+            "app.services.graph_extraction_worker._prepare_graph_extraction_unit",
+            new=AsyncMock(return_value=prepared),
+        ),
+        patch(
+            "app.services.graph_extraction_worker._load_prepared_replay",
+            new=AsyncMock(return_value=replay),
+        ) as load_replay,
+        patch(
+            "app.services.graph_extraction_worker.create_pending_attempt",
+            new=AsyncMock(),
+        ) as create_attempt,
+        patch(
+            "app.services.graph_extraction_worker._persist_candidate_result",
+            new=AsyncMock(return_value=True),
+        ) as persist,
+    ):
+        result = asyncio.run(
+            process_graph_extraction_unit(
+                sessions,
+                unit_id=UNIT_ID,
+                claim_token=CLAIM_TOKEN,
+                provider=provider,
+                max_attempts=3,
+            )
+        )
+
+    assert result == GraphExtractionProcessResult(
+        "succeeded",
+        ready_for_materialization=True,
+    )
+    load_replay.assert_awaited_once_with(sessions, prepared)
+    create_attempt.assert_not_awaited()
+    provider.extract.assert_not_awaited()
+    persist.assert_awaited_once_with(
+        sessions,
+        prepared=prepared,
+        payload=replay,
+    )
+
+
+def test_candidate_database_failure_reaches_worker_reconnect_boundary():
+    prepared = replace(_prepared(), has_prior_attempts=True)
+    replay = GraphExtractionPayload(entities=[], relations=[])
+    sessions = _SessionFactory()
+    database_error = DBAPIError(
+        statement=None,
+        params=None,
+        orig=ConnectionResetError("database reset"),
+        connection_invalidated=True,
+    )
+
+    with (
+        patch(
+            "app.services.graph_extraction_worker._prepare_graph_extraction_unit",
+            new=AsyncMock(return_value=prepared),
+        ),
+        patch(
+            "app.services.graph_extraction_worker._load_prepared_replay",
+            new=AsyncMock(return_value=replay),
+        ),
+        patch(
+            "app.services.graph_extraction_worker._persist_candidate_result",
+            new=AsyncMock(side_effect=database_error),
+        ),
+        patch(
+            "app.services.graph_extraction_worker._finish_claim_after_error",
+            new=AsyncMock(),
+        ) as finish,
+        pytest.raises(DBAPIError),
+    ):
+        asyncio.run(
+            process_graph_extraction_unit(
+                sessions,
+                unit_id=UNIT_ID,
+                claim_token=CLAIM_TOKEN,
+                max_attempts=3,
+            )
+        )
+
+    finish.assert_not_awaited()
 
 
 @pytest.mark.parametrize("category", ["timeout", "network_error", "http_error"])
@@ -545,6 +960,57 @@ def test_provider_failure_finalizes_attempt_and_fails_unit_without_candidate_wri
     completion = finalize.await_args.kwargs["completion"]
     assert completion.request_status == category
     finish.assert_awaited_once()
+    persist.assert_not_awaited()
+
+
+def test_parseable_truncated_single_unit_is_not_persisted():
+    prepared = _prepared()
+    attempt = SimpleNamespace(id=uuid.uuid4())
+    provider = AsyncMock()
+    provider.extract.return_value = _provider_response(
+        json.dumps({"entities": [], "relations": []}),
+        finish_reason="length",
+    )
+    sessions = _SessionFactory()
+
+    with (
+        patch(
+            "app.services.graph_extraction_worker._prepare_graph_extraction_unit",
+            new=AsyncMock(return_value=prepared),
+        ),
+        patch(
+            "app.services.graph_extraction_worker._preflight_provider_call",
+            new=AsyncMock(),
+        ),
+        patch(
+            "app.services.graph_extraction_worker.create_pending_attempt",
+            new=AsyncMock(return_value=attempt),
+        ),
+        patch(
+            "app.services.graph_extraction_worker.finalize_attempt",
+            new=AsyncMock(return_value=True),
+        ) as finalize,
+        patch(
+            "app.services.graph_extraction_worker._finish_claim_after_error",
+            new=AsyncMock(return_value=True),
+        ),
+        patch(
+            "app.services.graph_extraction_worker._persist_candidate_result",
+            new=AsyncMock(),
+        ) as persist,
+    ):
+        result = asyncio.run(
+            process_graph_extraction_unit(
+                sessions,
+                unit_id=UNIT_ID,
+                claim_token=CLAIM_TOKEN,
+                provider=provider,
+                max_attempts=3,
+            )
+        )
+
+    assert result.outcome == "failed"
+    assert finalize.await_args.kwargs["completion"].parse_status == "invalid_json"
     persist.assert_not_awaited()
 
 
@@ -658,7 +1124,7 @@ def test_watch_entrypoint_delegates_to_active_worker_with_m5_heartbeat(monkeypat
     monkeypatch.setattr(heartbeat, "heartbeat_loop", AsyncMock())
     monkeypatch.setattr(heartbeat, "beat", AsyncMock(return_value=True))
     active = AsyncMock()
-    monkeypatch.setattr(worker_service, "run_graph_extraction_worker", active)
+    monkeypatch.setattr(worker_service, "run_graph_extraction_worker_pool", active)
 
     asyncio.run(graph_extractor.run(watch=True))
 
@@ -671,6 +1137,84 @@ def test_watch_entrypoint_delegates_to_active_worker_with_m5_heartbeat(monkeypat
     }
 
 
+def test_watch_entrypoint_reconnects_after_transient_database_failure(monkeypatch):
+    from app import db as db_module
+    from app.services import graph_extraction_worker as worker_service
+    from app.services import heartbeat
+    from app.workers import graph_extractor
+
+    monkeypatch.setattr(graph_extractor.settings, "graph_extraction_enabled", True)
+    monkeypatch.setattr(graph_extractor, "validate_graph_extraction_startup", lambda _: None)
+    monkeypatch.setattr(heartbeat, "make_instance_id", lambda: "worker-instance")
+    monkeypatch.setattr(heartbeat, "heartbeat_loop", AsyncMock())
+    monkeypatch.setattr(heartbeat, "beat", AsyncMock(return_value=True))
+    active = AsyncMock(side_effect=[ConnectionResetError("database reset"), None])
+    monkeypatch.setattr(worker_service, "run_graph_extraction_worker_pool", active)
+    engine = SimpleNamespace(dispose=AsyncMock())
+    monkeypatch.setattr(db_module, "get_engine", lambda: engine)
+    sleep = AsyncMock()
+    monkeypatch.setattr(graph_extractor.asyncio, "sleep", sleep)
+
+    asyncio.run(graph_extractor.run(watch=True))
+
+    assert active.await_count == 2
+    engine.dispose.assert_awaited_once()
+    sleep.assert_awaited_once()
+    metadata = active.await_args_list[-1].kwargs["metadata"]
+    assert metadata["database_reconnects"] == 1
+
+
+def test_worker_pool_starts_four_controlled_loops_with_unique_ids(monkeypatch):
+    from app.services import graph_extraction_worker as worker
+
+    monkeypatch.setattr(worker.settings, "graph_extraction_worker_concurrency", 4)
+    active = AsyncMock()
+    monkeypatch.setattr(worker, "run_graph_extraction_worker", active)
+    metadata = {}
+
+    asyncio.run(
+        worker.run_graph_extraction_worker_pool(
+            watch=False, metadata=metadata, session_factory=_SessionFactory()
+        )
+    )
+
+    assert active.await_count == 4
+    assert metadata["worker_concurrency"] == 4
+    maintenance_roles = [
+        call.kwargs["maintenance_enabled"] for call in active.await_args_list
+    ]
+    assert maintenance_roles.count(True) == 1
+    assert maintenance_roles.count(False) == 3
+    assert len({worker.graph_extraction_worker_id() for _ in range(4)}) == 4
+
+
+def test_worker_pool_restarts_only_the_loop_with_transient_database_failure(
+    monkeypatch,
+):
+    from app.services import graph_extraction_worker as worker
+
+    monkeypatch.setattr(worker.settings, "graph_extraction_worker_concurrency", 2)
+    active = AsyncMock(
+        side_effect=[ConnectionResetError("database reset"), None, None]
+    )
+    monkeypatch.setattr(worker, "run_graph_extraction_worker", active)
+    sleep = AsyncMock()
+    monkeypatch.setattr(worker.asyncio, "sleep", sleep)
+    metadata = {}
+
+    asyncio.run(
+        worker.run_graph_extraction_worker_pool(
+            watch=True,
+            metadata=metadata,
+            session_factory=_SessionFactory(),
+        )
+    )
+
+    assert active.await_count == 3
+    sleep.assert_awaited_once()
+    assert metadata["database_reconnects"] == 1
+
+
 def test_worker_materializes_only_when_processing_marks_job_ready():
     unit = _unit()
     unit.claim_token = CLAIM_TOKEN
@@ -680,6 +1224,10 @@ def test_worker_materializes_only_when_processing_marks_job_ready():
         patch(
             "app.services.graph_extraction_worker.recover_stale_graph_extraction_units",
             new=AsyncMock(return_value=StaleUnitRecoveryResult(0, 0, 0)),
+        ),
+        patch(
+            "app.services.graph_extraction_batch_eval.claim_eval_graph_extraction_batch",
+            new=AsyncMock(return_value=()),
         ),
         patch(
             "app.services.graph_extraction_worker.claim_graph_extraction_unit",
@@ -696,10 +1244,12 @@ def test_worker_materializes_only_when_processing_marks_job_ready():
         ),
         patch(
             "app.services.graph_extraction_materializer.materialize_graph_extraction_job",
-            new=AsyncMock(
-                return_value=SimpleNamespace(already_materialized=False)
-            ),
+            new=AsyncMock(return_value=SimpleNamespace(already_materialized=False)),
         ) as materialize,
+        patch(
+            "app.services.graph_extraction_auto_publication.auto_publish_graph_extraction_job",
+            new=AsyncMock(return_value=SimpleNamespace(outcome="activated")),
+        ) as publish,
     ):
         asyncio.run(
             run_graph_extraction_worker(
@@ -710,5 +1260,45 @@ def test_worker_materializes_only_when_processing_marks_job_ready():
         )
 
     materialize.assert_awaited_once_with(sessions, job_id=JOB_ID)
+    publish.assert_awaited_once_with(sessions, job_id=JOB_ID)
     assert metadata["claimed"] == 1
     assert metadata["succeeded"] == 1
+    assert metadata["published"] == 1
+
+
+def test_center_only_evidence_rejects_neighbor_context_refs():
+    payload = GraphExtractionPayload.model_validate(
+        {
+            "entities": [
+                {
+                    "local_id": "e1",
+                    "name": "Example",
+                    "entity_type_key": "term",
+                    "confidence": 0.9,
+                    "evidence": [{"context_ref": "p1", "quote": "Example"}],
+                }
+            ],
+            "relations": [],
+        }
+    )
+    with pytest.raises(GraphExtractionWorkerError) as exc:
+        _validate_center_only_evidence(payload)
+    assert exc.value.code == "neighbor_evidence_forbidden"
+
+
+def test_center_only_evidence_accepts_center_context_refs():
+    payload = GraphExtractionPayload.model_validate(
+        {
+            "entities": [
+                {
+                    "local_id": "e1",
+                    "name": "Example",
+                    "entity_type_key": "term",
+                    "confidence": 0.9,
+                    "evidence": [{"context_ref": "c0", "quote": "Example"}],
+                }
+            ],
+            "relations": [],
+        }
+    )
+    _validate_center_only_evidence(payload)

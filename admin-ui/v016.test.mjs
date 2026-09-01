@@ -44,7 +44,8 @@ const icons = [
     'mdi:key-variant', 'mdi:account-group-outline', 'mdi:bookshelf',
     'mdi:shield-key-outline', 'mdi:cog-sync-outline', 'mdi:heart-pulse', 'mdi:history',
     'mdi:comment-text-multiple-outline', 'mdi:chevron-down', 'mdi:lock-reset',
-    'mdi:logout', 'mdi:menu', 'mdi:backburger', 'carbon:chart-relationship',
+    'mdi:logout', 'mdi:menu', 'mdi:backburger', 'mdi:refresh',
+    'mdi:certificate-outline', 'mdi:publish', 'carbon:chart-relationship',
 ];
 
 for (const name of icons) {
@@ -64,9 +65,9 @@ const fallback = iconSvg('mdi:nonexistent-xyz');
 ok('未知图标回退 SVG', fallback.startsWith('<svg'));
 contains('回退图标含 fallback path', fallback, '<path');
 
-// Carbon 图标使用更大 viewBox 避免裁切
+// 知识图谱素材使用标准 24×24 viewBox
 const carbon = iconSvg('carbon:chart-relationship');
-contains('carbon 使用 32×32 viewBox', carbon, 'viewBox="0 0 32 32"');
+contains('知识图谱素材使用 24×24 viewBox', carbon, 'viewBox="0 0 24 24"');
 
 // ── 所有图标不包含公网 CDN URL（SVG namespace http://www.w3.org 除外）──
 for (const name of icons) {
@@ -217,7 +218,7 @@ const JS_FILES = [
     'src/app.js', 'src/api.js', 'src/api_errors.js', 'src/icons.js',
     'src/views/Chat.js', 'src/views/Login.js', 'src/views/Layout.js',
     'src/views/Users.js', 'src/views/Import.js', 'src/views/Dashboard.js',
-    'src/views/Libraries.js', 'src/views/Documents.js', 'src/views/Search.js',
+    'src/views/Libraries.js', 'src/views/Search.js',
     'src/views/ApiKeys.js', 'src/views/Permissions.js', 'src/views/Jobs.js',
     'src/views/RuntimeStatus.js', 'src/views/Audit.js', 'src/views/ChatLogs.js',
     'src/views/import_errors.js',

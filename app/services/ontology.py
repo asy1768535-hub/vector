@@ -108,6 +108,8 @@ async def create_ontology_version(
     status: str = ONTOLOGY_STATUS_DRAFT,
     description: str | None = None,
     parent_version_id: uuid.UUID | None = None,
+    origin: str = "user",
+    confirmed: bool = True,
 ) -> OntologyVersion:
     if parent_version_id is not None:
         parent = await get_ontology_version(db, library, parent_version_id)
@@ -119,6 +121,8 @@ async def create_ontology_version(
         version_no=version_no,
         status=status,
         description=description,
+        origin=origin,
+        confirmed=confirmed,
         parent_version_id=parent_version_id,
     )
     db.add(ontology)
@@ -163,6 +167,7 @@ async def create_entity_type(
     library: Library,
     ontology_version_id: uuid.UUID,
     *,
+    object_id: uuid.UUID | None = None,
     key: str,
     label: str,
     description: str | None = None,
@@ -173,6 +178,7 @@ async def create_entity_type(
     ontology = await get_ontology_version(db, library, ontology_version_id)
     require_ontology_mutable(ontology)
     row = EntityType(
+        id=object_id or uuid.uuid4(),
         library_id=library.id,
         ontology_version_id=ontology.id,
         key=key,
@@ -231,6 +237,7 @@ async def create_relation_type(
     library: Library,
     ontology_version_id: uuid.UUID,
     *,
+    object_id: uuid.UUID | None = None,
     key: str,
     label: str,
     direction: str,
@@ -244,6 +251,7 @@ async def create_relation_type(
     ontology = await get_ontology_version(db, library, ontology_version_id)
     require_ontology_mutable(ontology)
     row = RelationType(
+        id=object_id or uuid.uuid4(),
         library_id=library.id,
         ontology_version_id=ontology.id,
         key=key,
@@ -305,6 +313,7 @@ async def create_relation_type_constraint(
     library: Library,
     ontology_version_id: uuid.UUID,
     *,
+    object_id: uuid.UUID | None = None,
     relation_type_id: uuid.UUID,
     source_entity_type_id: uuid.UUID,
     target_entity_type_id: uuid.UUID,
@@ -322,6 +331,7 @@ async def create_relation_type_constraint(
     _require_same_scope(target_entity_type, library.id, ontology.id, "target entity type")
 
     row = RelationTypeConstraint(
+        id=object_id or uuid.uuid4(),
         library_id=library.id,
         ontology_version_id=ontology.id,
         relation_type_id=relation_type.id,
@@ -401,6 +411,7 @@ async def create_attribute_definition(
     library: Library,
     ontology_version_id: uuid.UUID,
     *,
+    object_id: uuid.UUID | None = None,
     owner_kind: str,
     owner_type_id: uuid.UUID,
     key: str,
@@ -419,6 +430,7 @@ async def create_attribute_definition(
         raise ValueError("enum attribute definitions require enum_values")
 
     row = AttributeDefinition(
+        id=object_id or uuid.uuid4(),
         library_id=library.id,
         ontology_version_id=ontology.id,
         owner_kind=owner_kind,

@@ -67,6 +67,18 @@ class ExtractionRawOutputAttempt(Base):
             "AND parse_error IS NULL)",
             name="ck_extraction_raw_attempts_payload_or_purged",
         ),
+        CheckConstraint(
+            "(batch_request_id IS NULL AND batch_key IS NULL AND batch_ordinal IS NULL) OR "
+            "(batch_request_id IS NOT NULL AND batch_key IS NOT NULL AND batch_ordinal IS NOT NULL)",
+            name="ck_extraction_raw_attempts_batch_membership",
+        ),
+        CheckConstraint(
+            "batch_ordinal IS NULL OR batch_ordinal BETWEEN 0 AND 7",
+            name="ck_extraction_raw_attempts_batch_ordinal",
+        ),
+        UniqueConstraint(
+            "batch_request_id", "batch_key", name="uq_extraction_raw_attempts_batch_key"
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -90,6 +102,11 @@ class ExtractionRawOutputAttempt(Base):
         ),
         nullable=False,
     )
+    batch_request_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PgUUID(as_uuid=True), nullable=True
+    )
+    batch_key: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    batch_ordinal: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     attempt_no: Mapped[int] = mapped_column(Integer, nullable=False)
     claim_token: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
     request_status: Mapped[str] = mapped_column(
@@ -137,4 +154,9 @@ Index(
     "ix_extraction_raw_attempts_purge",
     ExtractionRawOutputAttempt.purged_at,
     ExtractionRawOutputAttempt.created_at,
+)
+Index(
+    "ix_extraction_raw_attempts_batch_request",
+    ExtractionRawOutputAttempt.batch_request_id,
+    ExtractionRawOutputAttempt.batch_ordinal,
 )

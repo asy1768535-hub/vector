@@ -6,6 +6,8 @@ import uuid
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from app.schemas.dify import DifyRetrievalRequest, DifyRetrievalResponse
 from app.services import retrieval as R
 
@@ -105,8 +107,8 @@ def test_hybrid_degrades_to_dense_without_db():
 # ── RRF 融合排序稳定 + keyword-only 进结果 ──────────────────────────────────
 def test_rrf_fusion_stable_and_keyword_only_enters():
     # dense: a(rank1), b(rank2)；keyword: a(rank1), c(rank2, 文件名命中, dense 没有)
-    dense = [_dense("a", 0.9), _dense("b", 0.5)]
-    keyword = [_kw("a", 0.8), _kw("c", 0.7, title="JGJ250-2011职业标准", external_id="JGJ250-2011")]
+    dense = [_dense("a", 0.9, text="A"), _dense("b", 0.5, text="B")]
+    keyword = [_kw("a", 0.8, text="A"), _kw("c", 0.7, text="C", title="JGJ250-2011职业标准", external_id="JGJ250-2011")]
     resp, *_ = _run(_req(top_k=5), mode="hybrid", dense=dense, keyword=keyword,
                     db=object(), library=_Lib())
     ids = [r.metadata["document_id"] for r in resp.records]
@@ -121,10 +123,60 @@ def test_rrf_fusion_stable_and_keyword_only_enters():
     assert by["c"].metadata["rrf_score"] > 0
 
 
+def test_rrf_ties_are_stable_across_input_order():
+    dense = [_dense("b", 0.8), _dense("a", 0.8)]
+    keyword = [_kw("d", 0.7), _kw("c", 0.7)]
+
+    first = R._rrf_fuse(dense, keyword, k=60)
+    second = R._rrf_fuse(list(reversed(dense)), list(reversed(keyword)), k=60)
+
+    assert [item["id"] for item in first] == [item["id"] for item in second]
+    assert [item["id"] for item in first] == ["a", "c", "b", "d"]
+
+
+def test_deterministic_dense_control_uses_exact_pool_of_50():
+    with patch.object(R.embedding, "embed_one", new=AsyncMock(return_value=[0.1] * 8)), \
+         patch.object(R.qdrant, "search", new=AsyncMock(return_value=[])) as search, \
+         patch.object(R.rerank_svc, "is_configured", return_value=False), \
+         patch.object(R.rerank_svc, "rank_candidates", new=AsyncMock(return_value=([], {}))):
+        asyncio.run(
+            R.run_retrieval(
+                collection="c",
+                embedding_model="m",
+                embedding_base_url=None,
+                request=_req(top_k=10),
+                retrieval_mode="dense",
+                candidate_k=50,
+                exact_vector_search=True,
+            )
+        )
+
+    assert search.await_args.kwargs["limit"] == 50
+    assert search.await_args.kwargs["exact"] is True
+
+
+@pytest.mark.parametrize("candidate_k", [0, 201])
+def test_candidate_pool_is_positive_and_bounded(candidate_k, monkeypatch):
+    monkeypatch.setattr(R.settings, "visibility_overfetch_max", 200)
+
+    with pytest.raises(ValueError, match="candidate_k"):
+        asyncio.run(
+            R.run_retrieval(
+                collection="c",
+                embedding_model="m",
+                embedding_base_url=None,
+                request=_req(top_k=10),
+                retrieval_mode="dense",
+                candidate_k=candidate_k,
+                exact_vector_search=True,
+            )
+        )
+
+
 # ── rerank 在融合后执行 ──────────────────────────────────────────────────────
 def test_rerank_runs_after_fusion():
-    dense = [_dense("a", 0.9), _dense("b", 0.1)]
-    keyword = [_kw("c", 0.7)]
+    dense = [_dense("a", 0.9, text="A"), _dense("b", 0.1, text="B")]
+    keyword = [_kw("c", 0.7, text="C")]
     # 融合后 RRF 序 = [a, c, b]（a/c 同分按插入序 dense 先，b rank2 略低）；reranker 把 b 顶到第一
     rank_return = ([2, 0, 1], {2: 0.95, 0: 0.6, 1: 0.3})
     resp, _ms, _kwc, rank = _run(
@@ -149,6 +201,66 @@ def test_threshold_skipped_for_hybrid_without_rerank():
     assert len(resp.records) == 1            # 未被 rrf<0.3 误杀
 
 
+def test_hybrid_rejects_weak_dense_evidence_before_rrf_thresholding():
+    resp, *_ = _run(
+        _req(top_k=5, threshold=0.9),
+        mode="hybrid",
+        dense=[_dense("weak", 0.2, text="weak")],
+        keyword=[_kw("weak", 0.9, text="weak")],
+        db=object(),
+        library=_Lib(),
+    )
+
+    assert resp.records == []
+    assert resp.retrieval_debug["evidence"] == {
+        "status": "insufficient",
+        "policy": "hybrid_dense_minimum",
+        "dense_minimum": 0.55,
+        "max_dense_score": 0.2,
+        "qualified_count": 0,
+        "reason": "dense_score_below_minimum",
+    }
+
+
+def test_duplicate_content_uses_one_slot_and_keeps_bounded_sources():
+    first = _dense("doc-a", 0.95, text="same content")
+    first["payload"].update(
+        document_revision_id="rev-a",
+        document_revision=1,
+        source_path="/contracts/a.pdf",
+    )
+    second = _dense("doc-b", 0.90, text="same   content")
+    second["payload"].update(
+        document_revision_id="rev-b",
+        document_revision=2,
+        source_path="/archive/b.pdf",
+    )
+
+    resp, *_ = _run(
+        _req(top_k=2),
+        mode="dense",
+        dense=[first, second],
+        db=None,
+        library=None,
+    )
+
+    assert len(resp.records) == 1
+    metadata = resp.records[0].metadata
+    assert metadata["document_id"] == "doc-a"
+    assert metadata["duplicate_count"] == 1
+    assert metadata["duplicate_sources"] == [
+        {
+            "document_id": "doc-b",
+            "document_revision_id": "rev-b",
+            "document_revision": "2",
+            "source_path": "/archive/b.pdf",
+            "chunk_id": "doc-b",
+            "title": "t-doc-b",
+        }
+    ]
+    assert resp.retrieval_debug["duplicate_suppressed"] == 1
+
+
 def test_threshold_applies_to_hybrid_rerank_score():
     dense = [_dense("a", 0.9), _dense("b", 0.5)]
     keyword = [_kw("a", 0.8)]
@@ -158,6 +270,31 @@ def test_threshold_applies_to_hybrid_rerank_score():
                     rerank=True, rank_return=rank_return, db=object(), library=_Lib())
     ids = [r.metadata["document_id"] for r in resp.records]
     assert ids == ["a"]                      # 阈值作用在 rerank 分上，语义正常
+
+
+def test_hybrid_rejects_successful_but_low_rerank_evidence():
+    dense = [_dense("a", 0.9)]
+    keyword = [_kw("a", 0.8)]
+    resp, *_ = _run(
+        _req(top_k=5),
+        mode="hybrid",
+        dense=dense,
+        keyword=keyword,
+        rerank=True,
+        rank_return=([0], {0: 0.01}),
+        db=object(),
+        library=_Lib(),
+    )
+
+    assert resp.records == []
+    assert resp.retrieval_debug["evidence"] == {
+        "status": "insufficient",
+        "policy": "rerank_minimum",
+        "rerank_minimum": 0.05,
+        "max_rerank_score": 0.01,
+        "qualified_count": 0,
+        "reason": "rerank_score_below_minimum",
+    }
 
 
 # ── 可见性过滤在 hybrid 仍生效 ──────────────────────────────────────────────

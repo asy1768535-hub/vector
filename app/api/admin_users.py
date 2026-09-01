@@ -1,4 +1,5 @@
 """admin 用户管理。仅 superuser 可访问。"""
+
 from __future__ import annotations
 
 import uuid
@@ -42,7 +43,9 @@ async def create_user(
         raise HTTPException(status.HTTP_409_CONFLICT, "email already registered") from exc
 
     await audit_log.record(
-        db, actor.id, "user.create",
+        db,
+        actor.id,
+        "user.create",
         {"user_id": str(user.id), "email": user.email, "is_superuser": user.is_superuser},
     )
     await db.commit()
@@ -62,6 +65,20 @@ async def list_users(
         stmt = stmt.where(User.deleted_at.is_(None))
     rows = await db.execute(stmt)
     return list(rows.scalars().all())
+
+
+@router.get("/_stats/count")
+async def user_count(
+    _: User = Depends(current_superuser),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, int]:
+    total = (await db.execute(select(func.count(User.id)))).scalar_one()
+    active = (
+        await db.execute(
+            select(func.count(User.id)).where(User.is_active.is_(True), User.deleted_at.is_(None))
+        )
+    ).scalar_one()
+    return {"total": int(total), "active": int(active)}
 
 
 @router.get("/{user_id}", response_model=AdminUserRead)
@@ -143,15 +160,3 @@ async def disable_user(
     await audit_log.record(db, actor.id, "user.disable", {"user_id": str(user.id)})
     await db.commit()
     return None
-
-
-@router.get("/_stats/count")
-async def user_count(
-    _: User = Depends(current_superuser),
-    db: AsyncSession = Depends(get_db),
-) -> dict[str, int]:
-    total = (await db.execute(select(func.count(User.id)))).scalar_one()
-    active = (await db.execute(
-        select(func.count(User.id)).where(User.is_active.is_(True), User.deleted_at.is_(None))
-    )).scalar_one()
-    return {"total": int(total), "active": int(active)}

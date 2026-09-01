@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -23,6 +24,21 @@ _NORMALIZATION_SCORES_V1 = {
     "new_entity": 0.9,
     "ambiguous": 0.0,
 }
+_CONCEPTUAL_ENTITY_TYPE_KEYS = frozenset({"concept", "term"})
+_GENERIC_ENTITY_NAMES = frozenset({"重大", "较大", "稳定性", "概况", "安排", "处理"})
+_DATE_ONLY_NAME = re.compile(
+    r"^(?:\d{4}[-/.年])?\d{1,2}[-/.月]\d{1,2}(?:日)?$"
+)
+_IP_ADDRESS_NAME = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?$")
+_SECTION_HEADING_NAME = re.compile(r"^\d+(?:\.\d+)*\s+\S+")
+_GENERIC_ACTION_NAMES = frozenset(
+    {
+        "\u64cd\u4f5c\u5b89\u6392",
+        "\u5de5\u4f5c\u5b89\u6392",
+        "\u5b9e\u65bd\u5b89\u6392",
+        "\u8be6\u7ec6\u8bbe\u8ba1\u4e0e\u7f16\u7801\u8854\u63a5",
+    }
+)
 
 
 class ConfidencePolicyError(ValueError):
@@ -35,6 +51,7 @@ class ConfidencePolicyError(ValueError):
 class ConfidencePolicyV1:
     entity_materialization_threshold: float = 0.85
     relation_draft_threshold: float = 0.85
+    candidate_review_policy: str = "manual_review"
 
 
 @dataclass(frozen=True)
@@ -48,6 +65,9 @@ class JobCandidateRouteResult:
     validated_count: int
     pending_review_count: int
     rejected_count: int
+    entity_status_counts: dict[str, int]
+    relation_status_counts: dict[str, int]
+    failure_reasons: dict[str, dict[str, int]]
 
 
 def _bounded_component(value: Any, *, label: str) -> float:
@@ -108,7 +128,13 @@ def load_confidence_policy_v1(job: Any) -> ConfidencePolicyV1:
         raise ConfidencePolicyError(
             "invalid_confidence_policy", "v1 Evidence Group policy must be all_claims_valid"
         )
-    return ConfidencePolicyV1()
+    candidate_review_policy = snapshot.get("candidate_review_policy", "manual_review")
+    if candidate_review_policy not in {"manual_review", "precision_first_auto"}:
+        raise ConfidencePolicyError(
+            "invalid_confidence_policy",
+            "v1 Candidate review policy is not supported",
+        )
+    return ConfidencePolicyV1(candidate_review_policy=candidate_review_policy)
 
 
 def route_entity_candidate_v1(
@@ -121,21 +147,42 @@ def route_entity_candidate_v1(
     matched_entity_id: Any | None,
     final_confidence: float,
     threshold: float = 0.85,
+    automatic: bool = False,
+    generic_name: bool = False,
+    conceptual: bool = False,
+    repeated_evidence: bool = True,
 ) -> CandidateRoute:
     if schema_invalid:
         return CandidateRoute("rejected", "schema_invalid")
     if evidence_invalid:
         return CandidateRoute("rejected", "evidence_invalid")
+    if generic_name:
+        return CandidateRoute("rejected", "generic_entity_name")
     if evidence_ambiguous:
-        return CandidateRoute("pending_review", "evidence_ambiguous")
+        return CandidateRoute(
+            "rejected" if automatic else "pending_review",
+            "evidence_ambiguous",
+        )
     if normalization_method == "ambiguous":
-        return CandidateRoute("pending_review", "entity_match_ambiguous")
+        return CandidateRoute(
+            "rejected" if automatic else "pending_review",
+            "entity_match_ambiguous",
+        )
     if has_open_conflict:
-        return CandidateRoute("pending_review", "conflict_open")
-    if matched_entity_id is not None:
+        return CandidateRoute(
+            "rejected" if automatic else "pending_review",
+            "conflict_open",
+        )
+    if conceptual and not repeated_evidence:
+        return CandidateRoute("pending_review", "concept_single_occurrence")
+    if matched_entity_id is not None and not automatic:
         return CandidateRoute("validated", None)
+    _bounded_component(final_confidence, label="final confidence")
     if final_confidence < threshold:
-        return CandidateRoute("pending_review", "low_confidence")
+        return CandidateRoute(
+            "rejected" if automatic else "pending_review",
+            "low_confidence",
+        )
     return CandidateRoute("validated", None)
 
 
@@ -150,24 +197,46 @@ def route_relation_candidate_v1(
     endpoint_pending_review: bool,
     evidence_support_mode: str,
     final_confidence: float,
+    threshold: float = 0.85,
+    automatic: bool = False,
+    self_relation: bool = False,
 ) -> CandidateRoute:
     if schema_invalid:
         return CandidateRoute("rejected", "schema_invalid")
     if evidence_invalid:
         return CandidateRoute("rejected", "evidence_invalid")
+    if self_relation:
+        return CandidateRoute("rejected", "self_relation")
     if endpoint_rejected:
         return CandidateRoute("rejected", "endpoint_rejected")
     if evidence_ambiguous:
-        return CandidateRoute("pending_review", "evidence_ambiguous")
+        return CandidateRoute(
+            "rejected" if automatic else "pending_review",
+            "evidence_ambiguous",
+        )
     if schema_boundary_unclear:
-        return CandidateRoute("pending_review", "schema_boundary_unclear")
+        return CandidateRoute(
+            "rejected" if automatic else "pending_review",
+            "schema_boundary_unclear",
+        )
     if has_open_conflict:
-        return CandidateRoute("pending_review", "conflict_open")
+        return CandidateRoute(
+            "rejected" if automatic else "pending_review",
+            "conflict_open",
+        )
     if endpoint_pending_review:
-        return CandidateRoute("pending_review", "endpoint_pending_review")
+        return CandidateRoute(
+            "rejected" if automatic else "pending_review",
+            "endpoint_pending_review",
+        )
     if evidence_support_mode == "evidence_group":
-        return CandidateRoute("pending_review", "evidence_group")
+        return CandidateRoute(
+            "rejected" if automatic else "pending_review",
+            "evidence_group_unsupported" if automatic else "evidence_group",
+        )
     _bounded_component(final_confidence, label="final confidence")
+    if automatic and final_confidence < threshold:
+        return CandidateRoute("rejected", "low_confidence")
     return CandidateRoute("validated", None)
 
 
@@ -178,6 +247,33 @@ def _evidence_flags(rows: Iterable[Any]) -> tuple[bool, bool]:
     return (
         any(row.validation_status == "invalid" for row in values),
         any(row.validation_status == "ambiguous" for row in values),
+    )
+
+
+def _valid_evidence_chunk_count(rows: Iterable[Any]) -> int:
+    return len(
+        {
+            row.resolved_chunk_id
+            for row in rows
+            if row.validation_status == "valid" and row.resolved_chunk_id is not None
+        }
+    )
+
+
+def _is_conceptual_entity(candidate: Any) -> bool:
+    return str(candidate.entity_type_key).strip().casefold() in _CONCEPTUAL_ENTITY_TYPE_KEYS
+
+
+def _has_generic_entity_name(candidate: Any) -> bool:
+    value = candidate.normalized_name or candidate.canonical_name or ""
+    normalized = str(value).strip().casefold()
+    return (
+        normalized in _GENERIC_ENTITY_NAMES
+        or bool(_SECTION_HEADING_NAME.fullmatch(normalized))
+        or normalized in _GENERIC_ACTION_NAMES
+        or bool(_DATE_ONLY_NAME.fullmatch(normalized))
+        or bool(_IP_ADDRESS_NAME.fullmatch(normalized))
+        or normalized.startswith(("http://", "https://", "/api/", "api/"))
     )
 
 
@@ -193,6 +289,43 @@ def _append_error(candidate: Any, code: str) -> None:
             item.get("value_hash", "") if isinstance(item, dict) else "",
         ),
     )
+
+
+def _candidate_status_counts(candidates: Iterable[Any]) -> dict[str, int]:
+    counts = {"validated": 0, "pending_review": 0, "rejected": 0}
+    for candidate in candidates:
+        if candidate.status in counts:
+            counts[candidate.status] += 1
+    return counts
+
+
+def _candidate_failure_reasons(candidates: Iterable[Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for candidate in candidates:
+        if candidate.review_reason:
+            counts[candidate.review_reason] = counts.get(candidate.review_reason, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _apply_concept_relation_gate(
+    entity_candidates: Iterable[Any],
+    relation_candidates: Iterable[Any],
+) -> None:
+    related_entity_ids = {
+        endpoint_id
+        for relation in relation_candidates
+        if relation.status == "validated"
+        for endpoint_id in (relation.source_candidate_id, relation.target_candidate_id)
+    }
+    for candidate in entity_candidates:
+        if (
+            candidate.status == "validated"
+            and _is_conceptual_entity(candidate)
+            and candidate.id not in related_entity_ids
+        ):
+            candidate.status = "pending_review"
+            candidate.review_reason = "concept_missing_valid_relation"
+            _append_error(candidate, candidate.review_reason)
 
 
 async def apply_job_candidate_routes(db, *, job: Any) -> JobCandidateRouteResult:
@@ -219,6 +352,28 @@ async def apply_job_candidate_routes(db, *, job: Any) -> JobCandidateRouteResult
     entity_evidence: dict[Any, list[Any]] = {}
     for row in entity_evidence_result.scalars().all():
         entity_evidence.setdefault(row.candidate_id, []).append(row)
+
+    relation_evidence_result = await db.execute(
+        select(GraphRelationCandidateEvidence).where(
+            GraphRelationCandidateEvidence.job_id == job.id,
+            GraphRelationCandidateEvidence.purged_at.is_(None),
+        )
+    )
+    relation_evidence: dict[Any, list[Any]] = {}
+    for row in relation_evidence_result.scalars().all():
+        relation_evidence.setdefault(row.candidate_id, []).append(row)
+
+    relation_result = await db.execute(
+        select(GraphRelationCandidate)
+        .where(
+            GraphRelationCandidate.job_id == job.id,
+            GraphRelationCandidate.purged_at.is_(None),
+            GraphRelationCandidate.status.notin_({"materialized", "superseded"}),
+        )
+        .order_by(GraphRelationCandidate.candidate_key)
+        .with_for_update()
+    )
+    relation_candidates = list(relation_result.scalars().all())
 
     entity_result = await db.execute(
         select(GraphEntityCandidate)
@@ -267,6 +422,12 @@ async def apply_job_candidate_routes(db, *, job: Any) -> JobCandidateRouteResult
             matched_entity_id=candidate.matched_entity_id,
             final_confidence=candidate.final_confidence,
             threshold=policy.entity_materialization_threshold,
+            automatic=policy.candidate_review_policy == "precision_first_auto",
+            generic_name=_has_generic_entity_name(candidate),
+            conceptual=_is_conceptual_entity(candidate),
+            repeated_evidence=(
+                _valid_evidence_chunk_count(entity_evidence.get(candidate.id, [])) >= 2
+            ),
         )
         candidate.status = route.status
         candidate.review_reason = route.review_reason
@@ -275,27 +436,6 @@ async def apply_job_candidate_routes(db, *, job: Any) -> JobCandidateRouteResult
         elif route.status == "validated":
             candidate.validation_errors = []
 
-    relation_evidence_result = await db.execute(
-        select(GraphRelationCandidateEvidence).where(
-            GraphRelationCandidateEvidence.job_id == job.id,
-            GraphRelationCandidateEvidence.purged_at.is_(None),
-        )
-    )
-    relation_evidence: dict[Any, list[Any]] = {}
-    for row in relation_evidence_result.scalars().all():
-        relation_evidence.setdefault(row.candidate_id, []).append(row)
-
-    relation_result = await db.execute(
-        select(GraphRelationCandidate)
-        .where(
-            GraphRelationCandidate.job_id == job.id,
-            GraphRelationCandidate.purged_at.is_(None),
-            GraphRelationCandidate.status.notin_({"materialized", "superseded"}),
-        )
-        .order_by(GraphRelationCandidate.candidate_key)
-        .with_for_update()
-    )
-    relation_candidates = list(relation_result.scalars().all())
     for candidate in relation_candidates:
         if candidate.model_confidence is None:
             raise ConfidencePolicyError(
@@ -324,7 +464,8 @@ async def apply_job_candidate_routes(db, *, job: Any) -> JobCandidateRouteResult
             endpoint.status == "rejected" for endpoint in (source, target)
         )
         endpoint_pending = not endpoint_rejected and any(
-            endpoint.status == "pending_review" and endpoint.matched_entity_id is None
+            endpoint.status == "pending_review"
+            and (endpoint.matched_entity_id is None or _is_conceptual_entity(endpoint))
             for endpoint in (source, target)
         )
         route = route_relation_candidate_v1(
@@ -341,6 +482,9 @@ async def apply_job_candidate_routes(db, *, job: Any) -> JobCandidateRouteResult
             endpoint_pending_review=endpoint_pending,
             evidence_support_mode=candidate.evidence_support_mode,
             final_confidence=candidate.final_confidence,
+            threshold=policy.relation_draft_threshold,
+            automatic=policy.candidate_review_policy == "precision_first_auto",
+            self_relation=candidate.source_candidate_id == candidate.target_candidate_id,
         )
         candidate.status = route.status
         candidate.review_reason = route.review_reason
@@ -348,6 +492,8 @@ async def apply_job_candidate_routes(db, *, job: Any) -> JobCandidateRouteResult
             _append_error(candidate, route.review_reason)
         elif route.status == "validated":
             candidate.validation_errors = []
+
+    _apply_concept_relation_gate(entity_candidates, relation_candidates)
 
     await db.flush()
     all_candidates: list[Any] = [*entity_candidates, *relation_candidates]
@@ -357,4 +503,10 @@ async def apply_job_candidate_routes(db, *, job: Any) -> JobCandidateRouteResult
             item.status == "pending_review" for item in all_candidates
         ),
         rejected_count=sum(item.status == "rejected" for item in all_candidates),
+        entity_status_counts=_candidate_status_counts(entity_candidates),
+        relation_status_counts=_candidate_status_counts(relation_candidates),
+        failure_reasons={
+            "entities": _candidate_failure_reasons(entity_candidates),
+            "relations": _candidate_failure_reasons(relation_candidates),
+        },
     )

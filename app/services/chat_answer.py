@@ -33,6 +33,10 @@ class ChatError(RuntimeError):
     """Chat 生成失败（网络/超时/HTTP/响应结构异常）。"""
 
 
+CHAT_OUTPUT_MAX_CHARS = 131_072
+CHAT_OUTPUT_LIMIT_EXCEEDED = "chat_output_limit_exceeded"
+
+
 @dataclass
 class ChatAnswer:
     answer: str
@@ -127,6 +131,8 @@ async def generate_answer(
         "temperature": temperature,
         "stream": False,
     }
+    if "gemma" in model.lower():
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
     headers = _headers(api_key)
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
@@ -171,7 +177,10 @@ async def stream_answer(
         "temperature": temperature,
         "stream": True,
     }
+    if "gemma" in model.lower():
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
     headers = _headers(api_key)
+    output_length = 0
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
             async with client.stream(
@@ -195,6 +204,9 @@ async def stream_answer(
                     except (KeyError, IndexError, TypeError, ValueError):
                         continue        # 心跳/非内容块，跳过
                     if delta:
+                        output_length += len(delta)
+                        if output_length > CHAT_OUTPUT_MAX_CHARS:
+                            raise ChatError(CHAT_OUTPUT_LIMIT_EXCEEDED)
                         yield delta
     except httpx.TimeoutException as exc:
         raise ChatError("chat 模型调用超时") from exc

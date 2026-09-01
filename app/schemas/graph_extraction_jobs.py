@@ -9,11 +9,24 @@ from pydantic import BaseModel, Field
 
 class GraphExtractionCreate(BaseModel):
     document_id: uuid.UUID
+    build_mode: Literal["fast", "standard", "deep"] = "standard"
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class GraphExtractionRerun(BaseModel):
     client_idempotency_key: str = Field(min_length=8, max_length=128)
+
+
+class GraphExtractionUploadConfiguration(BaseModel):
+    available: bool
+    exploration_available: bool = False
+    default_requested: bool
+    default_build_mode: Literal["fast", "standard", "deep"]
+    allowed_security_levels: list[str]
+    reasons: list[str]
+    schema_mode: Literal["disabled", "explore", "governed"] = "disabled"
+    requires_active_schema: bool = False
+    schema_confirmation_policy: Literal["required", "automatic"] = "required"
 
 
 class GraphExtractionJobRead(BaseModel):
@@ -24,6 +37,9 @@ class GraphExtractionJobRead(BaseModel):
     ontology_version_id: uuid.UUID
     trigger_type: str
     execution_mode: str
+    build_mode: Literal["fast", "standard", "deep"]
+    schema_state: Literal["waiting_schema", "discovering_schema", "ai_draft_pending_confirmation", "confirmed_schema"] = "confirmed_schema"
+    schema_discovery_run_id: uuid.UUID | None = None
     status: str
     current_stage: str | None = None
     input_fingerprint: str
@@ -54,6 +70,44 @@ class GraphExtractionJobRead(BaseModel):
 
 class GraphExtractionJobList(BaseModel):
     items: list[GraphExtractionJobRead]
+    total: int
+    limit: int
+    offset: int
+
+
+class SchemaDiscoveryRunRead(BaseModel):
+    id: uuid.UUID
+    library_id: uuid.UUID
+    source_set_key: str
+    source_revision_ids: list[str]
+    source_hash: str
+    status: str
+    confirmation_policy: Literal["required", "automatic"] = "required"
+    schema_state: Literal[
+        "waiting_schema",
+        "discovering_schema",
+        "ai_draft_pending_confirmation",
+        "confirmed_schema",
+        "failed",
+        "cancelled",
+    ]
+    ontology_version_id: uuid.UUID | None = None
+    ontology_snapshot: dict[str, Any] | None = None
+    ontology_snapshot_hash: str | None = None
+    concept_inventory: list[dict[str, Any]] = Field(default_factory=list)
+    discovery_trace: dict[str, Any] = Field(default_factory=dict)
+    error_code: str | None = None
+    error_message: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class SchemaDiscoveryRunList(BaseModel):
+    items: list[SchemaDiscoveryRunRead]
     total: int
     limit: int
     offset: int

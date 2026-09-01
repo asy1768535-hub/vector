@@ -1,14 +1,46 @@
 from __future__ import annotations
 
+import hashlib
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.document import Document
 from app.models.folder import Folder
 from app.models.library import Library
+
+
+_FOLDER_LOCK_PREFIX = "vector-kb:folder-tree:"
+
+
+def _folder_advisory_lock_key(library_id: uuid.UUID) -> int:
+    digest = hashlib.sha256(f"{_FOLDER_LOCK_PREFIX}{library_id}".encode("ascii")).digest()
+    return int.from_bytes(digest[:8], byteorder="big", signed=True)
+
+
+def _database_dialect_name(db: AsyncSession) -> str | None:
+    try:
+        bind = db.sync_session.get_bind()
+    except (AttributeError, RuntimeError):
+        try:
+            bind = db.get_bind()
+        except (AttributeError, RuntimeError):
+            return None
+    return getattr(getattr(bind, "dialect", None), "name", None)
+
+
+async def _lock_library_folder_tree(db: AsyncSession, library_id: uuid.UUID) -> None:
+    dialect = _database_dialect_name(db)
+    if dialect == "sqlite":
+        return
+    if dialect not in {None, "postgresql"}:
+        raise RuntimeError("folder creation requires PostgreSQL")
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(:lock_key)"),
+        {"lock_key": _folder_advisory_lock_key(library_id)},
+    )
 
 
 def normalize_folder_path(path: str | None) -> list[str]:
@@ -73,7 +105,14 @@ async def list_folders(db: AsyncSession, library: Library) -> list[Folder]:
     return list(result.scalars().all())
 
 
-async def create_folder(db: AsyncSession, library: Library, *, name: str, parent_id: uuid.UUID | None, sort_order: int) -> Folder:
+async def _create_folder_unlocked(
+    db: AsyncSession,
+    library: Library,
+    *,
+    name: str,
+    parent_id: uuid.UUID | None,
+    sort_order: int,
+) -> Folder:
     parent = await get_active_folder(db, library, parent_id) if parent_id is not None else None
     path = build_folder_path(parent.path if parent is not None else None, name)
     folder = Folder(
@@ -88,9 +127,35 @@ async def create_folder(db: AsyncSession, library: Library, *, name: str, parent
     return folder
 
 
-async def ensure_folder_path(db: AsyncSession, library: Library, path: str | None) -> uuid.UUID | None:
+async def create_folder(
+    db: AsyncSession,
+    library: Library,
+    *,
+    name: str,
+    parent_id: uuid.UUID | None,
+    sort_order: int,
+) -> Folder:
+    await _lock_library_folder_tree(db, library.id)
+    return await _create_folder_unlocked(
+        db,
+        library,
+        name=name,
+        parent_id=parent_id,
+        sort_order=sort_order,
+    )
+
+
+async def ensure_folder_path(
+    db: AsyncSession,
+    library: Library,
+    path: str | None,
+) -> uuid.UUID | None:
+    names = normalize_folder_path(path)
+    if not names:
+        return None
+    await _lock_library_folder_tree(db, library.id)
     parent_id: uuid.UUID | None = None
-    for name in normalize_folder_path(path):
+    for name in names:
         conditions = [
             Folder.library_id == library.id,
             Folder.name == name,
@@ -102,7 +167,13 @@ async def ensure_folder_path(db: AsyncSession, library: Library, path: str | Non
             conditions.append(Folder.parent_id == parent_id)
         existing = (await db.execute(select(Folder).where(*conditions).limit(1))).scalars().first()
         if existing is None:
-            existing = await create_folder(db, library, name=name, parent_id=parent_id, sort_order=0)
+            existing = await _create_folder_unlocked(
+                db,
+                library,
+                name=name,
+                parent_id=parent_id,
+                sort_order=0,
+            )
         parent_id = existing.id
     return parent_id
 

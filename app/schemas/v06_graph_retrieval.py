@@ -69,7 +69,7 @@ class GraphRetrievalQueryRequest(_StrictGraphRetrievalModel):
     seeds: list[GraphRetrievalSeed] = Field(min_length=1, max_length=10)
     direction: GraphRetrievalDirection = "both"
     relation_type_keys: list[TypeKey] = Field(default_factory=list, max_length=64)
-    max_hops: int = Field(default=1, ge=0, le=2)
+    max_hops: int = Field(default=1, ge=0, le=3)
     max_nodes: int = Field(default=100, ge=1, le=100)
     max_relations: int = Field(default=200, ge=1, le=200)
     include_evidence_locators: bool = True
@@ -145,7 +145,7 @@ class GraphRetrievalNodeRead(_StrictGraphRetrievalModel):
     normalized_name: str = Field(min_length=1, max_length=512)
     source_type: GraphSourceType
     confidence: Confidence | None = None
-    depth: int = Field(ge=0, le=2)
+    depth: int = Field(ge=0, le=3)
     evidence: list[GraphRetrievalEvidenceLocator] = Field(default_factory=list, max_length=20)
 
 
@@ -157,7 +157,7 @@ class GraphRetrievalRelationRead(_StrictGraphRetrievalModel):
     target_entity_id: uuid.UUID
     source_type: GraphSourceType
     confidence: Confidence | None = None
-    depth: int = Field(ge=1, le=2)
+    depth: int = Field(ge=1, le=3)
     evidence: list[GraphRetrievalEvidenceLocator] = Field(default_factory=list, max_length=20)
 
 

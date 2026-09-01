@@ -72,5 +72,9 @@ current_cookie_user = fastapi_users.current_user(
     active=True,
     get_enabled_backends=lambda: [cookie_backend],
 )
-current_superuser = fastapi_users.current_user(active=True, superuser=True)
+current_superuser = fastapi_users.current_user(
+    active=True,
+    superuser=True,
+    get_enabled_backends=lambda: [cookie_backend],
+)
 optional_current_user = fastapi_users.current_user(active=True, optional=True)

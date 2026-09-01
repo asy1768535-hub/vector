@@ -32,6 +32,31 @@ test('allows top_k selector and refresh; rejects forbidden features', () => {
     }
 });
 
+test('offers per-question graph assistance and sends the choice to the API', () => {
+    for (const token of ['graphAssist', '图谱辅助检索', 'el-switch']) {
+        assert.ok(chat.includes(token), `missing graph assistance control: ${token}`);
+    }
+    assert.ok(chat.includes('use_graph: graphAssist.value'));
+});
+
+test('conversation history is paged and can load earlier messages without jumping', () => {
+    for (const token of [
+        'loadEarlierMessages', 'hasEarlierMessages', 'loadingEarlierMessages',
+        'before', 'previousHeight', 'chat-load-earlier', '加载更早消息',
+    ]) assert.ok(chat.includes(token), `missing paged history behavior: ${token}`);
+    assert.match(css, /\.chat-load-earlier\s*\{/);
+});
+
+test('remembers a valid library and keeps common chat actions available', () => {
+    assert.ok(chat.includes('LAST_CHAT_LIBRARY_KEY'));
+    assert.ok(chat.includes('savedChatLibrary()'));
+    assert.ok(chat.includes('libs.value[0]?.slug'));
+    assert.ok(chat.includes("messages.length ? '继续提问……' : '输入问题……'"));
+    assert.ok(chat.includes('检索数量（Top K）'));
+    assert.ok(chat.includes('结果不足时可适当提高，数值越大检索范围越广。'));
+    assert.ok(!chat.includes('chat-new-button" circle :disabled="!currentSlug"'));
+});
+
 // ── Refresh button moved to toolbar ──
 test('refresh button is in toolbar, not using mdi:history', () => {
     assert.ok(chat.includes('chat-toolbar-right'), 'toolbar right section exists');

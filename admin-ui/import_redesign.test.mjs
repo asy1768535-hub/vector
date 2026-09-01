@@ -3,8 +3,10 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import {
     ALLOWED_EXTENSIONS, MAX_FILE_SIZE, MAX_BATCH_SIZE, LEGACY_SAVE_AS,
-    validateFile, validateBatch, fileKey, formatSize, fileTypeIcon,
-    ST_LABEL, ST_TAG, OP_LABEL, OP_TAG,
+    validateFile, validateBatch, createBatchValidationState, validateBatchChunk,
+    fileKey, formatSize, fileTypeIcon,
+    ST_LABEL, ST_TAG, OP_LABEL, OP_TAG, graphJobProgress, graphProgressDetail,
+    SECURITY_LEVEL_LABEL, securityLevelLabel,
 } from './src/import_ui.js';
 import {
     BATCH_REPLACE_MATCH_LABEL, BATCH_REPLACE_MATCH_TAG,
@@ -15,11 +17,87 @@ import {
 
 const source = readFileSync(new URL('./src/views/Import.js', import.meta.url), 'utf8');
 const css = readFileSync(new URL('./style.css', import.meta.url), 'utf8');
+const apiSource = readFileSync(new URL('./src/api.js', import.meta.url), 'utf8');
 
 // ── Helpers for creating test File-like objects ──
 function mockFile(name, size, lastModified = 1700000000000) {
     return { name, size, lastModified };
 }
+
+test('graphJobProgress maps real stages and extraction counts', () => {
+    const active = graphJobProgress({
+        status: 'processing',
+        current_stage: 'binding_evidence',
+        statistics: { candidate_pipeline: { entity_candidate_count: 7, relation_candidate_count: 4 } },
+    });
+    assert.equal(active.progress, 70);
+    assert.equal(active.terminal, false);
+    assert.match(graphProgressDetail(active), /实体 7，关系 4/);
+
+    const completed = graphJobProgress({
+        status: 'succeeded',
+        statistics: { materialization: { entity_count: 5, relation_count: 3 } },
+    });
+    assert.equal(completed.progress, 100);
+    assert.equal(completed.terminal, true);
+    assert.equal(completed.tone, 'success');
+});
+
+test('graphJobProgress warns when only entity candidates remain', () => {
+    const completed = graphJobProgress({
+        status: 'succeeded',
+        statistics: {
+            materialization: {
+                outcome: 'entities_only',
+                entity_count: 0,
+                relation_count: 0,
+                pending_entity_candidate_count: 3,
+            },
+        },
+    });
+    assert.equal(completed.tone, 'warning');
+    assert.equal(completed.label, '仅有实体、暂无有效关系，未发布');
+    assert.equal(completed.entityCount, 3);
+    assert.equal(completed.relationCount, 0);
+});
+
+test('graphJobProgress reports library graph replacement after entity-only update', () => {
+    const completed = graphJobProgress({
+        status: 'succeeded',
+        statistics: {
+            materialization: {
+                outcome: 'entities_only',
+                pending_entity_candidate_count: 2,
+                relation_count: 0,
+            },
+            publication: { outcome: 'activated' },
+        },
+    });
+    assert.equal(completed.label, '暂无新关系，已更新库级图谱');
+    assert.equal(completed.entityCount, 2);
+    assert.equal(completed.relationCount, 0);
+});
+
+test('graphJobProgress keeps the current graph label when update fails', () => {
+    const failed = graphJobProgress({
+        status: 'failed',
+        statistics: { publication: { current_graph_unchanged: true } },
+    });
+    assert.equal(failed.label, '图谱更新失败，当前正式图谱未切换');
+});
+
+test('localizes security levels without changing submitted enum values', () => {
+    assert.equal(SECURITY_LEVEL_LABEL.internal, '内部');
+    assert.equal(securityLevelLabel('internal'), '内部');
+    assert.equal(securityLevelLabel('restricted'), '受限');
+    assert.equal(securityLevelLabel('partner-only'), 'partner-only（自定义安全级别）');
+    assert.ok(source.includes('formatSize, fileTypeIcon, securityLevelLabel, MAX_BATCH_SIZE'));
+    assert.ok(source.includes(':label="securityLevelLabel(level)" :value="level"'));
+    assert.ok(source.includes('外部文档编号'));
+    assert.ok(source.includes('用于与外部业务系统中的文档建立对应关系，普通上传无需填写。'));
+    assert.ok(source.includes('title="高级设置"'));
+    assert.equal(source.includes('placeholder="external_id"'), false);
+});
 
 // ════════════════════════════════════════════════════════════
 //  Real behavior tests (import_ui.js pure functions)
@@ -27,7 +105,12 @@ function mockFile(name, size, lastModified = 1700000000000) {
 
 // ── validateFile ──
 test('validateFile accepts all allowed extensions', () => {
-    for (const ext of ['.txt', '.md', '.markdown', '.json', '.csv', '.docx', '.xlsx', '.pdf']) {
+    for (const ext of [
+        '.txt', '.md', '.markdown', '.rst', '.log', '.ini', '.cfg', '.conf',
+        '.json', '.yaml', '.yml', '.xml', '.html', '.htm', '.csv', '.tsv',
+        '.docx', '.pptx', '.xls', '.xlsx', '.pdf',
+        '.bmp', '.jpeg', '.jpg', '.png', '.tif', '.tiff', '.webp',
+    ]) {
         const r = validateFile(mockFile(`doc${ext}`, 1024));
         assert.equal(r.valid, true, `${ext} should be valid`);
     }
@@ -39,26 +122,33 @@ test('validateFile rejects legacy .doc with save-as message', () => {
     assert.ok(r.reason.includes('.docx'), 'reason mentions .docx');
 });
 
-test('validateFile rejects legacy .xls with save-as message', () => {
+test('validateFile accepts legacy .xls through the bounded xlrd parser', () => {
     const r = validateFile(mockFile('sheet.xls', 1024));
-    assert.equal(r.valid, false);
-    assert.ok(r.reason.includes('.xlsx'), 'reason mentions .xlsx');
+    assert.equal(r.valid, true);
+});
+
+test('validateFile accepts .doc only when the asynchronous import contract advertises it', () => {
+    const r = validateFile(mockFile('old.doc', 1024), {
+        allowed_extensions: [...ALLOWED_EXTENSIONS, '.doc'],
+        max_file_bytes: MAX_FILE_SIZE,
+    });
+    assert.equal(r.valid, true);
 });
 
 test('validateFile rejects unknown extensions', () => {
-    for (const name of ['a.exe', 'a.png', 'a.zip', 'noext']) {
+    for (const name of ['a.exe', 'a.zip', 'noext']) {
         const r = validateFile(mockFile(name, 1024));
         assert.equal(r.valid, false, `${name} should be rejected`);
     }
 });
 
-test('validateFile rejects files over 50 MB', () => {
+test('validateFile rejects files over 500 MB', () => {
     const r = validateFile(mockFile('big.pdf', MAX_FILE_SIZE + 1));
     assert.equal(r.valid, false);
-    assert.ok(r.reason.includes('50 MB'), 'reason mentions 50 MB limit');
+    assert.ok(r.reason.includes('500 MB'), 'reason mentions 500 MB limit');
 });
 
-test('validateFile accepts files at or under 50 MB', () => {
+test('validateFile accepts files at or under 500 MB', () => {
     assert.equal(validateFile(mockFile('max.pdf', MAX_FILE_SIZE)).valid, true);
     assert.equal(validateFile(mockFile('small.pdf', MAX_FILE_SIZE - 1)).valid, true);
 });
@@ -138,7 +228,7 @@ test('formatSize handles boundaries correctly', () => {
     assert.equal(formatSize(1024), '1 KB');
     assert.equal(formatSize(1536), '1.5 KB');
     assert.equal(formatSize(1048576), '1 MB');
-    assert.equal(formatSize(MAX_FILE_SIZE), '50 MB');
+    assert.equal(formatSize(MAX_FILE_SIZE), '500 MB');
 });
 
 // ── fileTypeIcon delegates to documents_ui.js ──
@@ -159,8 +249,8 @@ test('fileTypeIcon returns null for unknown extensions', () => {
 
 // ── Constants ──
 test('constants have expected values', () => {
-    assert.equal(MAX_FILE_SIZE, 50 * 1024 * 1024);
-    assert.equal(MAX_BATCH_SIZE, 20);
+    assert.equal(MAX_FILE_SIZE, 500 * 1024 * 1024);
+    assert.equal(MAX_BATCH_SIZE, 1000);
     assert.equal(ALLOWED_EXTENSIONS.has('.pdf'), true);
     assert.equal(ALLOWED_EXTENSIONS.has('.doc'), false);
 });
@@ -279,6 +369,38 @@ test('template includes drag-and-drop bindings', () => {
     assert.ok(source.includes('@drop'), 'drop event');
 });
 
+test('chunked batch validation preserves duplicate and selection-limit semantics', () => {
+    const state = createBatchValidationState([], { max_files_per_selection: 2 });
+    const first = validateBatchChunk([
+        mockFile('a.pdf', 100, 1),
+        mockFile('bad.exe', 100, 2),
+    ], state);
+    const second = validateBatchChunk([
+        mockFile('a.pdf', 100, 1),
+        mockFile('b.pdf', 100, 3),
+    ], state);
+    assert.equal(first.accepted.length, 1);
+    assert.equal(first.invalid.length, 1);
+    assert.equal(second.duplicates.length, 1);
+    assert.equal(second.accepted.length, 1);
+    assert.equal(second.invalid.length, 0);
+});
+
+test('library admins can select daily, initial-import, or custom upload limits', () => {
+    for (const token of [
+        '上传限制设置',
+        '首次导入',
+        '日常使用',
+        '自定义',
+        'updateImportConfiguration',
+        'canManageLibrary',
+        'queuePageSize',
+        ':data="displayQueue"',
+    ]) assert.ok(source.includes(token) || apiSource.includes(token), `missing upload setting token: ${token}`);
+    assert.equal(source.includes('IMPORT_PROFILE_INITIAL'), true);
+    assert.match(apiSource, /import-configuration`, jsonBody\('PUT'/);
+});
+
 test('template uses _failType not error text for check columns', () => {
     assert.ok(source.includes('格式校验'), 'format check column');
     assert.ok(source.includes('大小校验'), 'size check column');
@@ -331,15 +453,111 @@ test('replace route query auto-selects target document and handles not-found sta
 });
 
 test('replace submission preserves target document id and never falls back to add', () => {
-    assert.ok(source.includes('api.importFile(slug.value, file, { replaceDocumentId: replaceDocId.value })'), 'submits selected replace target');
+    assert.match(source, /api\.importFile\(slug\.value, file, \{[\s\S]*?replaceDocumentId: replaceDocId\.value,[\s\S]*?\}\)/, 'submits selected replace target');
     assert.ok(source.includes('!routeReplaceError.value'), 'canReplace blocks not-found target');
     assert.ok(source.includes('if (!routeReplaceActive.value) replaceDocId.value = null'), 'route-driven target is not cleared after replace');
     assert.equal(source.includes('api.importFile(slug.value, file, {})'), false, 'replace mode does not upload without target');
 });
 
+test('upload area confirms graph extraction configuration before submitting', () => {
+    for (const token of [
+        '抽取实体和关系',
+        'graphExtractionRequested',
+        'getUploadGraphExtractionConfiguration',
+        'graphExtractionSecurityLevel',
+        'graphExtractionReady',
+        'graphExplorationMode',
+        'formalGraphExtractionRequested',
+        'graphJobRequested',
+        '确认上传并抽取图谱',
+        'graphJobRequested.value',
+        'securityLevel: graphExtractionSecurityLevel.value',
+    ]) assert.ok(source.includes(token), `missing graph upload token: ${token}`);
+    assert.match(css, /\.import-graph-option\s*\{/);
+    assert.match(apiSource, /formData\.append\('graph_extraction_requested', 'true'\)/);
+    assert.match(apiSource, /formData\.append\('security_level', securityLevel\)/);
+    assert.match(apiSource, /v04\/graph-extractions\/upload-configuration/);
+});
+
+test('upload inherits graph extraction default from the selected library', () => {
+    assert.match(source, /typeof config\.default_requested !== 'boolean'/);
+    assert.match(source, /typeof config\.exploration_available !== 'boolean'/);
+    assert.match(source, /typeof config\.requires_active_schema !== 'boolean'/);
+    assert.match(source, /!\['disabled', 'explore', 'governed'\]\.includes\(config\.schema_mode\)/);
+    assert.match(source, /graphExtractionRequested\.value = config\.default_requested/);
+    assert.match(source, /loadGraphExtractionConfiguration\(\{ applyLibraryDefault: true \}\)/);
+    assert.match(source, /watch\(graphExtractionRequested,\s*\(requested\)/);
+    assert.match(source, /:disabled="graphExtractionConfigLoading"/);
+});
+
+test('AI self-extraction sends graph jobs without requiring Schema activation', () => {
+    assert.match(source, /graphExplorationMode = computed\(\(\) =>\s*graphExtractionConfig\.value\?\.schema_mode === 'explore'\s*\)/);
+    assert.match(source, /graphExtractionConfig\.value\?\.exploration_available === true/);
+    assert.match(source, /graphExtractionConfig\.value\?\.available === true/);
+    assert.match(source, /return graphJobRequested\.value \?/);
+    assert.match(source, /AI 自主抽取/);
+});
+
+test('uploaded files track vectorization and graph extraction progress', () => {
+    for (const token of [
+        'attachGraphTracking',
+        'listDocumentJobs',
+        'listGraphExtractions',
+        'pollGraphProgress',
+        '等待图谱抽取任务',
+        '知识图谱构建',
+        'graphProgressDetail',
+        'stopGraphProgressPolling();',
+    ]) assert.ok(source.includes(token) || apiSource.includes(token), `missing graph progress token: ${token}`);
+    assert.match(css, /\.import-graph-progress\s*\{/);
+    assert.match(apiSource, /v04\/graph-extractions\/\?/);
+});
+
+test('failed graph construction retries the graph job instead of the completed import', () => {
+    assert.match(source, /it\.importJob\.retry_target_type === 'graph'/);
+    assert.match(source, /it\.importJob\.retry_target_id/);
+    assert.match(source, /api\.retryGraphExtraction\(/);
+    assert.match(apiSource, /graph-extractions\/\$\{jobId\}\/retry/);
+    assert.match(source, /error\?\.body\?\.detail !== 'no_retryable_units'/);
+    assert.match(source, /api\.rerunGraphExtraction\(/);
+    assert.match(source, /retry_target_type !== 'import'/);
+    assert.match(source, /api\.retryImportJob\(/);
+});
+
+test('batch replacement forwards graph extraction upload options', async () => {
+    const item = {
+        _key: 'doc', file: mockFile('doc.txt', 12), validationStatus: 'valid',
+        matchStatus: 'matched', matchedDocId: 'document-id', status: 'pending', error: '',
+    };
+    const calls = [];
+    await submitBatchReplaceItems([item], 'public', async (...args) => calls.push(args), undefined, {
+        graphExtractionRequested: true,
+        securityLevel: 'internal',
+    });
+    assert.deepEqual(calls[0][2], {
+        graphExtractionRequested: true,
+        securityLevel: 'internal',
+        replaceDocumentId: 'document-id',
+    });
+    assert.ok(item.importResponse !== undefined, 'batch replacement keeps upload response for graph tracking');
+});
+
 test('replace route query locks library and mode controls', () => {
-    assert.ok(source.includes('class="import-lib-select" :disabled="routeReplaceActive || batchReplacing"'), 'route replace locks library select');
-    assert.ok(source.includes('<el-radio-group v-model="mode" :disabled="routeReplaceActive || batchReplacing">'), 'route replace locks mode switch');
+    assert.match(source, /class="import-lib-select" :disabled="routeReplaceActive \|\| batchReplacing \|\| uploading \|\| addingFiles"/, 'route replace and active upload lock library select');
+    assert.match(source, /<el-radio-group v-model="mode" :disabled="routeReplaceActive \|\| batchReplacing \|\| uploading \|\| addingFiles">/, 'route replace and active upload lock mode switch');
+});
+
+test('upload configuration displays schema policy and freezes the library build mode', () => {
+    assert.match(source, /Object\.hasOwn\(BUILD_MODE_LABEL, config\.default_build_mode\)/);
+    assert.match(source, /schemaModeLabel\(graphExtractionConfig\)/);
+    assert.match(source, /抽取策略：\{\{ schemaModeLabel\(graphExtractionConfig\) \}\} · 构建模式：\{\{ buildModeLabel\(graphExtractionConfig\?\.default_build_mode\) \}\}/);
+    assert.match(source, /使用\$\{buildModeLabel\(graphExtractionConfig\.value\?\.default_build_mode\)\}模式/);
+});
+
+test('upload confirmation describes automatic publication and later correction', () => {
+    assert.match(source, /自动抽取并发布合格事实/);
+    assert.match(source, /使用中发现错误后，可在知识治理中修正并重新发布/);
+    assert.doesNotMatch(source, /抽取结果仍需在知识治理中发布后/);
 });
 
 console.log('import redesign test passed');

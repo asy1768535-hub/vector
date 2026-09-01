@@ -8,29 +8,24 @@
 from __future__ import annotations
 
 import logging
-from typing import Literal
 
 from fastapi import Depends, HTTPException, status
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.backend import current_active_user, current_superuser  # noqa: F401  (re-export)
 from app.casbin.enforcer import has_permission
+from app.config import settings
 from app.db import get_db
 from app.models.library import Library
 from app.models.user import User
+from app.services.organization_authorization import (
+    Action,
+    OrganizationAuthorizationError,
+    authorize_library,
+    load_active_library,
+)
 
 log = logging.getLogger(__name__)
-
-Action = Literal["read", "insert", "delete", "admin"]
-
-
-async def load_active_library(slug: str, db: AsyncSession) -> Library | None:
-    result = await db.execute(
-        select(Library).where(Library.slug == slug, Library.deleted_at.is_(None))
-    )
-    return result.scalar_one_or_none()
-
 
 def require_lib(action: Action):
     """生成一个 Depends：要求当前用户在 library:<slug> 上有 action 权限。
@@ -45,13 +40,21 @@ def require_lib(action: Action):
         user: User = Depends(current_active_user),
         db: AsyncSession = Depends(get_db),
     ) -> Library:
-        lib = await load_active_library(slug, db)
-        if lib is None:
+        if not settings.organization_authorization_enabled:
+            lib = await load_active_library(slug, db)
+            if lib is None:
+                raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden")
+            if user.is_superuser or has_permission(str(user.id), slug, action):
+                return lib
             raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden")
-        if user.is_superuser:
-            return lib
-        if has_permission(str(user.id), slug, action):
-            return lib
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden")
+        try:
+            return await authorize_library(
+                db,
+                user=user,
+                library_slug=slug,
+                action=action,
+            )
+        except OrganizationAuthorizationError as exc:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden") from exc
 
     return _dep

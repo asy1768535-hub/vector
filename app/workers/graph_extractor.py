@@ -12,6 +12,30 @@ from app.config import settings, validate_graph_extraction_startup
 log = logging.getLogger(__name__)
 
 
+async def _run_active_worker(worker_service, metadata: dict) -> None:
+    from sqlalchemy.exc import DBAPIError
+
+    from app.db import get_engine
+
+    while True:
+        try:
+            await worker_service.run_graph_extraction_worker_pool(
+                watch=True,
+                metadata=metadata,
+            )
+            return
+        except (DBAPIError, OSError) as exc:
+            metadata["database_reconnects"] = int(
+                metadata.get("database_reconnects", 0)
+            ) + 1
+            log.warning(
+                "transient database connection failure; restarting worker pool: %s",
+                type(exc).__name__,
+            )
+            await get_engine().dispose()
+            await asyncio.sleep(max(1.0, settings.graph_extraction_worker_poll_seconds))
+
+
 async def run(*, watch: bool) -> None:
     validate_graph_extraction_startup(settings)
     if not settings.graph_extraction_enabled:
@@ -62,10 +86,7 @@ async def run(*, watch: bool) -> None:
         )
     )
     try:
-        await worker_service.run_graph_extraction_worker(
-            watch=True,
-            metadata=metadata,
-        )
+        await _run_active_worker(worker_service, metadata)
     finally:
         stop_event.set()
         await heartbeat.beat(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+import re
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping
@@ -11,6 +12,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from app.models.entity import Entity
 from app.models.entity_alias import EntityAlias
 from app.models.graph_candidates import GraphEntityCandidate, GraphRelationCandidate
+from app.models.graph_candidate_evidence import GraphEntityCandidateEvidence
 from app.models.graph_review import GraphEntityMergeCandidate, GraphExtractionConflict
 from app.services.graph_candidate_aggregation import (
     canonical_graph_value_hash_v1,
@@ -87,10 +89,23 @@ class JobCandidateValidationResult:
     conflict_count: int
 
 
-def _expect_object(value: Any, *, label: str, keys: set[str]) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != keys:
+def _expect_object(
+    value: Any,
+    *,
+    label: str,
+    keys: set[str],
+    optional_keys: set[str] | None = None,
+) -> dict[str, Any]:
+    allowed_keys = keys | (optional_keys or set())
+    actual_keys = set(value) if isinstance(value, dict) else set()
+    if not isinstance(value, dict) or not keys <= actual_keys <= allowed_keys:
+        if optional_keys:
+            detail = f"exactly required keys {sorted(keys)} and only optional keys {sorted(allowed_keys - keys)}"
+        else:
+            detail = f"exactly {sorted(keys)}"
         raise OntologySnapshotError(
-            "invalid_ontology_snapshot", f"{label} must contain exactly {sorted(keys)}"
+            "invalid_ontology_snapshot",
+            f"{label} must contain {detail}",
         )
     return value
 
@@ -105,32 +120,24 @@ def _parse_uuid(value: Any, *, label: str) -> uuid.UUID:
     try:
         return value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
     except (TypeError, ValueError, AttributeError) as exc:
-        raise OntologySnapshotError(
-            "invalid_ontology_snapshot", f"{label} must be a UUID"
-        ) from exc
+        raise OntologySnapshotError("invalid_ontology_snapshot", f"{label} must be a UUID") from exc
 
 
 def _expect_string(value: Any, *, label: str) -> str:
     if not isinstance(value, str) or not value:
-        raise OntologySnapshotError(
-            "invalid_ontology_snapshot", f"{label} must be a non-empty string"
-        )
+        raise OntologySnapshotError("invalid_ontology_snapshot", f"{label} must be a non-empty string")
     return value
 
 
 def _expect_bool(value: Any, *, label: str) -> bool:
     if not isinstance(value, bool):
-        raise OntologySnapshotError(
-            "invalid_ontology_snapshot", f"{label} must be a boolean"
-        )
+        raise OntologySnapshotError("invalid_ontology_snapshot", f"{label} must be a boolean")
     return value
 
 
 def _expect_optional_object(value: Any, *, label: str) -> dict[str, Any] | None:
     if value is not None and not isinstance(value, dict):
-        raise OntologySnapshotError(
-            "invalid_ontology_snapshot", f"{label} must be an object or null"
-        )
+        raise OntologySnapshotError("invalid_ontology_snapshot", f"{label} must be an object or null")
     return value
 
 
@@ -145,13 +152,9 @@ def _parse_attribute_rules(value: Any, *, label: str) -> tuple[AttributeDefiniti
         )
         key = _expect_string(item["key"], label=f"{label}[{index}].key")
         if key in seen:
-            raise OntologySnapshotError(
-                "invalid_ontology_snapshot", f"duplicate Attribute key: {key}"
-            )
+            raise OntologySnapshotError("invalid_ontology_snapshot", f"duplicate Attribute key: {key}")
         seen.add(key)
-        value_type = _expect_string(
-            item["value_type"], label=f"{label}[{index}].value_type"
-        )
+        value_type = _expect_string(item["value_type"], label=f"{label}[{index}].value_type")
         if value_type not in _ATTRIBUTE_VALUE_TYPES:
             raise OntologySnapshotError(
                 "invalid_ontology_snapshot", f"unsupported Attribute value_type: {value_type}"
@@ -168,17 +171,13 @@ def _parse_attribute_rules(value: Any, *, label: str) -> tuple[AttributeDefiniti
             AttributeDefinitionRule(
                 key=key,
                 value_type=value_type,
-                required=_expect_bool(
-                    item["required"], label=f"{label}[{index}].required"
-                ),
+                required=_expect_bool(item["required"], label=f"{label}[{index}].required"),
                 enum_values=tuple(enum_values) if enum_values is not None else None,
                 validation_schema=validation_schema,
             )
         )
     if [rule.key for rule in rules] != sorted(rule.key for rule in rules):
-        raise OntologySnapshotError(
-            "invalid_ontology_snapshot", f"{label} must be sorted by key"
-        )
+        raise OntologySnapshotError("invalid_ontology_snapshot", f"{label} must be sorted by key")
     return tuple(rules)
 
 
@@ -188,22 +187,19 @@ def load_ontology_rule_set_v1(job: Any) -> OntologyRuleSet:
             "unsupported_normalization_rule", "Job normalization rule must be normalization_v1"
         )
     if getattr(job, "confidence_policy_version", None) != "v1":
-        raise OntologySnapshotError(
-            "unsupported_confidence_policy", "Job confidence policy must be v1"
-        )
+        raise OntologySnapshotError("unsupported_confidence_policy", "Job confidence policy must be v1")
     snapshot = _expect_object(
         getattr(job, "ontology_snapshot", None),
         label="ontology_snapshot",
         keys={"ontology_version_id", "entity_types", "relation_types", "relation_constraints"},
+        optional_keys={"schema_state", "confirmed", "source_hash", "origin"},
     )
     expected_hash = canonical_graph_value_hash_v1(snapshot)
     if getattr(job, "ontology_snapshot_hash", None) != expected_hash:
         raise OntologySnapshotError(
             "ontology_snapshot_hash_mismatch", "Ontology Snapshot hash does not match its payload"
         )
-    ontology_version_id = _parse_uuid(
-        snapshot["ontology_version_id"], label="ontology_version_id"
-    )
+    ontology_version_id = _parse_uuid(snapshot["ontology_version_id"], label="ontology_version_id")
     if ontology_version_id != getattr(job, "ontology_version_id", None):
         raise OntologySnapshotError(
             "ontology_snapshot_scope_mismatch",
@@ -218,7 +214,14 @@ def load_ontology_rule_set_v1(job: Any) -> OntologyRuleSet:
             raw,
             label=f"entity_types[{index}]",
             keys={"id", "key", "properties_schema", "active_attribute_definitions"},
+            optional_keys={"label", "description"},
         )
+        for metadata_key in ("label", "description"):
+            if item.get(metadata_key) is not None:
+                _expect_string(
+                    item[metadata_key],
+                    label=f"entity_types[{index}].{metadata_key}",
+                )
         type_id = _parse_uuid(item["id"], label=f"entity_types[{index}].id")
         key = _expect_string(item["key"], label=f"entity_types[{index}].key")
         if type_id in entity_types_by_id or key in entity_types_by_key:
@@ -241,16 +244,12 @@ def load_ontology_rule_set_v1(job: Any) -> OntologyRuleSet:
         entity_types_by_id[type_id] = rule
         entity_sort_keys.append((key, str(type_id)))
     if entity_sort_keys != sorted(entity_sort_keys):
-        raise OntologySnapshotError(
-            "invalid_ontology_snapshot", "entity_types must be sorted by key and id"
-        )
+        raise OntologySnapshotError("invalid_ontology_snapshot", "entity_types must be sorted by key and id")
 
     relation_types_by_key: dict[str, RelationTypeRule] = {}
     relation_types_by_id: dict[uuid.UUID, RelationTypeRule] = {}
     relation_sort_keys: list[tuple[str, str]] = []
-    for index, raw in enumerate(
-        _expect_list(snapshot["relation_types"], label="relation_types")
-    ):
+    for index, raw in enumerate(_expect_list(snapshot["relation_types"], label="relation_types")):
         item = _expect_object(
             raw,
             label=f"relation_types[{index}]",
@@ -263,24 +262,27 @@ def load_ontology_rule_set_v1(job: Any) -> OntologyRuleSet:
                 "properties_schema",
                 "active_attribute_definitions",
             },
+            optional_keys={"label", "description"},
         )
+        for metadata_key in ("label", "description"):
+            if item.get(metadata_key) is not None:
+                _expect_string(
+                    item[metadata_key],
+                    label=f"relation_types[{index}].{metadata_key}",
+                )
         type_id = _parse_uuid(item["id"], label=f"relation_types[{index}].id")
         key = _expect_string(item["key"], label=f"relation_types[{index}].key")
         if type_id in relation_types_by_id or key in relation_types_by_key:
             raise OntologySnapshotError(
                 "invalid_ontology_snapshot", "Relation Type IDs and keys must be unique"
             )
-        direction = _expect_string(
-            item["direction"], label=f"relation_types[{index}].direction"
-        )
+        direction = _expect_string(item["direction"], label=f"relation_types[{index}].direction")
         review_policy = _expect_string(
             item["default_review_policy"],
             label=f"relation_types[{index}].default_review_policy",
         )
         if direction not in _RELATION_DIRECTIONS or review_policy not in _REVIEW_POLICIES:
-            raise OntologySnapshotError(
-                "invalid_ontology_snapshot", "Relation Type enum value is invalid"
-            )
+            raise OntologySnapshotError("invalid_ontology_snapshot", "Relation Type enum value is invalid")
         rule = RelationTypeRule(
             id=type_id,
             ontology_version_id=ontology_version_id,
@@ -310,9 +312,7 @@ def load_ontology_rule_set_v1(job: Any) -> OntologyRuleSet:
 
     constraints: dict[tuple[uuid.UUID, uuid.UUID, uuid.UUID], RelationConstraintRule] = {}
     constraint_sort_keys: list[tuple[str, str, str]] = []
-    for index, raw in enumerate(
-        _expect_list(snapshot["relation_constraints"], label="relation_constraints")
-    ):
+    for index, raw in enumerate(_expect_list(snapshot["relation_constraints"], label="relation_constraints")):
         item = _expect_object(
             raw,
             label=f"relation_constraints[{index}]",
@@ -341,19 +341,13 @@ def load_ontology_rule_set_v1(job: Any) -> OntologyRuleSet:
             or source_type_id not in entity_types_by_id
             or target_type_id not in entity_types_by_id
         ):
-            raise OntologySnapshotError(
-                "invalid_ontology_snapshot", "Constraint references an unknown Type"
-            )
+            raise OntologySnapshotError("invalid_ontology_snapshot", "Constraint references an unknown Type")
         cardinality = item["cardinality"]
         if cardinality is not None and cardinality not in _CARDINALITIES:
-            raise OntologySnapshotError(
-                "invalid_ontology_snapshot", "Constraint cardinality is invalid"
-            )
+            raise OntologySnapshotError("invalid_ontology_snapshot", "Constraint cardinality is invalid")
         constraint_key = (relation_type_id, source_type_id, target_type_id)
         if constraint_key in constraints:
-            raise OntologySnapshotError(
-                "invalid_ontology_snapshot", "Constraint scope must be unique"
-            )
+            raise OntologySnapshotError("invalid_ontology_snapshot", "Constraint scope must be unique")
         constraints[constraint_key] = RelationConstraintRule(
             source_entity_type_id=source_type_id,
             target_entity_type_id=target_type_id,
@@ -405,14 +399,11 @@ def classify_entity_matches(
     eligible = [
         item
         for item in ordered
-        if item.entity_type_id == required_entity_type_id
-        and item.status in _REUSABLE_ENTITY_STATUSES
+        if item.entity_type_id == required_entity_type_id and item.status in _REUSABLE_ENTITY_STATUSES
     ]
     if not wrong_type and not ineligible and len(eligible) == 1:
         match = eligible[0]
-        method = (
-            "exact_normalized_match" if match.via_normalized_name else "exact_alias_match"
-        )
+        method = "exact_normalized_match" if match.via_normalized_name else "exact_alias_match"
         return EntityMatchDecision(
             match.entity_id,
             method,
@@ -444,6 +435,23 @@ async def _load_entity_matches(
     candidate: GraphEntityCandidate,
     entity_type: EntityTypeRule,
 ) -> list[EntityMatchInput]:
+    short_identifier = re.fullmatch(
+        r"[a-z]{1,8}-[a-z0-9]{1,16}", candidate.normalized_name
+    )
+    if short_identifier is not None:
+        evidence_result = await db.execute(
+            select(GraphEntityCandidateEvidence.id)
+            .where(
+                GraphEntityCandidateEvidence.candidate_id == candidate.id,
+                GraphEntityCandidateEvidence.job_id == job.id,
+                GraphEntityCandidateEvidence.resolved_document_id == job.document_id,
+                GraphEntityCandidateEvidence.validation_status == "valid",
+                GraphEntityCandidateEvidence.purged_at.is_(None),
+            )
+            .limit(1)
+        )
+        if evidence_result.scalar_one_or_none() is None:
+            return []
     name_result = await db.execute(
         select(Entity).where(
             Entity.library_id == job.library_id,
@@ -558,15 +566,11 @@ async def _upsert_entity_match_conflict(
         select(GraphExtractionConflict)
         .where(
             GraphExtractionConflict.job_id == job.id,
-            GraphExtractionConflict.conflict_type.in_(
-                {"entity_merge_ambiguity", "entity_status_conflict"}
-            ),
+            GraphExtractionConflict.conflict_type.in_({"entity_merge_ambiguity", "entity_status_conflict"}),
         )
         .with_for_update()
     )
-    existing_rows = [
-        row for row in result.scalars().all() if candidate_id in row.entity_candidate_ids
-    ]
+    existing_rows = [row for row in result.scalars().all() if candidate_id in row.entity_candidate_ids]
 
     expected: tuple[str, str, list[dict[str, Any]], dict[str, Any]] | None = None
     if decision.ambiguity_reason is not None:
@@ -591,9 +595,7 @@ async def _upsert_entity_match_conflict(
         fields = [
             {
                 "field": field_name,
-                "value_hashes": sorted(
-                    {canonical_graph_value_hash_v1(value) for value in values}
-                ),
+                "value_hashes": sorted({canonical_graph_value_hash_v1(value) for value in values}),
             }
         ]
         key = conflict_key_v1(
@@ -655,11 +657,7 @@ async def _open_entity_conflicts(db, *, job: Any, candidate: GraphEntityCandidat
     )
     candidate_id = str(candidate.id)
     return sorted(
-        (
-            row
-            for row in result.scalars().all()
-            if candidate_id in row.entity_candidate_ids
-        ),
+        (row for row in result.scalars().all() if candidate_id in row.entity_candidate_ids),
         key=lambda row: (row.conflict_type, row.conflict_key),
     )
 
@@ -695,9 +693,16 @@ async def validate_job_candidates(db, *, job: Any) -> JobCandidateValidationResu
         if entity_type is None:
             candidate.schema_validation_score = 0.0
             candidate.status = "rejected"
-            candidate.review_reason = "schema_invalid"
+            candidate.review_reason = "schema_extension_candidate"
             candidate.validation_errors = [
-                _candidate_error("unknown_entity_type", field="entity_type_key")
+                _candidate_error(
+                    "schema_extension_candidate",
+                    field="entity_type_key",
+                    message=(
+                        "The proposed entity type is not declared by the frozen Schema: "
+                        f"{candidate.entity_type_key}"
+                    ),
+                )
             ]
             candidate.normalization_method = "ambiguous"
             continue
@@ -713,24 +718,16 @@ async def validate_job_candidates(db, *, job: Any) -> JobCandidateValidationResu
             candidate.schema_validation_score = 0.0
             candidate.status = "rejected"
             candidate.review_reason = "schema_invalid"
-            candidate.validation_errors = [
-                _candidate_error("entity_shape_invalid", message=str(exc))
-            ]
+            candidate.validation_errors = [_candidate_error("entity_shape_invalid", message=str(exc))]
             candidate.normalization_method = "ambiguous"
             continue
 
         candidate.schema_validation_score = 1.0
-        match_inputs = await _load_entity_matches(
-            db, job=job, candidate=candidate, entity_type=entity_type
-        )
-        decision = classify_entity_matches(
-            required_entity_type_id=entity_type.id, matches=match_inputs
-        )
+        match_inputs = await _load_entity_matches(db, job=job, candidate=candidate, entity_type=entity_type)
+        decision = classify_entity_matches(required_entity_type_id=entity_type.id, matches=match_inputs)
         candidate.matched_entity_id = decision.matched_entity_id
         candidate.normalization_method = decision.normalization_method
-        merge_count += await _upsert_merge_candidates(
-            db, job=job, candidate=candidate, decision=decision
-        )
+        merge_count += await _upsert_merge_candidates(db, job=job, candidate=candidate, decision=decision)
         conflict_count += await _upsert_entity_match_conflict(
             db, job=job, candidate=candidate, decision=decision
         )
@@ -741,17 +738,12 @@ async def validate_job_candidates(db, *, job: Any) -> JobCandidateValidationResu
                 _candidate_error(decision.ambiguity_reason, field="matched_entity_id")
             ]
         else:
-            open_conflicts = await _open_entity_conflicts(
-                db, job=job, candidate=candidate
-            )
+            open_conflicts = await _open_entity_conflicts(db, job=job, candidate=candidate)
             if open_conflicts:
                 candidate.status = "pending_review"
                 candidate.review_reason = (
                     "property_conflict"
-                    if any(
-                        row.conflict_type == "property_conflict"
-                        for row in open_conflicts
-                    )
+                    if any(row.conflict_type == "property_conflict" for row in open_conflicts)
                     else "conflict_open"
                 )
                 candidate.validation_errors = sorted(
@@ -785,25 +777,23 @@ async def validate_job_candidates(db, *, job: Any) -> JobCandidateValidationResu
         relation_type = rules.relation_types_by_key.get(candidate.relation_type_key)
         source = entity_by_id.get(candidate.source_candidate_id)
         target = entity_by_id.get(candidate.target_candidate_id)
-        source_type = (
-            rules.entity_types_by_key.get(source.entity_type_key) if source is not None else None
-        )
-        target_type = (
-            rules.entity_types_by_key.get(target.entity_type_key) if target is not None else None
-        )
+        source_type = rules.entity_types_by_key.get(source.entity_type_key) if source is not None else None
+        target_type = rules.entity_types_by_key.get(target.entity_type_key) if target is not None else None
         if relation_type is None or source_type is None or target_type is None:
             candidate.ontology_validation_status = "invalid"
             candidate.schema_validation_score = 0.0
             candidate.normalization_score = 0.0
             candidate.status = "rejected"
-            candidate.review_reason = "schema_invalid"
+            candidate.review_reason = "schema_extension_candidate"
             candidate.validation_errors = [
-                _candidate_error("relation_type_or_endpoint_type_unknown")
+                _candidate_error(
+                    "schema_extension_candidate",
+                    field="relation_type_key",
+                    message="The proposed relation or endpoint type is not declared by the frozen Schema",
+                )
             ]
             continue
-        constraint = rules.constraints.get(
-            (relation_type.id, source_type.id, target_type.id)
-        )
+        constraint = rules.constraints.get((relation_type.id, source_type.id, target_type.id))
         try:
             shape = validate_relation_shape(
                 relation_type=relation_type,
@@ -817,16 +807,10 @@ async def validate_job_candidates(db, *, job: Any) -> JobCandidateValidationResu
             candidate.schema_validation_score = 0.0
             candidate.status = "rejected"
             candidate.review_reason = "schema_invalid"
-            candidate.validation_errors = [
-                _candidate_error("relation_shape_invalid", message=str(exc))
-            ]
+            candidate.validation_errors = [_candidate_error("relation_shape_invalid", message=str(exc))]
             continue
-        source_score = _NORMALIZATION_SCORES.get(
-            source.normalization_method or "ambiguous", 0.0
-        )
-        target_score = _NORMALIZATION_SCORES.get(
-            target.normalization_method or "ambiguous", 0.0
-        )
+        source_score = _NORMALIZATION_SCORES.get(source.normalization_method or "ambiguous", 0.0)
+        target_score = _NORMALIZATION_SCORES.get(target.normalization_method or "ambiguous", 0.0)
         candidate.normalization_score = min(source_score, target_score)
         if not shape.valid:
             candidate.ontology_validation_status = "invalid"
@@ -841,9 +825,7 @@ async def validate_job_candidates(db, *, job: Any) -> JobCandidateValidationResu
             candidate.schema_validation_score = 0.4
             candidate.status = "pending_review"
             candidate.review_reason = "schema_boundary_unclear"
-            candidate.validation_errors = [
-                _candidate_error("schema_boundary_unclear")
-            ]
+            candidate.validation_errors = [_candidate_error("schema_boundary_unclear")]
         else:
             candidate.ontology_validation_status = "warning" if shape.requires_review else "valid"
             candidate.schema_validation_score = 0.6 if shape.requires_review else 1.0

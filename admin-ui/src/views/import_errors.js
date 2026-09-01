@@ -21,7 +21,28 @@ export function humanizeError(e) {
         case 400: return '文件内容无法解析或不符合格式';
         case 403: return '你没有该知识库的上传权限';
         case 413: return '文件超过上传大小限制';
-        case 415: return '暂不支持该文件类型';
+        case 415: {
+            const responseDetail = e?.body?.detail;
+            switch (responseDetail?.code) {
+                case 'metadata_file':
+                    return 'macOS 元数据文件，已忽略';
+                case 'office_lock_file':
+                    return 'Office 临时锁文件，已忽略';
+                case 'encrypted_office_file':
+                    return '检测到加密的 Office 文件，请在本地解密后重新上传';
+                case 'file_signature_mismatch': {
+                    const suggestedExtension = responseDetail.suggested_extension;
+                    if (['.doc', '.docx', '.xls', '.xlsx', '.pptx'].includes(suggestedExtension)) {
+                        return `文件后缀与实际格式不一致，请改为 ${suggestedExtension} 后重新上传`;
+                    }
+                    return '文件后缀与实际格式不一致，请检查后重新上传';
+                }
+                case 'file_signature_unconfirmed':
+                    return '无法确认文件的真实格式，请检查文件后重新上传';
+                default:
+                    return '暂不支持该文件类型';
+            }
+        }
         case 422: return '文件或参数不符合要求，请检查后重试';
         case 503: return '服务暂不可用，请稍后重试';
         // 兜底：英文/数组等不安全 detail 不外显，统一通用文案。

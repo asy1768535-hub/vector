@@ -1,19 +1,32 @@
 """管理员接口 Pydantic schemas。"""
+
 from __future__ import annotations
 
 import re
 import uuid
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from app.services.graph_extraction_safety import normalize_allowed_security_levels
+from app.models.organization import DEFAULT_ORGANIZATION_ID
+from app.services.knowledge_artifact_policy import (
+    normalize_knowledge_artifact_security_levels,
+)
+from app.services.classification_runtime_policy import (
+    normalize_classification_security_levels,
+)
+from app.services.embedding import (
+    EmbeddingEndpointError,
+    validate_library_embedding_endpoint,
+)
+from app.services.source_enrichment import redact_source_config
 
 # 库唯一ID：只允许大小写英文字母和下划线（其它一律不允许）。
 # 同时它也是 Dify knowledge_id、URL 路径段、Qdrant collection 名、约定全文源表名，
 # 限定为合法 SQL 标识符字符集可避免下游各处转义问题。
-_SLUG_RE = re.compile(r"^[A-Za-z_]{2,80}$")
+LIBRARY_SLUG_RE = re.compile(r"^[A-Za-z_]{2,80}$")
 
 
 class StrictBaseModel(BaseModel):
@@ -43,6 +56,8 @@ class AdminResetPassword(StrictBaseModel):
 
 class AdminUserRead(BaseModel):
     id: uuid.UUID
+    # Existing service principals may use reserved internal domains such as `.local`.
+    # Creation still requires EmailStr; reads must be able to represent all persisted users.
     email: str
     username: Optional[str] = None
     display_name: Optional[str] = None
@@ -62,27 +77,34 @@ class LibraryCreate(BaseModel):
     embedding_model: Optional[str] = Field(default=None, description="Defaults to global EMBEDDING_MODEL.")
     embedding_dim: Optional[int] = Field(default=None, ge=64, le=8192)
     embedding_base_url: Optional[str] = Field(
-        default=None, max_length=512,
+        default=None,
+        max_length=512,
         description="Per-library embedding endpoint URL; null = use global setting.",
     )
     vector_distance: str = Field(default="cosine", pattern="^(cosine|euclid|dot)$")
     chunk_size: Optional[int] = Field(default=None, ge=200, le=8000)
     chunk_overlap: Optional[int] = Field(default=None, ge=0, le=2000)
     embed_batch_size: Optional[int] = Field(
-        default=None, ge=1, le=256,
+        default=None,
+        ge=1,
+        le=256,
         description="Per-library embedding batch size; null = use global EMBED_BATCH_SIZE.",
     )
     rerank_enabled: Optional[bool] = Field(
-        default=None, description="Per-library rerank toggle; null = inherit global RERANK_ENABLED.",
+        default=None,
+        description="Per-library rerank toggle; null = inherit global RERANK_ENABLED.",
     )
     ocr_enabled: Optional[bool] = Field(
-        default=None, description="Per-library image OCR toggle; null = inherit global OCR_ENABLED.",
+        default=True,
+        description="Per-library image OCR toggle; enabled by default for new libraries.",
     )
     docx_table_aware: Optional[bool] = Field(
-        default=None, description="Per-library docx table-aware chunking; null = inherit global DOCX_TABLE_AWARE.",
+        default=True,
+        description="Per-library docx table-aware chunking; enabled by default for new libraries.",
     )
     retrieval_mode: Optional[str] = Field(
-        default=None, pattern="^(dense|hybrid)$",
+        default=None,
+        pattern="^(dense|hybrid)$",
         description="检索模式：dense=纯向量(默认)；hybrid=向量+pg_trgm 关键词 RRF 融合。不传按 dense。",
     )
     # 普通 UI 开关：默认开启时后端按约定生成 PGSQL 全文源；高级用户仍可传 source_config 覆盖。
@@ -96,17 +118,77 @@ class LibraryCreate(BaseModel):
         default=None,
         description="高级用法：完整跨库补全配置；不传则按 source_enrichment_enabled 决定是否按约定自动生成。结构见 source_enrichment.parse_source_config。",
     )
+    revision_retention_enabled: bool = False
+    revision_retention_days: int = Field(default=60, ge=30, le=60)
+    revision_retention_notice_days: int = Field(default=7, ge=1, le=14)
+    graph_extraction_enabled: bool = True
+    graph_extraction_build_mode: str = Field(
+        default="standard", pattern="^(fast|standard|deep)$"
+    )
+    external_llm_enabled: bool = True
+    graph_extraction_allowed_security_levels: list[str] = Field(default_factory=lambda: ["internal"])
+    schema_template: str = Field(default="none", pattern="^(none|enterprise)$")
+    schema_mode: str = Field(
+        default="explore", pattern="^(disabled|explore|governed)$"
+    )
+    schema_confirmation_policy: str = Field(
+        default="required", pattern="^(required|automatic)$"
+    )
+    claim_graph_shadow_policy: str = Field(
+        default="inherit", pattern="^(inherit|enabled|disabled)$"
+    )
+
+    @field_validator("graph_extraction_allowed_security_levels", mode="before")
+    @classmethod
+    def _validate_graph_security_levels(cls, value):
+        return normalize_allowed_security_levels(value)
 
     @field_validator("slug")
     @classmethod
     def _check_slug(cls, v: str) -> str:
-        if not _SLUG_RE.match(v):
+        if not LIBRARY_SLUG_RE.fullmatch(v):
             raise ValueError("库唯一ID 只能包含大小写英文字母和下划线，长度 2-80")
         return v
 
+    @field_validator("embedding_base_url")
+    @classmethod
+    def _validate_embedding_base_url(cls, value):
+        try:
+            return validate_library_embedding_endpoint(value)
+        except EmbeddingEndpointError as exc:
+            raise ValueError(str(exc)) from exc
+
     @model_validator(mode="after")
     def _check_chunk_params(self):
-        return _validate_chunk_overlap(self)
+        _validate_chunk_overlap(self)
+        _validate_revision_retention_policy(self)
+        if "schema_mode" not in self.model_fields_set:
+            self.schema_mode = (
+                "governed"
+                if self.schema_template == "enterprise"
+                else "explore" if self.graph_extraction_enabled else "disabled"
+            )
+        if self.schema_mode == "disabled" and self.graph_extraction_enabled:
+            raise ValueError("schema_mode=disabled requires graph extraction to be disabled")
+        if self.schema_mode in {"explore", "governed"} and not self.graph_extraction_enabled:
+            raise ValueError("schema_mode requires graph extraction to be enabled")
+        if self.schema_mode != "governed" and self.schema_template != "none":
+            raise ValueError("schema_template is only available in governed mode")
+        if self.graph_extraction_enabled:
+            if "graph_extraction_enabled" in self.model_fields_set and (
+                "external_llm_enabled" not in self.model_fields_set
+                or "graph_extraction_allowed_security_levels" not in self.model_fields_set
+            ):
+                raise ValueError(
+                    "explicit graph extraction enablement requires model permission and security levels"
+                )
+            if not self.external_llm_enabled:
+                raise ValueError("external_llm_enabled must be true when graph extraction is enabled")
+            if not self.graph_extraction_allowed_security_levels:
+                raise ValueError(
+                    "graph extraction security levels are required when graph extraction is enabled"
+                )
+        return self
 
 
 def _validate_chunk_overlap(model):
@@ -121,9 +203,18 @@ def _validate_chunk_overlap(model):
     return model
 
 
+def _validate_revision_retention_policy(model):
+    retention_days = model.revision_retention_days
+    notice_days = model.revision_retention_notice_days
+    if retention_days is not None and notice_days is not None and notice_days >= retention_days:
+        raise ValueError("revision_retention_notice_days must be less than retention days")
+    return model
+
+
 class LibraryUpdate(BaseModel):
     """所有字段可改。注意：改 embedding_dim/vector_distance 后 Qdrant 现有 collection 结构对不上，
     需要走 POST /admin/libraries/{slug}/rebuild-collection 重建。"""
+
     name: Optional[str] = Field(default=None, min_length=1, max_length=160)
     description: Optional[str] = None
     chunk_size: Optional[int] = Field(default=None, ge=200, le=8000)
@@ -141,8 +232,34 @@ class LibraryUpdate(BaseModel):
     # source_config 哨兵：不传=不改；传 {} =清空；传非空 dict=自定义。
     source_config: Optional[dict[str, Any]] = Field(default=None)
     graph_extraction_enabled: Optional[bool] = None
+    schema_mode: Optional[str] = Field(
+        default=None, pattern="^(disabled|explore|governed)$"
+    )
+    schema_confirmation_policy: Optional[str] = Field(
+        default=None, pattern="^(required|automatic)$"
+    )
+    claim_graph_shadow_policy: Optional[str] = Field(
+        default=None, pattern="^(inherit|enabled|disabled)$"
+    )
+    graph_extraction_build_mode: Optional[str] = Field(
+        default=None, pattern="^(fast|standard|deep)$"
+    )
+    graph_assisted_chat_mode: Optional[str] = Field(
+        default=None, pattern="^(off|shadow|enabled)$"
+    )
     external_llm_enabled: Optional[bool] = None
     graph_extraction_allowed_security_levels: Optional[list[str]] = None
+    knowledge_artifact_auto_enabled: Optional[bool] = None
+    summary_artifact_enabled: Optional[bool] = None
+    outline_artifact_enabled: Optional[bool] = None
+    knowledge_artifact_external_model_enabled: Optional[bool] = None
+    knowledge_artifact_allowed_security_levels: Optional[list[str]] = None
+    classification_auto_enabled: Optional[bool] = None
+    classification_external_model_enabled: Optional[bool] = None
+    classification_allowed_security_levels: Optional[list[str]] = None
+    revision_retention_enabled: Optional[bool] = None
+    revision_retention_days: Optional[int] = Field(default=None, ge=30, le=60)
+    revision_retention_notice_days: Optional[int] = Field(default=None, ge=1, le=14)
 
     @field_validator("graph_extraction_enabled", "external_llm_enabled", mode="before")
     @classmethod
@@ -151,6 +268,14 @@ class LibraryUpdate(BaseModel):
             raise ValueError("graph extraction opt-in cannot be null")
         return value
 
+    @field_validator("embedding_base_url")
+    @classmethod
+    def _validate_embedding_base_url(cls, value):
+        try:
+            return validate_library_embedding_endpoint(value)
+        except EmbeddingEndpointError as exc:
+            raise ValueError(str(exc)) from exc
+
     @field_validator("graph_extraction_allowed_security_levels", mode="before")
     @classmethod
     def _validate_graph_security_levels(cls, value):
@@ -158,13 +283,60 @@ class LibraryUpdate(BaseModel):
             raise ValueError("graph extraction security levels cannot be null")
         return normalize_allowed_security_levels(value)
 
+    @field_validator(
+        "knowledge_artifact_auto_enabled",
+        "summary_artifact_enabled",
+        "outline_artifact_enabled",
+        "knowledge_artifact_external_model_enabled",
+        mode="before",
+    )
+    @classmethod
+    def _reject_null_artifact_switch(cls, value):
+        if value is None:
+            raise ValueError("knowledge artifact switch cannot be null")
+        return value
+
+    @field_validator(
+        "classification_auto_enabled",
+        "classification_external_model_enabled",
+        mode="before",
+    )
+    @classmethod
+    def _reject_null_classification_switch(cls, value):
+        if value is None:
+            raise ValueError("classification switch cannot be null")
+        return value
+
+    @field_validator("revision_retention_enabled", mode="before")
+    @classmethod
+    def _reject_null_retention_switch(cls, value):
+        if value is None:
+            raise ValueError("revision retention switch cannot be null")
+        return value
+
+    @field_validator("knowledge_artifact_allowed_security_levels", mode="before")
+    @classmethod
+    def _validate_artifact_security_levels(cls, value):
+        if value is None:
+            raise ValueError("knowledge artifact security levels cannot be null")
+        return normalize_knowledge_artifact_security_levels(value)
+
+    @field_validator("classification_allowed_security_levels", mode="before")
+    @classmethod
+    def _validate_classification_security_levels(cls, value):
+        if value is None:
+            raise ValueError("classification security levels cannot be null")
+        return normalize_classification_security_levels(value)
+
     @model_validator(mode="after")
     def _check_chunk_params(self):
-        return _validate_chunk_overlap(self)
+        _validate_chunk_overlap(self)
+        return _validate_revision_retention_policy(self)
 
 
 class LibraryRead(BaseModel):
     id: uuid.UUID
+    organization_id: uuid.UUID = DEFAULT_ORGANIZATION_ID
     slug: str
     name: str
     description: Optional[str] = None
@@ -181,14 +353,110 @@ class LibraryRead(BaseModel):
     retrieval_mode: str = "dense"
     qdrant_collection: str
     source_config: Optional[dict[str, Any]] = None
-    graph_extraction_enabled: bool = False
-    external_llm_enabled: bool = False
-    graph_extraction_allowed_security_levels: list[str] = Field(default_factory=list)
-    lifecycle_mode: str = "managed"                 # #6 managed | external
-    index_state: str = "ready"                      # #6 ready | rebuilding | failed
+
+    @field_validator("source_config", mode="before")
+    @classmethod
+    def _redact_source_config(cls, value):
+        return redact_source_config(value)
+
+    graph_extraction_enabled: bool = True
+    schema_mode: str = "disabled"
+    schema_confirmation_policy: str = "required"
+    claim_graph_shadow_policy: str = "inherit"
+    claim_graph_shadow_enabled: bool = False
+    graph_extraction_build_mode: str = "standard"
+    graph_assisted_chat_mode: str = "off"
+    external_llm_enabled: bool = True
+    graph_extraction_allowed_security_levels: list[str] = Field(default_factory=lambda: ["internal"])
+    knowledge_artifact_auto_enabled: bool = False
+    summary_artifact_enabled: bool = False
+    outline_artifact_enabled: bool = False
+    knowledge_artifact_external_model_enabled: bool = False
+    knowledge_artifact_allowed_security_levels: list[str] = Field(default_factory=list)
+    classification_auto_enabled: bool = False
+    classification_external_model_enabled: bool = False
+    classification_allowed_security_levels: list[str] = Field(default_factory=list)
+    revision_retention_enabled: bool = False
+    revision_retention_days: int = 60
+    revision_retention_notice_days: int = 7
+    lifecycle_mode: str = "managed"  # #6 managed | external
+    index_state: str = "ready"  # #6 ready | rebuilding | failed
     active_rebuild_operation_id: Optional[uuid.UUID] = None
     created_at: datetime
     deleted_at: Optional[datetime] = None
+
+    @field_validator(
+        "graph_extraction_build_mode",
+        mode="before",
+    )
+    @classmethod
+    def _default_graph_extraction_build_mode(cls, value):
+        return value if value in {"fast", "standard", "deep"} else "standard"
+
+    @field_validator("graph_assisted_chat_mode", mode="before")
+    @classmethod
+    def _default_graph_assisted_chat_mode(cls, value):
+        return value if value in {"off", "shadow", "enabled"} else "off"
+
+    @field_validator("schema_mode", mode="before")
+    @classmethod
+    def _default_schema_mode(cls, value):
+        return "disabled" if value is None else value
+
+    @field_validator("schema_confirmation_policy", mode="before")
+    @classmethod
+    def _default_schema_confirmation_policy(cls, value):
+        return "required" if value is None else value
+
+    @field_validator("claim_graph_shadow_policy", mode="before")
+    @classmethod
+    def _default_claim_graph_shadow_policy(cls, value):
+        return "inherit" if value is None else value
+
+    @model_validator(mode="after")
+    def _resolve_claim_graph_shadow_enabled(self):
+        from app.services.shadow_rollout import resolve_shadow_enabled
+
+        self.claim_graph_shadow_enabled = resolve_shadow_enabled(
+            policy=self.claim_graph_shadow_policy,
+            graph_extraction_enabled=self.graph_extraction_enabled,
+            external_llm_enabled=self.external_llm_enabled,
+        )
+        return self
+
+    @field_validator(
+        "classification_auto_enabled",
+        "classification_external_model_enabled",
+        mode="before",
+    )
+    @classmethod
+    def _default_classification_switches(cls, value):
+        return False if value is None else value
+
+    @field_validator("classification_allowed_security_levels", mode="before")
+    @classmethod
+    def _default_classification_security_levels(cls, value):
+        return [] if value is None else value
+
+    @field_validator("revision_retention_enabled", mode="before")
+    @classmethod
+    def _default_retention_enabled(cls, value):
+        return False if value is None else value
+
+    @field_validator("revision_retention_days", mode="before")
+    @classmethod
+    def _default_retention_days(cls, value):
+        return 60 if value is None else value
+
+    @field_validator("revision_retention_notice_days", mode="before")
+    @classmethod
+    def _default_retention_notice_days(cls, value):
+        return 7 if value is None else value
+
+    @field_validator("organization_id", mode="before")
+    @classmethod
+    def _default_organization_id(cls, value):
+        return DEFAULT_ORGANIZATION_ID if value is None else value
 
     model_config = {"from_attributes": True}
 
@@ -259,6 +527,8 @@ class PermissionMatrixRow(BaseModel):
     actions: list[str]
     # 可选：活动库的真实名称（仅 /me/permissions 填充，向后兼容；缺失时前端回退 slug）。
     library_name: Optional[str] = None
+    # Organization-aware mode exposes the service-owned scope for safe client grouping.
+    organization_id: Optional[uuid.UUID] = None
 
 
 # ── Audit log ────────────────────────────────────────────────────────────
@@ -277,9 +547,9 @@ class EmbeddingJobRead(BaseModel):
     id: uuid.UUID
     library_id: uuid.UUID
     document_id: uuid.UUID
-    document_revision: int = 1                      # #6 该 job 对应的索引版本
+    document_revision: int = 1  # #6 该 job 对应的索引版本
     rebuild_operation_id: Optional[uuid.UUID] = None
-    status: str                                     # pending|processing|done|failed|superseded
+    status: str  # pending|processing|done|failed|superseded
     worker_id: Optional[str] = None
     attempt_count: int
     last_error: Optional[str] = None
@@ -292,6 +562,7 @@ class EmbeddingJobRead(BaseModel):
 
 class EmbeddingJobStats(BaseModel):
     """按状态聚合的任务计数（任务监控统计条用）。"""
+
     pending: int
     processing: int
     done: int
@@ -299,9 +570,104 @@ class EmbeddingJobStats(BaseModel):
     total: int
 
 
+class TaskMonitorRead(BaseModel):
+    """Normalized persistent task state across import, embedding, and graph jobs."""
+
+    id: uuid.UUID
+    task_type: str
+    title: Optional[str] = None
+    library_id: uuid.UUID
+    document_id: Optional[uuid.UUID] = None
+    document_revision: Optional[int] = None
+    document_revision_id: Optional[uuid.UUID] = None
+    status: str
+    raw_status: str
+    stage: Optional[str] = None
+    worker_id: Optional[str] = None
+    attempt_count: int = 0
+    last_error: Optional[str] = None
+    created_at: datetime
+    claimed_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    retry_target_type: Optional[str] = None
+    retry_target_id: Optional[uuid.UUID] = None
+    retry_generation: int = 0
+    retryable: bool = False
+    retry_capability: str = "unsupported"
+    retry_reason: str = "当前任务类型暂不支持"
+    raw_error: Optional[str] = None
+    build_mode: Optional[str] = None
+    publication_status: Optional[str] = None
+    progress: Optional[dict[str, Any]] = None
+    metrics: Optional[dict[str, Any]] = None
+
+
+class TaskMonitorRetryItem(BaseModel):
+    task_type: Literal["import", "embedding", "graph"]
+    job_id: uuid.UUID
+    observed_generation: int = Field(ge=0)
+
+
+class TaskMonitorRetryRequest(BaseModel):
+    items: list[TaskMonitorRetryItem] = Field(min_length=1, max_length=500)
+
+
+class TaskMonitorRetryResult(BaseModel):
+    task_type: Literal["import", "embedding", "graph"]
+    job_id: uuid.UUID
+    status: Literal["succeeded", "rejected"]
+    retry_generation: Optional[int] = None
+    reason: str
+    message: str
+
+
+class TaskMonitorRetryResponse(BaseModel):
+    results: list[TaskMonitorRetryResult]
+
+
+class TaskQueueHealth(BaseModel):
+    pending_count: int = Field(ge=0)
+    oldest_pending_age_seconds: Optional[int] = Field(default=None, ge=0)
+    processing_count: int = Field(ge=0)
+    throughput_per_minute: Optional[float] = Field(default=None, ge=0)
+    failure_rate: Optional[float] = Field(default=None, ge=0, le=1)
+    window_seconds: int = Field(ge=1)
+
+
+class TaskMonitorStats(BaseModel):
+    pending: int
+    processing: int
+    done: int
+    failed: int
+    cancelled: int
+    superseded: int
+    retryable_failed: int
+    total: int
+    retryable_embedding_failed: int = 0
+    upload_preflight_failures: dict[str, int] = Field(
+        default_factory=dict,
+        description=(
+            "Persisted Complete-stage upload preflight failures by code; "
+            "pre-session ignored files are not persisted."
+        ),
+    )
+    queues: dict[str, TaskQueueHealth]
+
+    @model_validator(mode="after")
+    def _status_counts_close(self) -> "TaskMonitorStats":
+        state_total = sum(
+            getattr(self, key)
+            for key in ("pending", "processing", "done", "failed", "cancelled", "superseded")
+        )
+        if state_total != self.total:
+            raise ValueError("task monitor status counts must equal total")
+        return self
+
+
 # ── Operations status（运行状态监控，docs/26 / 批次 C2） ──────────────────
 class ServiceInstanceLatest(BaseModel):
     """某 service_type 最新一个非 stopping 实例（供页面展示 host/pid/最后心跳）。"""
+
     instance_id: str
     hostname: str
     pid: int
@@ -312,8 +678,9 @@ class ServiceInstanceLatest(BaseModel):
 
 class ServiceStatus(BaseModel):
     """单类进程（api / embedding_worker / cleanup_worker）的聚合在线状态。"""
+
     service_type: str
-    status: str                                  # online | degraded | offline
+    status: str  # online | degraded | offline
     online_instances: int
     known_instances: int
     latest: Optional[ServiceInstanceLatest] = None
@@ -321,6 +688,7 @@ class ServiceStatus(BaseModel):
 
 class CleanupOutboxStats(BaseModel):
     """Cleanup Outbox 按状态聚合；dead_letter = 已达 max_attempts 的 failed。"""
+
     pending: int
     processing: int
     done: int
@@ -331,14 +699,16 @@ class CleanupOutboxStats(BaseModel):
 
 class LibraryIndexStats(BaseModel):
     """按 index_state 计活动库数（未删库）。"""
+
     rebuilding: int
     failed: int
 
 
 class RebuildOperationStatus(BaseModel):
     """活动重建 operation 的进度摘要（last_error 截断、不含堆栈）。"""
+
     library_slug: str
-    status: str                                  # preparing | running
+    status: str  # preparing | running
     expected_job_count: int
     done_job_count: int
     progress_pct: float
@@ -352,6 +722,7 @@ class GraphPublicationStats(BaseModel):
 
 class OperationsStatus(BaseModel):
     """GET /admin/operations/status 响应：三类进程在线 + 任务/Outbox/重建聚合。"""
+
     now: datetime
     offline_threshold_seconds: int
     services: list[ServiceStatus]

@@ -21,7 +21,11 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.api_key import ApiKey
+from app.models.organization import Organization
+from app.models.organization_membership import OrganizationMembership
 from app.models.user import User
+from app.config import settings
+from app.services.organization_authorization import bind_credential_organization
 
 log = logging.getLogger(__name__)
 
@@ -73,6 +77,26 @@ class APIKeyStrategy(Strategy[User, uuid.UUID]):
                 continue
             if not verify_api_key(token, candidate.key_hash):
                 continue
+            if settings.organization_authorization_enabled:
+                membership = (
+                    await self._session.execute(
+                        select(OrganizationMembership.id)
+                        .join(
+                            Organization,
+                            Organization.id
+                            == OrganizationMembership.organization_id,
+                        )
+                        .where(
+                            OrganizationMembership.organization_id
+                            == candidate.organization_id,
+                            OrganizationMembership.user_id == candidate.user_id,
+                            OrganizationMembership.status == "active",
+                            Organization.status == "active",
+                        )
+                    )
+                ).scalar_one_or_none()
+                if membership is None:
+                    continue
             # 命中：更新 last_used_at（fire and forget，错误不阻塞）
             await self._session.execute(
                 update(ApiKey).where(ApiKey.id == candidate.id).values(last_used_at=now)
@@ -80,9 +104,16 @@ class APIKeyStrategy(Strategy[User, uuid.UUID]):
             await self._session.commit()
             try:
                 user_uuid = candidate.user_id
-                return await user_manager.get(user_uuid)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("api key matched but user lookup failed: %s", exc)
+                user = await user_manager.get(user_uuid)
+                if settings.organization_authorization_enabled:
+                    bind_credential_organization(
+                        user,
+                        candidate.organization_id,
+                        candidate.id,
+                    )
+                return user
+            except Exception:  # noqa: BLE001
+                log.warning("api key matched but user lookup failed")
                 return None
         return None
 

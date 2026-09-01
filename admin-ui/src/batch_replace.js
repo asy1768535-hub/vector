@@ -121,7 +121,13 @@ export function submittableBatchReplaceItems(items) {
     return (items || []).filter(isBatchReplaceSubmittable);
 }
 
-export async function submitBatchReplaceItems(items, slug, uploadFn, humanize = (e) => e?.message || String(e)) {
+export async function submitBatchReplaceItems(
+    items,
+    slug,
+    uploadFn,
+    humanize = (e) => e?.message || String(e),
+    uploadOptions = {},
+) {
     const eligible = submittableBatchReplaceItems(items);
     const eligibleKeys = new Set(eligible.map((item) => item._key));
 
@@ -136,7 +142,10 @@ export async function submitBatchReplaceItems(items, slug, uploadFn, humanize = 
         item.status = 'uploading';
         item.error = '';
         try {
-            await uploadFn(slug, item.file, { replaceDocumentId: item.matchedDocId });
+            item.importResponse = await uploadFn(slug, item.file, {
+                ...uploadOptions,
+                replaceDocumentId: item.matchedDocId,
+            });
             item.status = 'submitted';
         } catch (e) {
             item.status = 'failed';

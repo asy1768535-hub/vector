@@ -58,6 +58,7 @@ class FakeDB:
         self.commits = 0
         self.rollbacks = 0
         self.flushes = 0
+        self.refreshes = 0
 
     def in_transaction(self):
         return False
@@ -85,6 +86,10 @@ class FakeDB:
 
     async def rollback(self):
         self.rollbacks += 1
+
+    async def refresh(self, value):
+        assert value is not None
+        self.refreshes += 1
 
 
 def _config(**overrides) -> Settings:
@@ -246,6 +251,7 @@ def test_activation_switches_snapshot_atomically_and_supersedes_previous(monkeyp
     assert previous.superseded_by_publication_id == publication.id
     assert previous_item.status == "superseded"
     assert db.commits == 1
+    assert db.refreshes == 1
     assert db.rollbacks == 0
     assert len(db.update_statements) == 3
     assert [row.action for row in db.added if isinstance(row, AuditLog)] == [

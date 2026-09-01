@@ -79,7 +79,8 @@
 | 组 | 变量与默认值 |
 |---|---|
 | switch/provider | `GRAPH_EXTRACTION_ENABLED=false`; `GRAPH_EXTRACTION_AUTO_TRIGGER_ENABLED=false`; `GRAPH_EXTRACTION_BASE_URL=https://api.deepseek.com/v1`; `GRAPH_EXTRACTION_MODEL=deepseek-v4-pro`; `GRAPH_EXTRACTION_API_KEY=`; `GRAPH_EXTRACTION_TIMEOUT_SECONDS=120`; `GRAPH_EXTRACTION_TEMPERATURE=0`; `GRAPH_EXTRACTION_RESPONSE_FORMAT=json_object` |
-| context/version | `GRAPH_EXTRACTION_MAX_CONTEXT_CHARS=24000`; `GRAPH_EXTRACTION_PREVIOUS_CHUNKS=1`; `GRAPH_EXTRACTION_NEXT_CHUNKS=1`; `GRAPH_EXTRACTION_PROMPT_VERSION=v1`; `GRAPH_EXTRACTION_EXTRACTOR_VERSION=v1`; `GRAPH_EXTRACTION_OUTPUT_PARSER_VERSION=v1`; `GRAPH_EXTRACTION_CONTEXT_POLICY_VERSION=v1`; `GRAPH_EXTRACTION_POLICY_VERSION=v1`; `GRAPH_EXTRACTION_NORMALIZATION_RULE_VERSION=normalization_v1`; `GRAPH_EXTRACTION_CONFIDENCE_POLICY_VERSION=v1` |
+| helper review | New Jobs use a local helper draft followed by the frozen canonical Qwen provider review; Qwen remains the only canonical output. `GRAPH_EXTRACTION_MINSTRAL_BASE_URL=http://graph-minstral-3b:8000/v1`; `GRAPH_EXTRACTION_MINSTRAL_MODEL=graph-minstral-3b`; `GRAPH_EXTRACTION_MINSTRAL_TIMEOUT_SECONDS=120`; `GRAPH_EXTRACTION_MINSTRAL_MAX_OUTPUT_TOKENS=1000`; `GRAPH_EXTRACTION_QWEN3_DRAFT_MAX_OUTPUT_TOKENS=1000`. Libraries in `GRAPH_EXTRACTION_NUEXTRACT_REVIEW_LIBRARY_IDS=` keep the NuExtract helper with `GRAPH_EXTRACTION_NUEXTRACT_BASE_URL=http://nuextract3-gpu0:8000/v1`; `GRAPH_EXTRACTION_NUEXTRACT_MODEL=nuextract3`; `GRAPH_EXTRACTION_NUEXTRACT_TIMEOUT_SECONDS=120`; `GRAPH_EXTRACTION_NUEXTRACT_MAX_OUTPUT_TOKENS=4000`. Existing frozen Jobs remain unchanged. |
+| context/version | `GRAPH_EXTRACTION_MAX_CONTEXT_CHARS=24000`; `GRAPH_EXTRACTION_PREVIOUS_CHUNKS=1`; `GRAPH_EXTRACTION_NEXT_CHUNKS=1`; `GRAPH_SCHEMA_DISCOVERY_MAX_SOURCE_CHUNKS=8`; `GRAPH_SCHEMA_DISCOVERY_CONCEPT_INVENTORY_ENABLED=false`; `GRAPH_SCHEMA_DISCOVERY_TIMEOUT_SECONDS=300`; `GRAPH_SCHEMA_DISCOVERY_CONTEXT_WINDOW_TOKENS=16384`; `GRAPH_SCHEMA_DISCOVERY_MAX_OUTPUT_TOKENS=8000`; `GRAPH_EXTRACTION_PROMPT_VERSION=v1`; `GRAPH_EXTRACTION_EXTRACTOR_VERSION=v1`; `GRAPH_EXTRACTION_OUTPUT_PARSER_VERSION=v1`; `GRAPH_EXTRACTION_CONTEXT_POLICY_VERSION=v1`; `GRAPH_EXTRACTION_POLICY_VERSION=v1`; `GRAPH_EXTRACTION_NORMALIZATION_RULE_VERSION=normalization_v1`; `GRAPH_EXTRACTION_CONFIDENCE_POLICY_VERSION=v1` |
 | confidence/evidence | `GRAPH_EXTRACTION_ENTITY_MATERIALIZATION_THRESHOLD=0.85`; `GRAPH_EXTRACTION_RELATION_DRAFT_THRESHOLD=0.85`; `GRAPH_EXTRACTION_WEIGHT_MODEL=0.25`; `GRAPH_EXTRACTION_WEIGHT_EVIDENCE=0.35`; `GRAPH_EXTRACTION_WEIGHT_SCHEMA=0.25`; `GRAPH_EXTRACTION_WEIGHT_NORMALIZATION=0.15`; `GRAPH_EXTRACTION_AUTO_EVIDENCE_TYPES=direct_statement,table_cell`; `GRAPH_EXTRACTION_EVIDENCE_GROUP_POLICY=all_claims_valid` |
 | worker/lease | `GRAPH_EXTRACTION_WORKER_POLL_SECONDS=3`; `GRAPH_EXTRACTION_UNIT_LEASE_SECONDS=180`; `GRAPH_EXTRACTION_UNIT_LEASE_RENEW_SECONDS=30`; `GRAPH_EXTRACTION_WORKER_MAX_MODEL_ATTEMPTS=3` |
 | retention | `GRAPH_EXTRACTION_CONTEXT_RETENTION_DAYS=30`; `GRAPH_EXTRACTION_RAW_OUTPUT_RETENTION_DAYS=30`; `GRAPH_EXTRACTION_CANDIDATE_RETENTION_DAYS=180` |
@@ -121,8 +122,16 @@ M1 只冻结 DTO、配置和启动校验，不挂载 `/v06` 路由，也不执�
 | 组 | 变量与默认值 |
 |---|---|
 | switch/version | `GRAPH_RETRIEVAL_ENABLED=false`; `GRAPH_RETRIEVAL_CONTRACT_VERSION=v1` |
-| traversal limits | `GRAPH_RETRIEVAL_MAX_SEEDS=10`; `GRAPH_RETRIEVAL_MAX_HOPS=2`; `GRAPH_RETRIEVAL_MAX_NODES=100`; `GRAPH_RETRIEVAL_MAX_RELATIONS=200` |
+| traversal limits | `GRAPH_RETRIEVAL_MAX_SEEDS=10`; `GRAPH_RETRIEVAL_MAX_HOPS=3`; `GRAPH_RETRIEVAL_MAX_NODES=100`; `GRAPH_RETRIEVAL_MAX_RELATIONS=200` |
 | evidence/timeout | `GRAPH_RETRIEVAL_MAX_EVIDENCE_PER_FACT=20`; `GRAPH_RETRIEVAL_TIMEOUT_SECONDS=3.0` |
+
+对话图谱增强先使用问答请求的 `top_k`（范围 1–20）完成向量/混合检索，再从排名最靠前的最多
+10 个命中切片中读取 `chunk_id` 和 Evidence 锚点。系统只在当前已发布图谱中围绕这些种子扩展
+最多 3 跳，并只把带有效原文证据的关系送入回答模型；不会把整个知识库图谱加入上下文。
+知识库的图谱辅助问答模式为 `enabled` 时，图谱证据才会实际参与回答；`shadow` 只记录候选
+结果，`off` 不执行对话图谱检索。问答请求可通过 `use_graph` 控制本次是否启用图谱辅助，默认
+为 `true`；设为 `false` 时不查询图谱。该请求字段不能绕过知识库模式，
+`GRAPH_RETRIEVAL_ENABLED=false` 也仍会全局关闭这条链路。
 
 ### 切分默认值
 
@@ -133,17 +142,50 @@ M1 只冻结 DTO、配置和启动校验，不挂载 `/v06` 路由，也不执�
 
 库级 chunk_size / chunk_overlap 优先于这两个默认值。
 
-### PDF 扫描页 OCR（仅当库 `ocr_enabled` 开启时生效）
+### PDF 扫描页与独立图片 OCR（仅当库 `ocr_enabled` 开启时生效）
 
-文字版 PDF 不受影响；只有低文字页才渲染 + OCR。需 `pip install -e ".[ocr]"`（含 `pypdfium2`、`Pillow`、RapidOCR）。
+文字版 PDF 不受影响；只有低文字页才渲染 + OCR。独立图片上传支持 BMP/JPEG/JPG/PNG/TIF/TIFF/WEBP，文件名进入检索文本，图片内容交给 RapidOCR；无可识别文字时仍可按文件名检索。需 `pip install -e ".[ocr]"`（含 `pypdfium2`、`Pillow`、RapidOCR）。
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `PDF_OCR_MIN_TEXT_CHARS` | `20` | 单页非空白字符数 < 此值 → 视为图片页走 OCR（否则用文字层） |
 | `PDF_OCR_RENDER_DPI` | `200` | 渲染扫描页的 DPI（建议 150~300，越高越清晰也越慢） |
 | `PDF_OCR_MAX_PAGES` | `50` | 单份 PDF 最多 OCR 多少页（只计真正进 OCR 的页）；超过即 400 快速失败 |
+| `OCR_INTRA_OP_NUM_THREADS` | `8` | RapidOCR 每个 ONNX 模型的计算线程上限 |
+| `OCR_INTER_OP_NUM_THREADS` | `1` | RapidOCR ONNX 模型间调度线程上限 |
+| `IMAGE_OCR_MAX_INPUT_BYTES` | `134217728` | 独立图片解析上限（默认 128 MiB，可配置 1–500 MiB）；在读入内存和 OCR 前检查，不改变上传总额度 |
 
-> OCR 在上传请求内**同步**执行，大批扫描页会较慢；靠上面两个上限兜底。详见 [09 文档摄入](./09-document-ingest.md)。
+OCR 在 Import Worker 中执行；同一进程内 OCR 调用串行，普通文本/Office 文件仍可并发解析。
+
+### 文件夹上传吞吐
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `IMPORT_UPLOAD_CHUNK_BYTES` | `33554432` | 浏览器分块大小（32 MiB） |
+| `IMPORT_UPLOAD_FILE_CONCURRENCY` | `1` | 服务端下发给浏览器的单用户文件上传调度并发，上限 16 |
+| `IMPORT_UPLOAD_USER_INFLIGHT_LIMIT` | `1` | 服务端允许同一用户同时执行的分块或 Complete 请求数 |
+| `IMPORT_UPLOAD_GLOBAL_INFLIGHT_LIMIT` | `10` | 服务端允许全部用户同时执行的分块或 Complete 请求数 |
+| `IMPORT_UPLOAD_CLAIM_HEARTBEAT_SECONDS` | `30` | 慢传输、`fsync` 或哈希校验期间续约上传 owner claim 的间隔 |
+| `IMPORT_UPLOAD_CLAIM_STALE_SECONDS` | `300` | 上传 owner claim 的过期窗口；必须至少覆盖 3 次心跳 |
+| `IMPORT_UPLOAD_RETRY_AFTER_SECONDS` | `2` | 上传繁忙或额度已满时通过 `Retry-After` 返回的建议重试秒数 |
+| `IMPORT_WORKER_BATCH_SIZE` | `4` | Import Worker 每轮领取任务数，上限 16；当前按领取顺序逐个处理，不代表解析并发数 |
+| `DOC_CONVERSION_MAX_BYTES` | `209715200` | 旧版 `.doc` 单文件转换上限（200 MiB） |
+| `DOC_CONVERTER_BINARY` | `soffice` | DOC Converter 使用的 LibreOffice CLI 路径 |
+| `DOC_CONVERTER_CONCURRENCY` | `2` | 同时转换 DOC 数，配置范围 1-4；生产初始保持 2 |
+| `DOC_CONVERSION_TIMEOUT_SECONDS` | `180` | 单个 DOC 的 LibreOffice 转换超时 |
+| `DOC_CONVERTER_POLL_SECONDS` | `1` | Converter 空队列轮询间隔 |
+| `DOC_CONVERTER_STALE_SECONDS` | `600` | Converter 租约回收时间；应大于转换超时并预留文件复制时间 |
+| `DOC_CONVERTER_MAX_ATTEMPTS` | `3` | DOC 自动转换最多尝试次数；失败后可由任务页人工重试 |
+| `XLS_MAX_INPUT_BYTES` | `67108864` | 旧版 `.xls` 单文件解析上限（64 MiB，避免整文件读入耗尽内存） |
+
+`.doc` 只走新的异步新建/文件夹导入协议。临时 DOCX 位于同一 staging 根目录，
+只用于解析；正式文件、下载和证据 SHA 仍绑定原 DOC。API、DOC Converter 和
+Importer 必须挂载同一个 `IMPORT_STAGING_DIR`。
+
+每用户额度不能高于全局额度。服务端在短事务内原子认领请求，额度已满时返回
+`429`；同一上传会话正被其他请求持有时返回可重试的 `409`。两种响应都携带
+`Upload-Offset`（存在已提交 offset 时）和 `Retry-After`，客户端必须从服务端已提交
+offset 继续，不能盲目重复追加字节。
 
 ## 加新配置项
 

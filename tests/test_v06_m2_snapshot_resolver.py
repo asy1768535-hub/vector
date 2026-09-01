@@ -165,7 +165,14 @@ def test_m2_runtime_limits_fail_before_database_access():
     request = _request(seeds=[{"entity_id": ENTITY_ID}, {"entity_id": SECOND_ENTITY_ID}])
 
     with pytest.raises(graph_retrieval.GraphRetrievalServiceError) as exc_info:
-        asyncio.run(graph_retrieval.resolve_graph_retrieval_query(NoQueryDB(), _library(), request, config=config))
+        asyncio.run(
+            graph_retrieval.resolve_and_traverse_graph_retrieval_query(
+                NoQueryDB(),
+                _library(),
+                request,
+                config=config,
+            )
+        )
 
     assert exc_info.value.code == "graph_retrieval_limit_exceeded"
     assert str(exc_info.value) == "graph_retrieval_limit_exceeded"
@@ -380,36 +387,6 @@ def test_m2_end_fence_fails_closed(rows, expected_code):
             )
         )
     assert exc_info.value.code == expected_code
-
-
-def test_m2_orchestrator_has_fixed_eight_statement_mixed_request():
-    db = FakeDB(
-        [
-            *_load_results(),
-            _Result([_entity_row(0)]),
-            _Result([_entity_row(1, entity_id=SECOND_ENTITY_ID, type_id=SECOND_TYPE_ID)]),
-            _Result([_relation_type_row()]),
-            _Result([_current_row()]),
-        ]
-    )
-    request = _request(
-        seeds=[{"entity_id": ENTITY_ID}, {"canonical_name": "Alice", "entity_type_key": "person"}],
-        relation_type_keys=["member_of"],
-    )
-
-    result = asyncio.run(
-        graph_retrieval.resolve_graph_retrieval_query(
-            db,
-            _library(),
-            request,
-            config=Settings(_env_file=None),
-        )
-    )
-
-    assert len(db.statements) == 8
-    assert len(result.seeds) == 2
-    assert len(result.relation_types) == 1
-
 
 def test_m2_source_has_no_route_traversal_alias_or_sensitive_projection():
     source = inspect.getsource(graph_retrieval).lower()

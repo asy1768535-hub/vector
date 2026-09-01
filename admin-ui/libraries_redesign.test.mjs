@@ -3,6 +3,7 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 
 const source = readFileSync(new URL('./src/views/Libraries.js', import.meta.url), 'utf8');
+const apiSource = readFileSync(new URL('./src/api.js', import.meta.url), 'utf8');
 const css = readFileSync(new URL('./style.css', import.meta.url), 'utf8');
 
 // ════════════════════════════════════════════════════════════
@@ -12,6 +13,7 @@ const css = readFileSync(new URL('./style.css', import.meta.url), 'utf8');
 import {
     computeLibraryStats,
     filterLibraries,
+    librarySlugFromName,
     libraryStatus,
     paginateLibraries,
     srcSummary,
@@ -187,12 +189,22 @@ test('.run_logs is in .gitignore', () => {
     assert.ok(gi.includes('.run_logs/'));
 });
 
-test('source enrichment switch defaults on in create dialog', () => {
+test('source enrichment defaults on without appearing in create dialog', () => {
     assert.match(source, /source_enrichment_enabled:\s*true/);
-    assert.match(source, /v-model="create\.form\.source_enrichment_enabled"/);
-    assert.match(source, /启用 PGSQL 全文源补全/);
-    assert.match(source, /v-if="create\.form\.source_enrichment_enabled"/);
-    assert.match(source, /已关闭全文源补全：检索结果只使用向量库已有文本/);
+    const createDialog = source.slice(
+        source.indexOf('<!-- Create dialog -->'),
+        source.indexOf('<!-- Edit dialog -->'),
+    );
+    assert.doesNotMatch(createDialog, /create\.form\.source_enrichment_enabled/);
+    assert.doesNotMatch(createDialog, /PGSQL|text_id|全文源/);
+});
+
+test('library IDs derive from names and remain valid for Chinese names', () => {
+    assert.equal(librarySlugFromName('Medical Knowledge Base'), 'medical_knowledge_base');
+    const chineseSlug = librarySlugFromName('医学知识库');
+    assert.match(chineseSlug, /^library_[a-z]{12}$/);
+    assert.equal(librarySlugFromName('医学知识库'), chineseSlug);
+    assert.equal(librarySlugFromName(''), '');
 });
 
 test('create submission includes disabled source_enrichment_enabled in payload', () => {
@@ -201,9 +213,74 @@ test('create submission includes disabled source_enrichment_enabled in payload',
     assert.match(source, /source_enrichment_enabled:\s*true/);
 });
 
+test('new libraries always enable OCR and DOCX table-aware parsing', () => {
+    assert.match(source, /ocr_enabled:\s*true,\s*docx_table_aware:\s*true/);
+    const createDialog = source.slice(
+        source.indexOf('<!-- Create dialog -->'),
+        source.indexOf('<!-- Edit dialog -->'),
+    );
+    assert.doesNotMatch(createDialog, /v-model="create\.form\.ocr_enabled"/);
+    assert.doesNotMatch(createDialog, /v-model="create\.form\.docx_table_aware"/);
+});
+
+test('create dialog keeps two vector/chunk rows with local bge-m3 defaults', () => {
+    assert.match(source, /embedding_dim:\s*1024/);
+    assert.match(source, /embed_batch_size:\s*32/);
+    const createDialog = source.slice(
+        source.indexOf('<!-- Create dialog -->'),
+        source.indexOf('<!-- Edit dialog -->'),
+    );
+    assert.doesNotMatch(createDialog, /create\.form\.embedding_model/);
+    assert.doesNotMatch(createDialog, /create\.form\.embedding_base_url/);
+    assert.match(createDialog, /create\.form\.embedding_dim/);
+    assert.match(createDialog, /create\.form\.embed_batch_size/);
+    assert.match(createDialog, /create\.form\.chunk_size/);
+    assert.match(createDialog, /create\.form\.chunk_overlap/);
+    assert.doesNotMatch(createDialog, /阿里云/);
+});
+
+test('create dialog places name first and shows a server-owned library ID', () => {
+    const createDialog = source.slice(
+        source.indexOf('<!-- Create dialog -->'),
+        source.indexOf('<!-- Edit dialog -->'),
+    );
+    assert.ok(
+        createDialog.indexOf('v-model="create.form.name"')
+        < createDialog.indexOf('v-model="create.form.slug"'),
+    );
+    assert.match(createDialog, /@input="onCreateNameInput"/);
+    assert.match(createDialog, /v-model="create\.form\.slug" readonly/);
+    assert.match(createDialog, /__r2、__r3/);
+    assert.match(source, /if \(!create\.slugEdited\) create\.form\.slug = librarySlugFromName\(name\)/);
+});
+
+test('recreated library names surface the server-assigned generation ID', () => {
+    assert.match(source, /created\.slug\.match/);
+    assert.ok(source.includes('同名知识库已按第 '));
+});
+
 test('edit dialog backfills source enrichment switch from source_config', () => {
     assert.match(source, /source_enrichment_enabled:\s*row\.source_config != null/);
     assert.match(source, /v-model="edit\.form\.source_enrichment_enabled"/);
+});
+
+test('edit dialog exposes the complete administrator configuration', () => {
+    const editDialog = source.slice(
+        source.indexOf('<!-- Edit dialog -->'),
+        source.indexOf('<!-- FAQ dialog -->'),
+    );
+    for (const field of [
+        'embedding_model', 'embedding_base_url', 'embedding_dim', 'vector_distance',
+        'embed_batch_size', 'chunk_size', 'chunk_overlap', 'retrieval_mode',
+        'rerank_enabled', 'ocr_enabled', 'docx_table_aware',
+        'source_enrichment_enabled', 'schema_mode',
+    ]) {
+        assert.match(editDialog, new RegExp(`edit\\.form\\.${field}`));
+    }
+    assert.doesNotMatch(editDialog, /阿里云/);
+    assert.match(source, /diff\.embedding_dim !== undefined \|\| diff\.vector_distance !== undefined/);
+    assert.match(editDialog, /path: '\/knowledge-governance\/schema'/);
+    assert.match(editDialog, /query: \{ library: edit\.slug, tab: 'overview' \}/);
 });
 
 test('edit from enabled to disabled submits source_enrichment_enabled diff', () => {
@@ -212,10 +289,64 @@ test('edit from enabled to disabled submits source_enrichment_enabled diff', () 
     assert.match(source, /source_enrichment_enabled/);
 });
 
+test('library save failures stay on the existing error path', () => {
+    const submitEdit = source.slice(source.indexOf('async function submitEdit'), source.indexOf('async function rebuild'));
+    assert.match(submitEdit, /try \{/);
+    assert.match(submitEdit, /api\.updateLibrary\(edit\.slug, diff\)/);
+    assert.match(submitEdit, /catch \(e\) \{ ElMessage\.error\(e\.message\); \}/);
+});
+
 test('detail drawer displays source enrichment enabled or disabled clearly', () => {
     assert.match(source, /function sourceDisplay\(config\)/);
     assert.match(source, /开启（\$\{srcSummary\(config\)\}）/);
     assert.match(source, /sourceDisplay\(selectedLibrary\.source_config\)/);
+});
+
+test('create and edit dialogs expose schema mode as the graph extraction policy', () => {
+    assert.match(source, /graph_extraction_enabled:\s*false/);
+    assert.match(source, /schema_mode:\s*'disabled'/);
+    assert.match(source, /v-model="create\.form\.schema_mode"/);
+    assert.match(source, /v-model="edit\.form\.schema_mode"/);
+    assert.match(source, /edit\.form\.graph_extraction_enabled = edit\.form\.schema_mode !== 'disabled'/);
+    assert.match(source, /value="disabled"/);
+    assert.match(source, /value="explore"/);
+    assert.match(source, /value="governed"/);
+    assert.match(source, /external_llm_enabled = body\.graph_extraction_enabled/);
+    assert.match(source, /graph_extraction_allowed_security_levels = body\.graph_extraction_enabled/);
+    assert.match(source, /diff\.graph_extraction_enabled === true/);
+});
+
+test('create dialog selects and submits a governed Schema template', () => {
+    assert.match(source, /schema_template:\s*'none'/);
+    assert.match(source, /v-if="create\.form\.schema_mode === 'governed'"/);
+    assert.match(source, /v-model="create\.form\.schema_template"/);
+    assert.match(source, /基础企业 Schema（推荐）/);
+    assert.match(source, /稍后导入自定义 Schema/);
+    assert.match(source, /if \(body\.schema_mode !== 'governed'\) body\.schema_template = 'none'/);
+    assert.doesNotMatch(source, /onCreateGraphToggle/);
+    assert.match(source, /将创建并激活基础企业 Schema/);
+});
+
+test('library details show whether graph extraction is enabled', () => {
+    assert.match(source, /selectedLibrary\.graph_extraction_enabled/);
+    assert.match(source, />知识图谱</);
+});
+
+test('graph extraction build mode defaults to standard and is editable', () => {
+    assert.match(source, /graph_extraction_build_mode:\s*'standard'/);
+    assert.match(source, /v-model="create\.form\.graph_extraction_build_mode"/);
+    assert.match(source, /v-model="edit\.form\.graph_extraction_build_mode"/);
+    assert.match(source, /value="fast">快速/);
+    assert.match(source, /value="standard">标准/);
+    assert.match(source, /value="deep">深度/);
+    assert.match(source, /row\.graph_extraction_build_mode \|\| 'standard'/);
+});
+
+test('graph extraction copy separates AI exploration from governed Schema extraction', () => {
+    assert.match(source, /AI 探索用于第一次陌生资料/);
+    assert.match(source, /Schema 治理用于长期约束/);
+    assert.match(source, /激活后/);
+    assert.doesNotMatch(source, /当前图谱抽取器仍要求先导入并激活 Schema/);
 });
 
 console.log('libraries redesign test passed');

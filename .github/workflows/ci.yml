@@ -22,15 +22,28 @@ jobs:
       QDRANT_API_KEY: ""
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - name: Install (with dev + ocr extras)
-        run: pip install -e ".[dev,ocr]"
+        run: pip install -c .github/constraints-v07-release.txt -e ".[dev,ocr]"
       - name: Ruff
         run: ruff check app tests scripts
-      - name: Pytest (mocked; PG integration auto-skips without DSN)
-        run: pytest -q
+      - name: Admin UI standalone Node tests
+        run: |
+          set -euo pipefail
+          for test_file in admin-ui/*.test.mjs; do
+            node "$test_file"
+          done
+      # Frozen release self-tests intentionally reject later release files. Verify them
+      # only in their matching acceptance workflows, not against the current release.
+      - name: Pytest (mocked; excludes frozen release self-tests)
+        run: >-
+          pytest -q
+          --ignore=tests/test_v07_entity_linking_eval.py
+          --ignore=tests/test_v09_first_slice_acceptance.py
       - name: Release safety check
         run: python scripts/check_release_safety.py
 
@@ -64,12 +77,20 @@ jobs:
       JWT_SECRET: ci-not-a-real-secret-rotate-before-use-0000
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - name: Install (with dev + ocr extras)
-        run: pip install -e ".[dev,ocr]"
-      # 现有 PG 测试已覆盖「空库 → Alembic upgrade 到 head」与唯一索引/outbox 结构，
-      # 不重复另建迁移测试；只运行这两份集成测试文件（不跑依赖真实 Qdrant/Embedding 的 E2E 脚本）。
-      - name: PG integration + Alembic migration tests
+        run: pip install -c .github/constraints-v07-release.txt -e ".[dev,ocr]"
+      - name: Alembic migration verification
+        run: |
+          alembic heads
+          test "$(alembic heads | grep -c ' (head)')" -eq 1
+          alembic upgrade head
+          alembic current
+      # The PG tests run against the migrated CI database; no create_all-based
+      # setup is used as migration evidence, and no real provider is called.
+      - name: PG integration tests against migrated schema
         run: pytest -q tests/test_batch_a_pg_integration.py tests/test_batch_b_pg_integration.py

@@ -215,3 +215,10 @@ def test_stream_http_error_raises_chat_error():
 def test_stream_timeout_raises_chat_error():
     with pytest.raises(C.ChatError):
         _collect_stream(iter_exc=httpx.ReadTimeout("slow"))
+
+
+def test_stream_rejects_output_over_hard_limit():
+    with pytest.raises(C.ChatError, match=C.CHAT_OUTPUT_LIMIT_EXCEEDED):
+        _collect_stream(
+            lines=[_delta("x" * (C.CHAT_OUTPUT_MAX_CHARS + 1))],
+        )

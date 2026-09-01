@@ -5,12 +5,13 @@ import uuid
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Integer, String, Text, func, text
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, ForeignKey, Integer, String, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
+from app.models.organization import DEFAULT_ORGANIZATION_ID
 
 
 class Library(Base):
@@ -19,9 +20,77 @@ class Library(Base):
         CheckConstraint("lifecycle_mode IN ('managed','external')", name="ck_lib_lifecycle_mode"),
         CheckConstraint("index_state IN ('ready','rebuilding','failed')", name="ck_lib_index_state"),
         CheckConstraint("retrieval_mode IN ('dense','hybrid')", name="ck_lib_retrieval_mode"),
+        CheckConstraint(
+            "graph_extraction_build_mode IN ('fast','standard','deep')",
+            name="ck_lib_graph_extraction_build_mode",
+        ),
+        CheckConstraint(
+            "graph_assisted_chat_mode IN ('off','shadow','enabled')",
+            name="ck_lib_graph_assisted_chat_mode",
+        ),
+        CheckConstraint(
+            "schema_mode IN ('disabled','explore','governed')",
+            name="ck_lib_schema_mode",
+        ),
+        CheckConstraint(
+            "schema_confirmation_policy IN ('required','automatic')",
+            name="ck_lib_schema_confirmation_policy",
+        ),
+        CheckConstraint(
+            "claim_graph_shadow_policy IN ('inherit','enabled','disabled')",
+            name="ck_lib_claim_graph_shadow_policy",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(knowledge_artifact_allowed_security_levels) = 'array'",
+            name="ck_lib_knowledge_artifact_security_levels_array",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(classification_allowed_security_levels) = 'array'",
+            name="ck_lib_classification_security_levels_array",
+        ),
+        CheckConstraint(
+            "revision_retention_days BETWEEN 30 AND 60 AND "
+            "revision_retention_notice_days BETWEEN 1 AND 14 AND "
+            "revision_retention_notice_days < revision_retention_days",
+            name="ck_lib_revision_retention_policy",
+        ),
+        CheckConstraint(
+            "import_max_file_bytes IS NULL OR "
+            "import_max_file_bytes BETWEEN 1048576 AND 53687091200",
+            name="ck_lib_import_max_file_bytes",
+        ),
+        CheckConstraint(
+            "import_max_files_per_selection IS NULL OR "
+            "import_max_files_per_selection BETWEEN 1 AND 100000",
+            name="ck_lib_import_max_files_per_selection",
+        ),
+        CheckConstraint(
+            "(num_nonnulls(embedding_probe_contract_version, embedding_probe_model, "
+            "embedding_probe_dimension, embedding_probe_endpoint_sha256, "
+            "embedding_probe_fingerprint, embedding_probe_verified_at) = 0 OR "
+            "(num_nonnulls(embedding_probe_contract_version, embedding_probe_model, "
+            "embedding_probe_dimension, embedding_probe_endpoint_sha256, "
+            "embedding_probe_fingerprint, embedding_probe_verified_at) = 6 AND "
+            "embedding_probe_dimension > 0 AND "
+            "embedding_probe_endpoint_sha256 ~ '^[0-9a-f]{64}$' AND "
+            "embedding_probe_fingerprint ~ '^[0-9a-f]{64}$'))",
+            name="ck_sys_libraries_embedding_probe_snapshot",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey(
+            "sys_organizations.id",
+            ondelete="RESTRICT",
+            name="fk_sys_libraries_organization",
+        ),
+        nullable=False,
+        default=DEFAULT_ORGANIZATION_ID,
+        server_default=str(DEFAULT_ORGANIZATION_ID),
+        index=True,
+    )
     slug: Mapped[str] = mapped_column(String(80), unique=True, nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(160), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -31,6 +100,20 @@ class Library(Base):
     vector_distance: Mapped[str] = mapped_column(String(16), nullable=False, default="cosine")
     # 库级 embedding 服务 URL；null = 用全局 settings.embedding_base_url
     embedding_base_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    embedding_probe_contract_version: Mapped[Optional[str]] = mapped_column(
+        String(32), nullable=True
+    )
+    embedding_probe_model: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    embedding_probe_dimension: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    embedding_probe_endpoint_sha256: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )
+    embedding_probe_fingerprint: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )
+    embedding_probe_verified_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     chunk_size: Mapped[int] = mapped_column(Integer, nullable=False, default=1000)
     chunk_overlap: Mapped[int] = mapped_column(Integer, nullable=False, default=120)
@@ -44,6 +127,11 @@ class Library(Base):
     # 开启后 docx 上传走 extract_docx_segments + chunk_segments（每表单独成块带表头/章节上下文），
     # 表格召回更稳但 chunk 数/成本上升；散文为主的库默认扁平更优（实测）。
     docx_table_aware: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    # 库级上传限制；null = 继承全局 Settings 默认值。
+    import_max_file_bytes: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    import_max_files_per_selection: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True
+    )
     # 检索模式（Hybrid 第一版）：dense=纯向量(默认)；hybrid=dense + pg_trgm 关键词 RRF 融合。
     # 库级实值开关（非继承）；只影响查询、不需 rebuild。
     retrieval_mode: Mapped[str] = mapped_column(
@@ -54,11 +142,59 @@ class Library(Base):
     graph_extraction_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
+    schema_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="disabled", server_default="disabled"
+    )
+    schema_confirmation_policy: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="required", server_default="required"
+    )
+    claim_graph_shadow_policy: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="inherit", server_default="inherit"
+    )
+    graph_extraction_build_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="standard", server_default="standard"
+    )
+    graph_assisted_chat_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="off", server_default="off"
+    )
     external_llm_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
     graph_extraction_allowed_security_levels: Mapped[list[str]] = mapped_column(
         JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    knowledge_artifact_auto_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    summary_artifact_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    outline_artifact_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    knowledge_artifact_external_model_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    knowledge_artifact_allowed_security_levels: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    classification_auto_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    classification_external_model_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    classification_allowed_security_levels: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    revision_retention_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    revision_retention_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=60, server_default="60"
+    )
+    revision_retention_notice_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=7, server_default="7"
     )
 
     # 生命周期归属（#6/#7 设计 §4.5）：managed=本系统管理(参与 revision/tombstone 过滤)；

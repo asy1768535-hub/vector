@@ -9,6 +9,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ── documentTypeIcon mapping ──────────────────────────────
 import { documentTypeIcon } from './src/documents_ui.js';
+import { DEFAULT_IMPORT_CONFIGURATION } from './src/folder_import.js';
 
 const EXPECTED_MAPPING = [
     { row: { title: 'report.pdf' },       asset: './assets/file-types/pdf.svg' },
@@ -86,39 +87,15 @@ test('icons.js no longer contains doc:* icon definitions', () => {
 });
 
 // ── Template uses img + local-icon fallback ───────────────
-const source = await readFile(new URL('./src/views/Documents.js', import.meta.url), 'utf8');
 
-test('Documents.js uses img for known types and local-icon fallback', () => {
-    assert.ok(source.includes('<img v-if="documentTypeIcon(row)"'), 'missing img tag');
-    assert.ok(source.includes('mdi:file-document-outline'), 'missing generic icon fallback');
-    assert.ok(source.includes('aria-hidden="true"'), 'missing aria-hidden');
-    assert.ok(source.includes('alt=""'), 'missing empty alt');
-});
 
 // ── Filter includes JSON/CSV ─────────────────────────────
-test('Documents.js filter has JSON and CSV options', () => {
-    assert.ok(source.includes('label="JSON"'), 'missing JSON filter option');
-    assert.ok(source.includes('label="CSV"'), 'missing CSV filter option');
-    assert.ok(source.includes('value="json"'), 'missing json filter value');
-    assert.ok(source.includes('value="csv"'), 'missing csv filter value');
-});
 
 // ── Import accept updated ─────────────────────────────────
 const importSource = await readFile(new URL('./src/views/Import.js', import.meta.url), 'utf8');
 
-test('Import.js accept removed .doc and added .markdown', () => {
-    // .doc should no longer be in accept
-    const acceptMatch = importSource.match(/accept="([^"]+)"/);
-    assert.ok(acceptMatch, 'accept attribute missing');
-    const accept = acceptMatch[1];
-    assert.ok(accept.includes('.markdown'), 'accept missing .markdown');
-    assert.equal(accept.includes('.doc,'), false, '.doc still in accept');
-    assert.equal(accept.includes(',.doc"'), false, '.doc still in accept');
-});
-
-// ── CSS ───────────────────────────────────────────────────
-const css = await readFile(new URL('./style.css', import.meta.url), 'utf8');
-
-test('CSS defines documents-file-icon with object-fit for img', () => {
-    assert.match(css, /\.documents-file-icon\s*\{[\s\S]*?object-fit:\s*contain/);
+test('Import.js accept is generated from import configuration', () => {
+    assert.ok(importSource.includes(':accept="importAccept"'));
+    assert.ok(DEFAULT_IMPORT_CONFIGURATION.allowed_extensions.includes('.markdown'));
+    assert.equal(DEFAULT_IMPORT_CONFIGURATION.allowed_extensions.includes('.doc'), true);
 });

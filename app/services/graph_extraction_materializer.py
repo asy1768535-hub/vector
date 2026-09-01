@@ -11,6 +11,7 @@ from app.config import settings
 from app.models.document import Document
 from app.models.document_revision import DocumentRevision
 from app.models.entity import Entity
+from app.models.entity_alias import EntityAlias
 from app.models.entity_mention import EntityMention
 from app.models.graph_candidate_evidence import (
     GraphEntityCandidateEvidence,
@@ -28,6 +29,7 @@ from app.services import graph_entities, graph_evidence, graph_relations
 from app.services.graph_candidate_aggregation import canonical_graph_value_hash_v1
 from app.services.graph_candidate_routing import load_confidence_policy_v1
 from app.services.graph_candidate_validation import load_ontology_rule_set_v1
+from app.services.graph_normalization import normalize_graph_name_v1
 
 
 class GraphExtractionMaterializationError(RuntimeError):
@@ -96,6 +98,78 @@ def _valid_evidence(rows: list[Any]) -> list[Any]:
     ]
 
 
+def _append_candidate_error(candidate: Any, code: str) -> None:
+    errors = list(candidate.validation_errors or [])
+    if not any(isinstance(item, dict) and item.get("code") == code for item in errors):
+        errors.append({"code": code})
+    candidate.validation_errors = errors
+
+
+def _publishable_relation_candidates(
+    *,
+    entity_candidates: list[Any],
+    relation_candidates: list[Any],
+    entity_evidence_by_candidate: dict[uuid.UUID, list[Any]],
+    relation_evidence_by_candidate: dict[uuid.UUID, list[Any]],
+    entity_threshold: float,
+    relation_threshold: float,
+    relation_types_by_key: dict[str, Any],
+) -> list[Any]:
+    eligible_entity_ids = {
+        candidate.id
+        for candidate in entity_candidates
+        if (candidate.status == "materialized" and candidate.materialized_entity_id is not None)
+        or (
+            _entity_candidate_eligible(candidate, entity_threshold)
+            and bool(_valid_evidence(entity_evidence_by_candidate.get(candidate.id, [])))
+        )
+    }
+    return [
+        candidate
+        for candidate in relation_candidates
+        if (candidate.status == "materialized" and candidate.materialized_relation_id is not None)
+        or (
+            _relation_candidate_eligible(candidate, relation_threshold)
+            and bool(_valid_evidence(relation_evidence_by_candidate.get(candidate.id, [])))
+            and candidate.source_candidate_id in eligible_entity_ids
+            and candidate.target_candidate_id in eligible_entity_ids
+            and candidate.relation_type_key in relation_types_by_key
+        )
+    ]
+
+
+def _add_extracted_aliases(
+    db,
+    *,
+    library: Library,
+    candidate: GraphEntityCandidate,
+    entity: Entity,
+) -> None:
+    aliases = getattr(candidate, "proposed_aliases", None)
+    if not isinstance(aliases, list):
+        return
+    seen: set[str] = set()
+    for value in aliases:
+        if not isinstance(value, str):
+            continue
+        alias = value.strip()
+        normalized = normalize_graph_name_v1(alias)
+        if not normalized or normalized == entity.normalized_name or normalized in seen:
+            continue
+        seen.add(normalized)
+        db.add(
+            EntityAlias(
+                library_id=library.id,
+                entity_id=entity.id,
+                alias=alias,
+                normalized_alias=normalized,
+                source_type="extracted",
+                confidence=candidate.final_confidence,
+                status="active",
+            )
+        )
+
+
 async def _load_materialization_scope(db, *, job_id: uuid.UUID):
     job = await db.get(GraphExtractionJob, job_id, with_for_update=True)
     if job is None:
@@ -103,19 +177,27 @@ async def _load_materialization_scope(db, *, job_id: uuid.UUID):
             "job_not_found",
             "graph extraction Job was not found",
         )
-    if job.status == "succeeded":
+    materialization_statistics = (job.statistics or {}).get("materialization")
+    if job.status == "succeeded" or (
+        job.status == "partially_succeeded" and isinstance(materialization_statistics, dict)
+    ):
         return job, None, None, None, None
     if (
         job.execution_mode != "production"
         or job.trigger_type == "eval"
-        or job.status != "processing"
-        or job.current_stage != "materializing"
+        or (
+            (job.status, job.current_stage)
+            not in {
+                ("processing", "materializing"),
+                ("partially_succeeded", "finalizing"),
+            }
+        )
     ):
         raise GraphExtractionMaterializationError(
             "job_not_materializable",
             "graph extraction Job is not ready for production materialization",
         )
-    library = await db.get(Library, job.library_id)
+    library = await db.get(Library, job.library_id, with_for_update=True)
     document = await db.get(Document, job.document_id)
     revision = await db.get(DocumentRevision, job.document_revision_id)
     ontology = await db.get(OntologyVersion, job.ontology_version_id)
@@ -142,8 +224,7 @@ async def _load_materialization_scope(db, *, job_id: uuid.UUID):
         or revision.document_id != document.id
         or revision.status != "ready"
         or not isinstance(revision.security_level, str)
-        or revision.security_level.strip()
-        not in library.graph_extraction_allowed_security_levels
+        or revision.security_level.strip() not in library.graph_extraction_allowed_security_levels
     ):
         raise GraphExtractionMaterializationError(
             "revision_not_authorized",
@@ -160,25 +241,41 @@ async def _load_materialization_scope(db, *, job_id: uuid.UUID):
             "document_not_current",
             "document is deleted or extraction revision is no longer current",
         )
-    if (
-        ontology is None
-        or ontology.library_id != library.id
-        or ontology.status != "active"
+    snapshot = job.ontology_snapshot or {}
+    explicit_ai_draft = bool(
+        job.schema_discovery_run_id is not None
+        and snapshot.get("schema_state") == "ai_draft"
+        and snapshot.get("confirmed") is False
+        and snapshot.get("ontology_version_id") == str(job.ontology_version_id)
+    )
+    if ontology is None or ontology.library_id != library.id or (
+        ontology.status != "active" and not (explicit_ai_draft and ontology.status == "draft")
     ):
         raise GraphExtractionMaterializationError(
             "active_ontology_changed",
-            "frozen ontology is no longer active",
+            "frozen ontology is no longer active or explicitly bound as an AI draft",
         )
-    incomplete_result = await db.execute(
+    pending_result = await db.execute(
         select(func.count(GraphExtractionUnit.id)).where(
             GraphExtractionUnit.job_id == job.id,
-            GraphExtractionUnit.status != "succeeded",
+            GraphExtractionUnit.status.in_(("queued", "processing")),
         )
     )
-    if int(incomplete_result.scalar_one()) != 0:
+    if int(pending_result.scalar_one()) != 0:
         raise GraphExtractionMaterializationError(
             "units_not_succeeded",
-            "all graph extraction Units must succeed before materialization",
+            "all graph extraction Units must be terminal before materialization",
+        )
+    succeeded_result = await db.execute(
+        select(func.count(GraphExtractionUnit.id)).where(
+            GraphExtractionUnit.job_id == job.id,
+            GraphExtractionUnit.status == "succeeded",
+        )
+    )
+    if int(succeeded_result.scalar_one()) == 0:
+        raise GraphExtractionMaterializationError(
+            "units_not_succeeded",
+            "at least one graph extraction Unit must succeed before materialization",
         )
     return job, library, document, revision, ontology
 
@@ -190,9 +287,20 @@ async def _eligible_matched_entity(
     job: GraphExtractionJob,
     expected_entity_type_id: uuid.UUID,
 ) -> Entity | None:
-    if candidate.matched_entity_id is None:
-        return None
-    entity = await db.get(Entity, candidate.matched_entity_id)
+    if candidate.matched_entity_id is not None:
+        entity = await db.get(Entity, candidate.matched_entity_id)
+    else:
+        existing_result = await db.execute(
+            select(Entity).where(
+                Entity.library_id == job.library_id,
+                Entity.ontology_version_id == job.ontology_version_id,
+                Entity.entity_type_id == expected_entity_type_id,
+                Entity.normalized_name == candidate.normalized_name,
+            )
+        )
+        entity = existing_result.scalars().one_or_none()
+        if entity is None:
+            return None
     if (
         entity is None
         or entity.library_id != job.library_id
@@ -281,9 +389,7 @@ async def _draft_relation(
         }
     )
     existing_result = await db.execute(
-        select(KnowledgeRelation).where(
-            KnowledgeRelation.extraction_key == extraction_key
-        )
+        select(KnowledgeRelation).where(KnowledgeRelation.extraction_key == extraction_key)
     )
     existing = existing_result.scalars().first()
     if existing is not None:
@@ -298,7 +404,9 @@ async def _draft_relation(
                 "relation_replay_mismatch",
                 "existing Knowledge Relation does not match its extraction key",
             )
-        if existing.status not in {"draft", "pending_review"}:
+        if existing.status == "stale":
+            existing.status = "draft"
+        elif existing.status not in {"draft", "pending_review", "active"}:
             return None, False
         return existing, False
     relation = await graph_relations.create_relation(
@@ -314,6 +422,7 @@ async def _draft_relation(
             confidence=candidate.final_confidence,
             schema_boundary_clear=True,
         ),
+        allow_draft_ontology=True,
     )
     relation.created_by_job_id = job.id
     relation.extraction_key = extraction_key
@@ -409,10 +518,65 @@ async def _materialize_job_transaction(
     for row in relation_evidence_result.scalars().all():
         relation_evidence_by_candidate.setdefault(row.candidate_id, []).append(row)
 
+    publishable_relations = _publishable_relation_candidates(
+        entity_candidates=entity_candidates,
+        relation_candidates=relation_candidates,
+        entity_evidence_by_candidate=entity_evidence_by_candidate,
+        relation_evidence_by_candidate=relation_evidence_by_candidate,
+        entity_threshold=policy.entity_materialization_threshold,
+        relation_threshold=policy.relation_draft_threshold,
+        relation_types_by_key=rules.relation_types_by_key,
+    )
+    entity_candidate_ids = {candidate.id for candidate in entity_candidates}
+    publishable_relations = [
+        candidate
+        for candidate in publishable_relations
+        if candidate.source_candidate_id in entity_candidate_ids
+        and candidate.target_candidate_id in entity_candidate_ids
+    ]
+    if not publishable_relations:
+        pending_entity_count = 0
+        for candidate in entity_candidates:
+            if candidate.status == "validated":
+                candidate.status = "pending_review"
+                candidate.review_reason = "entities_without_valid_relation"
+                _append_candidate_error(candidate, candidate.review_reason)
+                pending_entity_count += 1
+        counts = getattr(job, "counts", None)
+        counts = counts if isinstance(counts, dict) else {}
+        partially_succeeded = job.status == "partially_succeeded" or bool(
+            counts.get("failed", 0) or counts.get("cancelled", 0)
+        )
+        job.status = "partially_succeeded" if partially_succeeded else "succeeded"
+        job.current_stage = "finalizing"
+        job.error_code = "unit_failures" if partially_succeeded else None
+        job.error_message = None
+        job.finished_at = _utcnow()
+        statistics = dict(job.statistics or {})
+        statistics["materialization"] = {
+            "outcome": "entities_only",
+            "entity_count": 0,
+            "entity_mention_count": 0,
+            "relation_count": 0,
+            "relation_evidence_count": 0,
+            "publishable_entity_candidate_count": 0,
+            "publishable_relation_count": 0,
+            "publishable_relation_evidence_count": 0,
+            "pending_entity_candidate_count": pending_entity_count,
+            "failure_reasons": {"no_valid_relation": 1},
+        }
+        job.statistics = statistics
+        await db.flush()
+        return GraphExtractionMaterializationResult(0, 0, 0, 0)
+
     entity_count = 0
     mention_count = 0
     relation_count = 0
     relation_evidence_count = 0
+    materialized_entity_candidate_count = 0
+    publishable_relation_count = 0
+    publishable_relation_evidence_count = 0
+    orphan_entity_count = 0
     entity_by_candidate_id: dict[uuid.UUID, Entity] = {}
     for candidate in entity_candidates:
         type_rule = rules.entity_types_by_key.get(candidate.entity_type_key)
@@ -432,13 +596,14 @@ async def _materialize_job_transaction(
             if entity is not None:
                 entity_by_candidate_id[candidate.id] = entity
             continue
-        evidence_rows = _valid_evidence(
-            entity_evidence_by_candidate.get(candidate.id, [])
-        )
-        if not _entity_candidate_eligible(
-            candidate,
-            policy.entity_materialization_threshold,
-        ) or not evidence_rows:
+        evidence_rows = _valid_evidence(entity_evidence_by_candidate.get(candidate.id, []))
+        if (
+            not _entity_candidate_eligible(
+                candidate,
+                policy.entity_materialization_threshold,
+            )
+            or not evidence_rows
+        ):
             if matched is not None:
                 entity_by_candidate_id[candidate.id] = matched
             continue
@@ -456,8 +621,15 @@ async def _materialize_job_transaction(
                     source_type="extracted",
                     confidence=candidate.final_confidence,
                 ),
+                allow_draft_ontology=True,
             )
             entity.created_by_job_id = job.id
+            _add_extracted_aliases(
+                db,
+                library=library,
+                candidate=candidate,
+                entity=entity,
+            )
             entity_count += 1
         entity_by_candidate_id[candidate.id] = entity
         for evidence in evidence_rows:
@@ -472,6 +644,7 @@ async def _materialize_job_transaction(
             mention_count += int(created)
         candidate.materialized_entity_id = entity.id
         candidate.status = "materialized"
+        materialized_entity_candidate_count += 1
 
     for candidate in relation_candidates:
         if candidate.status == "materialized":
@@ -481,9 +654,7 @@ async def _materialize_job_transaction(
             policy.relation_draft_threshold,
         ):
             continue
-        relation_evidence_rows = _valid_evidence(
-            relation_evidence_by_candidate.get(candidate.id, [])
-        )
+        relation_evidence_rows = _valid_evidence(relation_evidence_by_candidate.get(candidate.id, []))
         if not relation_evidence_rows:
             continue
         source = entity_by_candidate_id.get(candidate.source_candidate_id)
@@ -507,6 +678,7 @@ async def _materialize_job_transaction(
         )
         if relation is None:
             continue
+        relation.review_status = "not_required"
         relation_count += int(created)
         for evidence in relation_evidence_rows:
             _row, evidence_created = await _relation_evidence_for_candidate(
@@ -518,20 +690,33 @@ async def _materialize_job_transaction(
                 evidence=evidence,
             )
             relation_evidence_count += int(evidence_created)
+        publishable_relation_evidence_count += len(relation_evidence_rows)
         candidate.materialized_relation_id = relation.id
         candidate.status = "materialized"
+        publishable_relation_count += 1
 
-    job.status = "succeeded"
+    counts = getattr(job, "counts", None)
+    counts = counts if isinstance(counts, dict) else {}
+    partially_succeeded = job.status == "partially_succeeded" or bool(
+        counts.get("failed", 0) or counts.get("cancelled", 0)
+    )
+    job.status = "partially_succeeded" if partially_succeeded else "succeeded"
     job.current_stage = "finalizing"
-    job.error_code = None
+    job.error_code = "unit_failures" if partially_succeeded else None
     job.error_message = None
     job.finished_at = _utcnow()
     statistics = dict(job.statistics or {})
     statistics["materialization"] = {
+        "outcome": "materialized",
         "entity_count": entity_count,
         "entity_mention_count": mention_count,
         "relation_count": relation_count,
         "relation_evidence_count": relation_evidence_count,
+        "publishable_entity_candidate_count": materialized_entity_candidate_count,
+        "publishable_relation_count": publishable_relation_count,
+        "publishable_relation_evidence_count": publishable_relation_evidence_count,
+        "pending_entity_candidate_count": orphan_entity_count,
+        "failure_reasons": ({"orphan_entity": orphan_entity_count} if orphan_entity_count else {}),
     }
     job.statistics = statistics
     await db.flush()
@@ -566,8 +751,9 @@ async def materialize_graph_extraction_job(
         async with session_factory() as db:
             async with db.begin():
                 return await _materialize_job_transaction(db, job_id=job_id)
-    except GraphExtractionMaterializationError:
-        await _mark_materialization_failed(session_factory, job_id=job_id)
+    except GraphExtractionMaterializationError as exc:
+        if exc.code != "job_not_materializable":
+            await _mark_materialization_failed(session_factory, job_id=job_id)
         raise
     except Exception as exc:
         await _mark_materialization_failed(session_factory, job_id=job_id)

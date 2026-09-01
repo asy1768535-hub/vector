@@ -91,6 +91,13 @@ test('permissionsReady guards table and actions', () => {
     assert.ok(source.includes('!permissionsReady'), 'save/reset disabled when not ready');
 });
 
+test('superuser hint preserves tenant content permission boundary', () => {
+    assert.ok(source.includes('超级管理员拥有平台管理权'));
+    assert.ok(source.includes('知识库内容权限仍按下表生效'));
+    assert.ok(source.includes('自己创建的知识库会自动获得全部权限'));
+    assert.ok(!source.includes('默认拥有全部知识库访问权限'));
+});
+
 test('management hint lives in user toolbar and matrix tools start with search', () => {
     assert.match(source, /可为该用户配置各知识库的读取、写入、删除权限/);
     assert.doesNotMatch(source, /permissions-legend-box/);

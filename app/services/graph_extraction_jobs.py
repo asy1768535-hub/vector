@@ -31,8 +31,11 @@ from app.services.graph_candidate_validation import (
     OntologySnapshotError,
     load_ontology_rule_set_v1,
 )
-from app.services.graph_extraction_prompt import graph_extraction_prompt_hash
-from app.services.graph_extraction_provider import DEEPSEEK_PROVIDER_NAME
+from app.services.graph_extraction_prompt import (
+    graph_extraction_prompt_hash,
+    graph_extraction_prompt_version,
+)
+from app.services.graph_extraction_provider import graph_extraction_provider_name
 
 
 _ACTIVE = "active"
@@ -93,9 +96,7 @@ def _validate_json_schema(value: Any, *, label: str) -> None:
     required = value.get("required", [])
     if required is None:
         required = []
-    if not isinstance(required, list) or any(
-        not isinstance(item, str) or not item for item in required
-    ):
+    if not isinstance(required, list) or any(not isinstance(item, str) or not item for item in required):
         _fail("invalid_ontology_snapshot", f"{label}.required must be a string array")
     properties = value.get("properties", {})
     if properties is None:
@@ -109,8 +110,7 @@ def _validate_json_schema(value: Any, *, label: str) -> None:
         if type_value is not None:
             type_names = type_value if isinstance(type_value, list) else [type_value]
             if not type_names or any(
-                not isinstance(item, str) or item not in _JSON_SCHEMA_TYPES
-                for item in type_names
+                not isinstance(item, str) or item not in _JSON_SCHEMA_TYPES for item in type_names
             ):
                 _fail(
                     "invalid_ontology_snapshot",
@@ -155,13 +155,11 @@ async def build_ontology_rule_snapshot(
     *,
     library: Library,
     ontology_version_id: uuid.UUID,
+    allow_draft: bool = False,
 ) -> tuple[dict[str, Any], str]:
     ontology = await db.get(OntologyVersion, ontology_version_id)
-    if (
-        ontology is None
-        or ontology.library_id != library.id
-        or ontology.status != _ACTIVE
-    ):
+    allowed_statuses = {_ACTIVE, "draft"} if allow_draft else {_ACTIVE}
+    if ontology is None or ontology.library_id != library.id or ontology.status not in allowed_statuses:
         _fail(
             "active_ontology_required",
             "an active ontology in the same Library is required",
@@ -216,7 +214,7 @@ async def build_ontology_rule_snapshot(
         for row in attribute_result.scalars().all()
         if _scoped(row, library_id=library.id, ontology_id=ontology_version_id)
     ]
-    if not entity_types:
+    if not entity_types and not allow_draft:
         _fail(
             "invalid_ontology_snapshot",
             "active ontology must contain at least one active Entity Type",
@@ -224,13 +222,11 @@ async def build_ontology_rule_snapshot(
 
     entity_ids = {row.id for row in entity_types}
     relation_ids = {row.id for row in relation_types}
-    if len(entity_ids) != len(entity_types) or len({row.key for row in entity_types}) != len(
-        entity_types
-    ):
+    if len(entity_ids) != len(entity_types) or len({row.key for row in entity_types}) != len(entity_types):
         _fail("invalid_ontology_snapshot", "active Entity Type keys and IDs must be unique")
-    if len(relation_ids) != len(relation_types) or len(
-        {row.key for row in relation_types}
-    ) != len(relation_types):
+    if len(relation_ids) != len(relation_types) or len({row.key for row in relation_types}) != len(
+        relation_types
+    ):
         _fail(
             "invalid_ontology_snapshot",
             "active Relation Type keys and IDs must be unique",
@@ -271,10 +267,11 @@ async def build_ontology_rule_snapshot(
             {
                 "id": str(row.id),
                 "key": row.key,
+                "label": row.label,
+                "description": row.description,
                 "properties_schema": deepcopy(row.properties_schema),
                 "active_attribute_definitions": [
-                    _attribute_payload(item)
-                    for item in sorted(owner_attributes, key=lambda item: item.key)
+                    _attribute_payload(item) for item in sorted(owner_attributes, key=lambda item: item.key)
                 ],
             }
         )
@@ -290,13 +287,14 @@ async def build_ontology_rule_snapshot(
             {
                 "id": str(row.id),
                 "key": row.key,
+                "label": row.label,
+                "description": row.description,
                 "direction": row.direction,
                 "requires_evidence": row.requires_evidence,
                 "default_review_policy": row.default_review_policy,
                 "properties_schema": deepcopy(row.properties_schema),
                 "active_attribute_definitions": [
-                    _attribute_payload(item)
-                    for item in sorted(owner_attributes, key=lambda item: item.key)
+                    _attribute_payload(item) for item in sorted(owner_attributes, key=lambda item: item.key)
                 ],
             }
         )
@@ -343,6 +341,8 @@ async def build_ontology_rule_snapshot(
         "relation_types": relation_payload,
         "relation_constraints": constraint_payload,
     }
+    if getattr(ontology, "status", None) == "draft":
+        snapshot.update({"schema_state": "ai_discovery_pending", "confirmed": False})
     snapshot_hash = _hash(snapshot)
     try:
         load_ontology_rule_set_v1(
@@ -373,11 +373,7 @@ async def select_active_ontology(db, *, library: Library) -> OntologyVersion:
         )
         .limit(2)
     )
-    rows = [
-        row
-        for row in result.scalars().all()
-        if row.library_id == library.id and row.status == _ACTIVE
-    ]
+    rows = [row for row in result.scalars().all() if row.library_id == library.id and row.status == _ACTIVE]
     if not rows:
         _fail("active_ontology_required", "Library has no active ontology")
     if len(rows) != 1:
@@ -442,9 +438,7 @@ async def plan_graph_extraction_units(
         if row.chunk_id in set(chunk_ids) and row.document_revision_id == revision.id
     ]
     evidence_ids = {row.evidence_id for row in links}
-    evidence_ids.update(
-        row.evidence_id for row in chunks if row.evidence_id is not None
-    )
+    evidence_ids.update(row.evidence_id for row in chunks if row.evidence_id is not None)
     evidence_result = await db.execute(
         select(EvidenceUnit).where(
             EvidenceUnit.id.in_(evidence_ids),
@@ -489,9 +483,7 @@ async def plan_graph_extraction_units(
                 "center_chunk_id": str(chunk.id),
                 "center_evidence_id": str(center_evidence_id),
                 "chunk_seq": chunk.seq,
-                "chunk_text_hash": hashlib.sha256(
-                    (chunk.text or "").encode("utf-8")
-                ).hexdigest(),
+                "chunk_text_hash": hashlib.sha256((chunk.text or "").encode("utf-8")).hexdigest(),
             }
         )
         plans.append(
@@ -559,29 +551,121 @@ def _validate_creation_scope(
         _fail("security_level_denied", "current revision security level is not allowed")
 
 
-def _model_config_snapshot() -> dict[str, Any]:
-    return {
-        "provider": DEEPSEEK_PROVIDER_NAME,
+_BUILD_MODE_SETTINGS = {
+    "fast": {"batch_size": 8, "max_output_tokens": 2_500},
+    "standard": {"batch_size": 6, "max_output_tokens": 4_000},
+    "deep": {"batch_size": 3, "max_output_tokens": 8_000},
+}
+
+
+def _build_mode(value: str | None) -> str:
+    mode = value or settings.graph_extraction_default_build_mode
+    if mode not in _BUILD_MODE_SETTINGS:
+        _fail("invalid_build_mode", "build mode must be fast, standard, or deep")
+    return mode
+
+
+def _model_config_snapshot(
+    *,
+    build_mode: str | None = None,
+    library_id: uuid.UUID | None = None,
+) -> dict[str, Any]:
+    from app.services.graph_extraction_batch_eval import (
+        BATCH_PROMPT_VERSION,
+        SCHEMA_ROUTER_VERSION,
+        batch_graph_extraction_prompt_hash,
+    )
+
+    mode = _build_mode(build_mode)
+    mode_settings = _BUILD_MODE_SETTINGS[mode]
+    review_library_ids = {
+        item.strip()
+        for item in settings.graph_extraction_nuextract_review_library_ids.split(",")
+        if item.strip()
+    }
+    extraction_profile = (
+        "nuextract_review"
+        if library_id is not None and str(library_id) in review_library_ids
+        else "draft_pool_review"
+    )
+    snapshot = {
+        "provider": graph_extraction_provider_name(
+            base_url=settings.graph_extraction_base_url,
+            model=settings.graph_extraction_model,
+        ),
         "base_url": settings.graph_extraction_base_url,
         "model": settings.graph_extraction_model,
         "timeout_seconds": settings.graph_extraction_timeout_seconds,
         "temperature": settings.graph_extraction_temperature,
         "response_format": settings.graph_extraction_response_format,
         "max_context_chars": settings.graph_extraction_max_context_chars,
+        "context_window_tokens": settings.graph_extraction_context_window_tokens,
         "previous_chunks": settings.graph_extraction_previous_chunks,
         "next_chunks": settings.graph_extraction_next_chunks,
+        "build_mode": mode,
+        "unit_planning_version": "v1",
+        "batch_prompt_version": BATCH_PROMPT_VERSION,
+        "batch_prompt_hash": batch_graph_extraction_prompt_hash(),
+        "schema_routing_version": (
+            SCHEMA_ROUTER_VERSION if settings.graph_extraction_schema_routing_enabled else "full-v1"
+        ),
+        "schema_routing_enabled": settings.graph_extraction_schema_routing_enabled,
+        "cache_policy_version": ("semantic-v1" if settings.graph_extraction_cache_enabled else "disabled-v1"),
+        "extraction_profile": extraction_profile,
     }
-
-
-def _policy_config_snapshot() -> dict[str, Any]:
-    evidence_types = sorted(
-        {
-            item.strip()
-            for item in settings.graph_extraction_auto_evidence_types.split(",")
-            if item.strip()
+    if extraction_profile == "nuextract_review":
+        snapshot["nuextract"] = {
+            "provider": graph_extraction_provider_name(
+                base_url=settings.graph_extraction_nuextract_base_url,
+                model=settings.graph_extraction_nuextract_model,
+            ),
+            "base_url": settings.graph_extraction_nuextract_base_url,
+            "model": settings.graph_extraction_nuextract_model,
+            "timeout_seconds": settings.graph_extraction_nuextract_timeout_seconds,
+            "max_output_tokens": settings.graph_extraction_nuextract_max_output_tokens,
+            "template_version": "nuextract-graph-draft-v1",
+            "review_prompt_version": "nuextract-qwen-review-v1",
         }
+    else:
+        snapshot["draft_pool"] = [
+            {
+                "provider": graph_extraction_provider_name(
+                    base_url=settings.graph_extraction_minstral_base_url,
+                    model=settings.graph_extraction_minstral_model,
+                ),
+                "base_url": settings.graph_extraction_minstral_base_url,
+                "model": settings.graph_extraction_minstral_model,
+                "timeout_seconds": settings.graph_extraction_minstral_timeout_seconds,
+                "max_output_tokens": settings.graph_extraction_minstral_max_output_tokens,
+            },
+            {
+                "provider": graph_extraction_provider_name(
+                    base_url=settings.graph_extraction_qwen3_draft_base_url,
+                    model=settings.graph_extraction_qwen3_draft_model,
+                ),
+                "base_url": settings.graph_extraction_qwen3_draft_base_url,
+                "model": settings.graph_extraction_qwen3_draft_model,
+                "timeout_seconds": settings.graph_extraction_qwen3_draft_timeout_seconds,
+                "max_output_tokens": settings.graph_extraction_qwen3_draft_max_output_tokens,
+            },
+        ]
+        snapshot["draft_routing_version"] = "unit-modulo-v1"
+        snapshot["review_prompt_version"] = "draft-pool-qwen-review-v1"
+    if settings.graph_extraction_output_budget_enabled:
+        snapshot["max_output_tokens"] = min(
+            settings.graph_extraction_max_output_tokens,
+            mode_settings["max_output_tokens"],
+        )
+    snapshot["batch_size"] = min(settings.graph_extraction_batch_size, mode_settings["batch_size"])
+    return snapshot
+
+
+def _policy_config_snapshot(*, candidate_review_policy: str, build_mode: str | None = None) -> dict[str, Any]:
+    mode = _build_mode(build_mode)
+    evidence_types = sorted(
+        {item.strip() for item in settings.graph_extraction_auto_evidence_types.split(",") if item.strip()}
     )
-    return {
+    snapshot = {
         "confidence_weights": {
             "model": settings.graph_extraction_weight_model,
             "evidence": settings.graph_extraction_weight_evidence,
@@ -601,13 +685,16 @@ def _policy_config_snapshot() -> dict[str, Any]:
             "new_entity": 0.9,
             "ambiguous": 0.0,
         },
-        "entity_materialization_threshold": (
-            settings.graph_extraction_entity_materialization_threshold
-        ),
+        "entity_materialization_threshold": (settings.graph_extraction_entity_materialization_threshold),
         "relation_draft_threshold": settings.graph_extraction_relation_draft_threshold,
         "auto_evidence_types": evidence_types,
         "evidence_group_policy": settings.graph_extraction_evidence_group_policy,
+        "candidate_review_policy": candidate_review_policy,
+        "build_mode": mode,
     }
+    if settings.graph_extraction_center_only_enabled:
+        snapshot["center_only"] = True
+    return snapshot
 
 
 def build_full_rerun_idempotency_key(
@@ -633,9 +720,7 @@ def build_full_rerun_idempotency_key(
 
 async def _job_by_idempotency_key(db, value: str) -> GraphExtractionJob | None:
     result = await db.execute(
-        select(GraphExtractionJob)
-        .where(GraphExtractionJob.idempotency_key == value)
-        .limit(1)
+        select(GraphExtractionJob).where(GraphExtractionJob.idempotency_key == value).limit(1)
     )
     return result.scalars().first()
 
@@ -669,6 +754,12 @@ async def create_graph_extraction_job(
     requested_by: Any,
     idempotency_key: str | None,
     rerun_of_job_id: uuid.UUID | None = None,
+    build_mode: str | None = None,
+    ontology_version: OntologyVersion | None = None,
+    ontology_snapshot: dict[str, Any] | None = None,
+    ontology_snapshot_hash: str | None = None,
+    schema_discovery_run_id: uuid.UUID | None = None,
+    waiting_schema: bool = False,
 ) -> GraphExtractionJob:
     _validate_creation_scope(
         library=library,
@@ -722,27 +813,61 @@ async def create_graph_extraction_job(
                 "source graph extraction Job was not found in this scope",
             ) from exc
 
-    ontology = await select_active_ontology(db, library=library)
-    ontology_snapshot, ontology_snapshot_hash = await build_ontology_rule_snapshot(
-        db,
-        library=library,
-        ontology_version_id=ontology.id,
-    )
+    try:
+        if ontology_version is not None:
+            ontology = ontology_version
+            if ontology.library_id != library.id:
+                _fail("ontology_scope_mismatch", "ontology does not belong to the Library")
+            if ontology_snapshot is None or ontology_snapshot_hash is None:
+                _fail("invalid_ontology_snapshot", "coordinated Schema snapshot is required")
+        else:
+            ontology = await select_active_ontology(db, library=library)
+        if ontology_version is None and getattr(library, "schema_mode", None) == "explore":
+            _fail(
+                "schema_discovery_run_required",
+                "explore extraction must be coordinated by a SchemaDiscoveryRun",
+            )
+        if ontology_version is None and (
+            getattr(library, "schema_mode", None) == "governed"
+            and str(getattr(ontology, "version_key", "")).startswith("ai-draft")
+        ):
+            _fail(
+                "active_ontology_required",
+                "AI Schema draft must be confirmed before strict extraction",
+            )
+        elif ontology_version is None:
+            ontology_snapshot, ontology_snapshot_hash = await build_ontology_rule_snapshot(
+                db,
+                library=library,
+                ontology_version_id=ontology.id,
+            )
+    except GraphExtractionJobError:
+        raise
     unit_plans = await plan_graph_extraction_units(
         db,
         library=library,
         document=document,
         revision=revision,
     )
-    model_snapshot = _model_config_snapshot()
-    policy_snapshot = _policy_config_snapshot()
+    mode = _build_mode(build_mode)
+    model_snapshot = _model_config_snapshot(build_mode=mode, library_id=library.id)
+    if getattr(ontology, "status", None) == "draft" or waiting_schema:
+        model_snapshot["schema_discovery"] = "pending"
+        model_snapshot["schema_state"] = "ai_draft"
+    policy_snapshot = _policy_config_snapshot(
+        candidate_review_policy=(
+            "precision_first_auto" if execution_mode == "production" else "manual_review"
+        ),
+        build_mode=mode,
+    )
     model_config_hash = _hash(model_snapshot)
     policy_config_hash = _hash(policy_snapshot)
-    prompt_content_hash = graph_extraction_prompt_hash()
+    center_only = policy_snapshot.get("center_only", False)
+    prompt_content_hash = graph_extraction_prompt_hash(center_only=center_only)
 
     versions = {
         "prompt_version": _validate_version(
-            settings.graph_extraction_prompt_version,
+            graph_extraction_prompt_version(center_only=center_only),
             label="prompt_version",
         ),
         "extractor_version": _validate_version(
@@ -770,6 +895,16 @@ async def create_graph_extraction_job(
             label="confidence_policy_version",
         ),
     }
+    if ontology_snapshot is not None:
+        frozen_ontology_snapshot = ontology_snapshot
+        frozen_ontology_snapshot_hash = ontology_snapshot_hash
+    else:
+        frozen_ontology_snapshot, frozen_ontology_snapshot_hash = await build_ontology_rule_snapshot(
+            db,
+            library=library,
+            ontology_version_id=ontology.id,
+            allow_draft=getattr(ontology, "status", None) == "draft",
+        )
     input_fingerprint = _hash(
         {
             "library_id": str(library.id),
@@ -781,7 +916,7 @@ async def create_graph_extraction_job(
             **versions,
             "model_config_hash": model_config_hash,
             "policy_config_hash": policy_config_hash,
-            "ontology_snapshot_hash": ontology_snapshot_hash,
+            "ontology_snapshot_hash": frozen_ontology_snapshot_hash,
             "prompt_content_hash": prompt_content_hash,
             "document_parser_version": revision.parser_version,
             "chunking_strategy_version": revision.chunking_strategy_version,
@@ -814,13 +949,13 @@ async def create_graph_extraction_job(
         ontology_version_id=ontology.id,
         trigger_type=trigger_type,
         execution_mode=execution_mode,
-        status="queued",
-        current_stage="preparing",
+        status="waiting_schema" if waiting_schema else "queued",
+        current_stage="waiting_schema" if waiting_schema else "preparing",
         input_fingerprint=input_fingerprint,
         idempotency_key=stored_idempotency_key,
         rerun_of_job_id=rerun_of_job_id,
         retry_generation=0,
-        model_provider=DEEPSEEK_PROVIDER_NAME,
+        model_provider=model_snapshot["provider"],
         model_name=settings.graph_extraction_model,
         **versions,
         document_parser_version=revision.parser_version,
@@ -829,8 +964,9 @@ async def create_graph_extraction_job(
         policy_config_snapshot=policy_snapshot,
         model_config_hash=model_config_hash,
         policy_config_hash=policy_config_hash,
-        ontology_snapshot=ontology_snapshot,
-        ontology_snapshot_hash=ontology_snapshot_hash,
+        ontology_snapshot=frozen_ontology_snapshot,
+        ontology_snapshot_hash=frozen_ontology_snapshot_hash,
+        schema_discovery_run_id=schema_discovery_run_id,
         prompt_content_hash=prompt_content_hash,
         requested_by=requested_by_id,
         counts={
@@ -975,9 +1111,7 @@ async def cancel_graph_extraction_job(
         return job
     if job.status not in {"queued", "processing"}:
         _fail("job_not_cancellable", "graph extraction Job is already terminal")
-    unit_ids = select(GraphExtractionUnit.id).where(
-        GraphExtractionUnit.job_id == job.id
-    )
+    unit_ids = select(GraphExtractionUnit.id).where(GraphExtractionUnit.job_id == job.id)
     await db.execute(
         update(ExtractionRawOutputAttempt)
         .where(

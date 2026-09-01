@@ -15,7 +15,20 @@ function fmtTime(t) {
 function fmtLatency(ms) { return ms != null ? ms + 'ms' : '—'; }
 function chatStatusLabel(s) { if (s === 'success') return '成功'; if (s === 'failed') return '失败'; return '未知'; }
 function chatStatusTag(s) { if (s === 'success') return 'success'; if (s === 'failed') return 'danger'; return 'info'; }
-function fmtSourceScore(score) { return Math.round((score || 0) * 100) + '%'; }
+function clampDisplayScore(value) {
+    const n = Number(value);
+    return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : null;
+}
+function fmtSourceScore(source) {
+    const score = clampDisplayScore(source?.display_score);
+    if ((source?.score_type === 'rerank' || source?.score_type === 'vector') && score !== null) {
+        const label = source.score_type === 'rerank' ? '相关度' : '向量相似度';
+        return `${label} ${(score * 100).toFixed(1)}%`;
+    }
+    if (source?.score_type === 'rrf') return '融合排序';
+    if (source?.score_type === 'legacy') return '历史排序';
+    return '未提供相关度';
+}
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
 export default {
@@ -102,11 +115,13 @@ export default {
             if (pageValue !== undefined && pageValue !== null && pageValue !== '') meta.push({ label: '页码', value: `第 ${pageValue} 页` });
             const location = source.loc || source.location;
             if (location) meta.push({ label: '位置', value: location });
-            meta.push({ label: '相似度', value: fmtSourceScore(source.score) });
+            meta.push({ label: '检索分', value: fmtSourceScore(source) });
             return meta;
         }
-        function sourceScoreTone(score) {
-            const n = Number(score || 0);
+        function sourceScoreTone(source) {
+            if (source?.score_type !== 'rerank' && source?.score_type !== 'vector') return 'neutral';
+            const n = clampDisplayScore(source.display_score);
+            if (n === null) return 'neutral';
             if (n >= 0.75) return 'high';
             if (n >= 0.5) return 'medium';
             return 'low';
@@ -142,7 +157,9 @@ export default {
           <p class="chat-logs-desc">记录用户的检索与问答行为，便于问题追踪与效果评估</p>
         </div>
         <div class="chat-logs-header-actions">
-          <el-button @click="load(true)" :loading="loading">刷新</el-button>
+          <el-button class="app-refresh-button" @click="load(true)" :loading="loading">
+            <span class="app-refresh-icon" aria-hidden="true"></span>刷新
+          </el-button>
           <el-button @click="exportCSV" :disabled="!filtered.length">导出 CSV</el-button>
         </div>
       </header>
@@ -182,7 +199,7 @@ export default {
                         <div class="logs-source-content">
                           <div class="logs-source-title">{{ s.title || '(无标题)' }}</div>
                           <div class="logs-source-summary-line">
-                            <span class="logs-source-score-pill" :class="'logs-source-score-pill--' + sourceScoreTone(s.score)">相似度 {{ fmtSourceScore(s.score) }}</span>
+                            <span class="logs-source-score-pill" :class="'logs-source-score-pill--' + sourceScoreTone(s)">{{ fmtSourceScore(s) }}</span>
                           </div>
                         </div>
                         <div class="logs-source-actions">

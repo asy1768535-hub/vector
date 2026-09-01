@@ -5,12 +5,14 @@ import csv
 import hashlib
 import re
 import io
+import asyncio
 import json
 import logging
 import uuid
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Annotated, Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Query, Response, status, File, UploadFile
 from fastapi.responses import FileResponse
@@ -24,6 +26,8 @@ from app.deps import require_lib
 from app.models.chunk import Chunk
 from app.models.document import Document
 from app.models.document_file import DocumentFile
+from app.models.document_revision import DocumentRevision
+from app.models.document_revision_file import DocumentRevisionFile
 from app.models.document_source import DocumentSource
 from app.models.embedding_job import EmbeddingJob
 from app.models.library import Library
@@ -42,15 +46,27 @@ from app.schemas.documents import (
     QueryResponse,
 )
 from app.config import settings
-from app.services import embedding, ingest as ingest_service, source_enrichment
+from app.services import embedding, import_parsing, ingest as ingest_service, source_enrichment
 from app.services import cleanup as cleanup_service
 from app.services.metadata_guard import MetadataValidationError
 from app.services import rerank as rerank_svc
 from app.services import retrieval as retrieval_svc
+from app.services.object_storage import build_object_storage_adapter
+from app.services.object_storage_contracts import ObjectStorageError
+from app.services.revision_files import (
+    PreparedStoredFile,
+    bind_prepared_file_object,
+    current_revision_file,
+    persist_revision_file_capture,
+    prepare_managed_file_object,
+    revision_file_access_from_row,
+    verified_revision_file_bytes,
+)
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/libraries/{slug}", tags=["documents"])
 SOURCE_CONTEXT_CHARS = 3000
+SOURCE_FULL_MAX_CHARS = 100_000
 
 # #13：导入文件后缀白名单（小写）。不在表内 → 415。
 _SUPPORTED_IMPORT_SUFFIXES = {
@@ -117,13 +133,36 @@ async def _upsert_document_file(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(content)
     rel_path = str(path.relative_to(_document_files_root()))
+    await _upsert_document_file_values(
+        db,
+        document_id=document_id,
+        revision=revision,
+        filename=filename,
+        content_type=content_type,
+        storage_path=rel_path,
+        size_bytes=len(content),
+        sha256=digest,
+    )
+
+
+async def _upsert_document_file_values(
+    db: AsyncSession,
+    *,
+    document_id: uuid.UUID,
+    revision: int,
+    filename: str,
+    content_type: str | None,
+    storage_path: str,
+    size_bytes: int,
+    sha256: str,
+) -> None:
     values = {
         "revision": revision,
         "file_name": filename,
         "content_type": content_type,
-        "storage_path": rel_path,
-        "size_bytes": len(content),
-        "sha256": digest,
+        "storage_path": storage_path,
+        "size_bytes": size_bytes,
+        "sha256": sha256,
     }
     existing = await db.get(DocumentFile, document_id)
     if existing is None:
@@ -141,12 +180,37 @@ async def _store_original_file_for_result(
     filename: str,
     content_type: str | None,
     content: bytes,
+    prepared_file: PreparedStoredFile | None = None,
 ) -> None:
     document_id = uuid.UUID(str(result["document_id"]))
     try:
         revision = int(result.get("_revision") or 1)
     except (TypeError, ValueError):
         revision = 1
+    if settings.revision_file_storage_enabled:
+        revision_id = _uuid_or_none(result.get("_document_revision_id"))
+        if prepared_file is None or revision_id is None:
+            raise ObjectStorageError(
+                "revision_file_scope_missing",
+                "structured file storage requires a DocumentRevision",
+            )
+        bound = bind_prepared_file_object(
+            prepared_file,
+            document_id=document_id,
+            document_revision_id=revision_id,
+        )
+        revision_file = await persist_revision_file_capture(db, prepared=bound)
+        await _upsert_document_file_values(
+            db,
+            document_id=document_id,
+            revision=revision,
+            filename=revision_file.file_name,
+            content_type=revision_file.content_type,
+            storage_path=revision_file.object_key,
+            size_bytes=revision_file.size_bytes,
+            sha256=revision_file.sha256,
+        )
+        return
     await _upsert_document_file(
         db,
         lib=lib,
@@ -156,6 +220,32 @@ async def _store_original_file_for_result(
         content_type=content_type,
         content=content,
     )
+
+
+async def _ingest_and_store_import_item(
+    db: AsyncSession,
+    *,
+    lib: Library,
+    created_by: uuid.UUID,
+    doc_data: dict,
+    filename: str,
+    content_type: str | None,
+    content: bytes,
+    prepared_file: PreparedStoredFile | None,
+) -> dict:
+    result = await _ingest_or_upsert(db, lib, created_by, doc_data)
+    await _store_original_file_for_result(
+        db,
+        lib=lib,
+        result=result,
+        filename=filename,
+        content_type=content_type,
+        content=content,
+        prepared_file=prepared_file,
+    )
+    result.pop("_revision", None)
+    result.pop("_document_revision_id", None)
+    return result
 
 
 async def _lock_writable(db: AsyncSession, lib: Library) -> Library:
@@ -193,8 +283,39 @@ def _uuid_or_none(value) -> uuid.UUID | None:
     return None
 
 
+async def _persist_graph_extraction_request(db: AsyncSession, result: dict) -> bool:
+    """Bind a per-upload extraction request to the revision the embed job will publish."""
+    if result.get("operation") == "unchanged":
+        return False
+    job_id = _uuid_or_none(result.get("job_id"))
+    if job_id is None:
+        return False
+    job = await db.get(EmbeddingJob, job_id)
+    revision_id = _uuid_or_none(getattr(job, "document_revision_id", None))
+    if revision_id is None:
+        return False
+    revision = await db.get(DocumentRevision, revision_id)
+    if revision is None:
+        return False
+    revision.parser_config = {
+        **(revision.parser_config or {}),
+        "graph_extraction_requested": True,
+    }
+    return True
+
+
 def _str_or_none(value) -> str | None:
     return value if isinstance(value, str) else None
+
+
+def _result_revision_id(doc: Document, job: EmbeddingJob | None) -> str | None:
+    value = (
+        getattr(job, "document_revision_id", None)
+        if job is not None
+        else doc.latest_revision_id or doc.current_revision_id
+    )
+    revision_id = _uuid_or_none(value)
+    return str(revision_id) if revision_id is not None else None
 
 
 def _ingest_response(doc: Document, job: EmbeddingJob | None, chunk_count: int) -> DocumentIngestResponse:
@@ -335,7 +456,36 @@ def _structured_doc_data(text: str, filename: str, suffix: str, splitter: str, l
     }
 
 
-async def _ingest_or_upsert(db: AsyncSession, lib: Library, user: User, doc_data: dict) -> dict:
+def _apply_import_management(document: Document, doc_data: dict) -> bool:
+    changed = False
+    for field in ("visibility_scope", "security_level"):
+        if field not in doc_data:
+            continue
+        value = doc_data[field]
+        if getattr(document, field) != value:
+            setattr(document, field, value)
+            changed = True
+    return changed
+
+
+def _normalize_import_scope(value: str | None, field: str) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"{field} must not be blank",
+        )
+    return normalized
+
+
+async def _ingest_or_upsert(
+    db: AsyncSession,
+    lib: Library,
+    created_by: uuid.UUID,
+    doc_data: dict,
+) -> dict:
     """单条文档摄入：有 external_id 且库内已存在同键未删文档 → reingest 覆盖更新；否则新建。
 
     返回 import 结果 dict（document_id/title/chunk_count/status/job_id/external_id）。
@@ -353,11 +503,12 @@ async def _ingest_or_upsert(db: AsyncSession, lib: Library, user: User, doc_data
             ).order_by(Document.created_at.desc()).limit(1).with_for_update()
         )).scalars().first()
         if existing is not None:
+            management_changed = _apply_import_management(existing, doc_data)
             job, chunk_count, changed = await ingest_service.reingest_document(
                 db=db, library=lib, document=existing,
                 new_text=doc_data["text"], title=doc_data["title"],
                 metadata=doc_data["metadata"], splitter=doc_data["splitter"],
-                force=False, chunks=doc_data.get("chunks"),
+                force=management_changed, chunks=doc_data.get("chunks"),
             )
             if changed:
                 await _upsert_document_source(db, existing.id, existing.current_revision, doc_data.get("source"))
@@ -367,12 +518,16 @@ async def _ingest_or_upsert(db: AsyncSession, lib: Library, user: User, doc_data
                 "job_id": str(job.id) if job is not None else None, "external_id": ext,
                 "operation": "updated" if changed else "unchanged",
                 "_revision": existing.current_revision,
+                "_document_revision_id": _result_revision_id(existing, job),
             }
 
     doc, job, chunk_count, was_existing = await ingest_service.ingest_text(
         db=db, library=lib, text=doc_data["text"], title=doc_data["title"],
         external_id=ext, metadata=doc_data["metadata"], splitter=doc_data["splitter"],
-        created_by=user.id, chunks=doc_data.get("chunks"),
+        created_by=created_by,
+        visibility_scope=doc_data.get("visibility_scope"),
+        security_level=doc_data.get("security_level"),
+        chunks=doc_data.get("chunks"),
     )
     if not was_existing:
         await _upsert_document_source(db, doc.id, doc.current_revision, doc_data.get("source"))
@@ -386,6 +541,7 @@ async def _ingest_or_upsert(db: AsyncSession, lib: Library, user: User, doc_data
         "external_id": doc.external_id if was_existing else ext,
         "operation": "unchanged" if was_existing else "created",
         "_revision": doc.current_revision,
+        "_document_revision_id": _result_revision_id(doc, job),
     }
 
 
@@ -404,6 +560,7 @@ async def _replace_document(db: AsyncSession, lib: Library, target_id: uuid.UUID
     # 避免替换正文却清空作者/分类/过滤字段；文件显式带 metadata（如 json）才覆盖。
     new_meta = doc_data.get("metadata")
     meta = new_meta if new_meta is not None else target.doc_metadata
+    _apply_import_management(target, doc_data)
     try:
         job, chunk_count, _changed = await ingest_service.reingest_document(
             db=db, library=lib, document=target,
@@ -424,6 +581,7 @@ async def _replace_document(db: AsyncSession, lib: Library, target_id: uuid.UUID
         "external_id": target.external_id,   # 保留目标原 external_id（替换不改身份）
         "operation": "updated",              # force=True 必然走新代际
         "_revision": target.current_revision,
+        "_document_revision_id": _result_revision_id(target, job),
     }
 
 
@@ -512,7 +670,8 @@ async def list_documents(
     status_filter: Optional[str] = Query(default=None, alias="status",
                                          pattern="^(pending|processing|ready|failed|deleted)$"),
     external_id: Optional[str] = Query(default=None),
-    limit: int = Query(default=50, ge=1, le=500),
+    folder_id: uuid.UUID | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
     lib: Library = Depends(require_lib("read")),
     db: AsyncSession = Depends(get_db),
@@ -528,6 +687,8 @@ async def list_documents(
         stmt = stmt.where(Document.status == status_filter)
     if external_id:
         stmt = stmt.where(Document.external_id == external_id)
+    if folder_id is not None:
+        stmt = stmt.where(Document.folder_id == folder_id)
     rows = await db.execute(stmt)
     return list(rows.scalars().all())
 
@@ -605,6 +766,8 @@ async def get_document_source(
 @router.get("/documents/{document_id}/source/full", response_model=DocumentFullSourceResponse)
 async def get_document_full_source(
     document_id: uuid.UUID,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=SOURCE_FULL_MAX_CHARS, ge=1, le=SOURCE_FULL_MAX_CHARS),
     lib: Library = Depends(require_lib("read")),
     db: AsyncSession = Depends(get_db),
 ) -> DocumentFullSourceResponse:
@@ -612,21 +775,65 @@ async def get_document_full_source(
     if doc is None or doc.library_id != lib.id or doc.deleted_at is not None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "document not found")
 
-    source = await db.get(DocumentSource, document_id)
-    if source is None:
+    source_row = None
+    if doc.current_revision_id is not None:
+        revision_stmt = (
+            select(
+                DocumentRevision.revision_no.label("revision"),
+                DocumentRevisionFile.file_name,
+                DocumentRevision.parser_name.label("file_type"),
+                DocumentRevision.created_at,
+                DocumentRevision.updated_at,
+                func.length(DocumentRevision.normalized_text).label("total_chars"),
+                func.substr(DocumentRevision.normalized_text, offset + 1, limit).label(
+                    "text_window"
+                ),
+            )
+            .outerjoin(
+                DocumentRevisionFile,
+                (DocumentRevisionFile.document_revision_id == DocumentRevision.id)
+                & (DocumentRevisionFile.lifecycle_status == "available"),
+            )
+            .where(
+                DocumentRevision.id == doc.current_revision_id,
+                DocumentRevision.document_id == doc.id,
+                DocumentRevision.library_id == lib.id,
+                DocumentRevision.normalized_text.is_not(None),
+            )
+            .limit(1)
+        )
+        source_row = (await db.execute(revision_stmt)).one_or_none()
+
+    if source_row is None:
+        source_stmt = select(
+            DocumentSource.revision,
+            DocumentSource.file_name,
+            DocumentSource.file_type,
+            DocumentSource.created_at,
+            DocumentSource.updated_at,
+            func.length(DocumentSource.normalized_text).label("total_chars"),
+            func.substr(DocumentSource.normalized_text, offset + 1, limit).label("text_window"),
+        ).where(DocumentSource.document_id == doc.id).limit(1)
+        source_row = (await db.execute(source_stmt)).one_or_none()
+    if source_row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "该文档需重新导入后才能阅读原文")
 
-    text = source.normalized_text or ""
+    total_chars = int(source_row.total_chars or 0)
+    window_end = min(offset + limit, total_chars)
+    window = source_row.text_window or ""
     return DocumentFullSourceResponse(
         document_id=doc.id,
-        document_title=doc.title or source.file_name,
-        file_name=source.file_name,
-        file_type=source.file_type,
-        revision=source.revision,
-        normalized_text=text,
-        text_length=len(text),
-        created_at=source.created_at,
-        updated_at=source.updated_at,
+        document_title=doc.title or source_row.file_name,
+        file_name=source_row.file_name,
+        file_type=source_row.file_type,
+        revision=source_row.revision,
+        normalized_text=window,
+        text_length=total_chars,
+        total_chars=total_chars,
+        offset=offset,
+        truncated=offset != 0 or window_end < total_chars,
+        created_at=source_row.created_at,
+        updated_at=source_row.updated_at,
     )
 
 
@@ -639,6 +846,37 @@ async def download_document_file(
     doc = await db.get(Document, document_id)
     if doc is None or doc.library_id != lib.id or doc.deleted_at is not None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "document not found")
+
+    if settings.revision_file_storage_enabled:
+        revision_row = await current_revision_file(
+            db,
+            library_id=lib.id,
+            document=doc,
+        )
+        if revision_row is not None:
+            try:
+                access = revision_file_access_from_row(revision_row)
+                await db.rollback()
+                adapter = build_object_storage_adapter()
+                content = await verified_revision_file_bytes(adapter, access)
+            except ObjectStorageError as exc:
+                await db.rollback()
+                http_status = (
+                    status.HTTP_404_NOT_FOUND
+                    if exc.code in {"object_not_found", "revision_file_unavailable"}
+                    else status.HTTP_502_BAD_GATEWAY
+                )
+                raise HTTPException(
+                    http_status, "stored document file is unavailable"
+                ) from None
+            encoded_name = quote(access.file_name, safe="")
+            return Response(
+                content=content,
+                media_type=access.content_type or "application/octet-stream",
+                headers={
+                    "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}",
+                },
+            )
 
     row = await db.get(DocumentFile, document_id)
     if row is None:
@@ -819,12 +1057,18 @@ async def query_library(
         for i in range(len(raw))
     ]
     # 重排：召回候选按 query 重排取前 limit；失败/未启用回退向量序（不阻断）
-    order, rerank_scores = await rerank_svc.rank_candidates(
+    ranked_candidates = await rerank_svc.rank_candidates(
         body.query, contents, top_k=body.limit, enabled=bool(eff_rerank), log_label="query"
     )
+    order, rerank_scores = ranked_candidates
 
     results = []
     for i in order:
+        if (
+            ranked_candidates.observation.effective == "success"
+            and rerank_scores.get(i, 0.0) < settings.rerank_min_score
+        ):
+            continue
         item, payload, enriched, src_row = raw[i], payloads[i], enr.texts[i], enr.rows[i]
         text = enriched if enriched is not None else (payload.get("text") or "")
         metadata = {k: v for k, v in payload.items() if k not in internal_keys}
@@ -855,11 +1099,18 @@ async def import_file(
     file: UploadFile = File(...),
     external_id: Optional[str] = Form(default=None),
     replace_document_id: Optional[uuid.UUID] = Form(default=None),
+    visibility_scope: Annotated[Optional[str], Form(max_length=64)] = None,
+    security_level: Annotated[Optional[str], Form(max_length=64)] = None,
+    graph_extraction_requested: bool = Form(default=False),
     lib: Library = Depends(require_lib("insert")),
     user: User = Depends(current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
-    await _lock_writable(db, lib)
+    structured_storage = settings.revision_file_storage_enabled
+    library_id = lib.id
+    created_by = user.id
+    if not structured_storage:
+        await _lock_writable(db, lib)
     filename = file.filename or "imported_file"
     # #13：后缀大小写不敏感 + 白名单。未知格式直接 415，不再「当纯文本」误吞二进制。
     lower_name = filename.lower()
@@ -872,17 +1123,47 @@ async def import_file(
 
     # #12：分块读取并在累计超限时立即 413（不先整文件入内存）。
     content = await _read_capped(file, settings.max_import_file_bytes)
+    prepared_file = None
+    if structured_storage:
+        await db.rollback()
+        try:
+            prepared_file = await prepare_managed_file_object(
+                adapter=build_object_storage_adapter(),
+                library_id=library_id,
+                file_name=filename,
+                content_type=file.content_type,
+                content=content,
+            )
+        except ObjectStorageError:
+            raise HTTPException(
+                status.HTTP_502_BAD_GATEWAY,
+                "document file storage failed verification",
+            ) from None
+        lib = await db.get(Library, library_id)
+        if lib is None or lib.deleted_at is not None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "library not found")
+        await _lock_writable(db, lib)
 
     documents_to_ingest = []
 
     if suffix == ".json":
         try:
-            data = json.loads(content.decode("utf-8"))
+            import_parsing.validate_json_input_size(len(content))
+            try:
+                data = json.loads(content.decode("utf-8"))
+            except RecursionError as exc:
+                raise import_parsing.ImportResourceLimitError from exc
+            import_parsing.validate_json_resource_budget(data)
+            normalized_chars = 0
             if isinstance(data, list):
+                import_parsing.validate_fanout_document_count(len(data))
                 for item in data:
                     text = item.get("text")
                     if not text:
                         continue
+                    import_parsing.validate_fanout_document_count(len(documents_to_ingest) + 1)
+                    normalized_chars += len(text)
+                    import_parsing.validate_normalized_text_budget(normalized_chars)
                     documents_to_ingest.append({
                         "text": text,
                         "title": item.get("title") or filename,
@@ -895,6 +1176,8 @@ async def import_file(
             elif isinstance(data, dict):
                 text = data.get("text")
                 if text:
+                    import_parsing.validate_fanout_document_count(1)
+                    import_parsing.validate_normalized_text_budget(len(text))
                     documents_to_ingest.append({
                         "text": text,
                         "title": data.get("title") or filename,
@@ -904,6 +1187,11 @@ async def import_file(
                         "chunks": _structured_chunks(text, data.get("splitter", "text"), lib),
                         "source": _source_data(text, filename, suffix),
                     })
+        except import_parsing.ImportResourceLimitError:
+            raise HTTPException(
+                status.HTTP_413_CONTENT_TOO_LARGE,
+                import_parsing.RESOURCE_LIMIT_ERROR,
+            ) from None
         except Exception as e:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid JSON format: {str(e)}")
 
@@ -911,7 +1199,21 @@ async def import_file(
         try:
             text_stream = io.StringIO(content.decode("utf-8"))
             reader = csv.DictReader(text_stream)
-            for row in reader:
+            total_cells = 0
+            normalized_chars = 0
+            document_count = 0
+            if reader.fieldnames is not None:
+                total_cells = import_parsing.validate_csv_row_budget(
+                    1, reader.fieldnames, total_cells
+                )
+            for row_number, row in enumerate(reader, start=2):
+                row_width = len(reader.fieldnames or ())
+                extra_cells = row.get(None)
+                if isinstance(extra_cells, list):
+                    row_width += len(extra_cells)
+                total_cells = import_parsing.validate_csv_row_budget(
+                    row_number, range(row_width), total_cells
+                )
                 # Find first column matching 'text' or 'content'
                 text_col = next((col for col in reader.fieldnames or [] if col.lower() in ("text", "content")), None)
                 if not text_col and reader.fieldnames:
@@ -924,6 +1226,10 @@ async def import_file(
                 if not text:
                     continue
 
+                document_count += 1
+                import_parsing.validate_fanout_document_count(document_count)
+                normalized_chars += len(text)
+                import_parsing.validate_normalized_text_budget(normalized_chars)
                 title_col = next((col for col in reader.fieldnames or [] if col.lower() in ("title", "name")), None)
                 title = row.get(title_col) if title_col else filename
 
@@ -939,6 +1245,11 @@ async def import_file(
                     "chunks": _structured_chunks(text, "text", lib, {"type": "csv_row", "row": reader.line_num}),
                     "source": _source_data(text, filename, suffix),
                 })
+        except import_parsing.ImportResourceLimitError:
+            raise HTTPException(
+                status.HTTP_413_CONTENT_TOO_LARGE,
+                import_parsing.RESOURCE_LIMIT_ERROR,
+            ) from None
         except Exception as e:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid CSV format: {str(e)}")
 
@@ -1017,10 +1328,10 @@ async def import_file(
     elif suffix == ".xlsx":
         # 电子表格：每个工作表按表格感知切分入库
         try:
-            from app.services.xlsx_extract import extract_xlsx_segments
+            from app.services import xlsx_extract
             from app.services.splitter import build_structured_source_from_segments
 
-            segs = extract_xlsx_segments(content)
+            segs = await asyncio.to_thread(xlsx_extract.extract_xlsx_segments, content)
             source = build_structured_source_from_segments(
                 segs, chunk_size=lib.chunk_size, chunk_overlap=lib.chunk_overlap
             )
@@ -1035,8 +1346,13 @@ async def import_file(
             })
         except HTTPException:
             raise
-        except Exception as e:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid spreadsheet: {str(e)}")
+        except xlsx_extract.XlsxLimitError:
+            raise HTTPException(
+                status.HTTP_413_CONTENT_TOO_LARGE,
+                "spreadsheet exceeds parser safety limits",
+            ) from None
+        except Exception:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid spreadsheet format") from None
 
     else:
         # 纯文本类（.txt/.md/.markdown）——已被白名单限定，不会再误吞未知二进制
@@ -1050,6 +1366,31 @@ async def import_file(
 
     if not documents_to_ingest:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "No valid content found to ingest")
+
+    management = {}
+    normalized_visibility = _normalize_import_scope(visibility_scope, "visibility_scope")
+    normalized_security = _normalize_import_scope(security_level, "security_level")
+    if graph_extraction_requested:
+        from app.services.graph_extraction_triggers import graph_extraction_upload_configuration
+
+        graph_config = await graph_extraction_upload_configuration(db, lib)
+        graph_allowed = graph_config["available"] or graph_config["exploration_available"]
+        if not graph_allowed:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                {"code": "graph_extraction_unavailable", "reasons": graph_config["reasons"]},
+            )
+        if normalized_security not in graph_config["allowed_security_levels"]:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                {"code": "graph_extraction_security_level_not_allowed"},
+            )
+    if normalized_visibility is not None:
+        management["visibility_scope"] = normalized_visibility
+    if normalized_security is not None:
+        management["security_level"] = normalized_security
+    for doc_data in documents_to_ingest:
+        doc_data.update(management)
 
     # 替换模式（新增/替换上传）：按 document ID 覆盖目标文档，不依赖 external_id。
     # 仅允许解析为单篇文档的文件；多篇（json 数组 / csv 多行）明确拒绝，避免一对多歧义。
@@ -1070,10 +1411,21 @@ async def import_file(
                 filename=filename,
                 content_type=file.content_type,
                 content=content,
+                prepared_file=prepared_file,
             )
             result.pop("_revision", None)
+            result.pop("_document_revision_id", None)
+        except ObjectStorageError as exc:
+            http_status = (
+                status.HTTP_409_CONFLICT
+                if exc.code == "revision_file_identity_conflict"
+                else status.HTTP_502_BAD_GATEWAY
+            )
+            raise HTTPException(http_status, "document file storage failed") from None
         except ValueError as exc:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+        if graph_extraction_requested:
+            await _persist_graph_extraction_request(db, result)
         await db.commit()
         return {
             "status": "success", "imported_count": 1, "failed_count": 0,
@@ -1089,17 +1441,38 @@ async def import_file(
     errors = []
     for idx, doc_data in enumerate(documents_to_ingest):
         try:
-            result = await _ingest_or_upsert(db, lib, user, doc_data)
-            await _store_original_file_for_result(
-                db,
-                lib=lib,
-                result=result,
-                filename=filename,
-                content_type=file.content_type,
-                content=content,
-            )
-            result.pop("_revision", None)
+            if structured_storage:
+                async with db.begin_nested():
+                    result = await _ingest_and_store_import_item(
+                        db,
+                        lib=lib,
+                        created_by=created_by,
+                        doc_data=doc_data,
+                        filename=filename,
+                        content_type=file.content_type,
+                        content=content,
+                        prepared_file=prepared_file,
+                    )
+            else:
+                result = await _ingest_and_store_import_item(
+                    db,
+                    lib=lib,
+                    created_by=created_by,
+                    doc_data=doc_data,
+                    filename=filename,
+                    content_type=file.content_type,
+                    content=content,
+                    prepared_file=prepared_file,
+                )
             ingested.append(result)
+        except ObjectStorageError as exc:
+            log.warning("Import doc[%s] storage failed: code=%s", idx, exc.code)
+            errors.append({
+                "index": idx,
+                "title": doc_data.get("title"),
+                "external_id": doc_data.get("external_id"),
+                "error": "document file storage failed",
+            })
         except ValueError as exc:
             log.warning("Import doc[%s] failed: %s", idx, str(exc))
             errors.append({
@@ -1116,6 +1489,10 @@ async def import_file(
             status.HTTP_400_BAD_REQUEST,
             {"message": "所有文档摄入均失败", "errors": errors},
         )
+
+    if graph_extraction_requested:
+        for result in ingested:
+            await _persist_graph_extraction_request(db, result)
 
     await db.commit()
     return {

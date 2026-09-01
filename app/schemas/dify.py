@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_serializer
 
 
 class RetrievalSetting(BaseModel):
@@ -55,3 +55,11 @@ class DifyRecord(BaseModel):
 
 class DifyRetrievalResponse(BaseModel):
     records: list[DifyRecord]
+    retrieval_debug: dict[str, Any] | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_without_empty_debug(self, handler):
+        data = handler(self)
+        if self.retrieval_debug is None:
+            data.pop("retrieval_debug", None)
+        return data

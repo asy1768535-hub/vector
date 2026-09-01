@@ -1,12 +1,24 @@
 // 极简全局状态：当前用户 + 权限缓存。
 import { reactive } from 'vue';
 import * as api from './api.js';
+import {
+    PREVIEW_ORGANIZATIONS,
+    PREVIEW_PERMISSIONS,
+    PREVIEW_USER,
+} from './preview_mode.js';
 
 export const store = reactive({
     user: null,            // { id, email, is_superuser, username, ... } 或 null
     permissions: [],       // [{ library_slug, actions: [] }]
+    organizations: [],     // [{ organization_id, slug, name, role }]
     ready: false,          // 首次加载完成？
 });
+
+export function clearAuthState() {
+    store.user = null;
+    store.permissions = [];
+    store.organizations = [];
+}
 
 export async function refreshAuth() {
     // 直接 fetch，避免 401 触发全局 onUnauthorized 跳路由（初次启动时 router 守卫已经在处理导航）
@@ -14,19 +26,19 @@ export async function refreshAuth() {
         const resp = await fetch('/users/me', { credentials: 'include' });
         if (resp.ok) {
             store.user = await resp.json();
-            try {
-                const pResp = await fetch('/me/permissions', { credentials: 'include' });
-                store.permissions = pResp.ok ? await pResp.json() : [];
-            } catch (_) {
-                store.permissions = [];
-            }
+            [store.permissions, store.organizations] = await Promise.all([
+                fetch('/me/permissions', { credentials: 'include' })
+                    .then((value) => (value.ok ? value.json() : []))
+                    .catch(() => []),
+                fetch('/me/organizations', { credentials: 'include' })
+                    .then((value) => (value.ok ? value.json() : []))
+                    .catch(() => []),
+            ]);
         } else {
-            store.user = null;
-            store.permissions = [];
+            clearAuthState();
         }
     } catch (_) {
-        store.user = null;
-        store.permissions = [];
+        clearAuthState();
     } finally {
         store.ready = true;
     }
@@ -34,15 +46,12 @@ export async function refreshAuth() {
 
 // 开发模式：后端不可用时模拟超管身份，方便本地查看前端
 export function setMockUser() {
-    store.user = {
-        id: 'dev-mock-001',
-        email: 'dev@localhost',
-        username: 'dev',
-        display_name: '开发预览',
-        is_superuser: true,
-        is_active: true,
-    };
-    store.permissions = [];
+    store.user = { ...PREVIEW_USER };
+    store.permissions = PREVIEW_PERMISSIONS.map((item) => ({
+        ...item,
+        actions: [...item.actions],
+    }));
+    store.organizations = PREVIEW_ORGANIZATIONS.map((item) => ({ ...item }));
     store.ready = true;
 }
 

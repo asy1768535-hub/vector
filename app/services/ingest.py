@@ -23,7 +23,12 @@ from app.models.chunk import Chunk
 from app.models.document import Document
 from app.models.embedding_job import EmbeddingJob
 from app.models.library import Library
-from app.services.evidence_write_path import PreparedChunk, create_evidence_generation
+from app.services.evidence_write_path import (
+    PreparedChunk,
+    create_evidence_generation,
+    validate_prepared_chunk_ranges,
+    validate_parser_segments,
+)
 from app.services.metadata_guard import validate_external_metadata
 from app.services import splitter as splitter_service
 
@@ -73,7 +78,11 @@ def _prepare_evidence_chunks(
 
 
 async def _find_active(
-    db: AsyncSession, library_id: uuid.UUID, external_id: str | None, content_hash: str
+    db: AsyncSession,
+    library_id: uuid.UUID,
+    external_id: str | None,
+    content_hash: str,
+    source_path: str | None = None,
 ) -> Document | None:
     """按身份规则查活动（未删）文档：external_id 优先，否则 content_hash。
 
@@ -83,10 +92,16 @@ async def _find_active(
         Document.library_id == library_id,
         Document.deleted_at.is_(None),
     )
-    if external_id is not None:
+    if source_path is not None:
+        stmt = stmt.where(Document.source_path == source_path)
+    elif external_id is not None:
         stmt = stmt.where(Document.external_id == external_id)
     else:
-        stmt = stmt.where(Document.external_id.is_(None), Document.content_hash == content_hash)
+        stmt = stmt.where(
+            Document.source_path.is_(None),
+            Document.external_id.is_(None),
+            Document.content_hash == content_hash,
+        )
     stmt = stmt.order_by(Document.created_at.desc()).limit(1)
     return (await db.execute(stmt)).scalars().first()
 
@@ -145,7 +160,14 @@ async def ingest_text(
     metadata: dict[str, Any] | None,
     splitter: str,
     created_by: uuid.UUID | None,
+    visibility_scope: str | None = None,
+    security_level: str | None = None,
     chunks: list[str | dict] | None = None,
+    source_path: str | None = None,
+    segments: list[dict] | None = None,
+    file_name: str | None = None,
+    raw_file_sha256: str | None = None,
+    document_revision_file_id: uuid.UUID | None = None,
 ) -> tuple[Document, EmbeddingJob, int, bool]:
     """返回 (document, job, chunk_count, was_existing)。
 
@@ -154,10 +176,13 @@ async def ingest_text(
     """
     if _evidence_write_enabled():
         validate_external_metadata(metadata)
+    validate_parser_segments(segments)
     chash = _content_hash(text)
 
     # 身份解析（external_id 优先，否则 content_hash）→ 命中已有活动文档直接返回（不重复 embed）
-    existing = await _find_active(db, library.id, external_id, chash)
+    existing = await _find_active(
+        db, library.id, external_id, chash, source_path=source_path
+    )
     if existing is not None:
         log.info("ingest dedup hit: lib=%s ext=%s hash=%s doc_id=%s",
                  library.slug, external_id, chash[:8], existing.id)
@@ -173,6 +198,14 @@ async def ingest_text(
     )
     if not chunks_text:
         raise ValueError("text produced zero chunks after splitting")
+    prepared_chunks = None
+    if _evidence_write_enabled():
+        prepared_chunks = _prepare_evidence_chunks(
+            chunks_text, title=title, external_id=external_id, revision=1
+        )
+        validate_prepared_chunk_ranges(
+            normalized_text=text, prepared_chunks=prepared_chunks
+        )
 
     doc = Document(
         library_id=library.id,
@@ -180,7 +213,10 @@ async def ingest_text(
         title=title,
         doc_metadata=metadata,
         content_hash=chash,
+        source_path=source_path,
         current_revision=1,          # #6：新文档索引版本从 1 起（DB 默认已移除，须显式赋值）
+        visibility_scope=visibility_scope,
+        security_level=security_level,
         status="pending",
         created_by=created_by,
     )
@@ -195,7 +231,9 @@ async def ingest_text(
         # 不调用 session 级 rollback（那会把同批前面成功的文档也回滚）。
         if doc in db:
             db.expunge(doc)  # 确保被回滚的 doc 不会在端点 commit 时被再次 INSERT
-        winner = await _find_active(db, library.id, external_id, chash)
+        winner = await _find_active(
+            db, library.id, external_id, chash, source_path=source_path
+        )
         if winner is None:
             raise  # 不是身份冲突（其它约束）→ 抛出
         log.info("ingest race resolved: lib=%s ext=%s hash=%s winner=%s",
@@ -204,9 +242,6 @@ async def ingest_text(
         return winner, job, chunk_count, True
 
     if _evidence_write_enabled():
-        prepared_chunks = _prepare_evidence_chunks(
-            chunks_text, title=title, external_id=external_id, revision=doc.current_revision
-        )
         result = await create_evidence_generation(
             db,
             library=library,
@@ -217,6 +252,10 @@ async def ingest_text(
             splitter=splitter,
             created_by=created_by,
             prepared_chunks=prepared_chunks,
+            segments=segments,
+            file_name=file_name,
+            raw_file_sha256=raw_file_sha256,
+            document_revision_file_id=document_revision_file_id,
         )
         log.info(
             "evidence ingest queued: lib=%s doc_id=%s rev=%s revision_id=%s chunks=%s job_id=%s",
@@ -271,6 +310,10 @@ async def reingest_document(
     splitter: str,
     force: bool = False,
     chunks: list[str | dict] | None = None,
+    segments: list[dict] | None = None,
+    file_name: str | None = None,
+    raw_file_sha256: str | None = None,
+    document_revision_file_id: uuid.UUID | None = None,
 ) -> tuple[EmbeddingJob | None, int, bool]:
     """更新已存在文档：删旧 chunk → 用新文本重切 → 更新 doc → 新建 pending job。
 
@@ -286,6 +329,7 @@ async def reingest_document(
     """
     if _evidence_write_enabled():
         validate_external_metadata(metadata)
+    validate_parser_segments(segments)
     new_hash = _content_hash(new_text)
     unchanged = (
         not force
@@ -307,9 +351,21 @@ async def reingest_document(
     )
     if not chunks_text:
         raise ValueError("text produced zero chunks after splitting")
+    prepared_chunks = None
+    if _evidence_write_enabled():
+        prepared_chunks = _prepare_evidence_chunks(
+            chunks_text,
+            title=title,
+            external_id=document.external_id,
+            revision=document.current_revision + 1,
+        )
+        validate_prepared_chunk_ranges(
+            normalized_text=new_text, prepared_chunks=prepared_chunks
+        )
 
     # 删旧 chunk（旧 Qdrant points 不在此同步清，靠 revision 过滤 + 批次 B outbox）
-    await db.execute(sa_delete(Chunk).where(Chunk.document_id == document.id))
+    if not segments:
+        await db.execute(sa_delete(Chunk).where(Chunk.document_id == document.id))
 
     document.content_hash = new_hash
     document.title = title
@@ -321,9 +377,6 @@ async def reingest_document(
     job = await _new_generation(db, library, document)
 
     if _evidence_write_enabled():
-        prepared_chunks = _prepare_evidence_chunks(
-            chunks_text, title=title, external_id=document.external_id, revision=document.current_revision
-        )
         result = await create_evidence_generation(
             db,
             library=library,
@@ -335,6 +388,10 @@ async def reingest_document(
             created_by=document.created_by,
             prepared_chunks=prepared_chunks,
             job=job,
+            segments=segments,
+            file_name=file_name,
+            raw_file_sha256=raw_file_sha256,
+            document_revision_file_id=document_revision_file_id,
         )
         from app.services import cleanup as cleanup_service
         if not settings.enable_revision_id_worker:

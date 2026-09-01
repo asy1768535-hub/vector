@@ -16,7 +16,7 @@
 | `/health` | `app/api/health.py`：一次性探活 db/qdrant/embedding/rerank/ocr，返回 `status/embedding/rerank/ocr` 等。**是“此刻能否连通”，不含“某进程是否在线/上次心跳”。** | 监控页的「服务在线」用心跳，不替代 `/health`；两者互补。 |
 | `/admin/jobs/stats` | `app/api/admin_jobs.py:jobs_stats`（`current_superuser`）：按 `embedding_jobs.status` 聚合，返回 `EmbeddingJobStats{pending,processing,done,failed,total}`。 | 直接复用其聚合 SQL。 |
 | rebuild operation 状态 | `app/models/rebuild_operation.py:RebuildOperation`：`status ∈ {preparing,running,done,failed}`、`expected_job_count`、`last_error`、`finished_at`；活动唯一索引 `uq_rebuild_op_active_per_lib`（preparing/running 每库至多一个）。进度 = `count(embedding_jobs where rebuild_operation_id=op.id and status='done') / expected_job_count`（见 `app/services/rebuild.py:reconcile_running`）。`sys_libraries.index_state ∈ {ready,rebuilding,failed}`。 | rebuild 进度/失败库数全部可由现有表算出，无需新表。 |
-| 后台任务监控页 | `admin-ui/src/views/Jobs.js`（路由 `jobs`，`meta.admin=true`，标题「任务监控」）：Vue3 组合式 + Element Plus，`load()` 拉列表 + `loadStats()` 拉统计，手动刷新。`admin-ui/src/api.js` 有 `jobStats()/listJobs()`。 | 新增「运行状态」页沿用同风格，不动现有任务监控页。 |
+| 后台任务监控页 | `admin-ui/src/views/Jobs.js`：Vue3 组合式 + Element Plus，使用 `listMonitoredTasks()` 和 `monitoredTaskStats()` 读取统一任务投影，手动刷新。 | 「运行状态」页沿用同风格，不复制任务读取接口。 |
 
 **核对结论**：聚合统计（任务 / Outbox / 重建）全部可复用现有四张表；唯一缺口是“进程是否在线 + 上次心跳时间”——现有任何表都不记录进程存活，需**新增一张极小的心跳表**（仅此一处新增，下文给出迁移与回滚）。
 

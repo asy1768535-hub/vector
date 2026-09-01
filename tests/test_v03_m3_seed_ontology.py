@@ -150,7 +150,9 @@ def _populate_complete_seed(db: FakeDB, *, related_to_requires_evidence: bool = 
 
     relation_types = {}
     for spec in graph_seed.DEFAULT_RELATION_TYPES:
-        requires_evidence = related_to_requires_evidence if spec.key == "related_to" else spec.requires_evidence
+        requires_evidence = (
+            related_to_requires_evidence if spec.key == "related_to" else spec.requires_evidence
+        )
         row = RelationType(
             id=uuid.uuid4(),
             library_id=LIB_ID,
@@ -229,6 +231,7 @@ def test_default_seed_data_matches_m3_scope_and_related_to_policy():
         "references",
         "approves",
         "depends_on",
+        "contains",
         "related_to",
     } <= set(relation_specs)
 
@@ -236,6 +239,10 @@ def test_default_seed_data_matches_m3_scope_and_related_to_policy():
     assert related_to.requires_evidence is True
     assert related_to.default_review_policy == REVIEW_POLICY_PENDING_REVIEW
     assert related_to.default_review_policy != REVIEW_POLICY_AUTO_ACTIVE
+
+    contains = relation_specs["contains"]
+    assert contains.requires_evidence is True
+    assert contains.default_review_policy == REVIEW_POLICY_AUTO_ACTIVE
 
 
 def test_seed_creates_draft_ontology_children_before_activating():
@@ -263,6 +270,64 @@ def test_seed_creates_draft_ontology_children_before_activating():
     assert all(row.status == "active" and row.is_seeded for row in db.rows(RelationType))
     assert result.created_counts["ontology_versions"] == 1
     assert result.created_counts["entity_types"] == len(graph_seed.DEFAULT_ENTITY_TYPES)
+
+
+def test_exploration_seed_is_minimal_for_local_model_context():
+    from app.models.attribute_definition import AttributeDefinition
+    from app.models.entity_type import EntityType
+    from app.models.ontology_version import OntologyVersion
+    from app.models.relation_type import RelationType
+    from app.models.relation_type_constraint import RelationTypeConstraint
+    from app.services import graph_seed
+
+    db = FakeDB()
+
+    result = asyncio.run(graph_seed.seed_exploration_ontology(db, _lib()))
+
+    assert result.ontology_version.status == "active"
+    assert result.ontology_version.version_key == "ai-exploration"
+    assert [row.key for row in db.rows(EntityType)] == [
+        "approval",
+        "company",
+        "contract",
+        "equipment",
+        "location",
+        "person",
+        "power_grid",
+        "project",
+    ]
+    assert [row.key for row in db.rows(RelationType)] == [
+        "approves_connection",
+        "connects_to",
+        "constructs",
+        "cooperates_with",
+        "general_manager_of",
+        "launches",
+        "legal_representative",
+        "located_in",
+        "procures",
+        "project_manager_of",
+        "reports_to",
+        "safety_officer_of",
+        "sales_director_of",
+        "supervises",
+        "supplies",
+        "uses",
+        "wholly_owns",
+    ]
+    assert len(db.rows(RelationTypeConstraint)) == 17
+    assert all(row.requires_evidence is True for row in db.rows(RelationType))
+    assert all(row.default_review_policy == "auto_active" for row in db.rows(RelationType))
+    assert all(row.requires_review is False for row in db.rows(RelationTypeConstraint))
+    assert db.rows(AttributeDefinition) == []
+    assert len(db.rows(OntologyVersion)) == 1
+    assert result.created_counts == {
+        "ontology_versions": 1,
+        "entity_types": 8,
+        "relation_types": 17,
+        "relation_type_constraints": 17,
+        "attribute_definitions": 0,
+    }
 
 
 def test_seed_is_noop_when_active_enterprise_ontology_is_complete():

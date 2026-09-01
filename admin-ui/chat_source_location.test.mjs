@@ -32,6 +32,48 @@ test('source actions use source wording and show chunk sequence', () => {
     assert.ok(chat.includes('recalledChunkDialog.source.seq'));
 });
 
+test('citation scores use their reliable score type in every source surface', () => {
+    const fmtScore = chat.slice(chat.indexOf('function fmtScore'), chat.indexOf('function nowISO'));
+    assert.ok(fmtScore.includes("source?.score_type === 'rrf'"));
+    assert.ok(fmtScore.includes("'融合排序'"));
+    assert.ok(fmtScore.includes("'相关度'"));
+    assert.ok(fmtScore.includes("'向量相似度'"));
+    assert.ok(fmtScore.includes('Math.max(0, Math.min(1, Number(raw)))'));
+    assert.ok(fmtScore.includes('(score * 100).toFixed(1)'));
+    assert.ok(chat.includes('<span class="chat-source-score">{{ fmtScore(s) }}</span>'));
+    assert.ok(chat.includes('{{ fmtScore(recalledChunkDialog.source) }}'));
+    assert.ok(chat.includes('{{ fmtScore(sourceLocationDialog.source) }}'));
+    assert.ok(!chat.includes('fmtScore(s.score)'));
+    assert.match(css, /\.chat-source-score\s*\{[^}]*color:\s*var\(--app-text-secondary\)/);
+    assert.doesNotMatch(css, /\.score--(?:high|mid|low)\b/);
+});
+
+test('formats reliable source scores and never percentages RRF', () => {
+    const start = chat.indexOf('function fmtScore');
+    const end = chat.indexOf('function nowISO');
+    const format = Function(`${chat.slice(start, end)}; return fmtScore;`)();
+
+    assert.equal(format({ score_type: 'rerank', display_score: 0.863 }), '相关度 86.3%');
+    assert.equal(format({ score_type: 'vector', display_score: 0.724 }), '向量相似度 72.4%');
+    assert.equal(format({ score_type: 'rrf', display_score: 0.0164 }), '融合排序');
+    assert.equal(format({ score_type: 'vector', display_score: 1.5 }), '向量相似度 100.0%');
+});
+
+test('same-document chunks retain list order and citation indices', () => {
+    assert.match(chat, /const sources = \[\.\.\.\(message\?\.sources \|\| \[\]\)\];[\s\S]*?return sources;/);
+    assert.match(chat, /v-for="\(s, si\) in m\.sources"[\s\S]*?\{\{ si \+ 1 \}\}\./);
+    assert.doesNotMatch(chat, /new Set\([^\n]*document_id|document_id[^\n]*new Set/);
+
+    const chunks = [
+        { document_id: 'doc-1', chunk_id: 'chunk-1' },
+        { document_id: 'doc-1', chunk_id: 'chunk-2' },
+    ];
+    assert.deepEqual(chunks.map((source, index) => [index + 1, source.chunk_id]), [
+        [1, 'chunk-1'],
+        [2, 'chunk-2'],
+    ]);
+});
+
 test('source location modal and citation styles exist', () => {
     assert.match(css, /\.chat-citation-badge/);
     assert.match(css, /\.chat-source-location-dialog/);

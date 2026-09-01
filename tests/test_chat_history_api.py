@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import uuid
+from types import SimpleNamespace
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -114,6 +115,34 @@ def test_list_conversations_scoped_to_current_user():
         r = TestClient(app).get("/chat/conversations")
     assert r.status_code == 200 and len(r.json()) == 1
     assert lc.await_args.args[1] == mock_user.id      # 只查当前用户的会话
+
+
+def test_history_messages_preserve_source_display_score_semantics():
+    conv = _Conv()
+    message = SimpleNamespace(
+        id=uuid.uuid4(), role="assistant", content="answer", status="success",
+        error_message=None, created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        graph_augmented=False, graph_evidence=[],
+    )
+    source = SimpleNamespace(
+        title="source", document_id="d1", chunk_id="c1", seq=3, score=0.0164,
+        score_type="vector", display_score=0.724, content="chunk",
+    )
+    _override(AsyncMock())
+    with patch.object(chat_api.chat_history, "get_conversation", new=AsyncMock(return_value=conv)), \
+         patch.object(chat_api.chat_history, "get_conversation_messages", new=AsyncMock(return_value=[(message, [source])])) as get_messages:
+        before = uuid.uuid4()
+        response = TestClient(app).get(
+            f"/chat/conversations/{conv.id}/messages?limit=7&before={before}"
+        )
+
+    assert response.status_code == 200
+    restored = response.json()[0]["sources"][0]
+    assert restored["score"] == 0.0164
+    assert restored["score_type"] == "vector"
+    assert restored["display_score"] == 0.724
+    assert get_messages.await_args.kwargs["limit"] == 7
+    assert get_messages.await_args.kwargs["before"] == before
 
 
 def test_get_other_users_conversation_messages_403():

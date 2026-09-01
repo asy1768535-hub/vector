@@ -31,7 +31,7 @@
 
 ---
 
-## 3. Documents.js — 文档管理
+## 3. KnowledgeCatalog.js — 文档与知识资产管理
 
 **当前状态**: 库选择器 + 统计卡片 + 文档表格 + 编辑弹窗
 **改造要点**:
@@ -133,7 +133,7 @@
 - 统计标签改为横排指标
 - 状态标签颜色规范
 - 重试按钮仅图标
-**依赖 API**: `listJobs`, `jobStats`, `retryJob`, `resetFailedJobs`
+**依赖 API**: `listMonitoredTasks`, `monitoredTaskStats`, `retryMonitoredTasks`, `resetFailedJobs`
 **风险**: 低
 
 ---

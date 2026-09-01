@@ -12,6 +12,8 @@ async def create_entity(
     db: AsyncSession,
     library: Library,
     payload: GraphEntityCreate,
+    *,
+    allow_draft_ontology: bool = False,
 ) -> Entity:
     validation = await graph_schema_validator.validate_entity_write(
         db,
@@ -23,6 +25,7 @@ async def create_entity(
         requested_status=payload.status,
         source_type=payload.source_type,
         confidence=payload.confidence,
+        allow_draft_ontology=allow_draft_ontology,
     )
     row = Entity(
         library_id=library.id,

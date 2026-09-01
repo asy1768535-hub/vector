@@ -12,7 +12,11 @@ from app.services.graph_candidate_aggregation import (
     merge_candidate_key_v1,
     relation_candidate_key_v1,
 )
-from app.services.graph_normalization import normalize_graph_name_v1
+from app.services.graph_normalization import (
+    evidence_backed_aliases_v1,
+    filter_identifier_aliases_v1,
+    normalize_graph_name_v1,
+)
 from app.services.graph_schema_validator import normalize_graph_name
 
 
@@ -22,18 +26,46 @@ ENTITY_ID = uuid.UUID("33333333-3333-3333-3333-333333333333")
 TARGET_ID = uuid.UUID("44444444-4444-4444-4444-444444444444")
 
 
-def test_normalization_v1_is_the_v03_strip_casefold_whitespace_rule():
+def test_normalization_v1_normalizes_unicode_whitespace_and_identifier_spacing():
     assert normalize_graph_name_v1("  Alice\tZHANG\n") == "alice zhang"
     assert normalize_graph_name("  Alice\tZHANG\n") == "alice zhang"
     assert normalize_graph_name_v1("Straße") == "strasse"
-    assert normalize_graph_name_v1("\u3000Ａlice\u3000") == "ａlice"
-    assert normalize_graph_name_v1("e\u0301") != normalize_graph_name_v1("é")
+    assert normalize_graph_name_v1("\u3000Ａlice\u3000") == "alice"
+    assert normalize_graph_name_v1("e\u0301") == normalize_graph_name_v1("é")
+    assert normalize_graph_name_v1("逆变器 A － 01") == normalize_graph_name_v1("逆变器A-01")
     assert normalize_graph_name_v1(" \t\n ") == ""
 
 
 def test_normalization_v1_requires_a_string():
     with pytest.raises(TypeError, match="graph name must be a string"):
         normalize_graph_name_v1(None)  # type: ignore[arg-type]
+
+
+def test_evidence_backed_aliases_keep_identifier_and_format_variants_only():
+    aliases = evidence_backed_aliases_v1(
+        name="监控网关 G-01",
+        explicit_aliases=[],
+        properties={},
+        evidence_quotes=["监控网关G-01（G-01）"],
+    )
+
+    assert "监控网关G-01" in aliases
+    assert "G-01" in aliases
+    assert "监控网关" not in aliases
+
+
+def test_identifier_aliases_are_kept_only_for_their_unique_evidence_owner():
+    rows = filter_identifier_aliases_v1(
+        [
+            {"name": "inverter A-01", "aliases": ["A-01", "WO-77"], "properties": {}},
+            {"name": "supplier", "aliases": ["A-01"], "properties": {}},
+            {"name": "work order WO-77", "aliases": ["WO-77"], "properties": {}},
+        ]
+    )
+
+    assert rows[0]["aliases"] == ["A-01"]
+    assert rows[1]["aliases"] == []
+    assert rows[2]["aliases"] == ["WO-77"]
 
 
 def test_canonical_json_is_stable_and_rejects_non_json_values():

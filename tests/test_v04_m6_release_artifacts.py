@@ -65,9 +65,8 @@ def test_eval_policy_v1_binds_exact_selected_calibration_and_human_approval():
     assert loaded.policy.evaluation_config_hash == (
         loaded.calibration.evaluation_config_hash
     )
-    assert loaded.policy.calibration_result_sha256 == hashlib.sha256(
-        CALIBRATION.read_bytes()
-    ).hexdigest()
+    calibration_bytes = CALIBRATION.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    assert loaded.policy.calibration_result_sha256 == hashlib.sha256(calibration_bytes).hexdigest()
     assert_sanitized_eval_artifact(loaded.policy.model_dump(mode="json"))
 
 

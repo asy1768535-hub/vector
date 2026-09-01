@@ -119,6 +119,7 @@ def _policy_snapshot() -> dict:
             "ambiguous": 0.0,
         },
         "evidence_group_policy": "all_claims_valid",
+        "candidate_review_policy": "precision_first_auto",
     }
 
 
@@ -501,7 +502,8 @@ async def _exercise_m4(name: str, ids: dict[str, object]) -> None:
             assert aggregate.property_conflict_count == 1
             assert validation.rejected_count == 0
             assert routing.validated_count == 1
-            assert routing.pending_review_count == 2
+            assert routing.pending_review_count == 0
+            assert routing.rejected_count == 2
 
         async with sessions() as db:
             entities = list(
@@ -525,11 +527,12 @@ async def _exercise_m4(name: str, ids: dict[str, object]) -> None:
             assert department.model_confidence == 0.95
             assert department.matched_entity_id == ids["formal_department"]
             assert department.normalization_method == "exact_alias_match"
-            assert department.status == "pending_review"
+            assert department.status == "rejected"
+            assert department.review_reason == "conflict_open"
             assert process.status == "validated"
             assert relation.evidence_support_mode == "evidence_group"
-            assert relation.status == "pending_review"
-            assert relation.review_reason == "evidence_group"
+            assert relation.status == "rejected"
+            assert relation.review_reason == "endpoint_rejected"
             assert 0 <= relation.final_confidence <= 1
             assert await db.scalar(select(func.count()).select_from(GraphEntityOccurrence)) == 4
             assert await db.scalar(select(func.count()).select_from(GraphRelationOccurrence)) == 2

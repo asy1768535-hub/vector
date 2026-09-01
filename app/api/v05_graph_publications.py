@@ -13,6 +13,7 @@ from app.config import settings
 from app.db import get_db
 from app.deps import require_lib
 from app.models.graph_publication import GraphPublication
+from app.models.graph_publication_item import GraphPublicationItem
 from app.models.library import Library
 from app.models.user import User
 from app.schemas.v05_graph_publication import (
@@ -31,6 +32,11 @@ from app.schemas.v05_graph_publication import (
     GraphPublicationStatus,
 )
 from app.services import audit_log, graph_publication_read
+from app.services.graph_governance_contracts import GraphGovernanceError
+from app.services.graph_governance_publication import (
+    parse_graph_governance_plan,
+    release_graph_governance_publication,
+)
 from app.services.graph_publication_activation import (
     GraphPublicationActivationError,
     activate_graph_publication,
@@ -42,11 +48,38 @@ from app.services.graph_publication_planner import (
     plan_graph_publication,
     plan_initial_publication,
 )
+from app.services.organization_authorization import (
+    OrganizationAuthorizationError,
+    authorize_library_management,
+    credential_organization_scope,
+)
 
 
 router = APIRouter(
     prefix="/libraries/{slug}/v05/graph-publications",
     tags=["v0.5-graph-publication"],
+)
+
+
+_SAFE_FACT_SNAPSHOT_KEYS = frozenset(
+    {
+        "manifest_version",
+        "item_kind",
+        "library_id",
+        "ontology_version_id",
+        "entity_id",
+        "entity_type_id",
+        "canonical_name",
+        "normalized_name",
+        "properties_hash",
+        "source_type",
+        "confidence",
+        "relation_id",
+        "relation_type_id",
+        "source_entity_id",
+        "target_entity_id",
+        "support_evidence_ids",
+    }
 )
 
 
@@ -105,6 +138,15 @@ def _publication_read(publication: GraphPublication) -> GraphPublicationRead:
         created_at=publication.created_at,
         updated_at=publication.updated_at,
     )
+
+
+def _safe_fact_snapshot(item: GraphPublicationItem) -> dict:
+    snapshot = item.fact_snapshot if isinstance(item.fact_snapshot, dict) else {}
+    return {
+        key: snapshot[key]
+        for key in _SAFE_FACT_SNAPSHOT_KEYS
+        if key in snapshot
+    }
 
 
 def _command_read(result: GraphPublicationPlanResult) -> GraphPublicationCommandRead:
@@ -248,6 +290,7 @@ async def list_publication_items(
                 support_evidence_ids=list(view.item.support_evidence_ids or []),
                 support_counts=dict(view.item.support_counts or {}),
                 source_job_ids=list(view.source_job_ids),
+                fact_snapshot=_safe_fact_snapshot(view.item),
                 created_at=view.item.created_at,
                 updated_at=view.item.updated_at,
             )
@@ -268,7 +311,13 @@ async def activate_publication(
     db: AsyncSession = Depends(get_db),
 ) -> GraphPublicationRead:
     _require_publication_enabled()
-    await _scoped_publication(db, library, publication_id)
+    scoped = await _scoped_publication(db, library, publication_id)
+    try:
+        governance_plan = parse_graph_governance_plan(scoped)
+    except GraphGovernanceError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, exc.code) from exc
+    if governance_plan is not None and credential_organization_scope(user) is not None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "cookie authentication required")
     actor_id = user.id
     await db.rollback()
     try:
@@ -308,6 +357,19 @@ async def cancel_publication(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "publication_not_found")
     if publication.status != "planned":
         raise HTTPException(status.HTTP_409_CONFLICT, "publication_not_planned")
+    try:
+        governance_plan = parse_graph_governance_plan(publication)
+    except GraphGovernanceError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, exc.code) from exc
+    if governance_plan is not None:
+        if credential_organization_scope(user) is not None:
+            raise HTTPException(
+                status.HTTP_401_UNAUTHORIZED, "cookie authentication required"
+            )
+        try:
+            await authorize_library_management(db, user=user, library=library)
+        except OrganizationAuthorizationError as exc:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden") from exc
     publication.status = "cancelled"
     publication.cancelled_by_user_id = user.id
     publication.cancelled_at = datetime.now(timezone.utc)
@@ -326,6 +388,12 @@ async def cancel_publication(
         "graph_publication.cancelled",
         audit_target,
     )
+    if governance_plan is not None:
+        try:
+            await release_graph_governance_publication(db, publication)
+        except GraphGovernanceError as exc:
+            await db.rollback()
+            raise HTTPException(status.HTTP_409_CONFLICT, exc.code) from exc
     await db.commit()
     return _publication_read(publication)
 
@@ -343,7 +411,13 @@ async def rollback_publication(
     db: AsyncSession = Depends(get_db),
 ) -> GraphPublicationCommandRead:
     _require_publication_enabled()
-    await _scoped_publication(db, library, publication_id)
+    scoped = await _scoped_publication(db, library, publication_id)
+    try:
+        governance_plan = parse_graph_governance_plan(scoped)
+    except GraphGovernanceError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, exc.code) from exc
+    if governance_plan is not None and credential_organization_scope(user) is not None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "cookie authentication required")
     command_key = body.idempotency_key or f"rollback:{publication_id}:{uuid.uuid4()}"
     try:
         result = await plan_graph_publication_rollback(

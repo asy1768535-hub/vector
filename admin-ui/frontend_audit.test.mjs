@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { menuAccess, canAccessRoute } from './src/menu_access.js';
 import { csvEscape, downloadCSV } from './src/logs_ui.js';
 
@@ -72,25 +72,40 @@ test('csvEscape: newline escaped', () => {
 // ══════════════════════════════════════════════════
 
 const appSrc = readFileSync(new URL('./src/app.js', import.meta.url), 'utf8');
+const navigationSrc = readFileSync(new URL('./src/domain_navigation.js', import.meta.url), 'utf8');
 const apiSrc = readFileSync(new URL('./src/api.js', import.meta.url), 'utf8');
 const apiKeysSrc = readFileSync(new URL('./src/views/ApiKeys.js', import.meta.url), 'utf8');
 const chatSrc = readFileSync(new URL('./src/views/Chat.js', import.meta.url), 'utf8');
-const docsSrc = readFileSync(new URL('./src/views/Documents.js', import.meta.url), 'utf8');
 const searchSrc = readFileSync(new URL('./src/views/Search.js', import.meta.url), 'utf8');
 const auditSrc = readFileSync(new URL('./src/views/Audit.js', import.meta.url), 'utf8');
 
-test('/dashboard has admin:true', () => {
-    assert.ok(appSrc.includes('path: \'dashboard\''), 'dashboard route exists');
+test('/operations-center/overview has admin:true', () => {
+    assert.ok(appSrc.includes("path: 'overview'"), 'operations overview route exists');
     assert.ok(appSrc.includes("admin: true"), 'dashboard has admin:true meta');
 });
 
-test('defaultRoute: superuser → /dashboard', () => {
-    assert.ok(appSrc.includes("/dashboard'") || appSrc.includes('/dashboard"'), 'superuser redirect to dashboard');
-    assert.ok(appSrc.includes('is_superuser'), 'checks is_superuser for default route');
+test('defaultRoute: platform admin starts in the first accessible business domain', () => {
+    assert.ok(
+        navigationSrc.indexOf("for (const domain of ['knowledgeUse', 'knowledgeAssets', 'knowledgeGovernance'])")
+            < navigationSrc.indexOf('if (access?.operationsCenter) return APP_PATHS.dashboard'),
+        'business domains take precedence over operations overview',
+    );
+    assert.ok(appSrc.includes('defaultRouteForAccess'), 'app uses shared default projection');
 });
 
-test('defaultRoute: no perm → /api-keys', () => {
-    assert.ok(appSrc.includes('/api-keys'), 'fallback to api-keys');
+test('authenticated root uses a real redirect instead of a component-less route guard', () => {
+    assert.ok(
+        appSrc.includes("{ path: '', redirect: () => ({ path: defaultRoute() }) }"),
+        'root child route redirects to the shared authenticated default',
+    );
+    assert.ok(
+        !appSrc.includes("{ path: '', beforeEnter: () => ({ path: defaultRoute() }) }"),
+        'root child route does not rely on a component-less beforeEnter record',
+    );
+});
+
+test('defaultRoute: no business permission → account profile', () => {
+    assert.ok(navigationSrc.includes('return APP_PATHS.profile'), 'fallback enters account settings');
 });
 
 test('ApiKeys: refresh calls load(true)', () => {
@@ -105,17 +120,6 @@ test('ApiKeys: expired stat card present', () => {
 test('Users: refresh calls loadUsers(true)', () => {
     const usersSrc = readFileSync(new URL('./src/views/Users.js', import.meta.url), 'utf8');
     assert.ok(usersSrc.includes('loadUsers(true)'), 'users refresh uses forceRefresh');
-});
-
-test('Documents: refresh calls loadDocs(true)', () => {
-    assert.ok(docsSrc.includes('loadDocs(true)'), 'docs refresh uses forceRefresh');
-});
-
-test('Documents: loadLibs calls loadDocs exactly once (no duplicate branch)', () => {
-    const afterLibs = docsSrc.slice(docsSrc.indexOf('async function loadLibs'));
-    const fnBody = afterLibs.slice(0, afterLibs.indexOf('async function loadDocs'));
-    const matches = fnBody.match(/loadDocs\(\)/g) || [];
-    assert.equal(matches.length, 1, `loadLibs calls loadDocs ${matches.length} times, expected 1`);
 });
 
 test('Chat: opens document source details in page', () => {
@@ -147,12 +151,47 @@ test('Audit: no unused targetTypeKey import', () => {
     assert.ok(!auditSrc.includes('targetTypeKey'), 'targetTypeKey removed from Audit import');
 });
 
+test('primary pages use readable terms while keeping protocol fields internal', () => {
+    const importSrc = readFileSync(new URL('./src/views/Import.js', import.meta.url), 'utf8');
+    const jobsSrc = readFileSync(new URL('./src/views/Jobs.js', import.meta.url), 'utf8');
+    assert.ok(importSrc.includes('externalId'));
+    assert.ok(importSrc.includes('外部文档编号'));
+    assert.ok(!importSrc.includes('placeholder="external_id'));
+    assert.ok(jobsSrc.includes('处理服务（Worker）'));
+    assert.ok(jobsSrc.includes('向量化'));
+});
+
 test('API: getLibraryJob removed', () => {
     assert.ok(!apiSrc.includes('getLibraryJob'), 'getLibraryJob removed');
 });
 
 test('API: sendChatMessage removed', () => {
     assert.ok(!apiSrc.includes('sendChatMessage'), 'sendChatMessage removed');
+});
+
+test('API: every exported frontend wrapper has a real source consumer', () => {
+    const sourceDirectories = ['./src/', './src/views/', './src/components/'];
+    const sourceFiles = [];
+    for (const directory of sourceDirectories) {
+        const url = new URL(directory, import.meta.url);
+        for (const name of readdirSync(url).filter((value) => value.endsWith('.js'))) {
+            sourceFiles.push(`${directory}${name}`);
+        }
+    }
+    const consumers = sourceFiles
+        .map((name) => readFileSync(new URL(name, import.meta.url), 'utf8'))
+        .join('\n');
+    const exportedNames = Array.from(apiSrc.matchAll(
+        /export\s+(?:async\s+)?(?:const|function)\s+([A-Za-z_][A-Za-z0-9_]*)/g,
+    ), (match) => match[1]);
+    const unused = exportedNames.filter((name) => {
+        if (new RegExp(`\\bapi\\.${name}\\b`).test(consumers)) return false;
+        return !new RegExp(
+            `import\\s*\\{[^}]*\\b${name}\\b[^}]*\\}\\s*from\\s*['\"][^'\"]*api\\.js['\"]`,
+            's',
+        ).test(consumers);
+    });
+    assert.deepEqual(unused, []);
 });
 
 console.log('frontend audit test passed');

@@ -16,6 +16,11 @@ from app.config import settings
 from app.db import get_db
 from app.deps import require_lib
 from app.models.library import Library
+from app.models.classification_taxonomy import (
+    ClassificationLabel,
+    ClassificationTaxonomy,
+    LibraryClassificationLabel,
+)
 from app.models.library_faq import LibraryFAQQuestion
 from app.models.user import User
 from app.schemas.admin import (
@@ -28,10 +33,23 @@ from app.schemas.admin import (
 )
 from app.services import (
     audit_log,
+    classification_jobs,
+    classification_runtime_policy,
     graph_extraction_safety,
+    graph_seed,
+    knowledge_artifact_jobs,
+    knowledge_artifact_policy,
     library_faq,
     qdrant,
     source_enrichment,
+)
+from app.services.organization_authorization import (
+    OrganizationAuthorizationError,
+    authorize_library_management,
+)
+from app.services.organization_permissions import (
+    PermissionMutationResult,
+    grant_platform_library_permissions,
 )
 
 log = logging.getLogger(__name__)
@@ -45,6 +63,40 @@ def _collection_name(slug: str) -> str:
     """
     return f"lib_{slug}"
 
+async def _attach_active_classification_labels(
+    db: AsyncSession,
+    library: Library,
+) -> None:
+    taxonomy = (
+        await db.execute(
+            select(ClassificationTaxonomy).where(
+                ClassificationTaxonomy.organization_id == library.organization_id,
+                ClassificationTaxonomy.status == "active",
+            )
+        )
+    ).scalar_one_or_none()
+    if taxonomy is None:
+        return
+    labels = (
+        await db.execute(
+            select(ClassificationLabel)
+            .where(
+                ClassificationLabel.taxonomy_version_id == taxonomy.id,
+                ClassificationLabel.status == "active",
+            )
+            .order_by(ClassificationLabel.sort_order, ClassificationLabel.key)
+        )
+    ).scalars().all()
+    db.add_all(
+        LibraryClassificationLabel(
+            library_id=library.id,
+            taxonomy_version_id=taxonomy.id,
+            label_id=label.id,
+            ordinal=ordinal,
+        )
+        for ordinal, label in enumerate(labels)
+    )
+
 
 def _has_non_empty_source_config(value: object) -> bool:
     return isinstance(value, dict) and bool(value)
@@ -57,12 +109,42 @@ def _validate_source_config_or_400(source_config: dict | None) -> dict | None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"invalid source_config: {exc}") from exc
 
 
+def _recreated_slug(base_slug: str, generation: int) -> str:
+    suffix = f"__r{generation}"
+    trimmed_base = base_slug[: 80 - len(suffix)].rstrip("_")
+    return f"{trimmed_base}{suffix}"
+
+
+async def _allocate_recreated_slug(
+    db: AsyncSession,
+    *,
+    base_slug: str,
+    name: str,
+) -> tuple[str, int] | None:
+    result = await db.execute(
+        select(Library.slug, Library.deleted_at).where(Library.name == name)
+    )
+    history = list(result.all())
+    if not history or any(deleted_at is None for _, deleted_at in history):
+        return None
+
+    generation = max(2, len(history) + 1)
+    for _ in range(8):
+        candidate = _recreated_slug(base_slug, generation)
+        collision = await db.execute(select(Library.id).where(Library.slug == candidate))
+        if collision.scalar_one_or_none() is None:
+            return candidate, generation
+        generation += 1
+    return None
+
+
 @router.post("", response_model=LibraryRead, status_code=status.HTTP_201_CREATED)
 async def create_library(
     body: LibraryCreate,
     actor: User = Depends(current_superuser),
     db: AsyncSession = Depends(get_db),
 ) -> Library:
+    creator_permissions: PermissionMutationResult | None = None
     embedding_model = body.embedding_model or settings.embedding_model
     embedding_dim = body.embedding_dim or settings.embedding_dim
     chunk_size = body.chunk_size or settings.default_chunk_size
@@ -100,15 +182,68 @@ async def create_library(
         chunk_overlap=chunk_overlap,
         qdrant_collection="",  # 写完 ID 后再 set
         source_config=source_config,
+        graph_extraction_enabled=body.graph_extraction_enabled,
+        schema_mode=body.schema_mode,
+        schema_confirmation_policy=body.schema_confirmation_policy,
+        claim_graph_shadow_policy=body.claim_graph_shadow_policy,
+        graph_extraction_build_mode=body.graph_extraction_build_mode,
+        external_llm_enabled=body.external_llm_enabled,
+        graph_extraction_allowed_security_levels=(
+            graph_extraction_safety.normalize_allowed_security_levels(
+                body.graph_extraction_allowed_security_levels
+            )
+        ),
+        knowledge_artifact_auto_enabled=True,
+        summary_artifact_enabled=True,
+        outline_artifact_enabled=True,
+        knowledge_artifact_external_model_enabled=body.external_llm_enabled,
+        knowledge_artifact_allowed_security_levels=(
+            graph_extraction_safety.normalize_allowed_security_levels(
+                body.graph_extraction_allowed_security_levels
+            )
+        ),
+        revision_retention_enabled=body.revision_retention_enabled,
+        classification_auto_enabled=True,
+        classification_external_model_enabled=True,
+        classification_allowed_security_levels=["internal"],
+        revision_retention_days=body.revision_retention_days,
+        revision_retention_notice_days=body.revision_retention_notice_days,
         created_by=actor.id,
     )
     lib.qdrant_collection = _collection_name(body.slug)
+    creation_generation = 1
     db.add(lib)
     try:
         await db.flush()
     except IntegrityError as exc:
         await db.rollback()
-        raise HTTPException(status.HTTP_409_CONFLICT, "库唯一ID已存在，请更换后重试") from exc
+        recreated = await _allocate_recreated_slug(
+            db,
+            base_slug=body.slug,
+            name=body.name,
+        )
+        if recreated is None:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "已有同名知识库；如需重建，请先删除当前活动库",
+            ) from exc
+        lib.slug, creation_generation = recreated
+        lib.qdrant_collection = _collection_name(lib.slug)
+        if body.source_enrichment_enabled and not _has_non_empty_source_config(body.source_config):
+            lib.source_config = source_enrichment.conventional_config(lib.slug)
+        db.add(lib)
+        try:
+            await db.flush()
+        except IntegrityError as retry_exc:
+            await db.rollback()
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "知识库重建ID分配冲突，请重试",
+            ) from retry_exc
+
+    if body.schema_mode == "governed" and body.schema_template == "enterprise":
+        await graph_seed.seed_enterprise_ontology(db, lib)
+    await _attach_active_classification_labels(db, lib)
 
     # 建 Qdrant collection（失败回滚库记录）
     try:
@@ -124,11 +259,36 @@ async def create_library(
             status.HTTP_502_BAD_GATEWAY, f"qdrant collection creation failed: {exc}"
         ) from exc
 
-    await audit_log.record(
-        db, actor.id, "library.create",
-        {"library_id": str(lib.id), "slug": lib.slug, "collection": lib.qdrant_collection},
-    )
-    await db.commit()
+    try:
+        if settings.organization_authorization_enabled:
+            creator_permissions = await grant_platform_library_permissions(
+                db,
+                actor_user_id=actor.id,
+                target_user_id=actor.id,
+                library=lib,
+                actions=("read", "insert", "delete", "admin"),
+            )
+        await audit_log.record(
+            db, actor.id, "library.create",
+            {
+                "library_id": str(lib.id),
+                "slug": lib.slug,
+                "requested_slug": body.slug,
+                "creation_generation": creation_generation,
+                "collection": lib.qdrant_collection,
+                "graph_extraction_enabled": lib.graph_extraction_enabled,
+                "schema_mode": lib.schema_mode,
+                "schema_confirmation_policy": lib.schema_confirmation_policy,
+                "claim_graph_shadow_policy": lib.claim_graph_shadow_policy,
+                "schema_template": body.schema_template,
+            },
+        )
+        await db.commit()
+    except Exception:
+        if creator_permissions is not None:
+            creator_permissions.compensate()
+        await db.rollback()
+        raise
     await db.refresh(lib)
     return lib
 
@@ -231,7 +391,7 @@ async def update_library(
     if source_config_provided and _has_non_empty_source_config(body.source_config):
         _validate_source_config_or_400(body.source_config)
         lib.source_config = body.source_config
-        changes["source_config"] = body.source_config
+        changes["source_config"] = source_enrichment.redact_source_config(body.source_config)
     elif source_config_provided and body.source_config == {}:
         lib.source_config = None
         changes["source_config"] = None
@@ -245,12 +405,46 @@ async def update_library(
             lib.source_config = source_config
             changes["source_config"] = source_config
 
+    if "schema_mode" in body.model_fields_set and "graph_extraction_enabled" in body.model_fields_set:
+        if (body.schema_mode == "disabled") != (body.graph_extraction_enabled is False):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "schema_mode and graph_extraction_enabled must describe the same mode",
+            )
+
     safety_change_error = None
-    for field in ("graph_extraction_enabled", "external_llm_enabled"):
+    if "schema_mode" in body.model_fields_set:
+        lib.schema_mode = body.schema_mode
+        changes["schema_mode"] = body.schema_mode
+        if "graph_extraction_enabled" not in body.model_fields_set:
+            lib.graph_extraction_enabled = body.schema_mode != "disabled"
+            changes["graph_extraction_enabled"] = lib.graph_extraction_enabled
+            if not lib.graph_extraction_enabled:
+                safety_change_error = "library_opt_out"
+
+    if "schema_confirmation_policy" in body.model_fields_set:
+        lib.schema_confirmation_policy = body.schema_confirmation_policy
+        changes["schema_confirmation_policy"] = body.schema_confirmation_policy
+
+    if "claim_graph_shadow_policy" in body.model_fields_set:
+        lib.claim_graph_shadow_policy = body.claim_graph_shadow_policy
+        changes["claim_graph_shadow_policy"] = body.claim_graph_shadow_policy
+
+    for field in (
+        "graph_extraction_enabled",
+        "graph_extraction_build_mode",
+        "graph_assisted_chat_mode",
+        "external_llm_enabled",
+    ):
         if field in body.model_fields_set:
             value = getattr(body, field)
             setattr(lib, field, value)
             changes[field] = value
+            if field == "graph_extraction_enabled" and "schema_mode" not in body.model_fields_set:
+                lib.schema_mode = "disabled" if value is False else (
+                    lib.schema_mode if lib.schema_mode != "disabled" else "governed"
+                )
+                changes["schema_mode"] = lib.schema_mode
             if value is False:
                 safety_change_error = "library_opt_out"
 
@@ -270,6 +464,118 @@ async def update_library(
                 db,
                 library_id=lib.id,
                 job_error_code=safety_change_error,
+            )
+        )
+
+    cancelled_artifact_types: set[str] = set()
+    cancel_model_artifact_jobs = (
+        "external_llm_enabled" in body.model_fields_set
+        and body.external_llm_enabled is False
+        and bool(lib.knowledge_artifact_external_model_enabled)
+    )
+    for field in (
+        "knowledge_artifact_auto_enabled",
+        "summary_artifact_enabled",
+        "outline_artifact_enabled",
+        "knowledge_artifact_external_model_enabled",
+    ):
+        if field not in body.model_fields_set:
+            continue
+        value = getattr(body, field)
+        setattr(lib, field, value)
+        changes[field] = value
+        if value is False and field == "summary_artifact_enabled":
+            cancelled_artifact_types.add("summary")
+        elif value is False and field == "outline_artifact_enabled":
+            cancelled_artifact_types.add("outline")
+        elif value is False and field == "knowledge_artifact_external_model_enabled":
+            cancel_model_artifact_jobs = True
+
+    artifact_policy_changed = False
+    if "knowledge_artifact_allowed_security_levels" in body.model_fields_set:
+        old_levels = list(lib.knowledge_artifact_allowed_security_levels or [])
+        levels = knowledge_artifact_policy.normalize_knowledge_artifact_security_levels(
+            body.knowledge_artifact_allowed_security_levels
+        )
+        lib.knowledge_artifact_allowed_security_levels = levels
+        changes["knowledge_artifact_allowed_security_levels"] = levels
+        artifact_policy_changed = levels != old_levels
+        cancel_model_artifact_jobs = cancel_model_artifact_jobs or artifact_policy_changed
+
+    retention_fields = {
+        "revision_retention_enabled",
+        "revision_retention_days",
+        "revision_retention_notice_days",
+    }
+    if retention_fields & body.model_fields_set:
+        retention_days = (
+            body.revision_retention_days
+            if "revision_retention_days" in body.model_fields_set
+            else lib.revision_retention_days
+        )
+        notice_days = (
+            body.revision_retention_notice_days
+            if "revision_retention_notice_days" in body.model_fields_set
+            else lib.revision_retention_notice_days
+        )
+        if notice_days >= retention_days:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "revision retention notice days must be less than retention days",
+            )
+        for field in sorted(retention_fields & body.model_fields_set):
+            value = getattr(body, field)
+            setattr(lib, field, value)
+            changes[field] = value
+
+    if cancelled_artifact_types or cancel_model_artifact_jobs:
+        error_code = (
+            "library_artifact_policy_changed"
+            if artifact_policy_changed or cancel_model_artifact_jobs
+            else "library_artifact_type_disabled"
+        )
+        changes["cancelled_knowledge_artifact_jobs"] = (
+            await knowledge_artifact_jobs.cancel_library_artifact_jobs_for_policy_change(
+                db,
+                library_id=lib.id,
+                error_code=error_code,
+                artifact_types=tuple(sorted(cancelled_artifact_types)),
+                include_model_jobs=cancel_model_artifact_jobs,
+            )
+        )
+
+    cancel_classification_jobs = (
+        "external_llm_enabled" in body.model_fields_set
+        and body.external_llm_enabled is False
+        and bool(lib.classification_external_model_enabled)
+    )
+    for field in (
+        "classification_auto_enabled",
+        "classification_external_model_enabled",
+    ):
+        if field not in body.model_fields_set:
+            continue
+        value = getattr(body, field)
+        setattr(lib, field, value)
+        changes[field] = value
+        if value is False:
+            cancel_classification_jobs = True
+
+    if "classification_allowed_security_levels" in body.model_fields_set:
+        old_levels = list(lib.classification_allowed_security_levels or [])
+        levels = classification_runtime_policy.normalize_classification_security_levels(
+            body.classification_allowed_security_levels
+        )
+        lib.classification_allowed_security_levels = levels
+        changes["classification_allowed_security_levels"] = levels
+        cancel_classification_jobs = cancel_classification_jobs or levels != old_levels
+
+    if cancel_classification_jobs:
+        changes["cancelled_classification_jobs"] = (
+            await classification_jobs.cancel_library_classification_jobs_for_policy_change(
+                db,
+                library_id=lib.id,
+                error_code="library_classification_policy_changed",
             )
         )
 
@@ -399,9 +705,19 @@ async def delete_library(
 
 
 # ── 常用问题（FAQ）：read 可看 active；admin/superuser 可管理 ───────────────
-def _can_manage_or_see_inactive(user: User, slug: str) -> bool:
+async def _can_manage_or_see_inactive(
+    db: AsyncSession,
+    user: User,
+    library: Library,
+) -> bool:
     """是否可管理 FAQ / 查看 inactive：superuser 直通，否则需库级 admin 权限。"""
-    return user.is_superuser or has_permission(str(user.id), slug, "admin")
+    if not settings.organization_authorization_enabled:
+        return user.is_superuser or has_permission(str(user.id), library.slug, "admin")
+    try:
+        await authorize_library_management(db, user=user, library=library)
+        return True
+    except OrganizationAuthorizationError:
+        return False
 
 
 @router.get("/{slug}/faqs", response_model=list[LibraryFAQRead])
@@ -413,7 +729,9 @@ async def list_library_faqs(
     db: AsyncSession = Depends(get_db),
 ) -> list[LibraryFAQQuestion]:
     # include_inactive 只对 admin/superuser 生效；普通 read 用户强制只看 active
-    effective_inactive = include_inactive and _can_manage_or_see_inactive(user, slug)
+    effective_inactive = include_inactive and await _can_manage_or_see_inactive(
+        db, user, lib
+    )
     return await library_faq.list_faqs(db, lib.id, include_inactive=effective_inactive)
 
 

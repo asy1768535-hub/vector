@@ -168,6 +168,7 @@ def test_m3_hop_sql_is_scoped_bounded_and_private(direction):
         )
     ).lower()
     for required in (
+        "as materialized",
         "graph_publication_items",
         "knowledge_relations",
         "relation_types",
@@ -226,6 +227,27 @@ def test_m3_two_hop_bfs_is_canonical_min_depth_and_deduplicated():
         nodes=False,
         relations=False,
     )
+
+
+def test_m3_three_hop_bfs_reaches_the_third_relation():
+    traversal, db = _traverse(
+        [
+            [_hop_row(RELATION_IDS[0], ENTITY_ID, SECOND_ENTITY_ID)],
+            [_hop_row(RELATION_IDS[1], SECOND_ENTITY_ID, THIRD_ENTITY_ID)],
+            [_hop_row(RELATION_IDS[2], THIRD_ENTITY_ID, FOURTH_ENTITY_ID)],
+        ],
+        max_hops=3,
+    )
+
+    assert len(db.statements) == 3
+    assert [node.entity_id for node in traversal.nodes] == [
+        ENTITY_ID,
+        SECOND_ENTITY_ID,
+        THIRD_ENTITY_ID,
+        FOURTH_ENTITY_ID,
+    ]
+    assert [node.depth for node in traversal.nodes] == [0, 1, 2, 3]
+    assert [row.depth for row in traversal.relations] == [1, 2, 3]
 
 
 def test_m3_exact_limits_without_extra_candidate_are_not_truncated():

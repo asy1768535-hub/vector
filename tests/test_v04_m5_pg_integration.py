@@ -314,6 +314,69 @@ async def _claim(sessions):
     return unit.id, unit.claim_token
 
 
+async def _exercise_claim_profile_filter(name: str, ids: dict[str, uuid.UUID]) -> None:
+    engine = create_async_engine(_database_url(name))
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with sessions() as db, db.begin():
+            library = await db.get(Library, ids["library"])
+            document = await db.get(Document, ids["document"])
+            revision = await db.get(DocumentRevision, ids["revision"])
+            legacy = await create_graph_extraction_job(
+                db,
+                library=library,
+                document=document,
+                revision=revision,
+                trigger_type="manual",
+                execution_mode="production",
+                requested_by=None,
+                idempotency_key="claim-profile-filter-legacy",
+            )
+            legacy_id = legacy.id
+            legacy_snapshot = dict(legacy.model_config_snapshot)
+            legacy_snapshot.pop("extraction_profile")
+            legacy_snapshot["batch_size"] = None
+            legacy.model_config_snapshot = legacy_snapshot
+
+        async with sessions() as db, db.begin():
+            library = await db.get(Library, ids["library"])
+            document = await db.get(Document, ids["document"])
+            revision = await db.get(DocumentRevision, ids["revision"])
+            eligible = await create_graph_extraction_job(
+                db,
+                library=library,
+                document=document,
+                revision=revision,
+                trigger_type="full_rerun",
+                execution_mode="production",
+                requested_by=None,
+                idempotency_key="claim-profile-filter-eligible",
+                rerun_of_job_id=legacy_id,
+            )
+            eligible_id = eligible.id
+
+        claimed_unit_id, _ = await _claim(sessions)
+
+        async with sessions() as db:
+            claimed_unit = await db.get(GraphExtractionUnit, claimed_unit_id)
+            legacy_job = await db.get(GraphExtractionJob, legacy_id)
+            eligible_job = await db.get(GraphExtractionJob, eligible_id)
+            legacy_unit_statuses = (
+                await db.execute(
+                    select(GraphExtractionUnit.status).where(
+                        GraphExtractionUnit.job_id == legacy_id
+                    )
+                )
+            ).scalars().all()
+
+            assert claimed_unit.job_id == eligible_id
+            assert legacy_job.status == "queued"
+            assert legacy_unit_statuses and set(legacy_unit_statuses) == {"queued"}
+            assert eligible_job.status == "processing"
+    finally:
+        await engine.dispose()
+
+
 async def _exercise(name: str, ids: dict[str, uuid.UUID]) -> None:
     engine = create_async_engine(_database_url(name))
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -546,6 +609,26 @@ def test_m5_operational_pipeline_on_real_postgresql(monkeypatch):
         command.upgrade(config, "head")
         ids = asyncio.run(_seed(database_name))
         asyncio.run(_exercise(database_name, ids))
+    finally:
+        asyncio.run(
+            _admin(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                f"WHERE datname = '{database_name}'"
+            )
+        )
+        asyncio.run(_admin(f'DROP DATABASE IF EXISTS "{database_name}"'))
+
+
+def test_claim_profile_filter_on_real_postgresql(monkeypatch):
+    database_name = f"vkt_claim_{uuid.uuid4().hex[:12]}"
+    asyncio.run(_admin(f'CREATE DATABASE "{database_name}"'))
+    try:
+        _configure_alembic(monkeypatch, database_name)
+        monkeypatch.setattr(settings, "graph_extraction_enabled", True)
+        monkeypatch.setattr(settings, "graph_extraction_auto_trigger_enabled", False)
+        command.upgrade(Config("alembic.ini"), "head")
+        ids = asyncio.run(_seed(database_name))
+        asyncio.run(_exercise_claim_profile_filter(database_name, ids))
     finally:
         asyncio.run(
             _admin(

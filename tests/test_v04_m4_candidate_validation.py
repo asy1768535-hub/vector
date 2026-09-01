@@ -90,6 +90,20 @@ def test_snapshot_parser_builds_shared_rules_and_constraints():
     assert constraint.requires_review is False
 
 
+def test_snapshot_parser_allows_ai_discovery_metadata():
+    snapshot = {
+        **_snapshot(),
+        "schema_state": "ai_draft",
+        "confirmed": False,
+        "origin": "ai_discovery",
+        "source_hash": "a" * 64,
+    }
+
+    rules = load_ontology_rule_set_v1(_job(snapshot))
+
+    assert list(rules.relation_types_by_key) == ["belongs_to"]
+
+
 def test_snapshot_parser_fails_closed_on_hash_scope_shape_order_and_references():
     bad_hash_job = _job()
     bad_hash_job.ontology_snapshot_hash = "0" * 64
