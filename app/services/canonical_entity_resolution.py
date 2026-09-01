@@ -6,12 +6,13 @@ provides a small, auditable resolution boundary for later callers to adopt.
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Mapping
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 
 from app.models.canonical_entity import CanonicalEntity
@@ -39,6 +40,7 @@ MAX_EVIDENCE_REFS = 32
 MAX_SNAPSHOT_JSON_BYTES = 64 * 1024
 MAX_OBSERVED_NAME_LENGTH = 512
 MAX_SOURCE_FINGERPRINT_LENGTH = 512
+_RESOLUTION_LOCK_PREFIX = "vector-kb:canonical-entity-resolution:"
 _REQUIRED_EVIDENCE_KEYS = {
     "document_id",
     "document_revision_id",
@@ -310,11 +312,43 @@ async def _scoped_rows(db, model: type[Any], library_id: uuid.UUID) -> list[Any]
     return list(result.scalars().all())
 
 
-async def _load_library_for_update(db, library_id: uuid.UUID) -> Library:
-    result = await db.execute(
-        select(Library).where(Library.id == library_id).with_for_update()
+def _resolution_subject_lock_key(library_id: uuid.UUID, subject_fingerprint: str) -> int:
+    digest = hashlib.sha256(
+        f"{_RESOLUTION_LOCK_PREFIX}{library_id}:{subject_fingerprint}".encode("ascii")
+    ).digest()
+    return int.from_bytes(digest[:8], byteorder="big", signed=True)
+
+
+def _database_dialect_name(db) -> str | None:
+    try:
+        bind = db.sync_session.get_bind()
+    except (AttributeError, RuntimeError):
+        try:
+            bind = db.get_bind()
+        except (AttributeError, RuntimeError):
+            return None
+    return getattr(getattr(bind, "dialect", None), "name", None)
+
+
+async def _lock_resolution_subject(
+    db,
+    *,
+    library_id: uuid.UUID,
+    subject_fingerprint: str,
+) -> None:
+    dialect = _database_dialect_name(db)
+    if dialect == "sqlite":
+        return
+    if dialect not in {None, "postgresql"}:
+        raise ResolutionPersistenceError("resolution concurrency control requires PostgreSQL")
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(:lock_key)"),
+        {"lock_key": _resolution_subject_lock_key(library_id, subject_fingerprint)},
     )
-    library = result.scalar_one_or_none()
+
+
+async def _load_library(db, library_id: uuid.UUID) -> Library:
+    library = await db.get(Library, library_id)
     if library is None:
         raise ResolutionScopeError("library_not_found")
     return library
@@ -325,6 +359,7 @@ async def _existing_decision(db, *, library_id: uuid.UUID, decision_fingerprint:
         select(EntityResolutionDecision).where(
             EntityResolutionDecision.library_id == library_id,
             EntityResolutionDecision.decision_fingerprint == decision_fingerprint,
+            EntityResolutionDecision.lifecycle_status == ENTITY_RESOLUTION_STATUS_ACTIVE,
         )
     )
     return result.scalar_one_or_none()
@@ -597,15 +632,19 @@ async def _persist(
 async def resolve_canonical_entity(db, request: EntityResolutionInput) -> EntityResolutionResult:
     """Resolve one extracted observation without changing extraction/materialization.
 
-    The caller owns the outer transaction.  A per-library row lock serializes
-    decision creation and active-subject supersession, while the database
-    constraints remain the final idempotency guard.
+    The caller owns the outer transaction. A transaction advisory lock keeps
+    each resolution subject serial while unrelated subjects remain concurrent.
     """
 
     if not isinstance(request.library_id, uuid.UUID):
         raise ResolutionScopeError("library_id must be a UUID")
     prepared = _prepare_input(request)
-    await _load_library_for_update(db, request.library_id)
+    await _load_library(db, request.library_id)
+    await _lock_resolution_subject(
+        db,
+        library_id=request.library_id,
+        subject_fingerprint=prepared.subject_fingerprint,
+    )
 
     candidate_id, candidate_error = await _candidate_fk_for_decision(db, request)
     if candidate_error is not None:

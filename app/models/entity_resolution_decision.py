@@ -11,7 +11,6 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     String,
-    UniqueConstraint,
     func,
     text,
 )
@@ -67,10 +66,12 @@ class EntityResolutionDecision(Base):
             "jsonb_typeof(candidate_snapshot) = 'array' AND jsonb_typeof(evidence_refs) = 'array'",
             name="ck_entity_resolution_decisions_snapshot_json",
         ),
-        UniqueConstraint(
+        Index(
+            "uq_entity_resolution_decisions_library_fingerprint_active",
             "library_id",
             "decision_fingerprint",
-            name="uq_entity_resolution_decisions_library_fingerprint",
+            unique=True,
+            postgresql_where=text("lifecycle_status = 'active'"),
         ),
         ForeignKeyConstraint(
             ["canonical_entity_id", "library_id"],

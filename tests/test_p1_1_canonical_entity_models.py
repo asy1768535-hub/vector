@@ -6,9 +6,13 @@ from pathlib import Path
 from sqlalchemy import ForeignKeyConstraint
 
 
-def _load_migration():
-    path = Path(__file__).parents[1] / "alembic" / "versions" / "0064_canonical_entity_identity.py"
-    spec = importlib.util.spec_from_file_location("migration_0064", path)
+def _load_migration(revision="0064"):
+    filename = {
+        "0064": "0064_canonical_entity_identity.py",
+        "0065": "0065_entity_resolution_active_fingerprint.py",
+    }[revision]
+    path = Path(__file__).parents[1] / "alembic" / "versions" / filename
+    spec = importlib.util.spec_from_file_location(f"migration_{revision}", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -74,13 +78,22 @@ def test_resolution_decision_model_has_append_only_outcomes_and_scope_indexes():
         "ck_entity_resolution_decisions_fingerprints",
         "ck_entity_resolution_decisions_reason",
     }
-    assert any(
+    assert not any(
         constraint.name == "uq_entity_resolution_decisions_library_fingerprint"
         for constraint in table.constraints
     )
     assert any(
         index.name == "uq_entity_resolution_decisions_library_subject_active" and index.unique
         for index in table.indexes
+    )
+    fingerprint_index = next(
+        index
+        for index in table.indexes
+        if index.name == "uq_entity_resolution_decisions_library_fingerprint_active"
+    )
+    assert fingerprint_index.unique
+    assert str(fingerprint_index.dialect_options["postgresql"]["where"]) == (
+        "lifecycle_status = 'active'"
     )
     candidate_fk = next(
         constraint
@@ -100,3 +113,14 @@ def test_migration_0064_declares_backfill_and_revision_chain():
     assert "CREATE TEMP TABLE _p1_1_entity_canonical_backfill" in source
     assert "UPDATE entities AS entity" in source
     assert "canonical_entity_id" in source
+
+
+def test_migration_0065_replaces_global_fingerprint_uniqueness_with_active_only_index():
+    migration = _load_migration("0065")
+
+    assert migration.revision == "0065"
+    assert migration.down_revision == "0064"
+    source = Path(migration.__file__).read_text(encoding="utf-8")
+    assert "uq_entity_resolution_decisions_library_fingerprint" in source
+    assert "uq_entity_resolution_decisions_library_fingerprint_active" in source
+    assert "lifecycle_status = 'active'" in source

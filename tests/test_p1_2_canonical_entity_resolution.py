@@ -79,9 +79,11 @@ class _Db:
     async def get(self, model, key):
         return self.rows.get(model, {}).get(key)
 
-    async def execute(self, statement):
+    async def execute(self, statement, params=None):
+        if not getattr(statement, "column_descriptions", None):
+            return _Result(())
         entity = statement.column_descriptions[0]["entity"]
-        params = statement.compile().params
+        params = params or statement.compile().params
         rows = list(self.rows.get(entity, {}).values())
         for key, value in params.items():
             if key.startswith("library_id"):
@@ -99,6 +101,12 @@ class _Db:
                     row
                     for row in rows
                     if getattr(row, "subject_fingerprint", None) == value
+                ]
+            elif key.startswith("lifecycle_status"):
+                rows = [
+                    row
+                    for row in rows
+                    if getattr(row, "lifecycle_status", None) == value
                 ]
         return _Result(rows)
 
@@ -367,6 +375,54 @@ def test_repeated_subject_can_supersede_active_decision_append_only():
         ENTITY_RESOLUTION_STATUS_SUPERSEDED
     )
     assert second.decision.lifecycle_status == ENTITY_RESOLUTION_STATUS_ACTIVE
+
+
+def test_historical_decision_reappearing_creates_new_active_generation_once():
+    library_id = uuid.uuid4()
+    canonical = _canonical(library_id, name="项目A", normalized="项目a")
+    db = _Db(_library(library_id), canonical)
+    request_a = _input(
+        library_id,
+        name="项目A",
+        source="same-subject",
+        context={"stage": "a"},
+    )
+    request_b = _input(
+        library_id,
+        name="项目A",
+        source="same-subject",
+        context={"stage": "b"},
+    )
+
+    first = _run(resolve_canonical_entity(db, request_a))
+    second = _run(resolve_canonical_entity(db, request_b))
+    third = _run(resolve_canonical_entity(db, request_a))
+    replay = _run(resolve_canonical_entity(db, request_a))
+
+    assert third.decision.id != first.decision.id
+    assert third.decision.supersedes_decision_id == second.decision.id
+    assert first.decision.lifecycle_status == ENTITY_RESOLUTION_STATUS_SUPERSEDED
+    assert second.decision.lifecycle_status == ENTITY_RESOLUTION_STATUS_SUPERSEDED
+    assert third.decision.lifecycle_status == ENTITY_RESOLUTION_STATUS_ACTIVE
+    assert replay.decision.id == third.decision.id
+    assert len(db.rows[EntityResolutionDecision]) == 3
+
+
+def test_resolution_subject_lock_key_is_stable_and_subject_scoped():
+    from app.services import canonical_entity_resolution as resolution
+
+    library_id = uuid.uuid4()
+
+    assert resolution._resolution_subject_lock_key(
+        library_id, "a" * 64
+    ) == resolution._resolution_subject_lock_key(
+        library_id, "a" * 64
+    )
+    assert resolution._resolution_subject_lock_key(
+        library_id, "a" * 64
+    ) != resolution._resolution_subject_lock_key(
+        library_id, "b" * 64
+    )
 
 
 def test_explicit_identifier_is_snapshotted_but_not_used_as_unregistered_auto_link():
