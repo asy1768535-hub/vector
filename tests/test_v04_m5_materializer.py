@@ -16,6 +16,7 @@ from app.models.entity_resolution_decision import (
 )
 from app.models.graph_extraction_job import GraphExtractionJob
 from app.models.knowledge_relation import KnowledgeRelation
+from app.services.graph_relation_fact_resolution import GraphRelationFactResolutionError
 from app.services.graph_extraction_materializer import (
     GraphExtractionMaterializationError,
     GraphExtractionMaterializationResult,
@@ -429,6 +430,10 @@ def test_materializer_creates_evidenced_independent_entities_and_draft_facts(
             "app.services.graph_extraction_materializer.graph_evidence.create_relation_evidence",
             new=AsyncMock(return_value=formal_evidence),
         ) as create_relation_evidence,
+        patch(
+            "app.services.graph_extraction_materializer.resolve_graph_relation_candidate_fact",
+            new=AsyncMock(),
+        ),
     ):
         result = asyncio.run(_materialize_job_transaction(db, job_id=JOB_ID))
 
@@ -1007,3 +1012,136 @@ def test_not_materializable_does_not_mark_job_failed():
 
     assert exc_info.value.code == "job_not_materializable"
     assert len(factory.used) == 1
+
+
+def test_materializer_passes_materialized_relation_and_resolved_occurrence_to_fact_resolution():
+    source_candidate = _entity_candidate(key="person")
+    target_candidate = _entity_candidate(key="team")
+    source = Entity(
+        id=uuid.uuid4(),
+        library_id=LIB_ID,
+        ontology_version_id=ONTOLOGY_ID,
+        entity_type_id=PERSON_TYPE_ID,
+        canonical_name="person name",
+        normalized_name="person name",
+        canonical_entity_id=uuid.uuid4(),
+        status="draft",
+        source_type="extracted",
+    )
+    target = Entity(
+        id=uuid.uuid4(),
+        library_id=LIB_ID,
+        ontology_version_id=ONTOLOGY_ID,
+        entity_type_id=TEAM_TYPE_ID,
+        canonical_name="team name",
+        normalized_name="team name",
+        canonical_entity_id=uuid.uuid4(),
+        status="draft",
+        source_type="extracted",
+    )
+    source_candidate.status = "materialized"
+    source_candidate.materialized_entity_id = source.id
+    target_candidate.status = "materialized"
+    target_candidate.materialized_entity_id = target.id
+    candidate = _relation_candidate(source_candidate.id, target_candidate.id)
+    occurrence = _candidate_evidence(candidate.id)
+    relation = KnowledgeRelation(
+        id=uuid.uuid4(),
+        library_id=LIB_ID,
+        ontology_version_id=ONTOLOGY_ID,
+        relation_type_id=RELATION_TYPE_ID,
+        source_entity_id=source.id,
+        target_entity_id=target.id,
+        status="draft",
+        source_type="extracted",
+    )
+    relation_evidence = SimpleNamespace(fact_assertion_id=None)
+    job = SimpleNamespace(
+        id=JOB_ID,
+        library_id=LIB_ID,
+        ontology_version_id=ONTOLOGY_ID,
+        status="processing",
+        current_stage="materializing",
+        counts={},
+        statistics={},
+        error_code=None,
+        error_message=None,
+        finished_at=None,
+    )
+    db = FakeDB(
+        results=[
+            _Result([source_candidate, target_candidate]),
+            _Result([candidate]),
+            _Result(),
+            _Result([occurrence]),
+            _Result([relation]),
+            _Result([relation_evidence]),
+        ],
+        objects={(Entity, source.id): source, (Entity, target.id): target},
+    )
+    rules = SimpleNamespace(
+        entity_types_by_key={
+            "person": SimpleNamespace(id=PERSON_TYPE_ID),
+            "team": SimpleNamespace(id=TEAM_TYPE_ID),
+        },
+        relation_types_by_key={"member_of": SimpleNamespace(id=RELATION_TYPE_ID)},
+    )
+    policy = SimpleNamespace(entity_materialization_threshold=0.85, relation_draft_threshold=0.85)
+
+    with (
+        patch(
+            "app.services.graph_extraction_materializer._load_materialization_scope",
+            new=AsyncMock(return_value=(job, SimpleNamespace(id=LIB_ID), None, None, None)),
+        ),
+        patch(
+            "app.services.graph_extraction_materializer.load_ontology_rule_set_v1",
+            return_value=rules,
+        ),
+        patch(
+            "app.services.graph_extraction_materializer.load_confidence_policy_v1",
+            return_value=policy,
+        ),
+        patch(
+            "app.services.graph_extraction_materializer.resolve_graph_relation_candidate_fact",
+            new=AsyncMock(),
+        ) as resolve_fact,
+    ):
+        result = asyncio.run(_materialize_job_transaction(db, job_id=JOB_ID))
+
+    assert result == GraphExtractionMaterializationResult(0, 0, 0, 0)
+    resolve_fact.assert_awaited_once_with(
+        db,
+        library_id=LIB_ID,
+        candidate=candidate,
+        relation=relation,
+        relation_evidence=relation_evidence,
+        source_entity=source,
+        target_entity=target,
+        evidence=occurrence,
+    )
+
+
+def test_fact_resolution_failure_rolls_back_the_outer_materializer_transaction():
+    job = SimpleNamespace(
+        id=JOB_ID,
+        status="processing",
+        current_stage="materializing",
+        error_code=None,
+        error_message=None,
+        finished_at=None,
+    )
+    materialization_session = TransactionSession()
+    failure_session = TransactionSession(job=job)
+    factory = TransactionFactory([materialization_session, failure_session])
+
+    with patch(
+        "app.services.graph_extraction_materializer._materialize_job_transaction",
+        new=AsyncMock(side_effect=GraphRelationFactResolutionError("fact assertion write failed")),
+    ):
+        with pytest.raises(GraphExtractionMaterializationError) as exc_info:
+            asyncio.run(materialize_graph_extraction_job(factory, job_id=JOB_ID))
+
+    assert exc_info.value.code == "materialization_failed"
+    assert materialization_session.rolled_back is True
+    assert materialization_session.committed is False
+    assert failure_session.committed is True
