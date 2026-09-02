@@ -182,6 +182,8 @@ def _relation_candidate(source_id, target_id, **changes):
         "final_confidence": 0.95,
         "status": "validated",
         "purged_at": None,
+        "validation_errors": [],
+        "review_reason": None,
     }
     values.update(changes)
     return SimpleNamespace(**values)
@@ -233,10 +235,206 @@ def test_materialization_filters_are_fail_closed():
     relation = _relation_candidate(uuid.uuid4(), uuid.uuid4())
     assert _relation_candidate_eligible(relation, 0.85)
     relation.evidence_support_mode = "evidence_group"
-    assert not _relation_candidate_eligible(relation, 0.85)
+    assert _relation_candidate_eligible(relation, 0.85)
     relation.evidence_support_mode = "single_evidence"
     relation.has_conflict = True
     assert not _relation_candidate_eligible(relation, 0.85)
+
+
+@pytest.mark.parametrize(
+    ("decision_status", "reason_code", "candidate_status"),
+    [
+        ("pending", "predicate_not_ready", "pending_review"),
+        ("rejected", "predicate_rejected", "rejected"),
+    ],
+)
+def test_unresolved_fact_resolution_is_a_relation_materialization_gate(
+    decision_status,
+    reason_code,
+    candidate_status,
+):
+    source = _entity_candidate(key="person")
+    target = _entity_candidate(key="team")
+    source_entity = Entity(
+        id=uuid.uuid4(),
+        library_id=LIB_ID,
+        ontology_version_id=ONTOLOGY_ID,
+        entity_type_id=PERSON_TYPE_ID,
+        canonical_name="person name",
+        normalized_name="person name",
+        canonical_entity_id=uuid.uuid4(),
+        status="draft",
+        source_type="extracted",
+    )
+    target_entity = Entity(
+        id=uuid.uuid4(),
+        library_id=LIB_ID,
+        ontology_version_id=ONTOLOGY_ID,
+        entity_type_id=TEAM_TYPE_ID,
+        canonical_name="team name",
+        normalized_name="team name",
+        canonical_entity_id=uuid.uuid4(),
+        status="draft",
+        source_type="extracted",
+    )
+    source.status = target.status = "materialized"
+    source.materialized_entity_id = source_entity.id
+    target.materialized_entity_id = target_entity.id
+    candidate = _relation_candidate(source.id, target.id)
+    occurrence = _candidate_evidence(candidate.id)
+    job = SimpleNamespace(
+        id=JOB_ID,
+        library_id=LIB_ID,
+        ontology_version_id=ONTOLOGY_ID,
+        status="processing",
+        current_stage="materializing",
+        counts={},
+        statistics={},
+        error_code=None,
+        error_message=None,
+        finished_at=None,
+    )
+    draft_relation = SimpleNamespace(id=uuid.uuid4(), review_status=None, logical_fact_id=None)
+    db = FakeDB(
+        results=[
+            _Result([source, target]),
+            _Result([candidate]),
+            _Result(),
+            _Result([occurrence]),
+        ],
+        objects={(Entity, source_entity.id): source_entity, (Entity, target_entity.id): target_entity},
+    )
+    rules = SimpleNamespace(
+        entity_types_by_key={
+            "person": SimpleNamespace(id=PERSON_TYPE_ID),
+            "team": SimpleNamespace(id=TEAM_TYPE_ID),
+        },
+        relation_types_by_key={"member_of": SimpleNamespace(id=RELATION_TYPE_ID)},
+    )
+    policy = SimpleNamespace(entity_materialization_threshold=0.85, relation_draft_threshold=0.85)
+
+    with (
+        patch(
+            "app.services.graph_extraction_materializer._load_materialization_scope",
+            new=AsyncMock(return_value=(job, SimpleNamespace(id=LIB_ID), None, None, None)),
+        ),
+        patch("app.services.graph_extraction_materializer.load_ontology_rule_set_v1", return_value=rules),
+        patch("app.services.graph_extraction_materializer.load_confidence_policy_v1", return_value=policy),
+        patch(
+            "app.services.graph_extraction_materializer._draft_relation",
+            new=AsyncMock(return_value=(draft_relation, True)),
+        ) as draft,
+        patch(
+            "app.services.graph_extraction_materializer._relation_evidence_for_candidate",
+            new=AsyncMock(return_value=(SimpleNamespace(fact_assertion_id=None), True)),
+        ) as create_evidence,
+        patch(
+            "app.services.graph_extraction_materializer.preflight_graph_relation_candidate_fact",
+            new=AsyncMock(
+                return_value=SimpleNamespace(
+                    is_resolved=False,
+                    decision=SimpleNamespace(status=decision_status, reason_code=reason_code),
+                )
+            ),
+        ),
+    ):
+        asyncio.run(_materialize_job_transaction(db, job_id=JOB_ID))
+
+    draft.assert_not_awaited()
+    create_evidence.assert_not_awaited()
+    assert candidate.status == candidate_status
+    assert candidate.review_reason == reason_code
+    assert candidate.materialized_relation_id is None
+
+
+def test_evidence_group_creates_only_pending_decision_without_relation_or_evidence():
+    source_candidate = _entity_candidate(key="person")
+    target_candidate = _entity_candidate(key="team")
+    source = Entity(
+        id=uuid.uuid4(),
+        library_id=LIB_ID,
+        ontology_version_id=ONTOLOGY_ID,
+        entity_type_id=PERSON_TYPE_ID,
+        canonical_name="person name",
+        normalized_name="person name",
+        canonical_entity_id=uuid.uuid4(),
+        status="draft",
+        source_type="extracted",
+    )
+    target = Entity(
+        id=uuid.uuid4(),
+        library_id=LIB_ID,
+        ontology_version_id=ONTOLOGY_ID,
+        entity_type_id=TEAM_TYPE_ID,
+        canonical_name="team name",
+        normalized_name="team name",
+        canonical_entity_id=uuid.uuid4(),
+        status="draft",
+        source_type="extracted",
+    )
+    source_candidate.status = target_candidate.status = "materialized"
+    source_candidate.materialized_entity_id = source.id
+    target_candidate.materialized_entity_id = target.id
+    candidate = _relation_candidate(
+        source_candidate.id,
+        target_candidate.id,
+        evidence_support_mode="evidence_group",
+    )
+    first_evidence = _candidate_evidence(candidate.id)
+    second_evidence = _candidate_evidence(candidate.id)
+    job = SimpleNamespace(
+        id=JOB_ID,
+        library_id=LIB_ID,
+        ontology_version_id=ONTOLOGY_ID,
+        status="processing",
+        current_stage="materializing",
+        counts={},
+        statistics={},
+        error_code=None,
+        error_message=None,
+        finished_at=None,
+    )
+    db = FakeDB(
+        results=[
+            _Result([source_candidate, target_candidate]),
+            _Result([candidate]),
+            _Result(),
+            _Result([first_evidence, second_evidence]),
+            _Result(),
+            _Result(),
+        ],
+        objects={(Entity, source.id): source, (Entity, target.id): target},
+    )
+    rules = SimpleNamespace(
+        entity_types_by_key={
+            "person": SimpleNamespace(id=PERSON_TYPE_ID),
+            "team": SimpleNamespace(id=TEAM_TYPE_ID),
+        },
+        relation_types_by_key={"member_of": SimpleNamespace(id=RELATION_TYPE_ID)},
+    )
+    policy = SimpleNamespace(entity_materialization_threshold=0.85, relation_draft_threshold=0.85)
+
+    with (
+        patch(
+            "app.services.graph_extraction_materializer._load_materialization_scope",
+            new=AsyncMock(return_value=(job, SimpleNamespace(id=LIB_ID), None, None, None)),
+        ),
+        patch("app.services.graph_extraction_materializer.load_ontology_rule_set_v1", return_value=rules),
+        patch("app.services.graph_extraction_materializer.load_confidence_policy_v1", return_value=policy),
+        patch("app.services.graph_extraction_materializer._draft_relation", new=AsyncMock()) as draft,
+        patch(
+            "app.services.graph_extraction_materializer._relation_evidence_for_candidate",
+            new=AsyncMock(),
+        ) as create_evidence,
+    ):
+        asyncio.run(_materialize_job_transaction(db, job_id=JOB_ID))
+
+    draft.assert_not_awaited()
+    create_evidence.assert_not_awaited()
+    assert candidate.status == "pending_review"
+    assert candidate.review_reason == "multi_evidence_fact_resolution_unsupported"
+    assert candidate.materialized_relation_id is None
+    assert [type(row).__name__ for row in db.added] == ["FactResolutionDecision"]
 
 
 def test_materializer_reuses_entity_created_after_candidate_matching():
@@ -431,7 +629,15 @@ def test_materializer_creates_evidenced_independent_entities_and_draft_facts(
             new=AsyncMock(return_value=formal_evidence),
         ) as create_relation_evidence,
         patch(
-            "app.services.graph_extraction_materializer.resolve_graph_relation_candidate_fact",
+            "app.services.graph_extraction_materializer.preflight_graph_relation_candidate_fact",
+            new=AsyncMock(return_value=SimpleNamespace(is_resolved=True)),
+        ),
+        patch(
+            "app.services.graph_extraction_materializer.materialize_resolved_graph_relation_fact",
+            new=AsyncMock(return_value=SimpleNamespace()),
+        ),
+        patch(
+            "app.services.graph_extraction_materializer.finalize_resolved_graph_relation_fact",
             new=AsyncMock(),
         ),
     ):
@@ -1014,7 +1220,7 @@ def test_not_materializable_does_not_mark_job_failed():
     assert len(factory.used) == 1
 
 
-def test_materializer_passes_materialized_relation_and_resolved_occurrence_to_fact_resolution():
+def test_materializer_finalizes_fact_resolution_after_relation_and_evidence_materialization():
     source_candidate = _entity_candidate(key="person")
     target_candidate = _entity_candidate(key="team")
     source = Entity(
@@ -1056,6 +1262,8 @@ def test_materializer_passes_materialized_relation_and_resolved_occurrence_to_fa
         source_type="extracted",
     )
     relation_evidence = SimpleNamespace(fact_assertion_id=None)
+    preflight = SimpleNamespace(is_resolved=True)
+    fact_materialization = SimpleNamespace()
     job = SimpleNamespace(
         id=JOB_ID,
         library_id=LIB_ID,
@@ -1074,9 +1282,7 @@ def test_materializer_passes_materialized_relation_and_resolved_occurrence_to_fa
             _Result([candidate]),
             _Result(),
             _Result([occurrence]),
-            _Result([relation]),
-            _Result([relation_evidence]),
-        ],
+            ],
         objects={(Entity, source.id): source, (Entity, target.id): target},
     )
     rules = SimpleNamespace(
@@ -1102,22 +1308,54 @@ def test_materializer_passes_materialized_relation_and_resolved_occurrence_to_fa
             return_value=policy,
         ),
         patch(
-            "app.services.graph_extraction_materializer.resolve_graph_relation_candidate_fact",
+            "app.services.graph_extraction_materializer.preflight_graph_relation_candidate_fact",
+            new=AsyncMock(return_value=preflight),
+        ) as preflight_fact,
+        patch(
+            "app.services.graph_extraction_materializer._draft_relation",
+            new=AsyncMock(return_value=(relation, True)),
+        ),
+        patch(
+            "app.services.graph_extraction_materializer.materialize_resolved_graph_relation_fact",
+            new=AsyncMock(return_value=fact_materialization),
+        ) as materialize_fact,
+        patch(
+            "app.services.graph_extraction_materializer._relation_evidence_for_candidate",
+            new=AsyncMock(return_value=(relation_evidence, True)),
+        ),
+        patch(
+            "app.services.graph_extraction_materializer.finalize_resolved_graph_relation_fact",
             new=AsyncMock(),
-        ) as resolve_fact,
+        ) as finalize_fact,
     ):
         result = asyncio.run(_materialize_job_transaction(db, job_id=JOB_ID))
 
-    assert result == GraphExtractionMaterializationResult(0, 0, 0, 0)
-    resolve_fact.assert_awaited_once_with(
+    assert result == GraphExtractionMaterializationResult(0, 0, 1, 1)
+    preflight_fact.assert_awaited_once_with(
+        db,
+        library_id=LIB_ID,
+        candidate=candidate,
+        relation_type_id=RELATION_TYPE_ID,
+        source_entity=source,
+        target_entity=target,
+        evidence_rows=[occurrence],
+    )
+    materialize_fact.assert_awaited_once_with(
+        db,
+        library_id=LIB_ID,
+        candidate=candidate,
+        relation=relation,
+        source_entity=source,
+        preflight=preflight,
+    )
+    finalize_fact.assert_awaited_once_with(
         db,
         library_id=LIB_ID,
         candidate=candidate,
         relation=relation,
         relation_evidence=relation_evidence,
-        source_entity=source,
-        target_entity=target,
-        evidence=occurrence,
+        preflight=preflight,
+        materialization=fact_materialization,
     )
 
 

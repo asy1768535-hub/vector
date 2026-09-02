@@ -41,7 +41,11 @@ from app.services.graph_candidate_aggregation import canonical_graph_value_hash_
 from app.services.graph_candidate_routing import load_confidence_policy_v1
 from app.services.graph_candidate_validation import load_ontology_rule_set_v1
 from app.services.graph_normalization import normalize_graph_name_v1
-from app.services.graph_relation_fact_resolution import resolve_graph_relation_candidate_fact
+from app.services.graph_relation_fact_resolution import (
+    finalize_resolved_graph_relation_fact,
+    materialize_resolved_graph_relation_fact,
+    preflight_graph_relation_candidate_fact,
+)
 
 
 class GraphExtractionMaterializationError(RuntimeError):
@@ -86,7 +90,6 @@ def _relation_candidate_eligible(candidate: Any, threshold: float) -> bool:
     return (
         candidate.status == "validated"
         and candidate.purged_at is None
-        and candidate.evidence_support_mode == "single_evidence"
         and candidate.ontology_validation_status == "valid"
         and not candidate.has_conflict
         and isinstance(candidate.final_confidence, (int, float))
@@ -153,6 +156,18 @@ def _mark_resolution_rejected(candidate: GraphEntityCandidate, reason: str) -> N
     candidate.status = "rejected"
     candidate.review_reason = reason
     _append_candidate_error(candidate, reason)
+
+
+def _apply_fact_resolution_lifecycle(candidate: GraphRelationCandidate, decision: Any) -> None:
+    if decision.status == "pending":
+        _mark_resolution_pending(candidate, decision.reason_code or "fact_resolution_pending")
+    elif decision.status == "rejected":
+        _mark_resolution_rejected(candidate, decision.reason_code or "fact_resolution_rejected")
+    else:
+        raise GraphExtractionMaterializationError(
+            "fact_resolution_invalid",
+            "unresolved Fact Resolution returned an invalid decision status",
+        )
 
 
 def _add_extracted_aliases(
@@ -661,6 +676,8 @@ async def _materialize_job_transaction(
         materialized_entity_candidate_count += 1
 
     for candidate in relation_candidates:
+        if candidate.status == "materialized":
+            continue
         relation_evidence_rows = _valid_evidence(relation_evidence_by_candidate.get(candidate.id, []))
         if not relation_evidence_rows:
             continue
@@ -668,40 +685,50 @@ async def _materialize_job_transaction(
         target = entity_by_candidate_id.get(candidate.target_candidate_id)
         if source is None or target is None:
             continue
-        if candidate.status == "materialized":
-            if candidate.materialized_relation_id is None:
-                continue
-            relation = await db.get(KnowledgeRelation, candidate.materialized_relation_id)
-            if relation is None:
-                continue
-            created = False
-        else:
-            if not _relation_candidate_eligible(
-                candidate,
-                policy.relation_draft_threshold,
-            ):
-                continue
-            relation_type = rules.relation_types_by_key.get(candidate.relation_type_key)
-            if relation_type is None:
-                raise GraphExtractionMaterializationError(
-                    "relation_type_missing",
-                    "validated Relation Candidate references an unknown frozen Relation Type",
-                )
-            relation, created = await _draft_relation(
-                db,
-                job=job,
-                library=library,
-                candidate=candidate,
-                relation_type_id=relation_type.id,
-                source_entity_id=source.id,
-                target_entity_id=target.id,
+        if not _relation_candidate_eligible(
+            candidate,
+            policy.relation_draft_threshold,
+        ):
+            continue
+        relation_type = rules.relation_types_by_key.get(candidate.relation_type_key)
+        if relation_type is None:
+            raise GraphExtractionMaterializationError(
+                "relation_type_missing",
+                "validated Relation Candidate references an unknown frozen Relation Type",
             )
-            if relation is None:
-                continue
-            relation.review_status = "not_required"
-            relation_count += int(created)
-
-        relation_evidence_rows_for_fact: list[RelationEvidence] = []
+        preflight = await preflight_graph_relation_candidate_fact(
+            db,
+            library_id=library.id,
+            candidate=candidate,
+            relation_type_id=relation_type.id,
+            source_entity=source,
+            target_entity=target,
+            evidence_rows=relation_evidence_rows,
+        )
+        if not preflight.is_resolved:
+            assert preflight.decision is not None
+            _apply_fact_resolution_lifecycle(candidate, preflight.decision)
+            continue
+        relation, created = await _draft_relation(
+            db,
+            job=job,
+            library=library,
+            candidate=candidate,
+            relation_type_id=relation_type.id,
+            source_entity_id=source.id,
+            target_entity_id=target.id,
+        )
+        if relation is None:
+            continue
+        relation.review_status = "not_required"
+        fact_materialization = await materialize_resolved_graph_relation_fact(
+            db,
+            library_id=library.id,
+            candidate=candidate,
+            relation=relation,
+            source_entity=source,
+            preflight=preflight,
+        )
         for evidence in relation_evidence_rows:
             row, evidence_created = await _relation_evidence_for_candidate(
                 db,
@@ -711,23 +738,21 @@ async def _materialize_job_transaction(
                 candidate=candidate,
                 evidence=evidence,
             )
-            relation_evidence_rows_for_fact.append(row)
-            relation_evidence_count += int(evidence_created)
-        publishable_relation_evidence_count += len(relation_evidence_rows)
-        candidate.materialized_relation_id = relation.id
-        candidate.status = "materialized"
-        publishable_relation_count += int(created)
-        if len(relation_evidence_rows_for_fact) == 1:
-            await resolve_graph_relation_candidate_fact(
+            await finalize_resolved_graph_relation_fact(
                 db,
                 library_id=library.id,
                 candidate=candidate,
                 relation=relation,
-                relation_evidence=relation_evidence_rows_for_fact[0],
-                source_entity=source,
-                target_entity=target,
-                evidence=relation_evidence_rows[0],
+                relation_evidence=row,
+                preflight=preflight,
+                materialization=fact_materialization,
             )
+            relation_evidence_count += int(evidence_created)
+        relation_count += int(created)
+        publishable_relation_evidence_count += len(relation_evidence_rows)
+        candidate.materialized_relation_id = relation.id
+        candidate.status = "materialized"
+        publishable_relation_count += int(created)
 
     counts = getattr(job, "counts", None)
     counts = counts if isinstance(counts, dict) else {}

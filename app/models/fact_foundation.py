@@ -395,10 +395,20 @@ class FactResolutionDecision(Base):
             "jsonb_typeof(evidence_refs) = 'array'",
             name="ck_fact_resolution_decisions_snapshot_shapes",
         ),
-        UniqueConstraint(
+        Index(
+            "uq_fact_resolution_decisions_library_fingerprint_active",
             "library_id",
             "decision_fingerprint",
-            name="uq_fact_resolution_decisions_library_fingerprint",
+            unique=True,
+            postgresql_where=text("status <> 'superseded'"),
+        ),
+        Index(
+            "uq_fact_resolution_decisions_library_subject_active",
+            "library_id",
+            "source_kind",
+            "subject_fingerprint",
+            unique=True,
+            postgresql_where=text("status <> 'superseded'"),
         ),
         Index(
             "ix_fact_resolution_decisions_library_status",

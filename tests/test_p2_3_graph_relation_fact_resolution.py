@@ -3,11 +3,12 @@ from __future__ import annotations
 import uuid
 from types import SimpleNamespace
 
-from app.models.fact_foundation import StablePredicateIdentity
+from app.models.fact_foundation import FactAssertion, LogicalFact, StablePredicateIdentity
 from app.services.graph_relation_fact_resolution import (
-    _fact_resolution_lock_key,
-    _lock_fact_resolution_subject,
+    _logical_fact_lock_key,
+    _lock_logical_fact_v2,
     build_graph_relation_fact_plan,
+    preflight_graph_relation_candidate_fact,
     resolve_graph_relation_candidate_fact,
     source_occurrence_fingerprint_v1,
 )
@@ -72,6 +73,7 @@ def _candidate(*, properties: dict[str, object] | None = None, identifier: uuid.
         relation_type_key="holds_equity",
         proposed_properties=properties or {},
         final_confidence=0.95,
+        evidence_support_mode="single_evidence",
     )
 
 
@@ -292,8 +294,9 @@ def test_resolver_creates_fact_assertion_decision_and_projection_bridges():
     assert isinstance(result.assertion.id, uuid.UUID)
     assert relation.logical_fact_id == result.logical_fact.id
     assert relation_evidence.fact_assertion_id == result.assertion.id
-    assert result.decision.candidate_snapshot["graph_relation_candidate_id"] == str(candidate.id)
-    assert result.decision.candidate_snapshot["knowledge_relation_id"] == str(relation.id)
+    assert result.decision.graph_relation_candidate_id == candidate.id
+    assert "graph_relation_candidate_id" not in result.decision.candidate_snapshot
+    assert "knowledge_relation_id" not in result.decision.candidate_snapshot
     assert [type(row).__name__ for row in db.added] == [
         "LogicalFact",
         "FactAssertion",
@@ -537,7 +540,155 @@ def test_new_decision_supersedes_the_previous_current_decision_for_the_same_cand
     assert result.decision.supersedes_decision_id == previous.id
 
 
-def test_postgresql_fact_resolution_uses_a_transaction_advisory_lock():
+def test_multiple_evidence_group_fails_closed_to_a_decision_without_formal_projection():
+    first = _evidence()
+    second = _evidence()
+    candidate = _candidate()
+    candidate.evidence_support_mode = "evidence_group"
+    db = _ResolutionDb(results=[_Result(), _Result()])
+
+    preflight = __import__("asyncio").run(
+        preflight_graph_relation_candidate_fact(
+            db,
+            library_id=LIBRARY_ID,
+            candidate=candidate,
+            relation_type_id=uuid.uuid4(),
+            source_entity=_entity(SOURCE_CANONICAL_ID),
+            target_entity=_entity(TARGET_CANONICAL_ID),
+            evidence_rows=[first, second],
+        )
+    )
+
+    assert preflight.is_resolved is False
+    assert preflight.decision is not None
+    assert preflight.decision.status == "pending"
+    assert preflight.decision.reason_code == "multi_evidence_fact_resolution_unsupported"
+    assert [type(row).__name__ for row in db.added] == ["FactResolutionDecision"]
+
+
+def test_cross_candidate_replay_and_a_b_a_keep_one_current_decision_per_source_subject():
+    predicate = _predicate(policy=_policy(assertion_bearing=["observation"]))
+    mapping = SimpleNamespace(stable_predicate_identity_id=predicate.id)
+    source = _entity(SOURCE_CANONICAL_ID)
+    target = _entity(TARGET_CANONICAL_ID)
+    occurrence = _evidence()
+    replay_occurrence = _evidence(
+        document_id=occurrence.resolved_document_id,
+        revision_id=occurrence.resolved_document_revision_id,
+        evidence_id=occurrence.resolved_evidence_id,
+        chunk_id=occurrence.resolved_chunk_id,
+        source_span=occurrence.resolved_source_span,
+        job_id=uuid.uuid4(),
+    )
+    first_candidate = _candidate(properties={"observation": "A"})
+    second_candidate = _candidate(properties={"observation": "B"})
+    third_candidate = _candidate(properties={"observation": "A"})
+    db = _ResolutionDb(
+        results=[_Result([mapping]), _Result(), _Result(), _Result(), _Result()],
+        objects={(StablePredicateIdentity, predicate.id): predicate},
+    )
+
+    first = __import__("asyncio").run(
+        resolve_graph_relation_candidate_fact(
+            db,
+            library_id=LIBRARY_ID,
+            candidate=first_candidate,
+            relation=_relation(),
+            relation_evidence=_relation_evidence(),
+            source_entity=source,
+            target_entity=target,
+            evidence=occurrence,
+        )
+    )
+    assert first.outcome == "CREATE"
+    assert first.logical_fact is not None
+    assert first.assertion is not None
+    db.objects[(LogicalFact, first.logical_fact.id)] = first.logical_fact
+    db.objects[(FactAssertion, first.assertion.id)] = first.assertion
+
+    db.results = [_Result([mapping]), _Result([first.decision])]
+    same_semantics = __import__("asyncio").run(
+        resolve_graph_relation_candidate_fact(
+            db,
+            library_id=LIBRARY_ID,
+            candidate=_candidate(properties={"observation": "A"}),
+            relation=_relation(),
+            relation_evidence=_relation_evidence(),
+            source_entity=source,
+            target_entity=target,
+            evidence=replay_occurrence,
+        )
+    )
+    assert same_semantics.decision is first.decision
+    assert same_semantics.logical_fact is first.logical_fact
+    assert same_semantics.assertion is first.assertion
+
+    db.results = [
+        _Result([mapping]),
+        _Result(),
+        _Result([first.logical_fact]),
+        _Result(),
+        _Result([first.decision]),
+    ]
+    second = __import__("asyncio").run(
+        resolve_graph_relation_candidate_fact(
+            db,
+            library_id=LIBRARY_ID,
+            candidate=second_candidate,
+            relation=_relation(),
+            relation_evidence=_relation_evidence(),
+            source_entity=source,
+            target_entity=target,
+            evidence=replay_occurrence,
+        )
+    )
+    assert first.decision.status == "superseded"
+    assert second.decision.supersedes_decision_id == first.decision.id
+    assert second.decision.status == "resolved"
+    assert second.logical_fact is first.logical_fact
+
+    db.results = [
+        _Result([mapping]),
+        _Result(),
+        _Result([first.logical_fact]),
+        _Result([first.assertion]),
+        _Result([second.decision]),
+    ]
+    third = __import__("asyncio").run(
+        resolve_graph_relation_candidate_fact(
+            db,
+            library_id=LIBRARY_ID,
+            candidate=third_candidate,
+            relation=_relation(),
+            relation_evidence=_relation_evidence(),
+            source_entity=source,
+            target_entity=target,
+            evidence=replay_occurrence,
+        )
+    )
+    assert second.decision.status == "superseded"
+    assert third.decision.status == "resolved"
+    assert third.decision.id != first.decision.id
+    assert third.decision.supersedes_decision_id == second.decision.id
+    assert third.assertion is first.assertion
+
+    db.results = [_Result([mapping]), _Result([third.decision])]
+    current_a = __import__("asyncio").run(
+        resolve_graph_relation_candidate_fact(
+            db,
+            library_id=LIBRARY_ID,
+            candidate=_candidate(properties={"observation": "A"}),
+            relation=_relation(),
+            relation_evidence=_relation_evidence(),
+            source_entity=source,
+            target_entity=target,
+            evidence=replay_occurrence,
+        )
+    )
+    assert current_a.decision is third.decision
+
+
+def test_postgresql_fact_resolution_locks_each_logical_fact_not_the_whole_subject():
     class _PostgresDb:
         def __init__(self):
             self.calls = []
@@ -549,15 +700,20 @@ def test_postgresql_fact_resolution_uses_a_transaction_advisory_lock():
             self.calls.append((statement, params))
 
     db = _PostgresDb()
-    subject_fingerprint = "a" * 64
+    first_fact = "a" * 64
+    second_fact = "b" * 64
 
     __import__("asyncio").run(
-        _lock_fact_resolution_subject(
+        _lock_logical_fact_v2(
             db,
             library_id=LIBRARY_ID,
-            subject_fingerprint=subject_fingerprint,
+            identity_fingerprint=first_fact,
         )
     )
 
     assert "pg_advisory_xact_lock" in str(db.calls[0][0]).lower()
-    assert db.calls[0][1]["lock_key"] == _fact_resolution_lock_key(LIBRARY_ID, subject_fingerprint)
+    assert db.calls[0][1]["lock_key"] == _logical_fact_lock_key(LIBRARY_ID, first_fact)
+    assert _logical_fact_lock_key(LIBRARY_ID, first_fact) != _logical_fact_lock_key(
+        LIBRARY_ID,
+        second_fact,
+    )

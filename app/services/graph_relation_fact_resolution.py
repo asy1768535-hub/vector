@@ -76,6 +76,27 @@ class GraphRelationFactResolutionResult:
     assertion: FactAssertion | None
 
 
+@dataclass(frozen=True, slots=True)
+class GraphRelationFactPreflight:
+    plan: GraphRelationFactPlan
+    decision: FactResolutionDecision | None
+    logical_fact: LogicalFact | None
+    assertion: FactAssertion | None
+    supersedes: FactResolutionDecision | None
+
+    @property
+    def is_resolved(self) -> bool:
+        return self.plan.status == "resolved"
+
+
+@dataclass(frozen=True, slots=True)
+class GraphRelationFactMaterialization:
+    logical_fact: LogicalFact
+    assertion: FactAssertion
+    logical_outcome: str
+    assertion_outcome: str
+
+
 _FINGERPRINT_VERSION = "p2_graph_relation_fact_v1"
 _LOCK_PREFIX = "vector-kb:fact-resolution-subject:"
 
@@ -314,6 +335,51 @@ def source_occurrence_fingerprint_v1(library_id: uuid.UUID, evidence: Any) -> st
     return _fingerprint(_source_occurrence_snapshot(library_id, evidence))
 
 
+def _source_occurrence_group_snapshot(
+    library_id: uuid.UUID,
+    evidence_rows: list[Any],
+) -> dict[str, Any]:
+    occurrences = sorted(
+        (_source_occurrence_snapshot(library_id, row) for row in evidence_rows),
+        key=_canonical_json,
+    )
+    if not occurrences:
+        raise ValueError("resolved evidence lineage is incomplete")
+    return {
+        "library_id": str(library_id),
+        "occurrences": occurrences,
+        "schema_version": "graph_relation_source_occurrence_group_v1",
+    }
+
+
+def resolution_subject_fingerprint_v1(
+    library_id: uuid.UUID,
+    *,
+    source_fingerprint: str,
+    candidate: Any,
+    source_entity: Any,
+    target_entity: Any,
+) -> str:
+    return _fingerprint(
+        {
+            "library_id": str(library_id),
+            "observed_relation_type_key": str(candidate.relation_type_key),
+            "schema_version": "fact_resolution_subject_v2",
+            "source_canonical_entity_id": (
+                str(source_entity.canonical_entity_id)
+                if getattr(source_entity, "canonical_entity_id", None) is not None
+                else None
+            ),
+            "source_fingerprint": source_fingerprint,
+            "target_canonical_entity_id": (
+                str(target_entity.canonical_entity_id)
+                if getattr(target_entity, "canonical_entity_id", None) is not None
+                else None
+            ),
+        }
+    )
+
+
 def _candidate_snapshot(candidate: Any, properties: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "properties": _normalized_property(properties),
@@ -333,22 +399,6 @@ def _predicate_snapshot(predicate: StablePredicateIdentity) -> dict[str, Any]:
     }
 
 
-def _with_projection_provenance(
-    plan: GraphRelationFactPlan,
-    *,
-    candidate: Any,
-    relation: Any,
-) -> GraphRelationFactPlan:
-    candidate_snapshot = dict(plan.candidate_snapshot)
-    candidate_snapshot.update(
-        {
-            "graph_relation_candidate_id": str(candidate.id),
-            "knowledge_relation_id": str(relation.id),
-        }
-    )
-    return replace(plan, candidate_snapshot=candidate_snapshot)
-
-
 def _pending_plan(
     *,
     library_id: uuid.UUID,
@@ -358,8 +408,9 @@ def _pending_plan(
     status: str = "pending",
     predicate: StablePredicateIdentity | None = None,
     subject_canonical_entity_id: uuid.UUID | None = None,
+    source_snapshot: Mapping[str, Any] | None = None,
 ) -> GraphRelationFactPlan:
-    source_snapshot = _source_occurrence_snapshot(library_id, evidence)
+    source_snapshot = dict(source_snapshot or _source_occurrence_snapshot(library_id, evidence))
     source_fingerprint = _fingerprint(source_snapshot)
     properties = candidate.proposed_properties if isinstance(candidate.proposed_properties, Mapping) else {}
     candidate_snapshot = _candidate_snapshot(candidate, properties)
@@ -571,12 +622,12 @@ def build_graph_relation_fact_plan(
             "source_fingerprint": source_fingerprint,
         }
     )
-    subject_fingerprint = _fingerprint(
-        {
-            "library_id": str(library_id),
-            "schema_version": "fact_resolution_subject_v1",
-            "subject_canonical_entity_id": str(source_canonical_entity_id),
-        }
+    subject_fingerprint = resolution_subject_fingerprint_v1(
+        library_id,
+        source_fingerprint=source_fingerprint,
+        candidate=candidate,
+        source_entity=source_entity,
+        target_entity=target_entity,
     )
     return GraphRelationFactPlan(
         status="resolved",
@@ -614,29 +665,6 @@ def build_graph_relation_fact_plan(
     )
 
 
-def _fact_resolution_lock_key(library_id: uuid.UUID, subject_fingerprint: str) -> int:
-    digest = hashlib.sha256(
-        f"{_LOCK_PREFIX}{library_id}:{subject_fingerprint}".encode("ascii")
-    ).digest()
-    return int.from_bytes(digest[:8], byteorder="big", signed=True)
-
-
-async def _lock_fact_resolution_subject(db: Any, *, library_id: uuid.UUID, subject_fingerprint: str) -> None:
-    try:
-        bind = db.get_bind()
-        dialect = bind.dialect.name if bind is not None else None
-    except AttributeError:
-        dialect = None
-    if dialect is None:
-        return
-    if dialect != "postgresql":
-        raise GraphRelationFactResolutionError("fact resolution requires PostgreSQL")
-    await db.execute(
-        text("SELECT pg_advisory_xact_lock(:lock_key)"),
-        {"lock_key": _fact_resolution_lock_key(library_id, subject_fingerprint)},
-    )
-
-
 async def _first(db: Any, statement: Any) -> Any | None:
     return (await db.execute(statement)).scalars().first()
 
@@ -657,29 +685,6 @@ async def _active_predicates(db: Any, *, library_id: uuid.UUID, relation_type_id
         if predicate is not None and predicate.library_id == library_id:
             predicates.append(predicate)
     return predicates
-
-
-async def _existing_decision(db: Any, *, library_id: uuid.UUID, decision_fingerprint: str) -> FactResolutionDecision | None:
-    return await _first(
-        db,
-        select(FactResolutionDecision).where(
-            FactResolutionDecision.library_id == library_id,
-            FactResolutionDecision.decision_fingerprint == decision_fingerprint,
-        ),
-    )
-
-
-async def _decision_to_supersede(db: Any, *, library_id: uuid.UUID, candidate_id: uuid.UUID) -> FactResolutionDecision | None:
-    return await _first(
-        db,
-        select(FactResolutionDecision)
-        .where(
-            FactResolutionDecision.library_id == library_id,
-            FactResolutionDecision.graph_relation_candidate_id == candidate_id,
-            FactResolutionDecision.status != "superseded",
-        )
-        .order_by(FactResolutionDecision.created_at.desc()),
-    )
 
 
 def _decision(
@@ -731,28 +736,149 @@ def _bridge(
     return None
 
 
-async def _persist_pending(
+def _with_resolution_subject(
+    plan: GraphRelationFactPlan,
+    *,
+    library_id: uuid.UUID,
+    candidate: Any,
+    source_entity: Any,
+    target_entity: Any,
+) -> GraphRelationFactPlan:
+    return replace(
+        plan,
+        subject_fingerprint=resolution_subject_fingerprint_v1(
+            library_id,
+            source_fingerprint=plan.source_fingerprint,
+            candidate=candidate,
+            source_entity=source_entity,
+            target_entity=target_entity,
+        ),
+    )
+
+
+def _advisory_lock_key(library_id: uuid.UUID, *, scope: str, fingerprint: str) -> int:
+    digest = hashlib.sha256(f"{_LOCK_PREFIX}{scope}:{library_id}:{fingerprint}".encode("ascii")).digest()
+    return int.from_bytes(digest[:8], byteorder="big", signed=True)
+
+
+def _resolution_subject_lock_key(library_id: uuid.UUID, subject_fingerprint: str) -> int:
+    return _advisory_lock_key(
+        library_id,
+        scope="decision-subject",
+        fingerprint=subject_fingerprint,
+    )
+
+
+def _logical_fact_lock_key(library_id: uuid.UUID, identity_fingerprint: str) -> int:
+    return _advisory_lock_key(
+        library_id,
+        scope="logical-fact",
+        fingerprint=identity_fingerprint,
+    )
+
+
+async def _lock_advisory_key(db: Any, lock_key: int) -> None:
+    try:
+        bind = db.get_bind()
+        dialect = bind.dialect.name if bind is not None else None
+    except AttributeError:
+        dialect = None
+    if dialect is None:
+        return
+    if dialect != "postgresql":
+        raise GraphRelationFactResolutionError("fact resolution requires PostgreSQL")
+    await db.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": lock_key})
+
+
+async def _lock_resolution_subject_v2(
+    db: Any,
+    *,
+    library_id: uuid.UUID,
+    subject_fingerprint: str,
+) -> None:
+    await _lock_advisory_key(db, _resolution_subject_lock_key(library_id, subject_fingerprint))
+
+
+async def _lock_logical_fact_v2(
+    db: Any,
+    *,
+    library_id: uuid.UUID,
+    identity_fingerprint: str,
+) -> None:
+    await _lock_advisory_key(db, _logical_fact_lock_key(library_id, identity_fingerprint))
+
+
+async def _current_decision_by_fingerprint(
+    db: Any,
+    *,
+    library_id: uuid.UUID,
+    decision_fingerprint: str,
+) -> FactResolutionDecision | None:
+    return await _first(
+        db,
+        select(FactResolutionDecision).where(
+            FactResolutionDecision.library_id == library_id,
+            FactResolutionDecision.decision_fingerprint == decision_fingerprint,
+            FactResolutionDecision.status != "superseded",
+        ),
+    )
+
+
+async def _current_decision_for_subject(
+    db: Any,
+    *,
+    library_id: uuid.UUID,
+    subject_fingerprint: str,
+) -> FactResolutionDecision | None:
+    return await _first(
+        db,
+        select(FactResolutionDecision)
+        .where(
+            FactResolutionDecision.library_id == library_id,
+            FactResolutionDecision.source_kind == "graph_relation_candidate",
+            FactResolutionDecision.subject_fingerprint == subject_fingerprint,
+            FactResolutionDecision.status != "superseded",
+        )
+        .order_by(FactResolutionDecision.created_at.desc()),
+    )
+
+
+async def _persist_preflight_unresolved(
     db: Any,
     *,
     library_id: uuid.UUID,
     candidate: Any,
+    source_entity: Any,
+    target_entity: Any,
     plan: GraphRelationFactPlan,
-) -> GraphRelationFactResolutionResult:
-    existing = await _existing_decision(
+) -> GraphRelationFactPreflight:
+    plan = _with_resolution_subject(
+        plan,
+        library_id=library_id,
+        candidate=candidate,
+        source_entity=source_entity,
+        target_entity=target_entity,
+    )
+    await _lock_resolution_subject_v2(
+        db,
+        library_id=library_id,
+        subject_fingerprint=plan.subject_fingerprint,
+    )
+    existing = await _current_decision_by_fingerprint(
         db,
         library_id=library_id,
         decision_fingerprint=plan.decision_fingerprint,
     )
     if existing is not None:
-        return GraphRelationFactResolutionResult(
-            "REUSE" if existing.status != plan.status else _unresolved_outcome(plan.status),
-            existing,
-            None,
-            None,
-        )
-    supersedes = await _decision_to_supersede(db, library_id=library_id, candidate_id=candidate.id)
+        return GraphRelationFactPreflight(plan, existing, None, None, None)
+    supersedes = await _current_decision_for_subject(
+        db,
+        library_id=library_id,
+        subject_fingerprint=plan.subject_fingerprint,
+    )
     if supersedes is not None:
         supersedes.status = "superseded"
+        await db.flush()
     decision = _decision(
         library_id=library_id,
         candidate=candidate,
@@ -762,46 +888,99 @@ async def _persist_pending(
     )
     db.add(decision)
     await db.flush()
-    return GraphRelationFactResolutionResult(_unresolved_outcome(plan.status), decision, None, None)
+    return GraphRelationFactPreflight(plan, decision, None, None, None)
 
 
-async def resolve_graph_relation_candidate_fact(
+def _pending_from_rows(
+    *,
+    library_id: uuid.UUID,
+    candidate: Any,
+    evidence_rows: list[Any],
+    reason_code: str,
+    status: str = "pending",
+    predicate: StablePredicateIdentity | None = None,
+    subject_canonical_entity_id: uuid.UUID | None = None,
+) -> GraphRelationFactPlan:
+    source_snapshot = _source_occurrence_group_snapshot(library_id, evidence_rows)
+    return _pending_plan(
+        library_id=library_id,
+        candidate=candidate,
+        evidence=evidence_rows[0],
+        reason_code=reason_code,
+        status=status,
+        predicate=predicate,
+        subject_canonical_entity_id=subject_canonical_entity_id,
+        source_snapshot=source_snapshot,
+    )
+
+
+async def preflight_graph_relation_candidate_fact(
     db: Any,
     *,
     library_id: uuid.UUID,
     candidate: Any,
-    relation: Any,
-    relation_evidence: Any,
+    relation_type_id: uuid.UUID,
     source_entity: Any,
     target_entity: Any,
-    evidence: Any,
-) -> GraphRelationFactResolutionResult:
+    evidence_rows: list[Any],
+) -> GraphRelationFactPreflight:
+    if not evidence_rows:
+        raise GraphRelationFactResolutionError("fact resolution requires resolved evidence")
+    source_canonical_entity_id = getattr(source_entity, "canonical_entity_id", None)
+    if getattr(candidate, "evidence_support_mode", "single_evidence") != "single_evidence" or len(evidence_rows) != 1:
+        return await _persist_preflight_unresolved(
+            db,
+            library_id=library_id,
+            candidate=candidate,
+            source_entity=source_entity,
+            target_entity=target_entity,
+            plan=_pending_from_rows(
+                library_id=library_id,
+                candidate=candidate,
+                evidence_rows=evidence_rows,
+                reason_code="multi_evidence_fact_resolution_unsupported",
+                subject_canonical_entity_id=source_canonical_entity_id,
+            ),
+        )
+
+    evidence = evidence_rows[0]
     predicates = await _active_predicates(
         db,
         library_id=library_id,
-        relation_type_id=relation.relation_type_id,
+        relation_type_id=relation_type_id,
     )
-    subject_canonical_entity_id = getattr(source_entity, "canonical_entity_id", None)
     if not predicates:
         plan = _pending_plan(
             library_id=library_id,
             candidate=candidate,
             evidence=evidence,
             reason_code="predicate_mapping_pending",
-            subject_canonical_entity_id=subject_canonical_entity_id,
+            subject_canonical_entity_id=source_canonical_entity_id,
         )
-        plan = _with_projection_provenance(plan, candidate=candidate, relation=relation)
-        return await _persist_pending(db, library_id=library_id, candidate=candidate, plan=plan)
+        return await _persist_preflight_unresolved(
+            db,
+            library_id=library_id,
+            candidate=candidate,
+            source_entity=source_entity,
+            target_entity=target_entity,
+            plan=plan,
+        )
     if len(predicates) != 1:
         plan = _pending_plan(
             library_id=library_id,
             candidate=candidate,
             evidence=evidence,
             reason_code="predicate_mapping_ambiguous",
-            subject_canonical_entity_id=subject_canonical_entity_id,
+            subject_canonical_entity_id=source_canonical_entity_id,
         )
-        plan = _with_projection_provenance(plan, candidate=candidate, relation=relation)
-        return await _persist_pending(db, library_id=library_id, candidate=candidate, plan=plan)
+        return await _persist_preflight_unresolved(
+            db,
+            library_id=library_id,
+            candidate=candidate,
+            source_entity=source_entity,
+            target_entity=target_entity,
+            plan=plan,
+        )
     predicate = predicates[0]
     if predicate.resolution_status == "rejected":
         plan = _pending_plan(
@@ -811,10 +990,16 @@ async def resolve_graph_relation_candidate_fact(
             reason_code="predicate_rejected",
             status="rejected",
             predicate=predicate,
-            subject_canonical_entity_id=subject_canonical_entity_id,
+            subject_canonical_entity_id=source_canonical_entity_id,
         )
-        plan = _with_projection_provenance(plan, candidate=candidate, relation=relation)
-        return await _persist_pending(db, library_id=library_id, candidate=candidate, plan=plan)
+        return await _persist_preflight_unresolved(
+            db,
+            library_id=library_id,
+            candidate=candidate,
+            source_entity=source_entity,
+            target_entity=target_entity,
+            plan=plan,
+        )
     if not is_predicate_ready_for_fact_resolution(predicate, active_mapping_count=1):
         plan = _pending_plan(
             library_id=library_id,
@@ -822,10 +1007,17 @@ async def resolve_graph_relation_candidate_fact(
             evidence=evidence,
             reason_code="predicate_not_ready",
             predicate=predicate,
-            subject_canonical_entity_id=subject_canonical_entity_id,
+            subject_canonical_entity_id=source_canonical_entity_id,
         )
-        plan = _with_projection_provenance(plan, candidate=candidate, relation=relation)
-        return await _persist_pending(db, library_id=library_id, candidate=candidate, plan=plan)
+        return await _persist_preflight_unresolved(
+            db,
+            library_id=library_id,
+            candidate=candidate,
+            source_entity=source_entity,
+            target_entity=target_entity,
+            plan=plan,
+        )
+
     plan = build_graph_relation_fact_plan(
         library_id=library_id,
         predicate=predicate,
@@ -834,47 +1026,55 @@ async def resolve_graph_relation_candidate_fact(
         target_entity=target_entity,
         evidence=evidence,
     )
-    plan = _with_projection_provenance(plan, candidate=candidate, relation=relation)
+    plan = _with_resolution_subject(
+        plan,
+        library_id=library_id,
+        candidate=candidate,
+        source_entity=source_entity,
+        target_entity=target_entity,
+    )
     if plan.status != "resolved":
-        return await _persist_pending(db, library_id=library_id, candidate=candidate, plan=plan)
+        return await _persist_preflight_unresolved(
+            db,
+            library_id=library_id,
+            candidate=candidate,
+            source_entity=source_entity,
+            target_entity=target_entity,
+            plan=plan,
+        )
 
-    await _lock_fact_resolution_subject(
+    await _lock_resolution_subject_v2(
         db,
         library_id=library_id,
         subject_fingerprint=plan.subject_fingerprint,
     )
-    existing_decision = await _existing_decision(
+    existing = await _current_decision_by_fingerprint(
         db,
         library_id=library_id,
         decision_fingerprint=plan.decision_fingerprint,
     )
-    if existing_decision is not None:
-        if existing_decision.status != "resolved":
-            return GraphRelationFactResolutionResult("REUSE", existing_decision, None, None)
-        logical_fact = await db.get(LogicalFact, existing_decision.logical_fact_id)
-        assertion = await db.get(FactAssertion, existing_decision.fact_assertion_id)
+    if existing is not None:
+        if existing.status != "resolved":
+            return GraphRelationFactPreflight(plan, existing, None, None, None)
+        assert plan.logical_fact is not None
+        await _lock_logical_fact_v2(
+            db,
+            library_id=library_id,
+            identity_fingerprint=plan.logical_fact.identity_fingerprint,
+        )
+        logical_fact = await db.get(LogicalFact, existing.logical_fact_id)
+        assertion = await db.get(FactAssertion, existing.fact_assertion_id)
         if logical_fact is None or assertion is None:
             raise GraphRelationFactResolutionError("resolved decision has missing fact assertion links")
-        bridge_error = _bridge(
-            relation=relation,
-            relation_evidence=relation_evidence,
-            logical_fact=logical_fact,
-            assertion=assertion,
-        )
-        if bridge_error is not None:
-            conflict_plan = _pending_plan(
-                library_id=library_id,
-                candidate=candidate,
-                evidence=evidence,
-                reason_code=bridge_error,
-                predicate=predicate,
-                subject_canonical_entity_id=subject_canonical_entity_id,
-            )
-            return await _persist_pending(db, library_id=library_id, candidate=candidate, plan=conflict_plan)
-        return GraphRelationFactResolutionResult("REUSE", existing_decision, logical_fact, assertion)
+        return GraphRelationFactPreflight(plan, existing, logical_fact, assertion, None)
 
     assert plan.logical_fact is not None
     assert plan.assertion is not None
+    await _lock_logical_fact_v2(
+        db,
+        library_id=library_id,
+        identity_fingerprint=plan.logical_fact.identity_fingerprint,
+    )
     facts = (
         await db.execute(
             select(LogicalFact).where(
@@ -890,13 +1090,62 @@ async def resolve_graph_relation_candidate_fact(
             evidence=evidence,
             reason_code="logical_fact_identity_ambiguous",
             predicate=predicate,
-            subject_canonical_entity_id=subject_canonical_entity_id,
+            subject_canonical_entity_id=source_canonical_entity_id,
         )
-        return await _persist_pending(db, library_id=library_id, candidate=candidate, plan=ambiguous_plan)
-    if facts:
-        logical_fact = facts[0]
-        logical_outcome = "REUSE"
-    else:
+        return await _persist_preflight_unresolved(
+            db,
+            library_id=library_id,
+            candidate=candidate,
+            source_entity=source_entity,
+            target_entity=target_entity,
+            plan=ambiguous_plan,
+        )
+    logical_fact = facts[0] if facts else None
+    assertion = await _first(
+        db,
+        select(FactAssertion).where(
+            FactAssertion.library_id == library_id,
+            FactAssertion.assertion_fingerprint == plan.assertion.assertion_fingerprint,
+        ),
+    )
+    if assertion is not None and (logical_fact is None or assertion.logical_fact_id != logical_fact.id):
+        raise GraphRelationFactResolutionError("assertion fingerprint does not match logical fact")
+    supersedes = await _current_decision_for_subject(
+        db,
+        library_id=library_id,
+        subject_fingerprint=plan.subject_fingerprint,
+    )
+    return GraphRelationFactPreflight(plan, None, logical_fact, assertion, supersedes)
+
+
+async def materialize_resolved_graph_relation_fact(
+    db: Any,
+    *,
+    library_id: uuid.UUID,
+    candidate: Any,
+    relation: Any,
+    source_entity: Any,
+    preflight: GraphRelationFactPreflight,
+) -> GraphRelationFactMaterialization:
+    if not preflight.is_resolved:
+        raise GraphRelationFactResolutionError("cannot materialize an unresolved fact plan")
+    if preflight.decision is not None:
+        if preflight.logical_fact is None or preflight.assertion is None:
+            raise GraphRelationFactResolutionError("resolved decision has missing fact assertion links")
+        return GraphRelationFactMaterialization(
+            preflight.logical_fact,
+            preflight.assertion,
+            "REUSE",
+            "REUSE",
+        )
+
+    plan = preflight.plan
+    predicate = plan.predicate
+    assert plan.logical_fact is not None
+    assert plan.assertion is not None
+    assert predicate is not None
+    logical_fact = preflight.logical_fact
+    if logical_fact is None:
         logical_fact = LogicalFact(
             id=uuid.uuid4(),
             library_id=library_id,
@@ -911,21 +1160,12 @@ async def resolve_graph_relation_candidate_fact(
             identity_fingerprint=plan.logical_fact.identity_fingerprint,
             status="active",
         )
+        db.add(logical_fact)
         logical_outcome = "CREATE"
-
-    existing_assertion = await _first(
-        db,
-        select(FactAssertion).where(
-            FactAssertion.library_id == library_id,
-            FactAssertion.assertion_fingerprint == plan.assertion.assertion_fingerprint,
-        ),
-    )
-    if existing_assertion is not None:
-        if existing_assertion.logical_fact_id != logical_fact.id:
-            raise GraphRelationFactResolutionError("assertion fingerprint does not match logical fact")
-        assertion = existing_assertion
-        assertion_outcome = "REUSE"
     else:
+        logical_outcome = "REUSE"
+    assertion = preflight.assertion
+    if assertion is None:
         assertion = FactAssertion(
             id=uuid.uuid4(),
             library_id=library_id,
@@ -945,42 +1185,108 @@ async def resolve_graph_relation_candidate_fact(
             graph_relation_candidate_id=candidate.id,
             status="active",
         )
+        db.add(assertion)
         assertion_outcome = "CREATE"
+    else:
+        assertion_outcome = "REUSE"
+    return GraphRelationFactMaterialization(logical_fact, assertion, logical_outcome, assertion_outcome)
 
+
+async def finalize_resolved_graph_relation_fact(
+    db: Any,
+    *,
+    library_id: uuid.UUID,
+    candidate: Any,
+    relation: Any,
+    relation_evidence: Any,
+    preflight: GraphRelationFactPreflight,
+    materialization: GraphRelationFactMaterialization,
+) -> GraphRelationFactResolutionResult:
     bridge_error = _bridge(
         relation=relation,
         relation_evidence=relation_evidence,
-        logical_fact=logical_fact,
-        assertion=assertion,
+        logical_fact=materialization.logical_fact,
+        assertion=materialization.assertion,
     )
     if bridge_error is not None:
-        conflict_plan = _pending_plan(
-            library_id=library_id,
-            candidate=candidate,
-            evidence=evidence,
-            reason_code=bridge_error,
-            predicate=predicate,
-            subject_canonical_entity_id=subject_canonical_entity_id,
+        raise GraphRelationFactResolutionError(bridge_error)
+    if preflight.decision is not None:
+        return GraphRelationFactResolutionResult(
+            "REUSE",
+            preflight.decision,
+            materialization.logical_fact,
+            materialization.assertion,
         )
-        return await _persist_pending(db, library_id=library_id, candidate=candidate, plan=conflict_plan)
-    if logical_outcome == "CREATE":
-        db.add(logical_fact)
-    if assertion_outcome == "CREATE":
-        db.add(assertion)
-
-    supersedes = await _decision_to_supersede(db, library_id=library_id, candidate_id=candidate.id)
-    if supersedes is not None:
-        supersedes.status = "superseded"
+    if preflight.supersedes is not None:
+        preflight.supersedes.status = "superseded"
+        await db.flush()
     decision = _decision(
         library_id=library_id,
         candidate=candidate,
-        plan=plan,
+        plan=preflight.plan,
         status="resolved",
-        logical_fact=logical_fact,
-        assertion=assertion,
-        supersedes=supersedes,
+        logical_fact=materialization.logical_fact,
+        assertion=materialization.assertion,
+        supersedes=preflight.supersedes,
     )
     db.add(decision)
     await db.flush()
-    outcome = "CREATE" if logical_outcome == "CREATE" or assertion_outcome == "CREATE" else "REUSE"
-    return GraphRelationFactResolutionResult(outcome, decision, logical_fact, assertion)
+    outcome = (
+        "CREATE"
+        if materialization.logical_outcome == "CREATE" or materialization.assertion_outcome == "CREATE"
+        else "REUSE"
+    )
+    return GraphRelationFactResolutionResult(
+        outcome,
+        decision,
+        materialization.logical_fact,
+        materialization.assertion,
+    )
+
+
+async def resolve_graph_relation_candidate_fact(
+    db: Any,
+    *,
+    library_id: uuid.UUID,
+    candidate: Any,
+    relation: Any,
+    relation_evidence: Any,
+    source_entity: Any,
+    target_entity: Any,
+    evidence: Any,
+) -> GraphRelationFactResolutionResult:
+    """Compatibility wrapper for direct resolver callers with an existing projection."""
+    preflight = await preflight_graph_relation_candidate_fact(
+        db,
+        library_id=library_id,
+        candidate=candidate,
+        relation_type_id=relation.relation_type_id,
+        source_entity=source_entity,
+        target_entity=target_entity,
+        evidence_rows=[evidence],
+    )
+    if not preflight.is_resolved:
+        assert preflight.decision is not None
+        return GraphRelationFactResolutionResult(
+            _unresolved_outcome(preflight.decision.status),
+            preflight.decision,
+            None,
+            None,
+        )
+    materialization = await materialize_resolved_graph_relation_fact(
+        db,
+        library_id=library_id,
+        candidate=candidate,
+        relation=relation,
+        source_entity=source_entity,
+        preflight=preflight,
+    )
+    return await finalize_resolved_graph_relation_fact(
+        db,
+        library_id=library_id,
+        candidate=candidate,
+        relation=relation,
+        relation_evidence=relation_evidence,
+        preflight=preflight,
+        materialization=materialization,
+    )

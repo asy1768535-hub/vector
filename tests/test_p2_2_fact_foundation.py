@@ -20,6 +20,7 @@ from app.models.relation_evidence import RelationEvidence
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "alembic" / "versions" / "0066_p2_2_fact_foundation.py"
+MIGRATION_0069 = ROOT / "alembic" / "versions" / "0069_fact_resolution_active_decisions.py"
 
 
 def _unique_names(table) -> set[str]:
@@ -98,6 +99,29 @@ def test_assertion_and_decision_status_and_nullable_source_contracts():
     assert _fk(decision, "fk_fact_resolution_decisions_candidate").ondelete == "SET NULL"
     assert _fk(decision, "fk_fact_resolution_decisions_raw_claim").ondelete == "SET NULL"
     assert _fk(decision, "fk_fact_resolution_decisions_assertion").ondelete == "SET NULL"
+
+
+def test_0069_keeps_fact_resolution_decision_uniqueness_current_only():
+    decision = FactResolutionDecision.__table__
+    indexes = {index.name: index for index in decision.indexes}
+
+    fingerprint = indexes["uq_fact_resolution_decisions_library_fingerprint_active"]
+    subject = indexes["uq_fact_resolution_decisions_library_subject_active"]
+    assert fingerprint.unique is True
+    assert subject.unique is True
+    assert tuple(fingerprint.columns.keys()) == ("library_id", "decision_fingerprint")
+    assert tuple(subject.columns.keys()) == ("library_id", "source_kind", "subject_fingerprint")
+    assert "superseded" in str(fingerprint.dialect_options["postgresql"]["where"])
+    assert "superseded" in str(subject.dialect_options["postgresql"]["where"])
+    assert "uq_fact_resolution_decisions_library_fingerprint" not in _unique_names(decision)
+
+    migration = MIGRATION_0069.read_text(encoding="utf-8")
+    offline_sql = _offline("0068:0069")
+    assert 'revision: str = "0069"' in migration
+    assert 'down_revision: Union[str, None] = "0068"' in migration
+    assert "uq_fact_resolution_decisions_library_fingerprint_active" in offline_sql
+    assert "uq_fact_resolution_decisions_library_subject_active" in offline_sql
+    assert "where status <> 'superseded'" in offline_sql
 
 
 def test_projection_evidence_bridges_are_nullable_and_preserve_old_owners():
