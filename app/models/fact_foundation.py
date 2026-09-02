@@ -66,6 +66,14 @@ class StablePredicateIdentity(Base):
             "resolution_status IN ('resolved','pending','ambiguous','rejected')",
             name="ck_stable_predicate_identities_resolution_status",
         ),
+        CheckConstraint(
+            "resolution_policy IS NULL OR jsonb_typeof(resolution_policy) = 'object'",
+            name="ck_stable_predicate_identities_resolution_policy_json",
+        ),
+        CheckConstraint(
+            "resolution_status != 'resolved' OR resolution_policy IS NOT NULL",
+            name="ck_stable_predicate_identities_resolved_requires_policy",
+        ),
         UniqueConstraint(
             "library_id",
             "namespace",
@@ -102,6 +110,7 @@ class StablePredicateIdentity(Base):
     resolution_status: Mapped[str] = mapped_column(
         String(16), nullable=False, default="pending", server_default="pending"
     )
+    resolution_policy: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
