@@ -4,7 +4,18 @@ import uuid
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import CheckConstraint, DateTime, Float, ForeignKey, Index, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    Float,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -36,6 +47,13 @@ class RelationEvidence(Base):
             "document_revision_id",
             "status",
         ),
+        ForeignKeyConstraint(
+            ["fact_assertion_id", "library_id"],
+            ["fact_assertions.id", "fact_assertions.library_id"],
+            ondelete="SET NULL",
+            name="fk_relation_evidence_fact_assertion",
+        ),
+        UniqueConstraint("id", "library_id", name="uq_relation_evidence_id_library"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -50,6 +68,9 @@ class RelationEvidence(Base):
         ForeignKey("knowledge_relations.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
+    )
+    fact_assertion_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PgUUID(as_uuid=True), nullable=True, index=True
     )
     evidence_id: Mapped[uuid.UUID] = mapped_column(
         PgUUID(as_uuid=True),

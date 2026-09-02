@@ -39,6 +39,7 @@ class RelationType(Base):
             "key",
             name="uq_relation_types_library_ontology_key",
         ),
+        UniqueConstraint("id", "library_id", name="uq_relation_types_id_library"),
         Index("ix_relation_types_library_ontology_status", "library_id", "ontology_version_id", "status"),
         Index("ix_relation_types_library_key", "library_id", "key"),
     )

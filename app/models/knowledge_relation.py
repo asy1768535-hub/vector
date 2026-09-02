@@ -9,8 +9,10 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     String,
+    UniqueConstraint,
     func,
     text,
 )
@@ -59,6 +61,13 @@ class KnowledgeRelation(Base):
             unique=True,
             postgresql_where=text("extraction_key IS NOT NULL"),
         ),
+        ForeignKeyConstraint(
+            ["logical_fact_id", "library_id"],
+            ["logical_facts.id", "logical_facts.library_id"],
+            ondelete="RESTRICT",
+            name="fk_knowledge_relations_logical_fact",
+        ),
+        UniqueConstraint("id", "library_id", name="uq_knowledge_relations_id_library"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -110,6 +119,9 @@ class KnowledgeRelation(Base):
         nullable=True,
     )
     extraction_key: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    logical_fact_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PgUUID(as_uuid=True), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

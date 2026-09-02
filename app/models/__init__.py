@@ -37,6 +37,13 @@ from app.models.entity_mention import EntityMention
 from app.models.entity_resolution_decision import EntityResolutionDecision
 from app.models.entity_type import EntityType
 from app.models.evidence_unit import EvidenceUnit
+from app.models.fact_foundation import (
+    FactAssertion,
+    FactResolutionDecision,
+    LogicalFact,
+    StablePredicateIdentity,
+    StablePredicateMapping,
+)
 from app.models.external_graph_sync import (
     GraphExternalFactMapping,
     GraphExternalSyncConflict,
@@ -126,6 +133,11 @@ __all__ = [
     "EntityResolutionDecision",
     "EntityType",
     "EvidenceUnit",
+    "StablePredicateIdentity",
+    "StablePredicateMapping",
+    "LogicalFact",
+    "FactAssertion",
+    "FactResolutionDecision",
     "GraphExternalFactMapping",
     "GraphExternalSyncConflict",
     "GraphExternalSyncOperation",

@@ -12,7 +12,7 @@ def test_doc_conversion_migration_extends_the_current_single_head():
 
     assert revision is not None
     assert revision.down_revision == "0061"
-    assert script.get_heads() == ["0065"]
+    assert script.get_heads() == ["0066"]
 
 
 def test_document_import_job_owns_conversion_state_and_stages():
