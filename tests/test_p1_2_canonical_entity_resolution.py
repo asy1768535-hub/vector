@@ -179,6 +179,7 @@ def _input(
     source="source-1",
     type_id=None,
     type_key=None,
+    ontology_version_id=None,
     existing_entity_id=None,
     identifiers=(),
     evidence=None,
@@ -192,6 +193,7 @@ def _input(
         observed_normalized_name=normalize_graph_name_v1(name),
         observed_entity_type_id=type_id,
         observed_entity_type_key=type_key,
+        observed_ontology_version_id=ontology_version_id,
         existing_entity_id=existing_entity_id,
         explicit_identifiers=tuple(identifiers),
         observed_properties=properties,
@@ -335,6 +337,33 @@ def test_incompatible_type_excludes_candidate_but_creates_new_entity():
     assert result.decision.reason_code == "no_compatible_candidate"
     assert result.decision.candidate_snapshot[0]["included"] is False
     assert result.decision.candidate_snapshot[0]["excluded_reason"] == "type_incompatible"
+
+
+def test_cross_ontology_same_name_stays_pending_without_a_type_mapping():
+    library_id = uuid.uuid4()
+    v1_type = _type(library_id, key="company")
+    v2_type = _type(library_id, key="company")
+    canonical = _canonical(library_id, name="项目A", normalized="项目a")
+    projection = _entity(library_id, v1_type, canonical, name="项目A")
+    db = _Db(_library(library_id), v1_type, v2_type, canonical, projection)
+
+    result = _run(
+        resolve_canonical_entity(
+            db,
+            _input(
+                library_id,
+                name="项目A",
+                type_id=v2_type.id,
+                type_key=v2_type.key,
+                ontology_version_id=v2_type.ontology_version_id,
+                source="cross-ontology-project-a",
+            ),
+        )
+    )
+
+    assert result.decision.decision_kind == ENTITY_RESOLUTION_PENDING_REVIEW
+    assert result.decision.reason_code == "cross_ontology_weak_identity"
+    assert result.decision.canonical_entity_id is None
 
 
 def test_invalid_name_or_evidence_is_rejected_without_canonical():

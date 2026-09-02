@@ -13,6 +13,12 @@ from app.models.document_revision import DocumentRevision
 from app.models.entity import Entity
 from app.models.entity_alias import EntityAlias
 from app.models.entity_mention import EntityMention
+from app.models.entity_resolution_decision import (
+    ENTITY_RESOLUTION_CREATE_NEW,
+    ENTITY_RESOLUTION_LINK_EXISTING,
+    ENTITY_RESOLUTION_PENDING_REVIEW,
+    ENTITY_RESOLUTION_REJECTED,
+)
 from app.models.graph_candidate_evidence import (
     GraphEntityCandidateEvidence,
     GraphRelationCandidateEvidence,
@@ -26,6 +32,11 @@ from app.models.ontology_version import OntologyVersion
 from app.models.relation_evidence import RelationEvidence
 from app.schemas.v03_graph import GraphEntityCreate, GraphRelationCreate
 from app.services import graph_entities, graph_evidence, graph_relations
+from app.services.canonical_entity_resolution import (
+    MAX_EVIDENCE_REFS,
+    EntityResolutionInput,
+    resolve_canonical_entity,
+)
 from app.services.graph_candidate_aggregation import canonical_graph_value_hash_v1
 from app.services.graph_candidate_routing import load_confidence_policy_v1
 from app.services.graph_candidate_validation import load_ontology_rule_set_v1
@@ -105,37 +116,42 @@ def _append_candidate_error(candidate: Any, code: str) -> None:
     candidate.validation_errors = errors
 
 
-def _publishable_relation_candidates(
-    *,
-    entity_candidates: list[Any],
-    relation_candidates: list[Any],
-    entity_evidence_by_candidate: dict[uuid.UUID, list[Any]],
-    relation_evidence_by_candidate: dict[uuid.UUID, list[Any]],
-    entity_threshold: float,
-    relation_threshold: float,
-    relation_types_by_key: dict[str, Any],
-) -> list[Any]:
-    eligible_entity_ids = {
-        candidate.id
-        for candidate in entity_candidates
-        if (candidate.status == "materialized" and candidate.materialized_entity_id is not None)
-        or (
-            _entity_candidate_eligible(candidate, entity_threshold)
-            and bool(_valid_evidence(entity_evidence_by_candidate.get(candidate.id, [])))
-        )
-    }
-    return [
-        candidate
-        for candidate in relation_candidates
-        if (candidate.status == "materialized" and candidate.materialized_relation_id is not None)
-        or (
-            _relation_candidate_eligible(candidate, relation_threshold)
-            and bool(_valid_evidence(relation_evidence_by_candidate.get(candidate.id, [])))
-            and candidate.source_candidate_id in eligible_entity_ids
-            and candidate.target_candidate_id in eligible_entity_ids
-            and candidate.relation_type_key in relation_types_by_key
-        )
-    ]
+def _resolution_evidence_refs(rows: list[Any]) -> tuple[dict[str, str], ...]:
+    ordered = sorted(
+        rows,
+        key=lambda row: (
+            str(row.resolved_evidence_id),
+            str(row.resolved_document_revision_id),
+            str(row.resolved_chunk_id),
+        ),
+    )
+    return tuple(
+        {
+            "chunk_id": str(row.resolved_chunk_id),
+            "document_id": str(row.resolved_document_id),
+            "document_revision_id": str(row.resolved_document_revision_id),
+            "evidence_id": str(row.resolved_evidence_id),
+        }
+        for row in ordered[:MAX_EVIDENCE_REFS]
+    )
+
+
+def _resolution_existing_entity_id(candidate: GraphEntityCandidate, entity: Entity | None) -> uuid.UUID | None:
+    if entity is None or candidate.normalization_method != "exact_normalized_match":
+        return None
+    return entity.id
+
+
+def _mark_resolution_pending(candidate: GraphEntityCandidate, reason: str) -> None:
+    candidate.status = "pending_review"
+    candidate.review_reason = reason
+    _append_candidate_error(candidate, reason)
+
+
+def _mark_resolution_rejected(candidate: GraphEntityCandidate, reason: str) -> None:
+    candidate.status = "rejected"
+    candidate.review_reason = reason
+    _append_candidate_error(candidate, reason)
 
 
 def _add_extracted_aliases(
@@ -518,57 +534,6 @@ async def _materialize_job_transaction(
     for row in relation_evidence_result.scalars().all():
         relation_evidence_by_candidate.setdefault(row.candidate_id, []).append(row)
 
-    publishable_relations = _publishable_relation_candidates(
-        entity_candidates=entity_candidates,
-        relation_candidates=relation_candidates,
-        entity_evidence_by_candidate=entity_evidence_by_candidate,
-        relation_evidence_by_candidate=relation_evidence_by_candidate,
-        entity_threshold=policy.entity_materialization_threshold,
-        relation_threshold=policy.relation_draft_threshold,
-        relation_types_by_key=rules.relation_types_by_key,
-    )
-    entity_candidate_ids = {candidate.id for candidate in entity_candidates}
-    publishable_relations = [
-        candidate
-        for candidate in publishable_relations
-        if candidate.source_candidate_id in entity_candidate_ids
-        and candidate.target_candidate_id in entity_candidate_ids
-    ]
-    if not publishable_relations:
-        pending_entity_count = 0
-        for candidate in entity_candidates:
-            if candidate.status == "validated":
-                candidate.status = "pending_review"
-                candidate.review_reason = "entities_without_valid_relation"
-                _append_candidate_error(candidate, candidate.review_reason)
-                pending_entity_count += 1
-        counts = getattr(job, "counts", None)
-        counts = counts if isinstance(counts, dict) else {}
-        partially_succeeded = job.status == "partially_succeeded" or bool(
-            counts.get("failed", 0) or counts.get("cancelled", 0)
-        )
-        job.status = "partially_succeeded" if partially_succeeded else "succeeded"
-        job.current_stage = "finalizing"
-        job.error_code = "unit_failures" if partially_succeeded else None
-        job.error_message = None
-        job.finished_at = _utcnow()
-        statistics = dict(job.statistics or {})
-        statistics["materialization"] = {
-            "outcome": "entities_only",
-            "entity_count": 0,
-            "entity_mention_count": 0,
-            "relation_count": 0,
-            "relation_evidence_count": 0,
-            "publishable_entity_candidate_count": 0,
-            "publishable_relation_count": 0,
-            "publishable_relation_evidence_count": 0,
-            "pending_entity_candidate_count": pending_entity_count,
-            "failure_reasons": {"no_valid_relation": 1},
-        }
-        job.statistics = statistics
-        await db.flush()
-        return GraphExtractionMaterializationResult(0, 0, 0, 0)
-
     entity_count = 0
     mention_count = 0
     relation_count = 0
@@ -576,7 +541,7 @@ async def _materialize_job_transaction(
     materialized_entity_candidate_count = 0
     publishable_relation_count = 0
     publishable_relation_evidence_count = 0
-    orphan_entity_count = 0
+    pending_entity_candidate_count = 0
     entity_by_candidate_id: dict[uuid.UUID, Entity] = {}
     for candidate in entity_candidates:
         type_rule = rules.entity_types_by_key.get(candidate.entity_type_key)
@@ -585,12 +550,6 @@ async def _materialize_job_transaction(
                 "entity_type_missing",
                 "validated Entity Candidate references an unknown frozen Entity Type",
             )
-        matched = await _eligible_matched_entity(
-            db,
-            candidate=candidate,
-            job=job,
-            expected_entity_type_id=type_rule.id,
-        )
         if candidate.status == "materialized":
             entity = await db.get(Entity, candidate.materialized_entity_id)
             if entity is not None:
@@ -604,10 +563,62 @@ async def _materialize_job_transaction(
             )
             or not evidence_rows
         ):
-            if matched is not None:
-                entity_by_candidate_id[candidate.id] = matched
             continue
+        matched = await _eligible_matched_entity(
+            db,
+            candidate=candidate,
+            job=job,
+            expected_entity_type_id=type_rule.id,
+        )
+        resolution = await resolve_canonical_entity(
+            db,
+            EntityResolutionInput(
+                library_id=library.id,
+                observed_name=candidate.canonical_name,
+                observed_normalized_name=candidate.normalized_name,
+                observed_entity_type_id=type_rule.id,
+                observed_entity_type_key=candidate.entity_type_key,
+                observed_ontology_version_id=job.ontology_version_id,
+                existing_entity_id=_resolution_existing_entity_id(candidate, matched),
+                observed_properties=candidate.proposed_properties,
+                context={
+                    "candidate_key": candidate.candidate_key,
+                    "job_id": str(job.id),
+                    "ontology_version_id": str(job.ontology_version_id),
+                },
+                graph_entity_candidate_id=candidate.id,
+                source_fingerprint=f"graph_entity_candidate:{candidate.id}",
+                evidence_refs=_resolution_evidence_refs(evidence_rows),
+            ),
+        )
+        decision = resolution.decision
+        if decision.decision_kind == ENTITY_RESOLUTION_PENDING_REVIEW:
+            _mark_resolution_pending(candidate, decision.reason_code or "canonical_resolution_pending")
+            pending_entity_candidate_count += 1
+            continue
+        if decision.decision_kind == ENTITY_RESOLUTION_REJECTED:
+            _mark_resolution_rejected(candidate, decision.reason_code or "canonical_resolution_rejected")
+            continue
+        if (
+            decision.decision_kind not in {
+                ENTITY_RESOLUTION_LINK_EXISTING,
+                ENTITY_RESOLUTION_CREATE_NEW,
+            }
+            or resolution.canonical_entity is None
+        ):
+            raise GraphExtractionMaterializationError(
+                "canonical_resolution_invalid",
+                "Canonical resolution returned an invalid materialization result",
+            )
         entity = matched
+        if (
+            entity is not None
+            and entity.canonical_entity_id is not None
+            and entity.canonical_entity_id != resolution.canonical_entity.id
+        ):
+            _mark_resolution_pending(candidate, "canonical_projection_conflict")
+            pending_entity_candidate_count += 1
+            continue
         if entity is None:
             entity = await graph_entities.create_entity(
                 db,
@@ -631,6 +642,7 @@ async def _materialize_job_transaction(
                 entity=entity,
             )
             entity_count += 1
+        entity.canonical_entity_id = resolution.canonical_entity.id
         entity_by_candidate_id[candidate.id] = entity
         for evidence in evidence_rows:
             _mention, created = await _entity_mention_for_evidence(
@@ -642,6 +654,7 @@ async def _materialize_job_transaction(
                 evidence=evidence,
             )
             mention_count += int(created)
+        decision.entity_id = entity.id
         candidate.materialized_entity_id = entity.id
         candidate.status = "materialized"
         materialized_entity_candidate_count += 1
@@ -715,8 +728,8 @@ async def _materialize_job_transaction(
         "publishable_entity_candidate_count": materialized_entity_candidate_count,
         "publishable_relation_count": publishable_relation_count,
         "publishable_relation_evidence_count": publishable_relation_evidence_count,
-        "pending_entity_candidate_count": orphan_entity_count,
-        "failure_reasons": ({"orphan_entity": orphan_entity_count} if orphan_entity_count else {}),
+        "pending_entity_candidate_count": pending_entity_candidate_count,
+        "failure_reasons": {},
     }
     job.statistics = statistics
     await db.flush()

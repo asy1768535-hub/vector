@@ -1,8 +1,4 @@
-"""Standalone P1.2 canonical-entity resolution.
-
-This module deliberately does not participate in extraction/materialization.  It
-provides a small, auditable resolution boundary for later callers to adopt.
-"""
+"""Canonical-entity resolution with caller-owned transaction boundaries."""
 
 from __future__ import annotations
 
@@ -95,6 +91,7 @@ class EntityResolutionInput:
     evidence_refs: tuple[Mapping[str, Any], ...]
     observed_entity_type_id: uuid.UUID | None = None
     observed_entity_type_key: str | None = None
+    observed_ontology_version_id: uuid.UUID | None = None
     existing_entity_id: uuid.UUID | None = None
     explicit_identifiers: tuple[ExplicitIdentifier, ...] = ()
     observed_properties: Mapping[str, Any] | None = None
@@ -251,6 +248,11 @@ def _prepare_input(request: EntityResolutionInput) -> _PreparedInput:
             "observed_entity_type_key": _safe_text(request.observed_entity_type_key, max_length=128)
             if request.observed_entity_type_key is not None
             else None,
+            "observed_ontology_version_id": str(request.observed_ontology_version_id)
+            if isinstance(request.observed_ontology_version_id, uuid.UUID)
+            else _safe_text(request.observed_ontology_version_id, max_length=64)
+            if request.observed_ontology_version_id is not None
+            else None,
             "observed_name": raw_name,
             "observed_normalized_name": raw_normalized,
             "source_fingerprint": raw_source,
@@ -297,6 +299,9 @@ def _decision_fingerprint(
             if isinstance(request.observed_entity_type_id, uuid.UUID)
             else None,
             "observed_entity_type_key": request.observed_entity_type_key,
+            "observed_ontology_version_id": str(request.observed_ontology_version_id)
+            if isinstance(request.observed_ontology_version_id, uuid.UUID)
+            else None,
             "observed_name": prepared.observed_name,
             "observed_normalized_name": prepared.observed_normalized_name,
             "observed_properties": prepared.properties_snapshot,
@@ -707,6 +712,23 @@ async def resolve_canonical_entity(db, request: EntityResolutionInput) -> Entity
                 entity_id=None,
             )
 
+    if request.observed_ontology_version_id is not None and not isinstance(
+        request.observed_ontology_version_id, uuid.UUID
+    ):
+        return await _persist(
+            db,
+            prepared,
+            request,
+            candidate_id=candidate_id,
+            candidate_snapshot=[],
+            decision_kind=ENTITY_RESOLUTION_REJECTED,
+            canonical_entity=None,
+            method="validation",
+            confidence=None,
+            reason_code="invalid_ontology_version_id",
+            entity_id=None,
+        )
+
     if prepared.validation_error is not None:
         return await _persist(
             db,
@@ -869,6 +891,28 @@ async def resolve_canonical_entity(db, request: EntityResolutionInput) -> Entity
             method="candidate_retrieval",
             confidence=None,
             reason_code="multiple_candidates",
+            entity_id=existing_entity.id if existing_entity is not None else None,
+        )
+
+    if request.observed_ontology_version_id is not None and any(
+        any(
+            projection["ontology_version_id"]
+            != str(request.observed_ontology_version_id)
+            for projection in candidate.get("projections", [])
+        )
+        for candidate in candidate_snapshot
+    ):
+        return await _persist(
+            db,
+            prepared,
+            request,
+            candidate_id=candidate_id,
+            candidate_snapshot=candidate_snapshot,
+            decision_kind=ENTITY_RESOLUTION_PENDING_REVIEW,
+            canonical_entity=None,
+            method="candidate_retrieval",
+            confidence=None,
+            reason_code="cross_ontology_weak_identity",
             entity_id=existing_entity.id if existing_entity is not None else None,
         )
 

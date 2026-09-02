@@ -7,7 +7,13 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from app.models.canonical_entity import CanonicalEntity
 from app.models.entity import Entity
+from app.models.entity_resolution_decision import (
+    ENTITY_RESOLUTION_CREATE_NEW,
+    ENTITY_RESOLUTION_LINK_EXISTING,
+    ENTITY_RESOLUTION_PENDING_REVIEW,
+)
 from app.models.graph_extraction_job import GraphExtractionJob
 from app.models.knowledge_relation import KnowledgeRelation
 from app.services.graph_extraction_materializer import (
@@ -15,6 +21,7 @@ from app.services.graph_extraction_materializer import (
     GraphExtractionMaterializationResult,
     _add_extracted_aliases,
     _draft_relation,
+    _entity_mention_for_evidence,
     _entity_candidate_eligible,
     _eligible_matched_entity,
     _materialize_job_transaction,
@@ -119,10 +126,12 @@ def _entity_candidate(*, key: str, matched_entity_id=None, confidence=0.95):
         entity_type_key=key,
         canonical_name=f"{key} name",
         normalized_name=f"{key} name",
+        candidate_key=f"{key}-{uuid.uuid4()}",
         proposed_aliases=[],
         proposed_properties={},
         matched_entity_id=matched_entity_id,
         materialized_entity_id=None,
+        normalization_method="exact_normalized_match",
         final_confidence=confidence,
         status="validated",
         validation_errors=[],
@@ -190,6 +199,27 @@ def _candidate_evidence(candidate_id):
     )
 
 
+def _canonical(name: str) -> CanonicalEntity:
+    return CanonicalEntity(
+        id=uuid.uuid4(),
+        library_id=LIB_ID,
+        canonical_name=name,
+        normalized_name=name,
+        status="active",
+    )
+
+
+def _resolution(kind: str, canonical: CanonicalEntity, *, reason_code: str | None = None):
+    return SimpleNamespace(
+        decision=SimpleNamespace(
+            decision_kind=kind,
+            entity_id=None,
+            reason_code=reason_code,
+        ),
+        canonical_entity=canonical,
+    )
+
+
 def test_materialization_filters_are_fail_closed():
     entity = _entity_candidate(key="person")
     assert _entity_candidate_eligible(entity, 0.85)
@@ -252,6 +282,11 @@ def test_materializer_creates_evidenced_independent_entities_and_draft_facts(
     person = _entity_candidate(key="person")
     team = _entity_candidate(key="team", matched_entity_id=matched_id)
     orphan = _entity_candidate(key="person")
+    orphan.canonical_name = "orphan name"
+    orphan.normalized_name = "orphan name"
+    person_canonical = _canonical(person.canonical_name)
+    team_canonical = _canonical("Existing team")
+    orphan_canonical = _canonical(orphan.canonical_name)
     relation = _relation_candidate(person.id, team.id)
     evidence_group = _relation_candidate(
         person.id,
@@ -283,16 +318,27 @@ def test_materializer_creates_evidenced_independent_entities_and_draft_facts(
         entity_type_id=TEAM_TYPE_ID,
         canonical_name="Existing team",
         normalized_name="existing team",
+        canonical_entity_id=team_canonical.id,
         status="active",
         source_type="manual",
     )
-    new_entity = Entity(
+    person_entity = Entity(
         id=uuid.uuid4(),
         library_id=LIB_ID,
         ontology_version_id=ONTOLOGY_ID,
         entity_type_id=PERSON_TYPE_ID,
         canonical_name="person name",
         normalized_name="person name",
+        status="draft",
+        source_type="extracted",
+    )
+    orphan_entity = Entity(
+        id=uuid.uuid4(),
+        library_id=LIB_ID,
+        ontology_version_id=ONTOLOGY_ID,
+        entity_type_id=PERSON_TYPE_ID,
+        canonical_name="orphan name",
+        normalized_name="orphan name",
         status="draft",
         source_type="extracted",
     )
@@ -306,7 +352,7 @@ def test_materializer_creates_evidenced_independent_entities_and_draft_facts(
         library_id=LIB_ID,
         ontology_version_id=ONTOLOGY_ID,
         relation_type_id=RELATION_TYPE_ID,
-        source_entity_id=new_entity.id,
+        source_entity_id=person_entity.id,
         target_entity_id=matched.id,
         status="draft",
         source_type="extracted",
@@ -359,8 +405,18 @@ def test_materializer_creates_evidenced_independent_entities_and_draft_facts(
         ),
         patch(
             "app.services.graph_extraction_materializer.graph_entities.create_entity",
-            new=AsyncMock(return_value=new_entity),
+            new=AsyncMock(side_effect=[person_entity, orphan_entity]),
         ) as create_entity,
+        patch(
+            "app.services.graph_extraction_materializer.resolve_canonical_entity",
+            new=AsyncMock(
+                side_effect=[
+                    _resolution(ENTITY_RESOLUTION_CREATE_NEW, person_canonical),
+                    _resolution(ENTITY_RESOLUTION_LINK_EXISTING, team_canonical),
+                    _resolution(ENTITY_RESOLUTION_CREATE_NEW, orphan_canonical),
+                ]
+            ),
+        ) as resolve,
         patch(
             "app.services.graph_extraction_materializer.graph_evidence.create_entity_mention",
             new=AsyncMock(side_effect=mention_rows),
@@ -387,22 +443,49 @@ def test_materializer_creates_evidenced_independent_entities_and_draft_facts(
     create_relation_evidence.assert_awaited_once()
     assert person.status == "materialized"
     assert team.status == "materialized"
+    assert person_entity.canonical_entity_id == person_canonical.id
+    assert matched.canonical_entity_id == team_canonical.id
+    assert orphan_entity.canonical_entity_id == orphan_canonical.id
     assert relation.status == "materialized"
     assert draft_relation.review_status == "not_required"
     assert evidence_group.status == "validated"
     assert orphan.status == "materialized"
-    assert orphan.materialized_entity_id == new_entity.id
+    assert orphan.materialized_entity_id == orphan_entity.id
     assert job.status == expected_status
     assert job.error_code == expected_error
     assert job.statistics["materialization"]["pending_entity_candidate_count"] == 0
     assert job.statistics["materialization"]["failure_reasons"] == {}
     assert job.statistics["materialization"]["publishable_relation_count"] == 1
     assert job.statistics["materialization"]["publishable_relation_evidence_count"] == 1
+    assert resolve.await_count == 3
+    assert resolve.await_args_list[0].args[1].existing_entity_id is None
+    assert resolve.await_args_list[1].args[1].existing_entity_id == matched_id
+    assert resolve.await_args_list[0].args[1].graph_entity_candidate_id == person.id
+    assert resolve.await_args_list[0].args[1].evidence_refs == (
+        {
+            "chunk_id": str(person_evidence.resolved_chunk_id),
+            "document_id": str(person_evidence.resolved_document_id),
+            "document_revision_id": str(person_evidence.resolved_document_revision_id),
+            "evidence_id": str(person_evidence.resolved_evidence_id),
+        },
+    )
 
 
-def test_materializer_retains_entity_candidates_when_no_valid_relation_exists():
+def test_materializer_materializes_relationless_entity_after_canonical_resolution():
     person = _entity_candidate(key="person")
     person_evidence = _candidate_evidence(person.id)
+    canonical = _canonical(person.canonical_name)
+    entity = Entity(
+        id=uuid.uuid4(),
+        library_id=LIB_ID,
+        ontology_version_id=ONTOLOGY_ID,
+        entity_type_id=PERSON_TYPE_ID,
+        canonical_name=person.canonical_name,
+        normalized_name=person.normalized_name,
+        status="draft",
+        source_type="extracted",
+    )
+    mention = SimpleNamespace(status="active", created_by_job_id=None, extraction_key=None)
     job = SimpleNamespace(
         id=JOB_ID,
         library_id=LIB_ID,
@@ -420,6 +503,8 @@ def test_materializer_retains_entity_candidates_when_no_valid_relation_exists():
             _Result([person]),
             _Result(),
             _Result([person_evidence]),
+            _Result(),
+            _Result(),
             _Result(),
         ]
     )
@@ -447,8 +532,16 @@ def test_materializer_retains_entity_candidates_when_no_valid_relation_exists():
         ),
         patch(
             "app.services.graph_extraction_materializer.graph_entities.create_entity",
-            new=AsyncMock(),
+            new=AsyncMock(return_value=entity),
         ) as create_entity,
+        patch(
+            "app.services.graph_extraction_materializer.resolve_canonical_entity",
+            new=AsyncMock(return_value=_resolution(ENTITY_RESOLUTION_CREATE_NEW, canonical)),
+        ) as resolve,
+        patch(
+            "app.services.graph_extraction_materializer.graph_evidence.create_entity_mention",
+            new=AsyncMock(return_value=mention),
+        ) as create_mention,
         patch(
             "app.services.graph_extraction_materializer.graph_relations.create_relation",
             new=AsyncMock(),
@@ -456,14 +549,246 @@ def test_materializer_retains_entity_candidates_when_no_valid_relation_exists():
     ):
         result = asyncio.run(_materialize_job_transaction(db, job_id=JOB_ID))
 
-    assert result == GraphExtractionMaterializationResult(0, 0, 0, 0)
-    assert person.status == "pending_review"
-    assert person.review_reason == "entities_without_valid_relation"
-    assert {item["code"] for item in person.validation_errors} == {"entities_without_valid_relation"}
-    assert job.statistics["materialization"]["outcome"] == "entities_only"
-    assert job.statistics["materialization"]["pending_entity_candidate_count"] == 1
-    create_entity.assert_not_awaited()
+    assert result == GraphExtractionMaterializationResult(1, 1, 0, 0)
+    assert person.status == "materialized"
+    assert person.materialized_entity_id == entity.id
+    assert person.review_reason is None
+    assert entity.canonical_entity_id == canonical.id
+    assert mention.status == "active"
+    assert job.statistics["materialization"]["outcome"] == "materialized"
+    assert job.statistics["materialization"]["publishable_entity_candidate_count"] == 1
+    create_entity.assert_awaited_once()
+    create_mention.assert_awaited_once()
+    resolve.assert_awaited_once()
     create_relation.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("normalization_method", "resolution_kind", "expected_reason", "use_existing_mapping"),
+    [
+        ("exact_alias_match", ENTITY_RESOLUTION_PENDING_REVIEW, "weak_identity_evidence", False),
+        ("exact_normalized_match", ENTITY_RESOLUTION_LINK_EXISTING, "canonical_projection_conflict", True),
+    ],
+)
+def test_materializer_keeps_alias_and_canonical_projection_conflicts_pending(
+    normalization_method,
+    resolution_kind,
+    expected_reason,
+    use_existing_mapping,
+):
+    candidate = _entity_candidate(key="person")
+    candidate.normalization_method = normalization_method
+    evidence = _candidate_evidence(candidate.id)
+    matched_canonical = _canonical("existing person")
+    resolved_canonical = (
+        _canonical("different person") if use_existing_mapping else matched_canonical
+    )
+    matched = Entity(
+        id=uuid.uuid4(),
+        library_id=LIB_ID,
+        ontology_version_id=ONTOLOGY_ID,
+        entity_type_id=PERSON_TYPE_ID,
+        canonical_name="existing person",
+        normalized_name=candidate.normalized_name,
+        canonical_entity_id=matched_canonical.id,
+        status="active",
+        source_type="manual",
+    )
+    candidate.matched_entity_id = matched.id
+    job = SimpleNamespace(
+        id=JOB_ID,
+        library_id=LIB_ID,
+        ontology_version_id=ONTOLOGY_ID,
+        status="processing",
+        current_stage="materializing",
+        counts={},
+        statistics={},
+        error_code=None,
+        error_message=None,
+        finished_at=None,
+    )
+    db = FakeDB(
+        results=[
+            _Result([candidate]),
+            _Result(),
+            _Result([evidence]),
+            _Result(),
+        ],
+        objects={(Entity, matched.id): matched},
+    )
+    rules = SimpleNamespace(
+        entity_types_by_key={"person": SimpleNamespace(id=PERSON_TYPE_ID)},
+        relation_types_by_key={},
+    )
+    policy = SimpleNamespace(
+        entity_materialization_threshold=0.85,
+        relation_draft_threshold=0.85,
+    )
+
+    with (
+        patch(
+            "app.services.graph_extraction_materializer._load_materialization_scope",
+            new=AsyncMock(return_value=(job, SimpleNamespace(id=LIB_ID), None, None, None)),
+        ),
+        patch(
+            "app.services.graph_extraction_materializer.load_ontology_rule_set_v1",
+            return_value=rules,
+        ),
+        patch(
+            "app.services.graph_extraction_materializer.load_confidence_policy_v1",
+            return_value=policy,
+        ),
+        patch(
+            "app.services.graph_extraction_materializer.resolve_canonical_entity",
+            new=AsyncMock(
+                return_value=_resolution(
+                    resolution_kind,
+                    resolved_canonical,
+                    reason_code=("weak_identity_evidence" if not use_existing_mapping else None),
+                )
+            ),
+        ) as resolve,
+        patch(
+            "app.services.graph_extraction_materializer.graph_entities.create_entity",
+            new=AsyncMock(),
+        ) as create_entity,
+    ):
+        result = asyncio.run(_materialize_job_transaction(db, job_id=JOB_ID))
+
+    assert result == GraphExtractionMaterializationResult(0, 0, 0, 0)
+    assert candidate.status == "pending_review"
+    assert candidate.review_reason == expected_reason
+    assert candidate.materialized_entity_id is None
+    assert matched.canonical_entity_id == matched_canonical.id
+    assert job.statistics["materialization"]["pending_entity_candidate_count"] == 1
+    assert resolve.await_args.args[1].existing_entity_id == (
+        matched.id if use_existing_mapping else None
+    )
+    create_entity.assert_not_awaited()
+
+
+def test_materializer_replay_keeps_existing_projection_without_a_new_resolution():
+    canonical = _canonical("person name")
+    entity = Entity(
+        id=uuid.uuid4(),
+        library_id=LIB_ID,
+        ontology_version_id=ONTOLOGY_ID,
+        entity_type_id=PERSON_TYPE_ID,
+        canonical_entity_id=canonical.id,
+        canonical_name="person name",
+        normalized_name="person name",
+        status="draft",
+        source_type="extracted",
+    )
+    candidate = _entity_candidate(key="person")
+    candidate.status = "materialized"
+    candidate.materialized_entity_id = entity.id
+    job = SimpleNamespace(
+        id=JOB_ID,
+        library_id=LIB_ID,
+        ontology_version_id=ONTOLOGY_ID,
+        status="processing",
+        current_stage="materializing",
+        counts={},
+        statistics={},
+        error_code=None,
+        error_message=None,
+        finished_at=None,
+    )
+    db = FakeDB(
+        results=[_Result([candidate]), _Result(), _Result(), _Result()],
+        objects={(Entity, entity.id): entity},
+    )
+    rules = SimpleNamespace(
+        entity_types_by_key={"person": SimpleNamespace(id=PERSON_TYPE_ID)},
+        relation_types_by_key={},
+    )
+    policy = SimpleNamespace(
+        entity_materialization_threshold=0.85,
+        relation_draft_threshold=0.85,
+    )
+
+    with (
+        patch(
+            "app.services.graph_extraction_materializer._load_materialization_scope",
+            new=AsyncMock(return_value=(job, SimpleNamespace(id=LIB_ID), None, None, None)),
+        ),
+        patch(
+            "app.services.graph_extraction_materializer.load_ontology_rule_set_v1",
+            return_value=rules,
+        ),
+        patch(
+            "app.services.graph_extraction_materializer.load_confidence_policy_v1",
+            return_value=policy,
+        ),
+        patch(
+            "app.services.graph_extraction_materializer.resolve_canonical_entity",
+            new=AsyncMock(),
+        ) as resolve,
+    ):
+        result = asyncio.run(_materialize_job_transaction(db, job_id=JOB_ID))
+
+    assert result == GraphExtractionMaterializationResult(0, 0, 0, 0)
+    assert candidate.materialized_entity_id == entity.id
+    assert entity.canonical_entity_id == canonical.id
+    resolve.assert_not_awaited()
+
+
+def test_entity_mention_materialization_keeps_two_document_evidence_rows_on_one_entity():
+    candidate = _entity_candidate(key="person")
+    entity = Entity(
+        id=uuid.uuid4(),
+        library_id=LIB_ID,
+        ontology_version_id=ONTOLOGY_ID,
+        entity_type_id=PERSON_TYPE_ID,
+        canonical_name=candidate.canonical_name,
+        normalized_name=candidate.normalized_name,
+        status="draft",
+        source_type="extracted",
+    )
+    first_evidence = _candidate_evidence(candidate.id)
+    second_evidence = _candidate_evidence(candidate.id)
+    second_evidence.resolved_document_id = uuid.uuid4()
+    second_evidence.resolved_document_revision_id = uuid.uuid4()
+    db = FakeDB(results=[_Result(), _Result()])
+    job = SimpleNamespace(id=JOB_ID)
+    mentions = [
+        SimpleNamespace(status="active", created_by_job_id=None, extraction_key=None),
+        SimpleNamespace(status="active", created_by_job_id=None, extraction_key=None),
+    ]
+
+    with patch(
+        "app.services.graph_extraction_materializer.graph_evidence.create_entity_mention",
+        new=AsyncMock(side_effect=mentions),
+    ) as create_mention:
+        first, first_created = asyncio.run(
+            _entity_mention_for_evidence(
+                db,
+                job=job,
+                library=SimpleNamespace(id=LIB_ID),
+                candidate=candidate,
+                entity=entity,
+                evidence=first_evidence,
+            )
+        )
+        second, second_created = asyncio.run(
+            _entity_mention_for_evidence(
+                db,
+                job=job,
+                library=SimpleNamespace(id=LIB_ID),
+                candidate=candidate,
+                entity=entity,
+                evidence=second_evidence,
+            )
+        )
+
+    assert (first, first_created) == (mentions[0], True)
+    assert (second, second_created) == (mentions[1], True)
+    assert create_mention.await_count == 2
+    assert {call.kwargs["entity_id"] for call in create_mention.await_args_list} == {entity.id}
+    assert {
+        call.kwargs["evidence_id"] for call in create_mention.await_args_list
+    } == {first_evidence.resolved_evidence_id, second_evidence.resolved_evidence_id}
 
 
 class _Transaction:
