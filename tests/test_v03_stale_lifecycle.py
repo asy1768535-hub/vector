@@ -236,6 +236,36 @@ def test_relation_remains_active_when_other_active_relation_evidence_survives_re
     assert result.stale_relations == 0
 
 
+def test_stale_relation_evidence_reconciles_its_bridged_fact_assertion(monkeypatch):
+    from app.services import graph_evidence
+
+    relation = _relation()
+    assertion_id = uuid.uuid4()
+    relation_evidence = _relation_evidence()
+    relation_evidence.fact_assertion_id = assertion_id
+    db = FakeDB(relation, relation_evidence)
+    calls = []
+
+    async def reconcile(db_arg, *, library_id, relation_evidence_rows):
+        calls.append((db_arg, library_id, list(relation_evidence_rows)))
+
+    monkeypatch.setattr(
+        "app.services.fact_lifecycle.reconcile_relation_evidence_lifecycle",
+        reconcile,
+    )
+
+    asyncio.run(
+        graph_evidence.mark_document_revision_graph_evidence_stale(
+            db,
+            _lib(),
+            document_revision_id=REVISION_ID,
+        )
+    )
+
+    assert calls == [(db, LIB_ID, [relation_evidence])]
+    assert relation_evidence.status == "stale"
+
+
 def test_document_delete_marks_graph_evidence_stale_without_deleting_entity():
     from app.services import graph_evidence
 

@@ -151,6 +151,7 @@ async def mark_document_revision_graph_evidence_stale(
     stale_mentions = _mark_rows_stale(mentions)
     affected_relation_ids = {row.relation_id for row in relation_evidence_rows}
     stale_relation_evidence = _mark_rows_stale(relation_evidence_rows)
+    await _reconcile_fact_lifecycle(db, library, relation_evidence_rows)
     stale_relations = await _mark_relations_without_active_evidence_stale(
         db,
         library,
@@ -188,6 +189,7 @@ async def mark_document_graph_evidence_stale(
     stale_mentions = _mark_rows_stale(mentions)
     affected_relation_ids = {row.relation_id for row in relation_evidence_rows}
     stale_relation_evidence = _mark_rows_stale(relation_evidence_rows)
+    await _reconcile_fact_lifecycle(db, library, relation_evidence_rows)
     stale_relations = await _mark_relations_without_active_evidence_stale(
         db,
         library,
@@ -230,6 +232,7 @@ async def mark_evidence_unit_graph_evidence_stale(
     stale_mentions = _mark_rows_stale(mentions)
     affected_relation_ids = {row.relation_id for row in relation_evidence_rows}
     stale_relation_evidence = _mark_rows_stale(relation_evidence_rows)
+    await _reconcile_fact_lifecycle(db, library, relation_evidence_rows)
     stale_relations = await _mark_relations_without_active_evidence_stale(
         db,
         library,
@@ -404,3 +407,19 @@ def _mark_rows_stale(rows: Iterable[Any]) -> int:
         row.status = GRAPH_BINDING_STATUS_STALE
         count += 1
     return count
+
+
+async def _reconcile_fact_lifecycle(
+    db: AsyncSession,
+    library: Library,
+    relation_evidence_rows: Iterable[RelationEvidence],
+) -> None:
+    if not any(row.fact_assertion_id is not None for row in relation_evidence_rows):
+        return
+    from app.services.fact_lifecycle import reconcile_relation_evidence_lifecycle
+
+    await reconcile_relation_evidence_lifecycle(
+        db,
+        library_id=library.id,
+        relation_evidence_rows=relation_evidence_rows,
+    )

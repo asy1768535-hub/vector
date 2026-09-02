@@ -16,7 +16,7 @@ from app.models.entity_resolution_decision import (
 )
 from app.models.graph_extraction_job import GraphExtractionJob
 from app.models.knowledge_relation import KnowledgeRelation
-from app.services.graph_relation_fact_resolution import GraphRelationFactResolutionError
+from app.services import graph_extraction_materializer
 from app.services.graph_extraction_materializer import (
     GraphExtractionMaterializationError,
     GraphExtractionMaterializationResult,
@@ -1264,6 +1264,7 @@ def test_materializer_finalizes_fact_resolution_after_relation_and_evidence_mate
     relation_evidence = SimpleNamespace(fact_assertion_id=None)
     preflight = SimpleNamespace(is_resolved=True)
     fact_materialization = SimpleNamespace()
+    decision = SimpleNamespace(library_id=LIB_ID, status="resolved", fact_assertion_id=uuid.uuid4())
     job = SimpleNamespace(
         id=JOB_ID,
         library_id=LIB_ID,
@@ -1325,8 +1326,12 @@ def test_materializer_finalizes_fact_resolution_after_relation_and_evidence_mate
         ),
         patch(
             "app.services.graph_extraction_materializer.finalize_resolved_graph_relation_fact",
-            new=AsyncMock(),
+            new=AsyncMock(return_value=SimpleNamespace(decision=decision)),
         ) as finalize_fact,
+        patch(
+            "app.services.graph_extraction_materializer.reconcile_resolved_fact_decision",
+            new=AsyncMock(),
+        ) as reconcile_fact,
     ):
         result = asyncio.run(_materialize_job_transaction(db, job_id=JOB_ID))
 
@@ -1357,9 +1362,10 @@ def test_materializer_finalizes_fact_resolution_after_relation_and_evidence_mate
         preflight=preflight,
         materialization=fact_materialization,
     )
+    reconcile_fact.assert_awaited_once_with(db, library_id=LIB_ID, decision=decision)
 
 
-def test_fact_resolution_failure_rolls_back_the_outer_materializer_transaction():
+def test_fact_lifecycle_failure_rolls_back_the_outer_materializer_transaction():
     job = SimpleNamespace(
         id=JOB_ID,
         status="processing",
@@ -1372,9 +1378,22 @@ def test_fact_resolution_failure_rolls_back_the_outer_materializer_transaction()
     failure_session = TransactionSession(job=job)
     factory = TransactionFactory([materialization_session, failure_session])
 
-    with patch(
-        "app.services.graph_extraction_materializer._materialize_job_transaction",
-        new=AsyncMock(side_effect=GraphRelationFactResolutionError("fact assertion write failed")),
+    async def materialize_with_lifecycle(db, *, job_id):
+        await graph_extraction_materializer.reconcile_resolved_fact_decision(
+            db,
+            library_id=LIB_ID,
+            decision=SimpleNamespace(),
+        )
+
+    with (
+        patch(
+            "app.services.graph_extraction_materializer._materialize_job_transaction",
+            new=materialize_with_lifecycle,
+        ),
+        patch(
+            "app.services.graph_extraction_materializer.reconcile_resolved_fact_decision",
+            new=AsyncMock(side_effect=RuntimeError("fact lifecycle reconciliation failed")),
+        ),
     ):
         with pytest.raises(GraphExtractionMaterializationError) as exc_info:
             asyncio.run(materialize_graph_extraction_job(factory, job_id=JOB_ID))

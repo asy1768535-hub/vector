@@ -46,6 +46,7 @@ from app.services.graph_relation_fact_resolution import (
     materialize_resolved_graph_relation_fact,
     preflight_graph_relation_candidate_fact,
 )
+from app.services.fact_lifecycle import reconcile_resolved_fact_decision
 
 
 class GraphExtractionMaterializationError(RuntimeError):
@@ -729,6 +730,7 @@ async def _materialize_job_transaction(
             source_entity=source,
             preflight=preflight,
         )
+        fact_resolution = None
         for evidence in relation_evidence_rows:
             row, evidence_created = await _relation_evidence_for_candidate(
                 db,
@@ -738,7 +740,7 @@ async def _materialize_job_transaction(
                 candidate=candidate,
                 evidence=evidence,
             )
-            await finalize_resolved_graph_relation_fact(
+            fact_resolution = await finalize_resolved_graph_relation_fact(
                 db,
                 library_id=library.id,
                 candidate=candidate,
@@ -748,6 +750,12 @@ async def _materialize_job_transaction(
                 materialization=fact_materialization,
             )
             relation_evidence_count += int(evidence_created)
+        if fact_resolution is not None:
+            await reconcile_resolved_fact_decision(
+                db,
+                library_id=library.id,
+                decision=fact_resolution.decision,
+            )
         relation_count += int(created)
         publishable_relation_evidence_count += len(relation_evidence_rows)
         candidate.materialized_relation_id = relation.id
