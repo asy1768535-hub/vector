@@ -121,11 +121,11 @@ P2 采用 **模型 C**，但只允许四个有限 temporal class，不建立通�
 | class | LogicalFact identity | object 是否进入 identity | valid/effective time | 不同时间值 |
 | --- | --- | --- | --- | --- |
 | `static_fact` | subject + stable predicate + normalized object | 是 | 仅 assertion 审计字段；不作为 identity | 同一 fact 的新 Assertion |
-| `value_fact` | subject + stable predicate + normalized literal/object | 是 | 仅 assertion 审计字段 | 同一 fact 的新 Assertion；不同 value 是不同 fact |
-| `state_slot`（默认） | subject + stable predicate + object + identity qualifiers | 是 | 仅 assertion；用于任期/状态重叠判断 | 同 object 为同一 fact；不同 object 为不同 fact |
+| `measurement_slot` | subject + stable predicate + identity-bearing target/scope | target/scope 是；measured value 否 | measured value/time 仅属于 Assertion | 同一 slot 的新 Assertion；不同 value 在同 scope/time 下形成 value conflict |
+| `state_fact`（默认） | subject + stable predicate + object + identity qualifiers | 是 | 仅 assertion；用于任期/状态重叠判断 | 同 object 为同一 fact；不同 object 为不同 fact |
 | `event_fact`（显式 opt-in） | subject + stable predicate + event/object key + derived temporal key | 是，event/object key 必须稳定 | 由 policy 派生 temporal_identity_key | 不同 temporal key 为新 fact；相同 key 为新 Assertion |
 
-`ceo_of` 使用 `state_slot`：2025 CEO 张三与 2026 CEO 李四是 **2 个
+`ceo_of` 使用 `state_fact`：2025 CEO 张三与 2026 CEO 李四是 **2 个
 LogicalFact + 2 个 FactAssertion**；任期不相交所以不 conflict。相同任期的不同
 CEO 仍是 2 个 LogicalFact，但属于同一 functional contradiction group。`valid_time`
 和 `effective_time` 原值始终存于 FactAssertion；`event_fact` 只把规范化后的派生 key
@@ -137,8 +137,7 @@ UTC/ISO-8601 规范。无法规范化时 fail closed 为 pending。
 ## E. Predicate identity 决策
 
 `RelationType.key` 只在 `(library, ontology_version)` 范围内有意义。P2 v1 引入
-一个逻辑上的、可治理的 **`StablePredicateIdentity` contract**（本轮只冻结契约，
-不建独立 registry 表）：
+一个可治理、可落库的 **`StablePredicateIdentity` contract**：
 
 ```text
 predicate_namespace       稳定命名空间/URI
@@ -152,9 +151,39 @@ source_mappings            明确列出 ontology_version + relation_type_id/key
 方向、适用范围和生效版本。未解决或 ambiguous 的 raw predicate 只能生成 pending
 resolution input，不能进入自动 Fact Resolution、publication 或 merge。
 
-P2 v1 **建立 StablePredicateIdentity**：LogicalFact 和 resolution decision 保存
-namespace/key/contract_version 快照；mapping 由 decision 审计，不从
-`RelationType.key` 猜测。`owns` 与 `holds_equity` 在没有显式 mapping 时保持不同
+P2 v1 **正式建立 StablePredicateIdentity**。P2.2 最小模型为：
+
+```text
+StablePredicateIdentity
+  id: UUID
+  library_id: UUID
+  namespace: bounded string
+  key: bounded string
+  contract_version: bounded string
+  temporal_class: static_fact | state_fact | measurement_slot | event_fact
+  identity_policy_version: bounded string
+  resolution_status: resolved | pending | ambiguous | rejected
+  created_at / updated_at
+```
+
+ontology projection 使用独立、可追加的 mapping（而不是在 RelationType 上覆盖一个
+nullable FK）：
+
+```text
+StablePredicateMapping
+  id: UUID
+  library_id: UUID
+  stable_predicate_identity_id: UUID
+  relation_type_id: UUID
+  mapping_status: active | superseded | rejected
+  created_at / superseded_at
+```
+
+独立 mapping 比 `RelationType.stable_predicate_identity_id` 多一个窄表，但能保留
+mapping 变更历史，且不改写已有 RelationType 语义。`library_id` 是自动 resolution
+scope，不重复引入 organization_id。1 个已有 RelationType 的历史 scaffold 最多创建
+1 个 StablePredicateIdentity，绝不按相同 key 跨 ontology 合并；后续显式 mapping/
+reconciliation 才能统一。`owns` 与 `holds_equity` 在没有 mapping 时保持不同
 projection/pending；有 mapping 且方向、端点均通过时才可共用 LogicalFact identity。
 
 ## E1. Literal object identity 契约
@@ -247,7 +276,7 @@ LogicalFact
   predicate_identity: {namespace, key, contract_version}
   object_identity: typed canonical entity / normalized literal / governed reference
   identity_policy_version: string
-  temporal_identity_key: string | null       # 仅 partitioned_time
+  temporal_identity_key: string | null       # 仅 event_fact
   qualifier_identity: bounded typed JSON     # 仅 identity_bearing subset
   identity_fingerprint: SHA-256
   status: active | conflicted | inactive
@@ -266,18 +295,24 @@ library_id
 + identity_policy_version
 ```
 
-ontology version、job、model、prompt、raw text、evidence refs 和 assertion modality
-不进入 LogicalFact identity。object 若无法稳定规范化，resolution 必须 pending。
+ontology version、job、model、prompt、raw text、evidence refs、assertion modality 和
+measurement_slot 的 asserted value 不进入 LogicalFact identity。measurement_slot 的
+target/scope 进入 `policy_selected_object_identity`；object/value 若无法稳定规范化，
+resolution 必须 pending。
 
 ## I. FactAssertion v1 候选模型
 
 ```text
 FactAssertion
   id: UUID
+  library_id: UUID
   logical_fact_id: UUID
   assertion_fingerprint: SHA-256
   subject/object snapshot: bounded typed audit snapshot
   predicate_identity_snapshot: namespace/key/version
+  asserted_object_kind: entity | literal | null
+  asserted_object_canonical_entity_id: UUID | null
+  asserted_value: bounded typed value | null  # required for measurement_slot
   polarity: affirmed | negated | unknown
   modality: planned | possible | expected | confirmed | completed | unknown
   qualifiers: bounded typed JSON             # assertion_bearing subset
@@ -300,6 +335,11 @@ FactAssertion 采用 append-only
 写入；生命周期变化使用受控 status/marker，不通过重写原始 assertion 内容来“修正”
 历史。若 predicate 或 object 尚未 resolved，不创建正式 FactAssertion，保留 pending
 resolution input 和原始 RawClaim。
+
+`static_fact`、`state_fact` 和 `event_fact` 的 object identity 已在 LogicalFact 中，
+Assertion 中的 asserted object 仅作为 bounded source snapshot，可为空。`measurement_slot`
+必须把实际测量值写入 `asserted_value`；不得把 20%/30% 只塞入普通 qualifier。其 target
+或 scope（例如公司 B）仍作为 identity-bearing object/scope 进入 LogicalFact。
 
 ## J. KnowledgeRelation / RelationEvidence bridge
 
@@ -328,6 +368,21 @@ P2 v1 的最终选择是 **RelationEvidence 增加 nullable `fact_assertion_id`�
 
 本桥接不改变 `Entity.id` / `KnowledgeRelation.id` 作为 publication/retrieval anchor，
 也不把 CanonicalEntity 直接暴露为现有 publication item。
+
+P2.2 的 FK 方向冻结为：
+
+```text
+StablePredicateIdentity 1 <- N StablePredicateMapping N -> 1 RelationType
+StablePredicateIdentity 1 <- N LogicalFact
+LogicalFact              1 <- N FactAssertion
+LogicalFact              1 <- N KnowledgeRelation   (nullable logical_fact_id)
+FactAssertion            1 <- N RelationEvidence   (nullable fact_assertion_id)
+KnowledgeRelation        1 <- N RelationEvidence   (existing relation_id owner)
+```
+
+`FactAssertion.knowledge_relation_id` 是 nullable 的 ontology projection provenance；
+一个 Assertion 只关联一个 KnowledgeRelation，只有未来出现一对多 projection 时才引入
+额外 bridge table。
 
 ## K. RawClaim / ClaimDecision bridge
 
