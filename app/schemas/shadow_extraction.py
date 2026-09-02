@@ -16,6 +16,7 @@ from app.schemas.shadow_raw_response import ShadowExtractionProvenanceV1, Shadow
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MAX_REF_KEY_LENGTH = 64
+_MAX_PROJECTION_CONTEXTS = 32
 
 
 class _ShadowExtractionModel(BaseModel):
@@ -43,6 +44,49 @@ class ShadowEvidenceContextV1(_ShadowExtractionModel):
         return cls(ref_key=ref_key, locator=locator)
 
 
+class ShadowProjectionContextV1(_ShadowExtractionModel):
+    """Opaque, evidence-scoped candidate reference exposed to the shadow provider."""
+
+    projection_ref: str = Field(min_length=1, max_length=_MAX_REF_KEY_LENGTH)
+    allowed_evidence_ref_keys: tuple[str, ...] = Field(min_length=1, max_length=16)
+
+    @field_validator("projection_ref", mode="before")
+    @classmethod
+    def normalize_projection_ref(cls, value: object) -> str:
+        if not isinstance(value, str):
+            raise ValueError("projection_ref must be a string")
+        value = value.strip()
+        if not value or len(value) > _MAX_REF_KEY_LENGTH or "\x00" in value:
+            raise ValueError("projection_ref must be non-empty and bounded")
+        return value
+
+    @field_validator("allowed_evidence_ref_keys", mode="before")
+    @classmethod
+    def normalize_allowed_evidence_ref_keys(cls, value: object) -> tuple[str, ...]:
+        if isinstance(value, (str, bytes)) or not isinstance(value, (list, tuple)):
+            raise ValueError("allowed_evidence_ref_keys must be a sequence")
+        normalized = tuple(
+            ShadowEvidenceContextV1.normalize_ref_key(item) for item in value
+        )
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("allowed_evidence_ref_keys must be unique")
+        return normalized
+
+
+class AnchoredShadowClaimV1(_ShadowExtractionModel):
+    """Shadow-only transport envelope; the anchor never enters RawClaim identity."""
+
+    projection_ref: str | None = Field(default=None, max_length=_MAX_REF_KEY_LENGTH)
+    claim: ShadowRawResponseV1
+
+    @field_validator("projection_ref", mode="before")
+    @classmethod
+    def normalize_optional_projection_ref(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        return ShadowProjectionContextV1.normalize_projection_ref(value)
+
+
 class ShadowExtractionLimitsV1(_ShadowExtractionModel):
     """Per-call bounds kept outside application Settings for M2C."""
 
@@ -57,6 +101,9 @@ class ShadowExtractionRequestV1(_ShadowExtractionModel):
 
     unit_text: str = Field(min_length=1, max_length=48_000)
     evidence_contexts: tuple[ShadowEvidenceContextV1, ...] = Field(min_length=1, max_length=16)
+    projection_contexts: tuple[ShadowProjectionContextV1, ...] = Field(
+        default_factory=tuple, max_length=_MAX_PROJECTION_CONTEXTS
+    )
     provenance: ShadowExtractionProvenanceV1
     limits: ShadowExtractionLimitsV1
     messages: tuple[dict[str, str], ...] = Field(min_length=2, max_length=2)
@@ -82,6 +129,18 @@ class ShadowExtractionRequestV1(_ShadowExtractionModel):
     @property
     def evidence_ref_keys(self) -> frozenset[str]:
         return frozenset(context.ref_key for context in self.evidence_contexts)
+
+    @model_validator(mode="after")
+    def validate_projection_contexts(self) -> ShadowExtractionRequestV1:
+        refs = [context.projection_ref for context in self.projection_contexts]
+        if len(refs) != len(set(refs)):
+            raise ValueError("projection refs must be unique")
+        if any(
+            not set(context.allowed_evidence_ref_keys).issubset(self.evidence_ref_keys)
+            for context in self.projection_contexts
+        ):
+            raise ValueError("projection context references undeclared evidence")
+        return self
 
 
 class ShadowProviderResponseV1(_ShadowExtractionModel):
@@ -167,7 +226,7 @@ ShadowRunStatusV1 = Literal["success", "skipped"]
 
 class ShadowExtractionResultV1(_ShadowExtractionModel):
     status: ShadowRunStatusV1
-    claims: tuple[ShadowRawResponseV1, ...] = Field(default_factory=tuple)
+    claims: tuple[AnchoredShadowClaimV1, ...] = Field(default_factory=tuple)
     telemetry: ShadowTelemetryV1
 
 

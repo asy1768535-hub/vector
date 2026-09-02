@@ -136,7 +136,7 @@ async def test_shadow_provider_receives_independent_messages_and_explicit_surfac
     monkeypatch.setattr(
         shadow_worker,
         "_build_request",
-        AsyncMock(return_value=(request, evidence, provenance)),
+        AsyncMock(return_value=(request, evidence, provenance, ())),
     )
     monkeypatch.setattr(shadow_worker, "run_shadow_extraction", AsyncMock(return_value=run_result))
     monkeypatch.setattr(shadow_worker, "_persist_claims", persist)
@@ -184,7 +184,7 @@ async def test_shadow_call_adapter_passes_request_messages_to_provider(monkeypat
     monkeypatch.setattr(
         shadow_worker,
         "_build_request",
-        AsyncMock(return_value=(request, {}, object())),
+        AsyncMock(return_value=(request, {}, object(), ())),
     )
     monkeypatch.setattr(shadow_worker, "run_shadow_extraction", fake_run)
     monkeypatch.setattr(
@@ -238,7 +238,7 @@ async def test_shadow_call_applies_output_budget_only_to_provider_clone(monkeypa
 
     monkeypatch.setattr(
         shadow_worker, "_build_request",
-        AsyncMock(return_value=(request, {}, object())),
+        AsyncMock(return_value=(request, {}, object(), ())),
     )
     monkeypatch.setattr(shadow_worker, "run_shadow_extraction", fake_run)
     monkeypatch.setattr(
@@ -262,7 +262,7 @@ async def test_dispatch_recheck_skips_when_current_library_is_disabled(monkeypat
     request = SimpleNamespace(messages=(), limits=SimpleNamespace(max_output_tokens=321))
     provider = SimpleNamespace(extract=AsyncMock())
     stats = AsyncMock()
-    build_request = AsyncMock(return_value=(request, {}, object()))
+    build_request = AsyncMock(return_value=(request, {}, object(), ()))
     monkeypatch.setattr(
         shadow_worker, "_build_request", build_request,
     )
@@ -293,7 +293,7 @@ async def test_dispatch_recheck_skips_when_current_library_is_disabled(monkeypat
 async def test_dispatch_missing_library_scope_skips_before_request_or_provider(monkeypatch):
     request = SimpleNamespace(messages=(), limits=SimpleNamespace(max_output_tokens=321))
     provider = SimpleNamespace(extract=AsyncMock())
-    build_request = AsyncMock(return_value=(request, {}, object()))
+    build_request = AsyncMock(return_value=(request, {}, object(), ()))
     stats = AsyncMock()
     monkeypatch.setattr(shadow_worker, "_build_request", build_request)
     monkeypatch.setattr(shadow_worker, "record_shadow_statistics", stats)
@@ -553,7 +553,9 @@ async def test_shadow_hook_runs_after_canonical_persist_and_cannot_change_result
 async def test_shadow_provider_failure_is_stable_and_does_not_raise(monkeypatch):
     request = SimpleNamespace(messages=())
     telemetry = SimpleNamespace(latency_ms=3, input_token_count=None, output_token_count=None)
-    monkeypatch.setattr(shadow_worker, "_build_request", AsyncMock(return_value=(request, {}, object())))
+    monkeypatch.setattr(
+        shadow_worker, "_build_request", AsyncMock(return_value=(request, {}, object(), ()))
+    )
     monkeypatch.setattr(
         shadow_worker,
         "run_shadow_extraction",
@@ -596,7 +598,7 @@ async def test_worker_provider_adapter_maps_stable_failure_tokens(monkeypatch, c
     monkeypatch.setattr(
         shadow_worker,
         "_build_request",
-        AsyncMock(return_value=(request, {}, object())),
+        AsyncMock(return_value=(request, {}, object(), ())),
     )
 
     provider = SimpleNamespace(
@@ -639,7 +641,7 @@ async def test_worker_provider_adapter_classifies_invalid_envelope_without_leak(
     monkeypatch.setattr(
         shadow_worker,
         "_build_request",
-        AsyncMock(return_value=(request, {}, object())),
+        AsyncMock(return_value=(request, {}, object(), ())),
     )
     provider = SimpleNamespace(
         extract=AsyncMock(
@@ -683,7 +685,7 @@ async def test_worker_provider_adapter_counts_retry_and_keeps_success_telemetry(
     monkeypatch.setattr(
         shadow_worker,
         "_build_request",
-        AsyncMock(return_value=(request, {}, object())),
+        AsyncMock(return_value=(request, {}, object(), ())),
     )
     response = ShadowProviderResponseV1(
         content='{"claims": []}',
@@ -783,7 +785,9 @@ async def test_shadow_statistics_persist_only_bounded_additive_telemetry():
 @pytest.mark.asyncio
 async def test_shadow_database_failure_is_stable_and_separate_from_canonical(monkeypatch):
     request = SimpleNamespace(messages=())
-    monkeypatch.setattr(shadow_worker, "_build_request", AsyncMock(return_value=(request, {}, object())))
+    monkeypatch.setattr(
+        shadow_worker, "_build_request", AsyncMock(return_value=(request, {}, object(), ()))
+    )
     monkeypatch.setattr(
         shadow_worker,
         "run_shadow_extraction",
@@ -958,7 +962,7 @@ async def test_decision_persistence_failure_keeps_shadow_success(monkeypatch):
     monkeypatch.setattr(
         shadow_worker,
         "_build_request",
-        AsyncMock(return_value=(request, {}, object())),
+        AsyncMock(return_value=(request, {}, object(), ())),
     )
     monkeypatch.setattr(shadow_worker, "run_shadow_extraction", AsyncMock(return_value=run_result))
     monkeypatch.setattr(

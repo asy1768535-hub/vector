@@ -13,12 +13,14 @@ from typing import Literal
 from pydantic import ValidationError
 
 from app.schemas.shadow_extraction import (
+    AnchoredShadowClaimV1,
     ParseCategoryV1,
     ProviderErrorCategoryV1,
     ShadowEvidenceContextV1,
     ShadowExtractionLimitsV1,
     ShadowExtractionRequestV1,
     ShadowExtractionResultV1,
+    ShadowProjectionContextV1,
     ShadowProviderResponseV1,
     ShadowTelemetryV1,
     ShadowValidationIssueV1,
@@ -28,7 +30,6 @@ from app.schemas.shadow_extraction import (
 from app.schemas.shadow_raw_response import (
     ShadowExtractionConfigV1,
     ShadowExtractionProvenanceV1,
-    ShadowRawResponseV1,
     resolve_shadow_extraction,
 )
 from app.services.token_budget import estimate_chat_request_tokens
@@ -93,13 +94,15 @@ or inverse mapping. Copy the predicate wording as it appears in the source after
 basic whitespace normalization. Preserve source and target mention order. Keep unknown
 direction as unknown and never swap endpoints. Use only declared evidence_ref_keys.
 Return exactly one JSON object with one claims array and no Markdown, prose, or extra keys.
-Each claim must have exactly this JSON shape and these JSON types:
-{"source_mention":{"local_id":"s1","surface":"exact source text","entity_type_hint":null,"evidence_ref":"c0"},"surface_raw_predicate":"exact predicate text","target_mention":{"local_id":"t1","surface":"exact target text","entity_type_hint":null,"evidence_ref":"c0"},"surface_direction":"source_to_target","negation":{"value":false,"evidence_ref":"c0"},"modality":{"value":null,"evidence_ref":null},"qualifiers":[],"valid_time":null,"effective_time":null,"evidence_ref_keys":["c0"]}
+Each claims entry must have exactly this JSON shape and these JSON types:
+{"projection_ref":"p0 or null","claim":{"source_mention":{"local_id":"s1","surface":"exact source text","entity_type_hint":null,"evidence_ref":"c0"},"surface_raw_predicate":"exact predicate text","target_mention":{"local_id":"t1","surface":"exact target text","entity_type_hint":null,"evidence_ref":"c0"},"surface_direction":"source_to_target","negation":{"value":false,"evidence_ref":"c0"},"modality":{"value":null,"evidence_ref":null},"qualifiers":[],"valid_time":null,"effective_time":null,"evidence_ref_keys":["c0"]}}
 surface_direction is exactly source_to_target, target_to_source, or unknown. A qualifier
 is {"key":"...","value":"...","evidence_ref":"c0"}. A time value is null or
 {"start":"ISO-8601 or null","end":"ISO-8601 or null","evidence_ref":"c0"}.
 Every non-null evidence_ref must be declared in evidence_ref_keys, and that array must
 contain exactly the evidence keys used by the claim. Do not copy the example wording.
+Set projection_ref only to an opaque value in projection_contexts whose allowed_evidence_ref_keys
+contain every evidence_ref_key used by the claim; otherwise set it to null.
 """
 
 
@@ -201,15 +204,22 @@ def build_shadow_extraction_request(
     *,
     unit_text: str,
     evidence_contexts: Sequence[ShadowEvidenceContextV1],
+    projection_contexts: Sequence[ShadowProjectionContextV1] = (),
     provenance: ShadowExtractionProvenanceV1,
     limits: ShadowExtractionLimitsV1 | None = None,
 ) -> ShadowExtractionRequestV1:
     limits = limits or ShadowExtractionLimitsV1()
     contexts = tuple(evidence_contexts)
+    projections = tuple(projection_contexts)
     if not contexts:
         raise ValueError("shadow request requires evidence contexts")
     if len({context.ref_key for context in contexts}) != len(contexts):
         raise ValueError("shadow evidence ref keys must be unique")
+    if len({context.projection_ref for context in projections}) != len(projections):
+        raise ValueError("shadow projection refs must be unique")
+    allowed_refs = {context.ref_key for context in contexts}
+    if any(not set(context.allowed_evidence_ref_keys).issubset(allowed_refs) for context in projections):
+        raise ValueError("shadow projection contexts must use declared evidence refs")
     if not isinstance(provenance, ShadowExtractionProvenanceV1):
         raise TypeError("provenance must be ShadowExtractionProvenanceV1")
     if not isinstance(unit_text, str) or not unit_text.strip() or "\x00" in unit_text:
@@ -221,6 +231,7 @@ def build_shadow_extraction_request(
             {"ref_key": context.ref_key, "locator": safe_locator_summary(context.locator)}
             for context in contexts
         ],
+        "projection_contexts": [context.model_dump(mode="json") for context in projections],
         "protocol": {"version": "raw_claim_v1", "prompt_version": SHADOW_PROMPT_VERSION},
     }
     messages = (
@@ -248,6 +259,7 @@ def build_shadow_extraction_request(
     return ShadowExtractionRequestV1(
         unit_text=unit_text,
         evidence_contexts=contexts,
+        projection_contexts=projections,
         provenance=provenance,
         limits=limits,
         messages=messages,
@@ -262,7 +274,7 @@ def parse_shadow_response(
     allowed_evidence_ref_keys: Sequence[str],
     max_claims: int = 32,
     finish_reason: str | None = None,
-) -> tuple[ShadowRawResponseV1, ...]:
+) -> tuple[AnchoredShadowClaimV1, ...]:
     if finish_reason and finish_reason.casefold() == "length":
         raise ShadowResponseParseError(
             "shadow provider response was truncated",
@@ -320,17 +332,17 @@ def parse_shadow_response(
             parse_category="bounds",
         )
     allowed = set(allowed_evidence_ref_keys)
-    claims: list[ShadowRawResponseV1] = []
+    claims: list[AnchoredShadowClaimV1] = []
     for claim_index, raw_claim in enumerate(raw_claims):
         try:
-            claim = ShadowRawResponseV1.model_validate(raw_claim)
+            claim = AnchoredShadowClaimV1.model_validate(raw_claim)
         except ValidationError as exc:
             raise ShadowResponseParseError(
                 "shadow response claim failed protocol validation",
                 parse_category=_validation_parse_category(exc),
                 validation_issues=_validation_issues(exc, claim_index=claim_index),
             ) from exc
-        if not set(claim.evidence_ref_keys).issubset(allowed):
+        if not set(claim.claim.evidence_ref_keys).issubset(allowed):
             raise ShadowResponseParseError(
                 "shadow response contains an undeclared evidence key",
                 parse_category="evidence_reference",

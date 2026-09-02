@@ -25,6 +25,10 @@ from app.models.graph_extraction_job import GraphExtractionJob
 from app.models.graph_extraction_unit import GraphExtractionUnit
 from app.models.raw_claim import GraphRawClaim, GraphRawClaimOccurrence
 from app.schemas.raw_claim import RawClaimV1, stable_evidence_identity
+from app.services.raw_claim_projection_binding import (
+    RawClaimProjectionAnchor,
+    create_or_get_raw_claim_projection_binding,
+)
 
 
 _SENSITIVE_KEYS = frozenset(
@@ -60,6 +64,7 @@ class RawClaimWriteResult:
     occurrence: GraphRawClaimOccurrence
     claim_created: bool
     occurrence_created: bool
+    projection_binding: Any | None = None
 
 
 def _canonical_json(value: Any) -> str:
@@ -360,6 +365,8 @@ def _assert_occurrence_matches(row: GraphRawClaimOccurrence, claim: RawClaimV1, 
 async def create_or_get_raw_claim(
     db: AsyncSession,
     payload: RawClaimV1,
+    *,
+    projection_anchor: RawClaimProjectionAnchor | None = None,
 ) -> RawClaimWriteResult:
     """Atomically insert or retrieve one core and one immutable occurrence."""
 
@@ -519,7 +526,22 @@ async def create_or_get_raw_claim(
                 _assert_occurrence_matches(existing_occurrence, claim, core.id)
                 occurrence = existing_occurrence
                 occurrence_created = False
-    return RawClaimWriteResult(core, occurrence, claim_created, occurrence_created)
+    projection_binding = None
+    if projection_anchor is not None:
+        projection_binding = await create_or_get_raw_claim_projection_binding(
+            db,
+            claim=core,
+            occurrence=occurrence,
+            source_claim=claim,
+            anchor=projection_anchor,
+        )
+    return RawClaimWriteResult(
+        core,
+        occurrence,
+        claim_created,
+        occurrence_created,
+        projection_binding,
+    )
 
 
 async def get_raw_claim(

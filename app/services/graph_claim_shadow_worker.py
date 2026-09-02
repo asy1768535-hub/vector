@@ -59,6 +59,11 @@ from app.services.raw_claim_persistence import (
     RawClaimScopeError,
     create_or_get_raw_claim,
 )
+from app.services.raw_claim_projection_binding import (
+    RawClaimProjectionAnchor,
+    load_shadow_projection_anchors,
+    projection_anchor_for_shadow_claim,
+)
 from app.services.raw_claim_shadow_builder import build_raw_claim_from_shadow
 from app.services.shadow_rollout import resolve_library_shadow_extraction
 from app.services.shadow_extraction_provider import (
@@ -378,7 +383,12 @@ async def _build_request(
     session_factory,
     *,
     prepared: Any,
-) -> tuple[Any, dict[str, EvidenceReferenceV1], ShadowExtractionProvenanceV1]:
+) -> tuple[
+    Any,
+    dict[str, EvidenceReferenceV1],
+    ShadowExtractionProvenanceV1,
+    tuple[RawClaimProjectionAnchor, ...],
+]:
     async with session_factory() as db:
         snapshot = await db.get(ExtractionContextSnapshot, prepared.context_snapshot_id)
         unit = await db.get(GraphExtractionUnit, prepared.unit_id)
@@ -425,21 +435,35 @@ async def _build_request(
             ontology_snapshot_hash=None,
         )
         limits = _shadow_limits_from_job(job)
+        projection_anchors = await load_shadow_projection_anchors(
+            db,
+            job=job,
+            occurrence=unit,
+            evidence_by_ref=references,
+        )
         request = build_shadow_extraction_request(
             unit_text=snapshot.context_text or "",
             evidence_contexts=contexts,
+            projection_contexts=tuple(anchor.context() for anchor in projection_anchors),
             provenance=provenance,
             limits=limits,
         )
-        return request, references, provenance
+        return request, references, provenance, projection_anchors
 
 
-async def _persist_claims(session_factory, claims: tuple[Any, ...]) -> ShadowRunSummary:
+async def _persist_claims(
+    session_factory,
+    claims: tuple[tuple[Any, RawClaimProjectionAnchor | None], ...],
+) -> ShadowRunSummary:
     core_created = core_reused = occurrence_created = occurrence_reused = 0
     async with session_factory() as db:
         async with db.begin():
-            for claim in claims:
-                result = await create_or_get_raw_claim(db, claim)
+            for claim, projection_anchor in claims:
+                result = await create_or_get_raw_claim(
+                    db,
+                    claim,
+                    projection_anchor=projection_anchor,
+                )
                 core_created += int(result.claim_created)
                 core_reused += int(not result.claim_created)
                 occurrence_created += int(result.occurrence_created)
@@ -712,7 +736,7 @@ async def run_shadow_after_canonical(
             raise ShadowAdapterError("shadow_library_scope_missing_at_dispatch")
         if not await _shadow_enabled_at_dispatch(session_factory, prepared):
             raise ShadowAdapterError("shadow_disabled_at_dispatch")
-        request, evidence, provenance = await _build_request(
+        request, evidence, provenance, projection_anchors = await _build_request(
             session_factory,
             prepared=prepared,
         )
@@ -786,16 +810,23 @@ async def run_shadow_after_canonical(
             config=ShadowExtractionConfigV1(global_enabled=True, library_policy="enabled"),
             timeout_seconds=timeout_seconds,
         )
-        claims = tuple(
-            build_raw_claim_from_shadow(
-                response,
-                verified_evidence=evidence,
-                provenance=provenance,
-                id_namespace=SHADOW_ID_NAMESPACE,
+        claims_with_anchors = tuple(
+            (
+                build_raw_claim_from_shadow(
+                    anchored_claim.claim,
+                    verified_evidence=evidence,
+                    provenance=provenance,
+                    id_namespace=SHADOW_ID_NAMESPACE,
+                ),
+                projection_anchor_for_shadow_claim(
+                    anchored_claim,
+                    anchors=projection_anchors,
+                ),
             )
-            for response in result.claims
+            for anchored_claim in result.claims
         )
-        summary = await _persist_claims(session_factory, claims)
+        summary = await _persist_claims(session_factory, claims_with_anchors)
+        claims = tuple(claim for claim, _anchor in claims_with_anchors)
         decision_summary = await _persist_decisions(session_factory, claims)
         summary = replace(
             summary,

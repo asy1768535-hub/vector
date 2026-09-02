@@ -90,6 +90,7 @@ from app.models.relation_evidence import RelationEvidence
 from app.models.relation_type import RelationType
 from app.models.relation_type_constraint import RelationTypeConstraint
 from app.models.raw_claim import GraphRawClaim, GraphRawClaimOccurrence
+from app.models.raw_claim_projection_binding import GraphRawClaimProjectionBinding
 from app.models.claim_decision import GraphClaimDecision
 from app.models.schema_lifecycle_action import SchemaLifecycleAction
 from app.models.schema_discovery_run import SchemaDiscoveryRun
@@ -182,6 +183,7 @@ __all__ = [
     "RelationTypeConstraint",
     "GraphRawClaim",
     "GraphRawClaimOccurrence",
+    "GraphRawClaimProjectionBinding",
     "GraphClaimDecision",
     "SchemaLifecycleAction",
     "ServiceHeartbeat",

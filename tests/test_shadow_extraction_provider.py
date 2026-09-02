@@ -98,9 +98,17 @@ def _claim(*, predicate: str = "supports", direction: str = "source_to_target", 
     }
 
 
+def _anchored(claim: dict, *, projection_ref: str | None = None) -> dict:
+    return {"projection_ref": projection_ref, "claim": claim}
+
+
 def _response(*claims: dict, finish_reason: str = "stop") -> ShadowProviderResponseV1:
     return ShadowProviderResponseV1(
-        content=json.dumps({"claims": list(claims)}, ensure_ascii=False, separators=(",", ":")),
+        content=json.dumps(
+            {"claims": [_anchored(claim) for claim in claims]},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
         finish_reason=finish_reason,
         input_token_count=101,
         output_token_count=23,
@@ -149,11 +157,11 @@ async def test_valid_multiple_claims_preserve_surface_fields_and_telemetry_is_ha
     )
 
     assert result.status == "success"
-    assert [claim.surface_raw_predicate for claim in result.claims] == [
+    assert [claim.claim.surface_raw_predicate for claim in result.claims] == [
         "is alleged to support",
         "unclassified surface predicate",
     ]
-    assert result.claims[1].surface_direction == "unknown"
+    assert result.claims[1].claim.surface_direction == "unknown"
     telemetry = result.telemetry.model_dump(mode="json")
     assert len(telemetry["request_hash"]) == 64
     assert len(telemetry["response_hash"]) == 64
@@ -207,21 +215,25 @@ def test_parser_rejects_canonical_key_inside_claim_and_never_uses_it_as_predicat
     claim = _claim(predicate="surface wording")
     claim["relation_type_key"] = "supports"
     with pytest.raises(ShadowResponseParseError, match="validation"):
-        parse_shadow_response(json.dumps({"claims": [claim]}), allowed_evidence_ref_keys=["e1"])
+        parse_shadow_response(
+            json.dumps({"claims": [_anchored(claim)]}), allowed_evidence_ref_keys=["e1"]
+        )
 
 
 def test_parser_rejects_unknown_evidence_key_and_preserves_unknown_predicate():
     with pytest.raises(ShadowResponseParseError, match="undeclared"):
         parse_shadow_response(
-            json.dumps({"claims": [_claim(evidence="e2", predicate="surface only")]}),
+            json.dumps({"claims": [_anchored(_claim(evidence="e2", predicate="surface only"))]}),
             allowed_evidence_ref_keys=["e1"],
         )
     parsed = parse_shadow_response(
-        json.dumps({"claims": [_claim(predicate="never canonicalized", direction="unknown")]}),
+        json.dumps(
+            {"claims": [_anchored(_claim(predicate="never canonicalized", direction="unknown"))]}
+        ),
         allowed_evidence_ref_keys=["e1"],
     )
-    assert parsed[0].surface_raw_predicate == "never canonicalized"
-    assert parsed[0].surface_direction == "unknown"
+    assert parsed[0].claim.surface_raw_predicate == "never canonicalized"
+    assert parsed[0].claim.surface_direction == "unknown"
 
 
 @pytest.mark.parametrize("content", ["{\"claims\": [", json.dumps({"claims": []}) + " prose"])
@@ -248,8 +260,10 @@ def test_parser_exposes_only_stable_parse_category(case, category):
         "markdown": "```json\n{\"claims\": []}\n```",
         "missing": '{"payload": []}',
         "extra": '{"claims": [], "extra": true}',
-        "type": json.dumps({"claims": [{**_claim(), "surface_direction": 1}]}),
-        "evidence": json.dumps({"claims": [_claim(evidence="e2")]}),
+        "type": json.dumps(
+            {"claims": [_anchored({**_claim(), "surface_direction": 1})]}
+        ),
+        "evidence": json.dumps({"claims": [_anchored(_claim(evidence="e2"))]}),
         "oversize": "x" * (128 * 1024 + 1),
     }[case]
     with pytest.raises(ShadowResponseParseError) as error:
@@ -269,16 +283,16 @@ def test_parser_exposes_only_bounded_pydantic_paths_types_and_counts():
 
     with pytest.raises(ShadowResponseParseError) as error:
         parse_shadow_response(
-            json.dumps({"claims": [claim]}),
+            json.dumps({"claims": [_anchored(claim)]}),
             allowed_evidence_ref_keys=["e1"],
         )
 
     assert error.value.parse_category == "schema_type"
     assert [(issue.path, issue.error_type, issue.count) for issue in error.value.validation_issues] == [
-        ("claims.0.modality", "model_type", 1),
-        ("claims.0.negation", "model_type", 1),
-        ("claims.0.source_mention", "model_type", 1),
-        ("claims.0.target_mention", "model_type", 1),
+        ("claims.0.claim.modality", "model_type", 1),
+        ("claims.0.claim.negation", "model_type", 1),
+        ("claims.0.claim.source_mention", "model_type", 1),
+        ("claims.0.claim.target_mention", "model_type", 1),
     ]
     serialized = json.dumps(
         [issue.model_dump(mode="json") for issue in error.value.validation_issues]
@@ -297,10 +311,12 @@ def test_parser_rejects_truncation_size_depth_nodes_and_claim_count():
     with pytest.raises(ShadowResponseParseError, match="depth"):
         parse_shadow_response(json.dumps(deep), allowed_evidence_ref_keys=["e1"])
     with pytest.raises(ShadowResponseParseError, match="node"):
-        parse_shadow_response(json.dumps({"claims": [None] * 2050}), allowed_evidence_ref_keys=["e1"])
+        parse_shadow_response(
+            json.dumps({"claims": [None] * 2050}), allowed_evidence_ref_keys=["e1"]
+        )
     with pytest.raises(ShadowResponseParseError, match="claim count"):
         parse_shadow_response(
-            json.dumps({"claims": [_claim() for _ in range(33)]}),
+            json.dumps({"claims": [_anchored(_claim()) for _ in range(33)]}),
             allowed_evidence_ref_keys=["e1"],
             max_claims=32,
         )
@@ -372,7 +388,7 @@ async def test_runner_keeps_schema_validation_diagnostics_bounded_and_redacted()
 
     async def provider(_request):
         return ShadowProviderResponseV1(
-            content=json.dumps({"claims": [invalid]}),
+            content=json.dumps({"claims": [_anchored(invalid)]}),
             finish_reason="stop",
             input_token_count=404,
             output_token_count=971,
@@ -389,7 +405,7 @@ async def test_runner_keeps_schema_validation_diagnostics_bounded_and_redacted()
     telemetry = error.value.telemetry
     assert telemetry.parse_category == "schema_type"
     assert telemetry.validation_error_count == 1
-    assert telemetry.validation_issues[0].path == "claims.0.source_mention"
+    assert telemetry.validation_issues[0].path == "claims.0.claim.source_mention"
     assert telemetry.validation_issues[0].error_type == "model_type"
     assert "Sensitive Asset Name" not in json.dumps(telemetry.model_dump(mode="json"))
 
