@@ -190,13 +190,15 @@ def _patch_core(
     candidate,
     ontology=None,
     capture=None,
+    library=None,
 ):
     db = FakeDB(objects={(OntologyVersion, ONTOLOGY_ID): ontology or _ontology()})
+    library = library or _library()
 
     async def lock_scope(_db, publication_id):
         assert _db is db
         assert publication_id == publication.id
-        return _library(), publication
+        return library, publication
 
     async def locked_items(_db, current):
         assert _db is db
@@ -211,6 +213,7 @@ def _patch_core(
 
     async def build_snapshot(*args, **kwargs):
         if capture is not None:
+            capture["args"] = args
             capture.update(kwargs)
         return candidate
 
@@ -434,6 +437,46 @@ def test_recheck_uses_frozen_policy_and_ignores_planner_item_limit(monkeypatch):
     assert capture["enforce_item_limit"] is False
     assert result.status == "active"
     assert result.degraded_item_count == 0
+
+
+def test_entity_only_publication_reconciles_against_its_bound_ontology_after_current_switch(
+    monkeypatch,
+):
+    bound_ontology_id = uuid.uuid4()
+    new_current_ontology_id = uuid.uuid4()
+    item = _entity_item()
+    item.ontology_version_id = bound_ontology_id
+    publication = _publication([item])
+    publication.ontology_version_id = bound_ontology_id
+    bound_ontology = _ontology()
+    bound_ontology.id = bound_ontology_id
+    library = _library()
+    library.current_ontology_version_id = new_current_ontology_id
+    candidate_item = _entity_item(item_hash=item.item_hash)
+    candidate_item.ontology_version_id = bound_ontology_id
+    capture = {}
+    db = _patch_core(
+        monkeypatch,
+        publication=publication,
+        items=[item],
+        entity_state={ENTITY_ID: "active"},
+        relation_state={},
+        candidate=_snapshot([candidate_item]),
+        ontology=bound_ontology,
+        capture=capture,
+        library=library,
+    )
+    db.objects = {(OntologyVersion, bound_ontology_id): bound_ontology}
+
+    result = asyncio.run(reconcile.reconcile_current_publication(db, publication.id))
+
+    assert result.status == "active"
+    assert publication.relation_count == 0
+    assert item.status == "active"
+    assert publication.ontology_version_id == bound_ontology_id
+    assert item.ontology_version_id == bound_ontology_id
+    assert library.current_ontology_version_id == new_current_ontology_id
+    assert capture["args"][2] is bound_ontology
 
 
 @pytest.mark.parametrize(

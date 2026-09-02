@@ -259,6 +259,10 @@ def test_merge_is_same_scope_type_and_preserves_rows_until_activation(monkeypatc
     entity_type_id = uuid.uuid4()
     survivor = _entity(library, entity_type_id=entity_type_id, name="Acme")
     loser = _entity(library, entity_type_id=entity_type_id, name="Acme Ltd")
+    survivor_canonical_id = uuid.uuid4()
+    loser_canonical_id = uuid.uuid4()
+    survivor.canonical_entity_id = survivor_canonical_id
+    loser.canonical_entity_id = loser_canonical_id
     loser.ontology_version_id = survivor.ontology_version_id
     relation = _relation(library, loser, survivor)
     alias = EntityAlias(
@@ -297,6 +301,8 @@ def test_merge_is_same_scope_type_and_preserves_rows_until_activation(monkeypatc
     )
     assert survivor.status == "active" and loser.status == "active"
     assert relation.source_entity_id == loser.id and alias.entity_id == loser.id
+    assert survivor.canonical_entity_id == survivor_canonical_id
+    assert loser.canonical_entity_id == loser_canonical_id
     assert [(item.item_kind, item.effect_kind) for item in result.items] == [
         ("entity", "retain"),
         ("entity", "disable"),

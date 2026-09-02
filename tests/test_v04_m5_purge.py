@@ -66,6 +66,9 @@ def test_immediate_document_purge_cancels_first_and_clears_every_payload_class()
     assert "update graph_extraction_units" in str(db.statements[2]).lower()
     assert "update graph_extraction_jobs" in str(db.statements[3]).lower()
     sql = "\n".join(str(statement).lower() for statement in db.statements[4:])
+    assert "canonical_entities" not in sql
+    assert "entity_resolution_decisions" not in sql
+    assert "delete from" not in sql
     for table in (
         "extraction_context_snapshots",
         "extraction_raw_output_attempts",

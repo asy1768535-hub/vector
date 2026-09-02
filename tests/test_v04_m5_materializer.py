@@ -725,6 +725,14 @@ def test_materializer_replay_keeps_existing_projection_without_a_new_resolution(
             "app.services.graph_extraction_materializer.resolve_canonical_entity",
             new=AsyncMock(),
         ) as resolve,
+        patch(
+            "app.services.graph_extraction_materializer.graph_entities.create_entity",
+            new=AsyncMock(),
+        ) as create_entity,
+        patch(
+            "app.services.graph_extraction_materializer.graph_evidence.create_entity_mention",
+            new=AsyncMock(),
+        ) as create_mention,
     ):
         result = asyncio.run(_materialize_job_transaction(db, job_id=JOB_ID))
 
@@ -732,6 +740,8 @@ def test_materializer_replay_keeps_existing_projection_without_a_new_resolution(
     assert candidate.materialized_entity_id == entity.id
     assert entity.canonical_entity_id == canonical.id
     resolve.assert_not_awaited()
+    create_entity.assert_not_awaited()
+    create_mention.assert_not_awaited()
 
 
 def test_entity_mention_materialization_keeps_two_document_evidence_rows_on_one_entity():
@@ -831,6 +841,23 @@ class TransactionSession:
         self.flush_count += 1
 
 
+class MaterializationTransactionSession(FakeDB):
+    def __init__(self, *, results=(), objects=None, job=None):
+        super().__init__(results=results, objects=objects)
+        self.job = job
+        self.committed = False
+        self.rolled_back = False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+    def begin(self):
+        return _Transaction(self)
+
+
 class TransactionFactory:
     def __init__(self, sessions):
         self.sessions = list(sessions)
@@ -842,7 +869,7 @@ class TransactionFactory:
         return session
 
 
-def test_materialization_failure_rolls_back_all_formal_writes_then_marks_job_failed():
+def test_entity_mention_write_failure_rolls_back_all_formal_writes_then_marks_job_failed():
     job = SimpleNamespace(
         id=JOB_ID,
         status="processing",
@@ -857,7 +884,7 @@ def test_materialization_failure_rolls_back_all_formal_writes_then_marks_job_fai
 
     with patch(
         "app.services.graph_extraction_materializer._materialize_job_transaction",
-        new=AsyncMock(side_effect=RuntimeError("formal write failed")),
+        new=AsyncMock(side_effect=RuntimeError("entity mention write failed")),
     ):
         with pytest.raises(GraphExtractionMaterializationError) as exc_info:
             asyncio.run(
@@ -874,6 +901,92 @@ def test_materialization_failure_rolls_back_all_formal_writes_then_marks_job_fai
     assert job.status == "failed"
     assert job.error_code == "materialization_failed"
     assert job.error_message is None
+
+
+def test_entity_mention_write_failure_rolls_back_the_actual_materialization_transaction():
+    candidate = _entity_candidate(key="person")
+    evidence = _candidate_evidence(candidate.id)
+    canonical = _canonical(candidate.canonical_name)
+    entity = Entity(
+        id=uuid.uuid4(),
+        library_id=LIB_ID,
+        ontology_version_id=ONTOLOGY_ID,
+        entity_type_id=PERSON_TYPE_ID,
+        canonical_name=candidate.canonical_name,
+        normalized_name=candidate.normalized_name,
+        status="draft",
+        source_type="extracted",
+    )
+    job = SimpleNamespace(
+        id=JOB_ID,
+        library_id=LIB_ID,
+        ontology_version_id=ONTOLOGY_ID,
+        status="processing",
+        current_stage="materializing",
+        counts={},
+        statistics={},
+        error_code=None,
+        error_message=None,
+        finished_at=None,
+    )
+    materialization_session = MaterializationTransactionSession(
+        results=[
+            _Result([candidate]),
+            _Result(),
+            _Result([evidence]),
+            _Result(),
+            _Result(),
+            _Result(),
+        ],
+        job=job,
+    )
+    failure_session = TransactionSession(job=job)
+    factory = TransactionFactory([materialization_session, failure_session])
+    rules = SimpleNamespace(
+        entity_types_by_key={"person": SimpleNamespace(id=PERSON_TYPE_ID)},
+        relation_types_by_key={},
+    )
+    policy = SimpleNamespace(
+        entity_materialization_threshold=0.85,
+        relation_draft_threshold=0.85,
+    )
+
+    with (
+        patch(
+            "app.services.graph_extraction_materializer._load_materialization_scope",
+            new=AsyncMock(return_value=(job, SimpleNamespace(id=LIB_ID), None, None, None)),
+        ),
+        patch(
+            "app.services.graph_extraction_materializer.load_ontology_rule_set_v1",
+            return_value=rules,
+        ),
+        patch(
+            "app.services.graph_extraction_materializer.load_confidence_policy_v1",
+            return_value=policy,
+        ),
+        patch(
+            "app.services.graph_extraction_materializer.resolve_canonical_entity",
+            new=AsyncMock(return_value=_resolution(ENTITY_RESOLUTION_CREATE_NEW, canonical)),
+        ),
+        patch(
+            "app.services.graph_extraction_materializer.graph_entities.create_entity",
+            new=AsyncMock(return_value=entity),
+        ),
+        patch(
+            "app.services.graph_extraction_materializer.graph_evidence.create_entity_mention",
+            new=AsyncMock(side_effect=RuntimeError("entity mention write failed")),
+        ) as create_mention,
+    ):
+        with pytest.raises(GraphExtractionMaterializationError) as exc_info:
+            asyncio.run(materialize_graph_extraction_job(factory, job_id=JOB_ID))
+
+    assert exc_info.value.code == "materialization_failed"
+    create_mention.assert_awaited_once()
+    assert materialization_session.rolled_back is True
+    assert materialization_session.committed is False
+    assert candidate.status == "validated"
+    assert candidate.materialized_entity_id is None
+    assert job.status == "failed"
 
 
 def test_not_materializable_does_not_mark_job_failed():

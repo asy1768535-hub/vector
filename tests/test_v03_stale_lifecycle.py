@@ -5,6 +5,7 @@ import operator
 import uuid
 from types import SimpleNamespace
 
+from app.models.canonical_entity import CanonicalEntity
 from app.models.entity import Entity
 from app.models.entity_mention import EntityMention
 from app.models.evidence_unit import EvidenceUnit
@@ -80,12 +81,28 @@ def _lib(library_id: uuid.UUID = LIB_ID):
     return SimpleNamespace(id=library_id, qdrant_collection="collection")
 
 
-def _entity(*, status: str = "active") -> Entity:
+def _canonical() -> CanonicalEntity:
+    return CanonicalEntity(
+        id=uuid.uuid4(),
+        library_id=LIB_ID,
+        canonical_name="Alice",
+        normalized_name="alice",
+        status="active",
+    )
+
+
+def _entity(
+    *,
+    status: str = "active",
+    entity_id: uuid.UUID = ENTITY_ID,
+    canonical_entity_id: uuid.UUID | None = None,
+) -> Entity:
     return Entity(
-        id=ENTITY_ID,
+        id=entity_id,
         library_id=LIB_ID,
         ontology_version_id=ONTOLOGY_ID,
         entity_type_id=ENTITY_TYPE_ID,
+        canonical_entity_id=canonical_entity_id,
         canonical_name="Alice",
         normalized_name="alice",
         status=status,
@@ -169,11 +186,12 @@ def _relation_evidence(
 def test_document_revision_replacement_marks_old_revision_graph_evidence_stale_and_relation_if_no_active_evidence():
     from app.services import graph_evidence
 
-    entity = _entity()
+    canonical = _canonical()
+    entity = _entity(canonical_entity_id=canonical.id)
     mention = _mention()
     relation = _relation()
     relation_evidence = _relation_evidence()
-    db = FakeDB(entity, mention, relation, relation_evidence)
+    db = FakeDB(canonical, entity, mention, relation, relation_evidence)
 
     result = asyncio.run(
         graph_evidence.mark_document_revision_graph_evidence_stale(
@@ -187,6 +205,8 @@ def test_document_revision_replacement_marks_old_revision_graph_evidence_stale_a
     assert relation_evidence.status == "stale"
     assert relation.status == "stale"
     assert entity.status == "active"
+    assert entity.canonical_entity_id == canonical.id
+    assert canonical.status == "active"
     assert result.stale_entity_mentions == 1
     assert result.stale_relation_evidence == 1
     assert result.stale_relations == 1
@@ -219,12 +239,13 @@ def test_relation_remains_active_when_other_active_relation_evidence_survives_re
 def test_document_delete_marks_graph_evidence_stale_without_deleting_entity():
     from app.services import graph_evidence
 
-    entity = _entity()
+    canonical = _canonical()
+    entity = _entity(canonical_entity_id=canonical.id)
     mention = _mention(document_id=DOC_ID)
     other_doc_mention = _mention(document_id=OTHER_DOC_ID, revision_id=OTHER_REVISION_ID)
     relation = _relation()
     relation_evidence = _relation_evidence(document_id=DOC_ID)
-    db = FakeDB(entity, mention, other_doc_mention, relation, relation_evidence)
+    db = FakeDB(canonical, entity, mention, other_doc_mention, relation, relation_evidence)
 
     result = asyncio.run(
         graph_evidence.mark_document_graph_evidence_stale(
@@ -239,9 +260,79 @@ def test_document_delete_marks_graph_evidence_stale_without_deleting_entity():
     assert relation_evidence.status == "stale"
     assert relation.status == "stale"
     assert entity.status == "active"
+    assert entity.canonical_entity_id == canonical.id
+    assert canonical.status == "active"
     assert result.stale_entity_mentions == 1
     assert result.stale_relation_evidence == 1
     assert result.stale_relations == 1
+
+
+def test_document_delete_isolates_stale_projection_evidence_and_keeps_other_projection_active():
+    from app.services import graph_evidence
+
+    canonical = _canonical()
+    stale_projection = _entity(canonical_entity_id=canonical.id)
+    active_projection = _entity(
+        entity_id=uuid.uuid4(),
+        canonical_entity_id=canonical.id,
+    )
+    active_projection.ontology_version_id = uuid.uuid4()
+    stale_mention = _mention(document_id=DOC_ID)
+    active_mention = EntityMention(
+        id=uuid.uuid4(),
+        library_id=LIB_ID,
+        entity_id=active_projection.id,
+        evidence_id=OTHER_EVIDENCE_ID,
+        document_id=OTHER_DOC_ID,
+        document_revision_id=OTHER_REVISION_ID,
+        mention_text="Alice",
+        source_type="manual",
+        status="active",
+    )
+    db = FakeDB(
+        canonical,
+        stale_projection,
+        active_projection,
+        stale_mention,
+        active_mention,
+    )
+
+    result = asyncio.run(
+        graph_evidence.mark_document_graph_evidence_stale(
+            db,
+            _lib(),
+            document_id=DOC_ID,
+        )
+    )
+
+    assert result.stale_entity_mentions == 1
+    assert stale_mention.status == "stale"
+    assert active_mention.status == "active"
+    assert stale_projection.status == "active"
+    assert active_projection.status == "active"
+    assert stale_projection.canonical_entity_id == canonical.id
+    assert active_projection.canonical_entity_id == canonical.id
+    assert canonical.status == "active"
+
+
+def test_document_delete_handles_legacy_entity_without_canonical_mapping():
+    from app.services import graph_evidence
+
+    legacy_entity = _entity()
+    mention = _mention(document_id=DOC_ID)
+    db = FakeDB(legacy_entity, mention)
+
+    result = asyncio.run(
+        graph_evidence.mark_document_graph_evidence_stale(
+            db,
+            _lib(),
+            document_id=DOC_ID,
+        )
+    )
+
+    assert result.stale_entity_mentions == 1
+    assert mention.status == "stale"
+    assert legacy_entity.canonical_entity_id is None
 
 
 def test_evidence_unit_invalidation_marks_bound_graph_rows_stale():

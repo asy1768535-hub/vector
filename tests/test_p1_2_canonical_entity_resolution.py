@@ -226,6 +226,72 @@ def test_existing_mapping_auto_links_and_replays_idempotently():
     assert len(db.rows[EntityResolutionDecision]) == 1
 
 
+def test_existing_mapping_reuses_canonical_across_revision_and_job_lineages():
+    library_id = uuid.uuid4()
+    entity_type = _type(library_id)
+    canonical = _canonical(library_id)
+    entity = _entity(library_id, entity_type, canonical)
+    db = _Db(_library(library_id), entity_type, canonical, entity)
+
+    first = _run(
+        resolve_canonical_entity(
+            db,
+            _input(
+                library_id,
+                existing_entity_id=entity.id,
+                source="revision-1-job-1",
+                evidence=({"document_revision_id": "revision-1"},),
+            ),
+        )
+    )
+    second = _run(
+        resolve_canonical_entity(
+            db,
+            _input(
+                library_id,
+                existing_entity_id=entity.id,
+                source="revision-2-job-2",
+                evidence=({"document_revision_id": "revision-2"},),
+            ),
+        )
+    )
+
+    assert first.decision.id != second.decision.id
+    assert first.canonical_entity.id == canonical.id
+    assert second.canonical_entity.id == canonical.id
+    assert entity.canonical_entity_id == canonical.id
+    assert len(db.rows[CanonicalEntity]) == 1
+    assert len(db.rows[EntityResolutionDecision]) == 2
+
+
+def test_purged_candidate_reference_does_not_block_existing_canonical_reuse():
+    library_id = uuid.uuid4()
+    entity_type = _type(library_id)
+    canonical = _canonical(library_id)
+    entity = _entity(library_id, entity_type, canonical)
+    purged_candidate_id = uuid.uuid4()
+    db = _Db(_library(library_id), entity_type, canonical, entity)
+
+    result = _run(
+        resolve_canonical_entity(
+            db,
+            _input(
+                library_id,
+                existing_entity_id=entity.id,
+                candidate_id=purged_candidate_id,
+            ),
+        )
+    )
+
+    assert result.canonical_entity.id == canonical.id
+    assert result.decision.graph_entity_candidate_id is None
+    assert result.decision.evidence_refs == [
+        {"document_revision_id": "rev-1", "mention_id": "m-1"}
+    ]
+    assert result.decision.candidate_snapshot
+    assert entity.canonical_entity_id == canonical.id
+
+
 def test_cross_library_existing_entity_is_rejected_without_new_canonical():
     library_id = uuid.uuid4()
     other_library_id = uuid.uuid4()
