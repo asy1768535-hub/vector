@@ -21,7 +21,7 @@ P2 = COMPLETED_WITH_KNOWN_LIMITATIONS
 P2 Acceptance = PASSED
 Alembic head = 0070
 P3 = PLANNING
-P3.0 = AUTHORIZED (read-only)
+P3.0 = COMPLETED_WITH_KNOWN_LIMITATIONS (static read-only baseline)
 P3.1+ = NOT AUTHORIZED
 ```
 
@@ -321,14 +321,297 @@ P3.0 的停止条件是七项输出完成并经单独 checkpoint 记录。此 ch
 P3.1 design freeze；不自动授权 P3.1 implementation、migration、P3.2/P3.3/P3.4、
 RawClaim promotion、Publication 或 Retrieval 语义变更。
 
-## 6. P3.0 Analysis Write-back
+## 6. P3.0 Analysis Method and Evidence Boundary
 
-当前状态：**NOT STARTED**
+当前状态：**COMPLETED_WITH_KNOWN_LIMITATIONS**
 
-P3.0 实际执行时，在本节追加：
+分析基线是本文件记录的正式 checkpoint `c887eaa8f61fa789741139d8bd227401397fff08`。
+P2 核心 model、Fact Resolution、Fact Lifecycle 与 migration 文件在工作区未被修改；
+个别 API/worker 有用户在途改动，涉及这些边界时本分析以正式 checkpoint 的代码语义为准。
 
-- Output A-G 的矩阵与结论；
-- 每项结论的 repository evidence；
-- PostgreSQL runtime 与其他环境限制；
-- 未决、pending 和 fail-closed 项；
-- 是否具备进入 P3.1 design freeze 的条件。
+GitNexus MCP 在当前会话不可用；此前执行 `npx gitnexus analyze` 因
+`tree-sitter-kotlin` 无法加载 `node-gyp-build` 失败。因此本次使用手工 fallback：
+对 ORM、Alembic、直接服务调用链和已有 unit test 逐项静态检查。没有修改 production
+symbol，也没有运行 migration、数据库写入或 runtime integration。
+
+`VECTOR_KB_PG_TEST_DSN` 当前未配置。因此下列结论是 migration/schema/service
+contract 的静态结论，不是 PostgreSQL runtime 实测：composite FK、partial unique
+index、`ON DELETE` 行为、transaction advisory lock、真实并发与 rollback。
+
+## 7. Output A - Identity Impact Matrix (Actual)
+
+### A.1 Direct references and semantic owners
+
+| Object / bridge | Current creator and consumer | Historical meaning | P3 treatment |
+| --- | --- | --- | --- |
+| `Entity.canonical_entity_id` | `graph_extraction_materializer` writes it after Entity Resolution; Fact Resolution reads it as subject/object identity. | Current ontology-specific projection assignment, not an immutable decision record. | P3.1 may deterministically reassign this current projection only with a new append-only resolution/evolution decision. |
+| `EntityResolutionDecision.canonical_entity_id` | `canonical_entity_resolution` creates active/superseding decisions; candidate lookup reads the active decision. | The canonical target selected when that decision was made. | Never rewrite or delete; a new decision must supersede the old one. |
+| `LogicalFact.subject_canonical_entity_id`, `object_canonical_entity_id` | Fact-plan compiler writes them; Fact Lifecycle groups and conflicts by them. | Historical Fact identity inputs. Both composite FKs use `RESTRICT`. | P3.1/P3.2 must not update them. P3.3 creates current interpretation through reconciliation lineage. |
+| `FactAssertion.asserted_object_canonical_entity_id` | Fact-plan compiler writes the asserted entity object. | Historical assertion object identity; FK is `SET NULL` only on physical delete. | No P3 rewrite; include it in current derived interpretation. |
+| `StablePredicateMapping.stable_predicate_identity_id` | Active mapping is the entry point of Fact Resolution. | RelationType-to-predicate mapping history; current model has `active/superseded/rejected`. | P3.2 must append/supersede mapping lineage, not rewrite historical Facts. |
+| `LogicalFact.stable_predicate_identity_id` | Fact-plan compiler writes it; Fact Lifecycle reads policy and temporal class. | Historical Fact predicate identity; composite FK is `RESTRICT`. | P3.2 must not update it; P3.3 reconciles affected Facts. |
+| `FactAssertion.logical_fact_id` | Fact materialization writes it; lifecycle uses it to collect assertions. | Immutable historical assertion-to-Fact bridge; composite FK is `RESTRICT`. | P3.3 must not update it. |
+| `KnowledgeRelation.logical_fact_id` | Initial Fact materialization writes it through `_bridge`. | Ontology projection's original Fact bridge; composite FK is `RESTRICT`. | P3.3 must not reuse `_bridge` to overwrite it. |
+| `RelationEvidence.fact_assertion_id` | Initial Fact materialization writes it through `_bridge`; evidence lifecycle reads it. | Original evidence-to-assertion bridge; composite FK is `SET NULL` only on physical delete. | P3.3 must not update it. |
+| `FactResolutionDecision.{stable_predicate_identity_id,logical_fact_id,fact_assertion_id}` | Fact Resolution persists a snapshot plus bridges; lifecycle supersedes decisions. | Resolution audit at the time of the source occurrence; each bridge is `SET NULL` only on physical delete. | Keep snapshots and old rows; future evolution/reconciliation needs a separate decision/lineage audit. |
+
+Primary schema evidence: `app/models/entity.py:55-87`,
+`app/models/entity_resolution_decision.py:32-120`,
+`app/models/fact_foundation.py:58-178,181-519`,
+`app/models/knowledge_relation.py:25-123`, and
+`app/models/relation_evidence.py:25-73`. Migration `0064` conservatively created one
+CanonicalEntity per historical Entity; migration `0066` created the P2 bridges and
+their composite FK contracts.
+
+### A.2 Actual code consumers and notable boundary
+
+- `canonical_entity_resolution.py:420-468` retrieves only `CanonicalEntity.status ==
+  "active"` candidates and uses existing `Entity.canonical_entity_id` assignments as
+  evidence. P3.1 must make this current-leaf aware without redefining `disabled`.
+- `graph_extraction_materializer.py:804-833` writes an Entity projection's canonical
+  assignment, while `graph_relation_fact_resolution.py:497-704` reads source/target
+  canonical IDs and the active predicate mapping to build Facts.
+- `fact_lifecycle.py:151-304` and `:390-439` consume Fact/Assertion/Evidence bridges
+  for assertion state and conflict recalculation.
+- `graph_publication_*`, `graph_retrieval.py`, `graph_catalog*.py`, and chat graph
+  services consume `Entity`, `KnowledgeRelation`, and `RelationEvidence`; no direct
+  production reader of `LogicalFact` or `FactAssertion` was found in those paths.
+
+One additional writer is material: `graph_governance_actions.stage_entity_merge`
+(`app/services/graph_governance_actions.py:1061-1288`) is an ontology-specific
+**Entity** merge. It stages disabled Entity/alias effects and KnowledgeRelation
+endpoint reassignment. It is not CanonicalEntity evolution, has no P3 lineage, and
+must never be reused for P3 Canonical merge/split or Fact reconciliation.
+
+## 8. Output B - Fingerprint Impact Matrix (Actual)
+
+The source-occurrence fingerprint is independent of extraction-run identity. It is
+derived from library, document, revision, evidence unit, chunk, optional block and
+source span (`graph_relation_fact_resolution.py:348-394`). Existing tests prove that
+the same occurrence replay is stable and a different occurrence is distinct
+(`tests/test_p2_3_graph_relation_fact_resolution.py:163-226`).
+
+| Fingerprint | Canonical merge/split | Predicate merge/split | `identity_policy_version` change | Historical handling |
+| --- | --- | --- | --- | --- |
+| `LogicalFact.identity_fingerprint` | **Changes for future/current derivation.** Subject and entity-object canonical UUIDs are hash inputs. | **Changes.** Predicate snapshot contains ID, namespace, key, contract, temporal class and identity policy. | **Changes directly.** It is an explicit hash input. | Existing value remains the historical row identity. |
+| `FactAssertion.assertion_fingerprint` | **Changes indirectly** because it includes LogicalFact fingerprint. | **Changes indirectly** for the same reason. | **May also change directly** when policy changes assertion value, qualifier, polarity, modality or time classification. | Existing value remains immutable. |
+| `FactResolutionDecision.subject_fingerprint` | **Changes for future resolution.** It includes source and target canonical UUIDs plus source occurrence and observed relation key. | No direct input. | No direct input. | Existing decision remains queryable by its recorded subject fingerprint. |
+| `FactResolutionDecision.decision_fingerprint` | **Changes indirectly** through LogicalFact/Assertion fingerprints. | **Changes** through predicate snapshot and Fact/Assertion fingerprints. | **Changes** through predicate snapshot and Fact/Assertion fingerprints. | Existing active decision is not overwritten; a later source re-resolution must supersede it. |
+| `EntityResolutionDecision.subject_fingerprint` | No direct input: it is observation/source/ontology/entity-type scoped. | No input. | No input. | Immutable historical observation identity. |
+| `EntityResolutionDecision.decision_fingerprint` | Only a `link_existing` decision hashes the selected canonical UUID. A new link therefore has a different fingerprint; CREATE NEW intentionally excludes its random UUID. | No input. | No input. | Never recompute or rewrite. |
+
+Evidence: Fact fingerprints are composed in
+`graph_relation_fact_resolution.py:625-686`; Fact Resolution subject fingerprints
+in `:398-424`; Entity Resolution fingerprints in
+`canonical_entity_resolution.py:234-312`. The `StablePredicateIdentity` policy is
+strictly parsed and includes identity-bearing versus assertion-bearing qualifier
+classes (`stable_predicate_resolution_policy.py:1-217`).
+
+**Frozen result:** fingerprint evolution produces a new current derived identity or
+new decision. It never changes a historical fingerprint in place.
+
+## 9. Output C - Current / Historical Bridge and Read Contract (Actual)
+
+### C.1 Current implementation state
+
+No `resolve_current_canonical_identity`, `resolve_current_stable_predicate_identity`
+or `resolve_current_logical_fact` exists yet. Current P2 writers use the row IDs
+directly: Canonical candidate lookup filters `status == "active"`; Fact Resolution
+uses the active StablePredicateMapping and direct Entity canonical IDs; LogicalFact
+lookup uses the stored identity fingerprint. There is no evolution or reconciliation
+lineage table in the current schema.
+
+### C.2 Frozen P3 contract
+
+The conceptual resolver signature is:
+
+```text
+resolve_current_canonical_identity(id, context?)
+resolve_current_stable_predicate_identity(id, context?)
+resolve_current_logical_fact(id, context?)
+```
+
+It must return one of:
+
+```text
+resolved        unique successor is determined
+forked          more than one successor exists and supplied context cannot choose one
+pending         evolution/reconciliation is not yet deterministically resolved
+historical_only no current successor exists, while the original remains queryable
+```
+
+For a split, absence of a specific Entity projection, Assertion source group or other
+frozen deterministic context must return `forked` or `pending`; selecting an arbitrary
+successor is forbidden.
+
+New Entity Resolution, graph-candidate Fact Resolution and RawClaim-backed Fact
+Resolution must write only an unambiguous `resolved` current identity. The existing
+P2 pending behavior is the compatibility pattern: an unresolved canonical/predicate
+or ambiguous mapping produces a Decision without Fact bridges. Historical reads use
+stored FKs and snapshots unchanged. Current reads must be an evolution-aware derived
+view; it is not an update of the historical tables.
+
+Existing Publication, Retrieval, graph catalog and chat paths are historical
+ontology-projection reads. They remain unchanged for all authorized P3 work; no
+automatic Publication or Retrieval migration is permitted.
+
+## 10. Output D - Current-State Consumer Matrix (Actual)
+
+| Consumer | Current P2 input | Required P3 interpretation | Change timing |
+| --- | --- | --- | --- |
+| Entity Resolution candidate lookup | Active CanonicalEntity and existing Entity projection assignment. | Must resolve current canonical leaf or return `forked/pending`; legacy `status` alone is insufficient. | P3.1 implementation only. |
+| Fact Resolution preflight and lookup | One active predicate mapping, direct Entity canonical IDs, direct Fact fingerprint. | Must resolve current canonical/predicate before planning; unresolved split must remain pending. | P3.1/P3.2 implementation only. |
+| RawClaim-backed Fact Resolution | Reuses the graph Fact compiler after a binding-backed projection check. | Same current-identity gate as graph-candidate Fact Resolution. | P3.1/P3.2 implementation only; no RawClaim promotion redesign. |
+| Initial `KnowledgeRelation` / `RelationEvidence` bridge | `_bridge` writes only the initial direct Fact and Assertion bridges. | Remains historical projection materialization; cannot implement reconciliation by re-bridging history. | Unchanged through P3.3. |
+| Assertion lifecycle | FactAssertion status plus RelationEvidence rows by historical bridge. | Historical assertion lifecycle remains auditable; current interpreted lifecycle must use reconciliation assignments. | P3.3 only. |
+| LogicalFact status, measurement, polarity | Direct Fact-to-Assertion grouping; measurement and polarity conflict use supported assertions. | Current graph status must be calculated over current reconciled Fact projection, not a mutated old Fact. | P3.3 only. |
+| Functional sibling conflict lookup | Subject canonical, predicate, policy, identity qualifiers and ontology relation constraints. | Must group current reconciled identities; otherwise merge/split creates false negatives/positives. | P3.3 only. |
+| Publication materialization and Retrieval | Active ontology-specific Entity/KnowledgeRelation/RelationEvidence snapshot. | Historical projection; must remain unchanged and not auto-follow successor lineage. | Out of P3 scope. |
+| Graph catalog / UI / chat graph context | Historical Entity/KnowledgeRelation and active RelationEvidence. | Historical projection; no current-Fact UI is present today. | Out of P3 scope. |
+| GraphGovernance Entity merge | Current Entity, relation and alias writes within one ontology. | Incompatible with P3 Canonical evolution unless a later implementation enforces mutual exclusion. | P3.1 prerequisite; do not reuse it. |
+
+**Lifecycle contract:** P2.4 must operate on the current reconciled Fact projection
+after P3.3. Old LogicalFact rows and their assertion bridges stay historical/auditable
+and must not be overwritten to make a current conflict appear or disappear. Evidence
+staleness continues to be derived from original RelationEvidence, then projects into
+the current reconciliation view. This requires a P3.3 lineage-aware lifecycle query;
+it is not present today.
+
+Evidence: `fact_lifecycle.py:151-439` implements the current direct bridge lifecycle;
+measurement and polarity cases are covered statically in
+`tests/test_p2_4_fact_lifecycle.py:107-176`. Publication and Retrieval use
+KnowledgeRelation IDs and ontology versions rather than P2 Fact IDs
+(`graph_publication_read.py:285-310`, `graph_retrieval.py:332-351,751-793`).
+
+## 11. Output E - Reconciliation Bridge Contract (Actual)
+
+Current schema confirms that in-place P3 reassignment is invalid:
+
+```text
+FactAssertion.logical_fact_id       NOT NULL + RESTRICT
+KnowledgeRelation.logical_fact_id   nullable + RESTRICT
+RelationEvidence.fact_assertion_id  nullable + SET NULL only on physical delete
+```
+
+The normal P2 `_bridge` function (`graph_relation_fact_resolution.py:775-784`) writes
+these bridges only during initial resolution and rejects a different existing target.
+P3.3 must not repurpose it for historical reconciliation.
+
+The existing source provenance is sufficient for deterministic partitioning without a
+new provenance system: the source occurrence snapshot requires document, revision,
+evidence unit, chunk and source span; RelationEvidence persists corresponding source
+fields; FactResolutionDecision persists `source_snapshot` and `evidence_refs`.
+For any legacy row that lacks a unique source group or a complete source occurrence,
+`1 -> N` reconciliation must return `pending`.
+
+The frozen P3.3 contract is:
+
+```text
+Old LogicalFact(s)
+    -> append-only Fact Reconciliation Decision / Lineage
+    -> current LogicalFact(s)
+```
+
+```text
+1 -> 1                allowed
+N -> 1                allowed
+1 -> N deterministic  allowed only with a unique source-group partition
+N -> M                pending in P3 v1
+```
+
+Historical Assertions retain their original `logical_fact_id`; historical
+KnowledgeRelation and RelationEvidence bridges also remain unchanged. The reconciliation
+lineage, not an updated FK, expresses current interpretation and supplies the
+current-Fact lifecycle input.
+
+## 12. Output F - Lock Ordering Contract (Actual)
+
+Current locks are useful P2 primitives but are not a P3 multi-identity contract:
+
+| Existing path | Current lock / transaction behavior | P3 conclusion |
+| --- | --- | --- |
+| Entity Resolution | PostgreSQL transaction advisory lock on Entity Resolution subject fingerprint. | Must join the P3 total order when it can race with projection reassignment. |
+| Fact Resolution | Advisory lock on Fact Resolution subject, then LogicalFact fingerprint. | Must resolve current identities first and then join the P3 total order. |
+| Fact Lifecycle | Advisory lock on LogicalFact fingerprint and, for state facts, functional scope. | P3.3 lifecycle must use current reconciliation scope rather than historical-only grouping. |
+| Extraction materializer | One outer transaction; locks job/library/candidate rows with `FOR UPDATE`. | Preserves materialization atomicity, but does not protect a future evolution operation by itself. |
+| GraphGovernance Entity merge | Locks the Library and ontology Entity/relations for its own action. | It does not participate in P3 locks; P3.1 must guard the overlapping Entity projection scope or explicitly reject concurrent governance merge. |
+
+P3 must use the following total order after constructing the **complete** lock set:
+
+```text
+(library_id, lock_scope_type, lock_scope_key)
+
+canonical_entity        = 10, key = CanonicalEntity UUID
+stable_predicate        = 20, key = StablePredicateIdentity UUID
+logical_fact            = 30, key = LogicalFact UUID or derived identity fingerprint
+entity_projection       = 40, key = Entity UUID
+entity_resolution_subject = 50, key = versioned Entity Resolution subject fingerprint
+```
+
+The exact numeric values are part of the P3.1 implementation contract; lexical or
+source/target order is forbidden. A command that overlaps an already-applied operation
+must acquire its full set, re-read current lineage and preconditions, then fail closed
+as `PENDING`, `RETRYABLE_CONFLICT` or `STALE_OPERATION` instead of writing from an old
+snapshot.
+
+PostgreSQL advisory behavior, multi-transaction deadlock freedom and rollback are
+**SKIPPED - PostgreSQL runtime integration unavailable**. Static evidence only:
+`canonical_entity_resolution.py:320-352,637-652`,
+`graph_relation_fact_resolution.py:808-856`,
+`fact_lifecycle.py:417-439`, and
+`graph_extraction_materializer.py:669-1016`.
+
+## 13. Output G - Canonical Split Lifecycle Contract (Actual)
+
+Current CanonicalEntity has only operational status:
+
+```text
+active
+pending_review
+disabled
+```
+
+`canonical_entity_resolution._candidate_snapshot` considers only `active` rows, and
+migration `0064` already used `disabled` to represent existing disabled/rejected/stale
+Entity projections. Therefore `disabled` cannot safely acquire a second meaning of
+merged, split or superseded.
+
+The P3.1 design-freeze requirement is:
+
+```text
+CanonicalEntity.status = existing operational status only
+Evolution lineage      = historical/current/successor and resolution eligibility
+```
+
+For a merge or split, the old CanonicalEntity remains retained and historically
+queryable. Its evolution lineage marks it as non-leaf/non-eligible for new resolution;
+the current resolver follows a single successor only when `resolved`, otherwise returns
+`forked` or `pending`. A split must record each Entity projection's deterministic
+assignment or explicit pending state. The final table/enum names are deferred to P3.1
+design freeze; no lifecycle schema change is authorized by P3.0.
+
+## 14. P3.0 Result and Next Authorized Boundary
+
+P3.0 is **COMPLETED_WITH_KNOWN_LIMITATIONS**. Outputs A-G are closed by static
+repository evidence and establish that:
+
+- no existing evolution/reconciliation model can be reused as-is;
+- historical Fact/Assertion/Relation/Evidence bridges must not be rewritten;
+- current Fact semantics need a derived append-only lineage projection;
+- source occurrence lineage is sufficient for deterministic `1 -> N` partition when
+  a source group is unique;
+- Publication, Retrieval and ontology-specific graph views remain historical and out
+  of scope;
+- the existing GraphGovernance Entity merge must be excluded or made mutually
+  exclusive before P3 evolution implementation.
+
+Known limitations are limited to unavailable GitNexus and PostgreSQL runtime
+integration. They do not block P3.1 **design freeze**, but they prevent claims that
+future FK enforcement, advisory-lock concurrency or rollback behavior has been runtime
+tested.
+
+The next possible stage is P3.1 design freeze only. It must decide the append-only
+Evolution Decision/lineage schema, current resolver persistence/query model,
+Entity-projection reassignment decision model, GraphGovernance mutual exclusion, and
+the concrete P3 lock API. P3.1 implementation, migration, P3.2/P3.3/P3.4, RawClaim
+promotion, Publication and Retrieval changes remain **NOT AUTHORIZED**.
