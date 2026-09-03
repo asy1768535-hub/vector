@@ -14,22 +14,24 @@ from app.models.entity_resolution_decision import (
     ENTITY_RESOLUTION_LINK_EXISTING,
     ENTITY_RESOLUTION_PENDING_REVIEW,
 )
+from app.models.fact_foundation import FactAssertion, LogicalFact
 from app.models.graph_extraction_job import GraphExtractionJob
 from app.models.knowledge_relation import KnowledgeRelation
+from app.models.raw_claim_projection_binding import GraphRawClaimProjectionBinding
 from app.services import graph_extraction_materializer
 from app.services.graph_extraction_materializer import (
     GraphExtractionMaterializationError,
     GraphExtractionMaterializationResult,
     _add_extracted_aliases,
     _draft_relation,
-    _entity_mention_for_evidence,
-    _entity_candidate_eligible,
     _eligible_matched_entity,
+    _entity_candidate_eligible,
+    _entity_mention_for_evidence,
     _materialize_job_transaction,
+    _materialize_raw_claim_facts,
     _relation_candidate_eligible,
     materialize_graph_extraction_job,
 )
-
 
 LIB_ID = uuid.UUID("10000000-0000-0000-0000-000000000001")
 JOB_ID = uuid.UUID("20000000-0000-0000-0000-000000000001")
@@ -64,6 +66,8 @@ class FakeDB:
         self.flush_count = 0
 
     async def execute(self, _statement):
+        if _statement.column_descriptions[0]["entity"] is GraphRawClaimProjectionBinding:
+            return _Result()
         assert self.results, "unexpected materializer query"
         return self.results.pop(0)
 
@@ -1050,6 +1054,422 @@ class TransactionSession:
 
     async def flush(self):
         self.flush_count += 1
+
+
+class _RawClaimFactDb:
+    def __init__(self, *, bindings, occurrence, raw_claim, objects=None):
+        self.bindings = bindings
+        self.occurrence = occurrence
+        self.raw_claim = raw_claim
+        self.objects = objects or {}
+        self.added = []
+
+    async def execute(self, statement):
+        entity = statement.column_descriptions[0]["entity"]
+        if entity is GraphRawClaimProjectionBinding:
+            return _Result(self.bindings)
+        if entity is graph_extraction_materializer.GraphRawClaimOccurrence:
+            return _Result([self.occurrence])
+        raise AssertionError(f"unexpected raw-claim fact query: {entity}")
+
+    async def get(self, model, object_id, **_kwargs):
+        if model is graph_extraction_materializer.GraphRawClaim and object_id == self.raw_claim.id:
+            return self.raw_claim
+        return self.objects.get((model, object_id))
+
+    def add(self, value):
+        self.added.append(value)
+
+    async def flush(self):
+        return None
+
+
+def test_raw_claim_ambiguous_valid_bindings_create_pending_decision_without_fact_writes():
+    raw_claim_id = uuid.uuid4()
+    occurrence_id = uuid.uuid4()
+    evidence = SimpleNamespace(
+        purged_at=None,
+        validation_status="valid",
+        resolved_evidence_id=uuid.uuid4(),
+        resolved_document_id=uuid.uuid4(),
+        resolved_document_revision_id=uuid.uuid4(),
+        resolved_chunk_id=uuid.uuid4(),
+        resolved_source_span={"start": 3, "end": 9},
+    )
+    raw_claim = SimpleNamespace(
+        id=raw_claim_id,
+        library_id=LIB_ID,
+        document_id=evidence.resolved_document_id,
+        document_revision_id=evidence.resolved_document_revision_id,
+        content_scoped_claim_fingerprint="b" * 64,
+        evidence_refs=[
+            {
+                "evidence_id": str(evidence.resolved_evidence_id),
+                "document_id": str(evidence.resolved_document_id),
+                "document_revision_id": str(evidence.resolved_document_revision_id),
+                "chunk_id": str(evidence.resolved_chunk_id),
+                "source_span": {"start": 3, "end": 9},
+            }
+        ],
+    )
+    occurrence = SimpleNamespace(
+        extraction_occurrence_id=occurrence_id,
+        claim_id=raw_claim_id,
+        job_id=JOB_ID,
+    )
+    candidate_ids = [uuid.uuid4(), uuid.uuid4()]
+    bindings = [
+        SimpleNamespace(
+            raw_claim_id=raw_claim_id,
+            raw_claim_occurrence_id=occurrence_id,
+            graph_relation_candidate_id=candidate_id,
+        )
+        for candidate_id in candidate_ids
+    ]
+    source_ids = [uuid.uuid4(), uuid.uuid4()]
+    target_ids = [uuid.uuid4(), uuid.uuid4()]
+    candidates = {
+        candidate_id: SimpleNamespace(
+            id=candidate_id,
+            job_id=JOB_ID,
+            library_id=LIB_ID,
+            ontology_version_id=ONTOLOGY_ID,
+            purged_at=None,
+            status="materialized",
+            relation_type_key="holds_equity",
+            proposed_properties={"ownership_percentage": "20%"},
+            source_candidate_id=source_id,
+            target_candidate_id=target_id,
+        )
+        for candidate_id, source_id, target_id in zip(candidate_ids, source_ids, target_ids, strict=True)
+    }
+    relations = {
+        candidate_id: SimpleNamespace(
+            id=uuid.uuid4(),
+            library_id=LIB_ID,
+            ontology_version_id=ONTOLOGY_ID,
+        )
+        for candidate_id in candidate_ids
+    }
+    entities = {
+        entity_id: SimpleNamespace(canonical_entity_id=uuid.uuid4())
+        for entity_id in [*source_ids, *target_ids]
+    }
+    db = _RawClaimFactDb(bindings=bindings, occurrence=occurrence, raw_claim=raw_claim)
+
+    with patch(
+        "app.services.graph_extraction_materializer.record_raw_claim_projection_pending_fact",
+        new=AsyncMock(return_value=SimpleNamespace()),
+    ) as record_pending, patch(
+        "app.services.graph_extraction_materializer.resolve_raw_claim_fact",
+        new=AsyncMock(),
+    ) as resolve_fact:
+        asyncio.run(
+            _materialize_raw_claim_facts(
+                db,
+                job=SimpleNamespace(
+                    id=JOB_ID,
+                    document_id=raw_claim.document_id,
+                    document_revision_id=raw_claim.document_revision_id,
+                    ontology_version_id=ONTOLOGY_ID,
+                ),
+                library=SimpleNamespace(id=LIB_ID),
+                relation_candidates=candidates,
+                relations=relations,
+                entities=entities,
+                relation_evidence_by_candidate={candidate_id: [evidence] for candidate_id in candidate_ids},
+            )
+        )
+
+    record_pending.assert_awaited_once()
+    assert record_pending.await_args.kwargs["reason_code"] == "raw_claim_projection_ambiguity"
+    assert len(record_pending.await_args.kwargs["projection_contexts"]) == 2
+    resolve_fact.assert_not_awaited()
+    assert db.added == []
+
+
+def test_raw_claim_unique_valid_binding_enters_the_adapter_with_existing_bridges():
+    raw_claim_id = uuid.uuid4()
+    occurrence_id = uuid.uuid4()
+    evidence = SimpleNamespace(
+        purged_at=None,
+        validation_status="valid",
+        resolved_evidence_id=uuid.uuid4(),
+        resolved_document_id=uuid.uuid4(),
+        resolved_document_revision_id=uuid.uuid4(),
+        resolved_chunk_id=uuid.uuid4(),
+        resolved_source_span={"start": 3, "end": 9},
+    )
+    raw_claim = SimpleNamespace(
+        id=raw_claim_id,
+        library_id=LIB_ID,
+        document_id=evidence.resolved_document_id,
+        document_revision_id=evidence.resolved_document_revision_id,
+        content_scoped_claim_fingerprint="c" * 64,
+        evidence_refs=[
+            {
+                "evidence_id": str(evidence.resolved_evidence_id),
+                "document_id": str(evidence.resolved_document_id),
+                "document_revision_id": str(evidence.resolved_document_revision_id),
+                "chunk_id": str(evidence.resolved_chunk_id),
+                "source_span": {"start": 3, "end": 9},
+            }
+        ],
+    )
+    candidate_id = uuid.uuid4()
+    source_id = uuid.uuid4()
+    target_id = uuid.uuid4()
+    fact = SimpleNamespace(id=uuid.uuid4())
+    assertion = SimpleNamespace(id=uuid.uuid4())
+    candidate = SimpleNamespace(
+        id=candidate_id,
+        job_id=JOB_ID,
+        library_id=LIB_ID,
+        ontology_version_id=ONTOLOGY_ID,
+        purged_at=None,
+        status="materialized",
+        relation_type_key="holds_equity",
+        proposed_properties={"ownership_percentage": "20%"},
+        source_candidate_id=source_id,
+        target_candidate_id=target_id,
+    )
+    relation = SimpleNamespace(
+        id=uuid.uuid4(),
+        library_id=LIB_ID,
+        ontology_version_id=ONTOLOGY_ID,
+        logical_fact_id=fact.id,
+    )
+    relation_evidence = SimpleNamespace(fact_assertion_id=assertion.id)
+    db = _RawClaimFactDb(
+        bindings=[
+            SimpleNamespace(
+                raw_claim_id=raw_claim_id,
+                raw_claim_occurrence_id=occurrence_id,
+                graph_relation_candidate_id=candidate_id,
+            )
+        ],
+        occurrence=SimpleNamespace(
+            extraction_occurrence_id=occurrence_id,
+            claim_id=raw_claim_id,
+            job_id=JOB_ID,
+        ),
+        raw_claim=raw_claim,
+        objects={(LogicalFact, fact.id): fact, (FactAssertion, assertion.id): assertion},
+    )
+
+    with patch(
+        "app.services.graph_extraction_materializer.record_raw_claim_projection_pending_fact",
+        new=AsyncMock(),
+    ) as record_pending, patch(
+        "app.services.graph_extraction_materializer._relation_evidence_for_candidate",
+        new=AsyncMock(return_value=(relation_evidence, False)),
+    ), patch(
+        "app.services.graph_extraction_materializer.resolve_raw_claim_fact",
+        new=AsyncMock(return_value=SimpleNamespace(decision=SimpleNamespace(status="resolved"))),
+    ) as resolve_fact, patch(
+        "app.services.graph_extraction_materializer.reconcile_resolved_fact_decision",
+        new=AsyncMock(),
+    ) as reconcile:
+        asyncio.run(
+            _materialize_raw_claim_facts(
+                db,
+                job=SimpleNamespace(
+                    id=JOB_ID,
+                    document_id=raw_claim.document_id,
+                    document_revision_id=raw_claim.document_revision_id,
+                    ontology_version_id=ONTOLOGY_ID,
+                ),
+                library=SimpleNamespace(id=LIB_ID),
+                relation_candidates={candidate_id: candidate},
+                relations={candidate_id: relation},
+                entities={
+                    source_id: SimpleNamespace(canonical_entity_id=uuid.uuid4()),
+                    target_id: SimpleNamespace(canonical_entity_id=uuid.uuid4()),
+                },
+                relation_evidence_by_candidate={candidate_id: [evidence]},
+            )
+        )
+
+    record_pending.assert_not_awaited()
+    resolve_fact.assert_awaited_once()
+    assert resolve_fact.await_args.kwargs["raw_claim"] is raw_claim
+    assert resolve_fact.await_args.kwargs["relation"] is relation
+    assert resolve_fact.await_args.kwargs["relation_evidence"] is relation_evidence
+    assert resolve_fact.await_args.kwargs["expected_logical_fact"] is fact
+    assert resolve_fact.await_args.kwargs["expected_assertion"] is assertion
+    reconcile.assert_awaited_once()
+
+
+def test_raw_claim_without_a_valid_binding_writes_no_fact_projection():
+    db = _RawClaimFactDb(
+        bindings=[],
+        occurrence=None,
+        raw_claim=SimpleNamespace(id=uuid.uuid4()),
+    )
+
+    with patch(
+        "app.services.graph_extraction_materializer.record_raw_claim_projection_pending_fact",
+        new=AsyncMock(),
+    ) as record_pending, patch(
+        "app.services.graph_extraction_materializer.resolve_raw_claim_fact",
+        new=AsyncMock(),
+    ) as resolve_fact:
+        asyncio.run(
+            _materialize_raw_claim_facts(
+                db,
+                job=SimpleNamespace(id=JOB_ID),
+                library=SimpleNamespace(id=LIB_ID),
+                relation_candidates={},
+                relations={},
+                entities={},
+                relation_evidence_by_candidate={},
+            )
+        )
+
+    record_pending.assert_not_awaited()
+    resolve_fact.assert_not_awaited()
+    assert db.added == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("purged_at", object()),
+        ("status", "rejected"),
+        ("library_id", uuid.uuid4()),
+        ("ontology_version_id", uuid.uuid4()),
+    ],
+)
+def test_raw_claim_invalid_projection_binding_writes_no_fact_projection(field, value):
+    raw_claim_id = uuid.uuid4()
+    occurrence_id = uuid.uuid4()
+    document_id = uuid.uuid4()
+    revision_id = uuid.uuid4()
+    candidate = SimpleNamespace(
+        id=uuid.uuid4(),
+        job_id=JOB_ID,
+        library_id=LIB_ID,
+        ontology_version_id=ONTOLOGY_ID,
+        purged_at=None,
+        status="materialized",
+    )
+    setattr(candidate, field, value)
+    db = _RawClaimFactDb(
+        bindings=[
+            SimpleNamespace(
+                raw_claim_id=raw_claim_id,
+                raw_claim_occurrence_id=occurrence_id,
+                graph_relation_candidate_id=candidate.id,
+            )
+        ],
+        occurrence=SimpleNamespace(
+            extraction_occurrence_id=occurrence_id,
+            claim_id=raw_claim_id,
+            job_id=JOB_ID,
+        ),
+        raw_claim=SimpleNamespace(
+            id=raw_claim_id,
+            library_id=LIB_ID,
+            document_id=document_id,
+            document_revision_id=revision_id,
+        ),
+    )
+
+    with patch(
+        "app.services.graph_extraction_materializer.record_raw_claim_projection_pending_fact",
+        new=AsyncMock(),
+    ) as record_pending, patch(
+        "app.services.graph_extraction_materializer.resolve_raw_claim_fact",
+        new=AsyncMock(),
+    ) as resolve_fact:
+        asyncio.run(
+            _materialize_raw_claim_facts(
+                db,
+                job=SimpleNamespace(
+                    id=JOB_ID,
+                    document_id=document_id,
+                    document_revision_id=revision_id,
+                    ontology_version_id=ONTOLOGY_ID,
+                ),
+                library=SimpleNamespace(id=LIB_ID),
+                relation_candidates={candidate.id: candidate},
+                relations={candidate.id: SimpleNamespace()},
+                entities={},
+                relation_evidence_by_candidate={},
+            )
+        )
+
+    record_pending.assert_not_awaited()
+    resolve_fact.assert_not_awaited()
+    assert db.added == []
+
+
+def test_raw_claim_cross_scope_relation_writes_no_fact_projection():
+    raw_claim_id = uuid.uuid4()
+    occurrence_id = uuid.uuid4()
+    document_id = uuid.uuid4()
+    revision_id = uuid.uuid4()
+    candidate = SimpleNamespace(
+        id=uuid.uuid4(),
+        job_id=JOB_ID,
+        library_id=LIB_ID,
+        ontology_version_id=ONTOLOGY_ID,
+        purged_at=None,
+        status="materialized",
+    )
+    db = _RawClaimFactDb(
+        bindings=[
+            SimpleNamespace(
+                raw_claim_id=raw_claim_id,
+                raw_claim_occurrence_id=occurrence_id,
+                graph_relation_candidate_id=candidate.id,
+            )
+        ],
+        occurrence=SimpleNamespace(
+            extraction_occurrence_id=occurrence_id,
+            claim_id=raw_claim_id,
+            job_id=JOB_ID,
+        ),
+        raw_claim=SimpleNamespace(
+            id=raw_claim_id,
+            library_id=LIB_ID,
+            document_id=document_id,
+            document_revision_id=revision_id,
+        ),
+    )
+
+    with patch(
+        "app.services.graph_extraction_materializer.record_raw_claim_projection_pending_fact",
+        new=AsyncMock(),
+    ) as record_pending, patch(
+        "app.services.graph_extraction_materializer.resolve_raw_claim_fact",
+        new=AsyncMock(),
+    ) as resolve_fact:
+        asyncio.run(
+            _materialize_raw_claim_facts(
+                db,
+                job=SimpleNamespace(
+                    id=JOB_ID,
+                    document_id=document_id,
+                    document_revision_id=revision_id,
+                    ontology_version_id=ONTOLOGY_ID,
+                ),
+                library=SimpleNamespace(id=LIB_ID),
+                relation_candidates={candidate.id: candidate},
+                relations={
+                    candidate.id: SimpleNamespace(
+                        library_id=LIB_ID,
+                        ontology_version_id=uuid.uuid4(),
+                    )
+                },
+                entities={},
+                relation_evidence_by_candidate={},
+            )
+        )
+
+    record_pending.assert_not_awaited()
+    resolve_fact.assert_not_awaited()
+    assert db.added == []
 
 
 class MaterializationTransactionSession(FakeDB):

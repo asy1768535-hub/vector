@@ -63,7 +63,7 @@ def test_0068_offline_upgrade_and_downgrade_emit_expected_schema_sql():
     assert "drop column resolution_policy" in downgrade
 
 
-def test_0069_is_the_only_alembic_head():
+def test_0070_is_the_only_alembic_head():
     config = Config(str(ROOT / "alembic.ini"))
 
-    assert ScriptDirectory.from_config(config).get_heads() == ["0069"]
+    assert ScriptDirectory.from_config(config).get_heads() == ["0070"]

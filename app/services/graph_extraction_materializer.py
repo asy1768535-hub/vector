@@ -19,6 +19,7 @@ from app.models.entity_resolution_decision import (
     ENTITY_RESOLUTION_PENDING_REVIEW,
     ENTITY_RESOLUTION_REJECTED,
 )
+from app.models.fact_foundation import FactAssertion, LogicalFact
 from app.models.graph_candidate_evidence import (
     GraphEntityCandidateEvidence,
     GraphRelationCandidateEvidence,
@@ -29,6 +30,8 @@ from app.models.graph_extraction_unit import GraphExtractionUnit
 from app.models.knowledge_relation import KnowledgeRelation
 from app.models.library import Library
 from app.models.ontology_version import OntologyVersion
+from app.models.raw_claim import GraphRawClaim, GraphRawClaimOccurrence
+from app.models.raw_claim_projection_binding import GraphRawClaimProjectionBinding
 from app.models.relation_evidence import RelationEvidence
 from app.schemas.v03_graph import GraphEntityCreate, GraphRelationCreate
 from app.services import graph_entities, graph_evidence, graph_relations
@@ -37,6 +40,7 @@ from app.services.canonical_entity_resolution import (
     EntityResolutionInput,
     resolve_canonical_entity,
 )
+from app.services.fact_lifecycle import reconcile_resolved_fact_decision
 from app.services.graph_candidate_aggregation import canonical_graph_value_hash_v1
 from app.services.graph_candidate_routing import load_confidence_policy_v1
 from app.services.graph_candidate_validation import load_ontology_rule_set_v1
@@ -46,7 +50,10 @@ from app.services.graph_relation_fact_resolution import (
     materialize_resolved_graph_relation_fact,
     preflight_graph_relation_candidate_fact,
 )
-from app.services.fact_lifecycle import reconcile_resolved_fact_decision
+from app.services.raw_claim_fact_resolution import (
+    record_raw_claim_projection_pending_fact,
+    resolve_raw_claim_fact,
+)
 
 
 class GraphExtractionMaterializationError(RuntimeError):
@@ -496,6 +503,169 @@ async def _relation_evidence_for_candidate(
     return row, True
 
 
+def _raw_claim_matches_candidate_evidence(raw_claim: Any, evidence: Any) -> bool:
+    refs = getattr(raw_claim, "evidence_refs", None)
+    if not isinstance(refs, list) or len(refs) != 1 or not isinstance(refs[0], dict):
+        return False
+    reference = refs[0]
+    span = reference.get("source_span")
+    return (
+        reference.get("evidence_id") == str(evidence.resolved_evidence_id)
+        and reference.get("document_id") == str(evidence.resolved_document_id)
+        and reference.get("document_revision_id") == str(evidence.resolved_document_revision_id)
+        and reference.get("chunk_id") == str(evidence.resolved_chunk_id)
+        and isinstance(span, dict)
+        and span.get("start") == evidence.resolved_source_span.get("start")
+        and span.get("end") == evidence.resolved_source_span.get("end")
+    )
+
+
+async def _materialize_raw_claim_facts(
+    db,
+    *,
+    job: GraphExtractionJob,
+    library: Library,
+    relation_candidates: dict[uuid.UUID, GraphRelationCandidate],
+    relations: dict[uuid.UUID, KnowledgeRelation],
+    entities: dict[uuid.UUID, Entity],
+    relation_evidence_by_candidate: dict[uuid.UUID, list[Any]],
+) -> None:
+    """Consume only uniquely valid projection bindings after candidate materialization."""
+    bindings = list(
+        (
+            await db.execute(
+                select(GraphRawClaimProjectionBinding)
+                .join(
+                    GraphRawClaimOccurrence,
+                    GraphRawClaimOccurrence.extraction_occurrence_id
+                    == GraphRawClaimProjectionBinding.raw_claim_occurrence_id,
+                )
+                .where(GraphRawClaimOccurrence.job_id == job.id)
+            )
+        ).scalars().all()
+    )
+    bindings_by_claim: dict[uuid.UUID, list[GraphRawClaimProjectionBinding]] = {}
+    for binding in bindings:
+        bindings_by_claim.setdefault(binding.raw_claim_id, []).append(binding)
+
+    for raw_claim_id, claim_bindings in bindings_by_claim.items():
+        raw_claim = await db.get(GraphRawClaim, raw_claim_id)
+        if raw_claim is None or (
+            raw_claim.library_id != library.id
+            or raw_claim.document_id != job.document_id
+            or raw_claim.document_revision_id != job.document_revision_id
+        ):
+            continue
+        valid: list[tuple[GraphRawClaimProjectionBinding, Any, Any, Any, Any, Any]] = []
+        for binding in claim_bindings:
+            occurrence = (
+                await db.execute(
+                    select(GraphRawClaimOccurrence).where(
+                        GraphRawClaimOccurrence.extraction_occurrence_id
+                        == binding.raw_claim_occurrence_id
+                    )
+                )
+            ).scalars().one_or_none()
+            candidate = relation_candidates.get(binding.graph_relation_candidate_id)
+            relation = relations.get(binding.graph_relation_candidate_id)
+            if (
+                occurrence is None
+                or occurrence.claim_id != raw_claim.id
+                or occurrence.job_id != job.id
+                or candidate is None
+                or candidate.job_id != job.id
+                or candidate.library_id != library.id
+                or candidate.ontology_version_id != job.ontology_version_id
+                or candidate.purged_at is not None
+                or candidate.status != "materialized"
+                or relation is None
+                or relation.library_id != library.id
+                or relation.ontology_version_id != job.ontology_version_id
+            ):
+                continue
+            source = entities.get(candidate.source_candidate_id)
+            target = entities.get(candidate.target_candidate_id)
+            evidence_rows = _valid_evidence(relation_evidence_by_candidate.get(candidate.id, []))
+            if (
+                source is None
+                or target is None
+                or source.canonical_entity_id is None
+                or target.canonical_entity_id is None
+                or len(evidence_rows) != 1
+            ):
+                continue
+            evidence = evidence_rows[0]
+            if not _raw_claim_matches_candidate_evidence(raw_claim, evidence):
+                continue
+            valid.append((binding, candidate, relation, source, target, evidence))
+
+        valid_candidate_ids = {binding.graph_relation_candidate_id for binding, *_rest in valid}
+        if len(valid_candidate_ids) > 1:
+            projection_contexts = [
+                {
+                    "proposed_properties": candidate.proposed_properties,
+                    "relation_type_key": candidate.relation_type_key,
+                    "source_canonical_entity_id": str(source.canonical_entity_id),
+                    "target_canonical_entity_id": str(target.canonical_entity_id),
+                }
+                for _binding, candidate, _relation, source, target, _evidence in valid
+            ]
+            await record_raw_claim_projection_pending_fact(
+                db,
+                library_id=library.id,
+                raw_claim=raw_claim,
+                evidence=valid[0][-1],
+                reason_code="raw_claim_projection_ambiguity",
+                projection_contexts=projection_contexts,
+            )
+            continue
+        if len(valid_candidate_ids) != 1:
+            continue
+
+        _binding, candidate, relation, source, target, evidence = valid[0]
+        expected_fact = (
+            await db.get(LogicalFact, relation.logical_fact_id)
+            if relation.logical_fact_id is not None
+            else None
+        )
+        if expected_fact is None:
+            continue
+        relation_evidence, _created = await _relation_evidence_for_candidate(
+            db,
+            job=job,
+            library=library,
+            relation=relation,
+            candidate=candidate,
+            evidence=evidence,
+        )
+        expected_assertion = (
+            await db.get(FactAssertion, relation_evidence.fact_assertion_id)
+            if relation_evidence.fact_assertion_id is not None
+            else None
+        )
+        if expected_assertion is None:
+            continue
+        result = await resolve_raw_claim_fact(
+            db,
+            library_id=library.id,
+            raw_claim=raw_claim,
+            projection_candidate=candidate,
+            relation=relation,
+            relation_evidence=relation_evidence,
+            source_entity=source,
+            target_entity=target,
+            evidence=evidence,
+            expected_logical_fact=expected_fact,
+            expected_assertion=expected_assertion,
+        )
+        if result.decision.status == "resolved":
+            await reconcile_resolved_fact_decision(
+                db,
+                library_id=library.id,
+                decision=result.decision,
+            )
+
+
 async def _materialize_job_transaction(
     db,
     *,
@@ -560,6 +730,7 @@ async def _materialize_job_transaction(
     publishable_relation_evidence_count = 0
     pending_entity_candidate_count = 0
     entity_by_candidate_id: dict[uuid.UUID, Entity] = {}
+    relation_by_candidate_id: dict[uuid.UUID, KnowledgeRelation] = {}
     for candidate in entity_candidates:
         type_rule = rules.entity_types_by_key.get(candidate.entity_type_key)
         if type_rule is None:
@@ -678,6 +849,13 @@ async def _materialize_job_transaction(
 
     for candidate in relation_candidates:
         if candidate.status == "materialized":
+            relation = await db.get(KnowledgeRelation, candidate.materialized_relation_id)
+            if (
+                relation is not None
+                and relation.library_id == library.id
+                and relation.ontology_version_id == job.ontology_version_id
+            ):
+                relation_by_candidate_id[candidate.id] = relation
             continue
         relation_evidence_rows = _valid_evidence(relation_evidence_by_candidate.get(candidate.id, []))
         if not relation_evidence_rows:
@@ -760,7 +938,18 @@ async def _materialize_job_transaction(
         publishable_relation_evidence_count += len(relation_evidence_rows)
         candidate.materialized_relation_id = relation.id
         candidate.status = "materialized"
+        relation_by_candidate_id[candidate.id] = relation
         publishable_relation_count += int(created)
+
+    await _materialize_raw_claim_facts(
+        db,
+        job=job,
+        library=library,
+        relation_candidates={candidate.id: candidate for candidate in relation_candidates},
+        relations=relation_by_candidate_id,
+        entities=entity_by_candidate_id,
+        relation_evidence_by_candidate=relation_evidence_by_candidate,
+    )
 
     counts = getattr(job, "counts", None)
     counts = counts if isinstance(counts, dict) else {}
