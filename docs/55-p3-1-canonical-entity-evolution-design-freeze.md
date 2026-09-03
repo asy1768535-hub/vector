@@ -128,27 +128,79 @@ Fact Resolution bridge。
 未来 P3.1 implementation 的单一 schema migration（预留为 `0071`，实际创建前仍须
 重新核对 Alembic head）必须新增以下模型。此处是设计冻结，不创建 migration。
 
-### 5.1 `canonical_entity_evolution_decisions`
+### 5.1 `canonical_entity_evolution_commands`
+
+每一行是一个 immutable logical evolution command root，不是 Decision。它消除
+"一个 idempotency key 只能有一条 Decision" 与 append-only Decision lineage 之间的
+矛盾：一个 command 可以有多条 Decision，但一个 library 中一个 idempotency key 只能有
+一个 command root。
 
 | Field | Contract |
 | --- | --- |
 | `id`, `library_id` | UUID primary ID，另有 `(id, library_id)` unique；library FK `RESTRICT`。 |
-| `idempotency_key` | 调用方提供的稳定键；同一 library 重用不同 command 必须 `REJECTED`。 |
+| `idempotency_key` | 调用方提供的稳定 logical-command key；必须非空且有界。 |
 | `request_fingerprint` | 64-char hash，包含 contract version、operation kind、显式 inputs/targets、partition、expected precondition；不含时间或随机 UUID。 |
+| `operation_kind` | `merge`、`split`、`reassign`；command root 的 immutable semantic kind。 |
+| `contract_version` | 本 command 使用的 evolution/resolver contract version。 |
+| `supersedes_command_id` | 可空的同 library 直接前驱 command root；只用于 stale/pending command 被 fresh command 取代时的 command-chain 审计，不替代 Decision 的直接前驱。 |
+| `created_at` | 不可变审计时间。 |
+
+数据库必须建立：
+
+```text
+UNIQUE (library_id, idempotency_key)
+UNIQUE (id, library_id)
+FK (supersedes_command_id, library_id) -> commands(id, library_id)
+UNIQUE (library_id, supersedes_command_id)           # NULL permitted; no branching command successor
+```
+
+因此 `(library_id, idempotency_key)` 唯一标识一个 persisted command chain，而不是一条
+Decision 行。`request_fingerprint` 在 command 创建后不可变；同 key 的后续请求必须读取该
+command 后比较 fingerprint，不能创建第二个 root。
+
+### 5.2 `canonical_entity_evolution_decisions`
+
+| Field | Contract |
+| --- | --- |
+| `id`, `library_id` | UUID primary ID，另有 `(id, library_id)` unique；library FK `RESTRICT`。 |
+| `command_id` | 非空 root command ID；以 `(command_id, library_id)` composite FK 指向 command。D1、D2、D3 经此字段共享同一 idempotency key、request fingerprint 和 contract version。 |
 | `operation_kind` | `merge`、`split`、`reassign`。`reassign` 只改变一个 Entity projection，不创建 global canonical successor。 |
 | `lifecycle_status` | `pending`、`applied`、`rejected`、`stale`、`superseded`。`pending`/`rejected` 是审计状态；`stale` 独立于 `rejected`。 |
 | `reason_code`, `reason_text` | 必须说明人工/规则依据；`reason_text` 有界且不可承载秘密或原始大 payload。 |
 | `method`, `confidence` | `method` 明确产生来源；`confidence` 为可选 `0..1` 审计值，永远不是 split 自动分流依据。 |
 | `evidence_refs` | JSONB array，沿用稳定 reference shape；只保留最小必要证据 locator。 |
-| `contract_version` | 固定为本实现所使用的 evolution contract/resolver version。 |
 | `precondition_fingerprint` | 锁前 observation 的可验证摘要；锁后重新读取时不相同即 `STALE_OPERATION`。 |
-| `supersedes_decision_id` | 同库的先前 pending 或被替代 decision；旧行保留。 |
+| `supersedes_decision_id` | 可空的同 command 直接前驱；旧行保留。自引用 composite FK 必须同时携带 `library_id` 和本行 `command_id`，禁止跨 command predecessor。 |
 | `created_at` | 不可变审计时间。 |
 
-除 lifecycle 从 `pending` 到 `superseded` 的显式状态转换外，decision payload 不更新。
-`applied` 不是重新写入同一行，而是新 decision supersede 原 pending decision。
+Decision payload 永远不更新。唯一允许的原地 lifecycle mutation 是：在同一 outer
+transaction 中插入直接 successor 后，将其直接前驱从 `pending` 标记为 `superseded`。
+`applied`、`rejected`、`stale` 与新 `pending` 均只能在新 Decision 行创建时写入；不得把
+同一行从 `pending` 原地改为 `applied`。
 
-### 5.2 `canonical_entity_evolution_sources`
+```text
+command C
+  D1: pending
+  D2: applied, command_id = C, supersedes_decision_id = D1
+  D1.lifecycle_status: pending -> superseded   # the only mutable lifecycle transition
+```
+
+数据库还必须建立以下可静态执行的 chain 约束：
+
+```text
+UNIQUE (id, library_id, command_id)
+FK (command_id, library_id) -> commands(id, library_id)
+FK (supersedes_decision_id, library_id, command_id)
+  -> decisions(id, library_id, command_id)
+UNIQUE (library_id, supersedes_decision_id)          # NULL permitted; no branching direct successor
+UNIQUE (library_id, command_id) WHERE lifecycle_status = 'pending'
+UNIQUE (library_id, command_id) WHERE lifecycle_status = 'applied'
+```
+
+这些约束允许同一 command chain 有多个 append-only Decision rows，同时禁止平行 pending
+chain、多条 applied terminal Decision 与跨 command supersede。
+
+### 5.3 `canonical_entity_evolution_sources`
 
 每一行代表一个不再是 current leaf 的 predecessor：
 
@@ -157,7 +209,7 @@ id
 library_id
 decision_id
 source_canonical_entity_id
-resolution_state = pending | applied | superseded
+resolution_state = pending | applied | superseded | historical_only
 created_at
 ```
 
@@ -173,8 +225,12 @@ WHERE resolution_state IN ('pending', 'applied')
 ```
 
 因此一个 historical canonical 不可能同时拥有两条 current/pending evolution 分支。
+`historical_only` 只能是显式 persisted terminal evolution state：该 source 已被声明为不再是
+current leaf，且没有 successor。P3.1 的 merge、split 与 reassign command 不创建该 terminal
+state；缺少这种 persisted state 时，resolver 不得从 CanonicalEntity operational status 或
+"没有找到 successor" 猜出 `historical_only`。
 
-### 5.3 `canonical_entity_evolution_successors`
+### 5.4 `canonical_entity_evolution_successors`
 
 ```text
 source_transition_id
@@ -193,7 +249,7 @@ CanonicalEntity 后写入 `target_canonical_entity_id`。对于 pending split，
 target 或 immutable target specification，不产生 target CanonicalEntity，也不形成
 applied successor relation。
 
-### 5.4 `canonical_entity_projection_assignments`
+### 5.5 `canonical_entity_projection_assignments`
 
 ```text
 id
@@ -219,7 +275,7 @@ Fact reconciliation。它必须以 `(entity_id, library_id)`、`(canonical_entit
 每个 applied reassignment 都有完整的 old/new Decision link；`pending` projection 的 new
 Decision 和 target 均为 NULL。一个 projection 在同一 decision 中只能有一条 assignment。
 
-### 5.5 Schema invariants
+### 5.6 Schema invariants
 
 未来 migration 必须静态保证：
 
@@ -230,6 +286,9 @@ confidence is NULL or 0..1
 JSON evidence/basis shapes are constrained
 current/pending source transition is partial-unique
 source != target for state-changing successor rows
+one library + idempotency key has exactly one command root
+all Decision rows reference one persisted command root
+one command has no parallel pending chain and no parallel applied terminal Decision
 ```
 
 跨 library、self successor、没有 successor 的 applied merge/split、split 少于两个
@@ -256,7 +315,9 @@ reason_code
 ```
 
 `status` 只描述 evolution 解析结果；`resolution_eligible` 由当前 target 的既有
-operational status 单独给出。下游 new resolution 必须同时要求：
+operational status 单独给出。两者严格解耦：Evolution status 绝不从
+`CanonicalEntity.status` 推导，operational status 也不改变 lineage 的 current leaf。下游
+new resolution 必须同时要求：
 
 ```text
 status == resolved
@@ -268,10 +329,22 @@ resolution_eligible == true
 
 | Result | Meaning |
 | --- | --- |
-| `resolved` | 无 successor 的 active leaf 解析为自身，或 lineage 唯一到达一个 active leaf。 |
+| `resolved` | 无 evolution successor 的唯一 current leaf 解析为自身，或 lineage 唯一到达一个 current leaf；该 leaf 可以是 `active`、`pending_review` 或 `disabled`。 |
 | `forked` | 已 applied split 有多个 successor，但 context 没有唯一的 persisted partition。 |
 | `pending` | source 有 pending evolution、指定 projection assignment pending、context 无效/不在 partition，或检测到 lineage integrity failure。 |
-| `historical_only` | 没有 current successor 且 canonical 只保留历史查询能力，例如 disabled historical leaf。 |
+| `historical_only` | 仅由显式 persisted terminal evolution state 表示：该 historical identity 已被声明为不再是 current leaf，且没有任何 current successor。它绝不能由 `disabled`、`pending_review`、普通缺失 successor 或 read-time integrity failure 推断。 |
+
+例如，一个没有 evolution successor 的 disabled CanonicalEntity 仍然是唯一 current leaf：
+
+```text
+status = resolved
+current_canonical_entity_id = self
+resolution_eligible = false
+```
+
+相反，只有 source transition 明确为 `historical_only` 且没有 successor 时，resolver 才返回
+`historical_only`。没有这种明确 persisted terminal state 的异常 lineage 一律 fail closed 为
+`pending`。
 
 第一版 `context` 只允许 persisted deterministic key：
 
@@ -388,15 +461,24 @@ REJECTED            invalid/scope/policy/cycle command, with explicit reason
 ### Replay
 
 `request_fingerprint` 使用已规范化的 stable inputs，包含 command 的 expected current
-preconditions，不能包含时间、random ID、candidate job ID 或 row insertion order。
+preconditions，不能包含时间、random ID、candidate job ID 或 row insertion order。它与
+`idempotency_key` 均由 `canonical_entity_evolution_commands` root 行持久化，而不是作为
+Decision 行唯一键。
 
-- 同一 idempotency key 加相同 request fingerprint：`REUSED`，不新增 decision、source、
-  successor、assignment 或 EntityResolutionDecision。
-- 同一 idempotency key 配不同 request fingerprint：`REJECTED(idempotency_key_conflict)`。
+- 同一 library、同一 idempotency key、同一 request fingerprint：读取唯一 command chain。
+  chain 已有 `applied` Decision 时返回 `REUSED`，不新增 Decision、source、successor、
+  assignment 或 EntityResolutionDecision；chain 当前有 `pending` Decision 时返回该
+  `PENDING` 状态，不得创建平行 pending chain。
+- 同一 idempotency key 配不同 request fingerprint：读取同一 command root 后返回
+  `REJECTED(idempotency_key_conflict)`；不得创建第二个 command root 或 Decision chain。
+- pending 完成必须 append successor Decision：`D1 pending -> D2 applied`
+  (`D2.supersedes_decision_id = D1`)，并仅将 D1 标记为 `superseded`。D1 不得原地变成
+  `applied`。
 - 历史上已存在等价 applied direct transition 时，即使调用方换了 idempotency key，也返回
   `REUSED`，不制造重复 lineage。
-- 被 supersede 的 pending/stale command 不可重新激活；调用方用 fresh precondition 发出
-  新 command，并通过 `supersedes_decision_id` 留下历史链。
+- 被 supersede 的 pending/stale command 不可重新激活；调用方用 fresh precondition 和新的
+  idempotency key 发出新 command root，并以 `supersedes_command_id` 留下 command-chain 直接
+  历史。`supersedes_decision_id` 只连接同一 command 内的 D1 -> D2 直接前驱。
 
 ### Cycle prevention
 
@@ -438,9 +520,9 @@ transaction；P3 integration 必须适配这一事实。GraphGovernance 和管�
 
 在明确授权 P3.1 implementation 后，允许的最小范围是：
 
-1. 一个新的 `0071` schema migration，创建第 5 节的 lineage/assignment tables、composite
-   FKs、partial unique indexes 和 EntityResolutionDecision `(id, library_id)` unique；不
-   修改任何 historical Fact bridge。
+1. 一个新的 `0071` schema migration，创建第 5 节的 command-root、lineage/assignment
+   tables、composite FKs、partial unique indexes 和 EntityResolutionDecision `(id, library_id)`
+   unique；不修改任何 historical Fact bridge。
 2. ORM models、typed command/result contracts 和 Canonical evolution service；command
    必须显式接收 survivor、targets、partition、idempotency key、reason、method、evidence
    和 expected preconditions。
@@ -450,9 +532,10 @@ transaction；P3 integration 必须适配这一事实。GraphGovernance 和管�
 5. Entity projection reassignment writer，与旧/new EntityResolutionDecision 的 supersede
    链一起运行。
 6. `graph_extraction_materializer` 的 current-canonical gate，以及 shared Fact Resolution
-   preflight 的 canonical-only gate：非 `resolved` identity 写 P2-compatible pending
-   decision，且不创建 LogicalFact、FactAssertion、KnowledgeRelation 或 RelationEvidence
-   的新 bridge。该 gate 不改变 RawClaim promotion 模型或 API。
+   preflight 的 canonical-only gate：非 `resolved` identity，或 `resolved` 但
+   `resolution_eligible == false` 的 identity，均写 P2-compatible pending decision，且不创建
+   LogicalFact、FactAssertion、KnowledgeRelation 或 RelationEvidence 的新 bridge。该 gate 不改变
+   RawClaim promotion 模型或 API。
 7. `stage_entity_merge` 对相同 Entity projection scopes 使用共享 lock API，保持其现有
    ontology-specific effect 语义不变。
 
@@ -467,15 +550,17 @@ Fact lifecycle、RawClaim promotion semantics、Publication、Retrieval、graph 
 | Area | Required evidence |
 | --- | --- |
 | Merge | 显式 existing survivor、无 self-edge、losing source 唯一解析、禁止自动新 C。 |
+| Resolver status separation | 无 successor 的 `active`、`pending_review`、`disabled` leaf 都为 `resolved(self)`；仅 `active` 为 resolution-eligible。`historical_only` 仅由显式 terminal evolution state 产生，不能由 disabled 或缺失 successor 推断。 |
 | Split resolver | 无 context 为 `forked`；唯一 Entity projection/subject context 为 `resolved`；pending/invalid context 为 `pending`；没有 first/latest fallback。 |
 | Projection partition | 覆盖全部 direct projections、重复/遗漏拒绝、pending 不改 Entity、resolved 原子更新 Entity 与新/旧 ER Decision。 |
 | History | 旧 EntityResolutionDecision 和所有 Fact/Assertion/Relation/Evidence bridges 不变。 |
+| Command replay | `(library_id, idempotency_key)` 只产生一个 command root；相同 fingerprint 的 applied chain 复用、pending chain 返回既有 `PENDING`、key 冲突拒绝；D1 pending -> D2 applied 必须 append 并仅将 D1 标记 superseded。 |
 | Replay | 相同 command 复用；key 冲突拒绝；`B -> A` 重放复用；`B -> C` 在 B 已解析为 A 时 stale。 |
 | Cycle | 两节点、长环、多 source/target 环全部拒绝；损坏读时 fail closed。 |
 | Cross-library | schema/model/service 都拒绝跨 library source、target、Entity、Decision。 |
 | Lock API | complete set 去重后固定排序；Entity Resolution 与 GraphGovernance 共享 projection scope；锁后 stale re-read 返回正确 vocabulary。 |
 | Transaction | Evolution audit、ER Decision supersede 与 Entity update 一起 rollback；无部分 lineage。 |
-| New Fact guard | canonical `forked`/`pending`/`historical_only` 仅产生 pending FactResolutionDecision，且无 Fact/Assertion bridge。 |
+| New Fact guard | canonical `forked`/`pending`/`historical_only`，以及 `resolved` 但 `resolution_eligible == false`，仅产生 pending FactResolutionDecision，且无 Fact/Assertion bridge。 |
 | Regression | Publication、Retrieval、RawClaim promotion、P2 historical Fact reads 保持既有行为。 |
 
 可稳定自动化的 service/schema 行为使用 T2 strict RED -> GREEN。当前文档任务本身是 T0：
@@ -513,12 +598,12 @@ GitNexus MCP 当前不可用；P3.0 已记录 `npx gitnexus analyze` 因 `tree-s
 ```text
 A. explicit existing merge survivor semantics
 B. fail-closed split and complete Entity projection partition semantics
-C. append-only evolution decision, source, successor, and assignment schema
-D. four-state current resolver contract
+C. immutable command-root plus append-only evolution decision, source, successor, and assignment schema
+D. four-state current resolver contract, strictly separate from CanonicalEntity operational status
 E. Entity reassignment plus EntityResolutionDecision supersede transaction
 F. GraphGovernance projection-level mutual exclusion
 G. shared lock API and fixed total order
-H. replay and idempotency behavior
+H. command-root replay and idempotency behavior with append-only Decision lineage
 I. cycle prevention
 J. outer transaction ownership
 K. exact implementation boundary
