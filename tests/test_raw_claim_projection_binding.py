@@ -115,6 +115,33 @@ def _anchors() -> tuple[RawClaimProjectionAnchor, ...]:
     )
 
 
+def _anchor(projection_ref: str, evidence_ref_keys: set[str]) -> RawClaimProjectionAnchor:
+    return RawClaimProjectionAnchor(
+        projection_ref=projection_ref,
+        graph_relation_candidate_id=(
+            CANDIDATE_A_ID if projection_ref == "p0" else CANDIDATE_B_ID
+        ),
+        allowed_evidence_ref_keys=frozenset(evidence_ref_keys),
+    )
+
+
+def _response_with_evidence_refs(*evidence_ref_keys: str) -> ShadowRawResponseV1:
+    if not evidence_ref_keys:
+        raise ValueError("fixture requires at least one evidence ref")
+    response = _response(evidence=evidence_ref_keys[0])
+    if len(evidence_ref_keys) == 1:
+        return response
+    payload = response.model_dump(mode="json")
+    payload.update(
+        qualifiers=[
+            {"key": f"evidence-{index}", "value": "fixture", "evidence_ref": ref_key}
+            for index, ref_key in enumerate(evidence_ref_keys[1:], start=1)
+        ],
+        evidence_ref_keys=list(evidence_ref_keys),
+    )
+    return ShadowRawResponseV1.model_validate(payload)
+
+
 class _Result:
     def __init__(self, rows=()):
         self.rows = list(rows)
@@ -277,6 +304,36 @@ def test_opaque_anchor_only_binds_an_explicit_ref_with_matching_evidence() -> No
     mismatched = _response(evidence="e2")
     assert projection_anchor_for_shadow_claim(
         AnchoredShadowClaimV1(projection_ref="p0", claim=mismatched), anchors=_anchors()
+    ) is None
+
+
+def test_projection_anchor_requires_one_server_compatible_candidate() -> None:
+    one_evidence_claim = _response_with_evidence_refs("e1")
+    two_evidence_claim = _response_with_evidence_refs("e1", "e2")
+
+    unique = (_anchor("p0", {"e1"}), _anchor("p1", {"e2"}))
+    assert projection_anchor_for_shadow_claim(
+        AnchoredShadowClaimV1(projection_ref="p0", claim=one_evidence_claim), anchors=unique
+    ) == unique[0]
+
+    exact_overlap = (_anchor("p0", {"e1"}), _anchor("p1", {"e1"}))
+    assert projection_anchor_for_shadow_claim(
+        AnchoredShadowClaimV1(projection_ref="p0", claim=one_evidence_claim),
+        anchors=exact_overlap,
+    ) is None
+
+    overlapping = (_anchor("p0", {"e1", "e2"}), _anchor("p1", {"e1"}))
+    assert projection_anchor_for_shadow_claim(
+        AnchoredShadowClaimV1(projection_ref="p1", claim=one_evidence_claim),
+        anchors=overlapping,
+    ) is None
+    assert projection_anchor_for_shadow_claim(
+        AnchoredShadowClaimV1(projection_ref="p0", claim=two_evidence_claim),
+        anchors=overlapping,
+    ) == overlapping[0]
+
+    assert projection_anchor_for_shadow_claim(
+        AnchoredShadowClaimV1(projection_ref="p1", claim=one_evidence_claim), anchors=unique
     ) is None
 
 

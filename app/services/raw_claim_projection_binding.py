@@ -66,13 +66,19 @@ def projection_anchor_for_shadow_claim(
     *,
     anchors: Sequence[RawClaimProjectionAnchor],
 ) -> RawClaimProjectionAnchor | None:
-    """Resolve only a server-issued opaque ref; invalid anchors remain unbound."""
+    """Accept only one evidence-compatible server anchor; otherwise leave unbound."""
     if claim.projection_ref is None:
         return None
-    anchor = next((item for item in anchors if item.projection_ref == claim.projection_ref), None)
-    if anchor is None:
+    evidence_ref_keys = set(claim.claim.evidence_ref_keys)
+    compatible = [
+        anchor
+        for anchor in anchors
+        if evidence_ref_keys.issubset(anchor.allowed_evidence_ref_keys)
+    ]
+    if len(compatible) != 1:
         return None
-    if not set(claim.claim.evidence_ref_keys).issubset(anchor.allowed_evidence_ref_keys):
+    anchor = compatible[0]
+    if claim.projection_ref != anchor.projection_ref:
         return None
     return anchor
 
