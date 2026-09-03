@@ -251,6 +251,101 @@ async def ensure_schema_discovery_run_for_batch(
     return run, jobs
 
 
+async def repair_schema_discovery_run(
+    db: AsyncSession,
+    *,
+    library: Library,
+    run_id: uuid.UUID,
+    requested_by: Any = None,
+) -> SchemaDiscoveryRun:
+    """Create a fresh discovery run from the current revisions of a failed run."""
+    source_run = await db.get(SchemaDiscoveryRun, run_id, with_for_update=True)
+    if source_run is None or source_run.library_id != library.id:
+        raise ValueError("schema_discovery_run_not_found")
+    if source_run.status != "failed":
+        raise ValueError("schema_discovery_run_not_retryable")
+
+    revision_ids = [uuid.UUID(value) for value in source_run.source_revision_ids]
+    document_ids = (
+        await db.execute(
+            select(DocumentRevision.document_id).where(DocumentRevision.id.in_(revision_ids))
+        )
+    ).scalars().all()
+    if not document_ids:
+        raise ValueError("schema_discovery_source_missing")
+    rows = (
+        await db.execute(
+            select(Document, DocumentRevision)
+            .join(DocumentRevision, DocumentRevision.id == Document.current_revision_id)
+            .where(
+                Document.library_id == library.id,
+                Document.id.in_(document_ids),
+                Document.deleted_at.is_(None),
+                Document.status == "ready",
+                DocumentRevision.status == "ready",
+            )
+        )
+    ).all()
+    if not rows:
+        raise ValueError("schema_discovery_source_not_ready")
+
+    source_hash = _revision_source_hash(rows)
+    source_set_key = f"repair:{source_run.id}"
+    existing = (
+        await db.execute(
+            select(SchemaDiscoveryRun)
+            .where(
+                SchemaDiscoveryRun.library_id == library.id,
+                SchemaDiscoveryRun.source_set_key == source_set_key,
+            )
+            .with_for_update()
+        )
+    ).scalars().first()
+    if existing is not None:
+        if existing.status == "failed":
+            raise ValueError("schema_discovery_repair_failed")
+        return existing
+
+    ontology = await _create_draft_ontology(db, library, source_hash)
+    run = SchemaDiscoveryRun(
+        library_id=library.id,
+        source_set_key=source_set_key,
+        source_revision_ids=[str(revision.id) for _document, revision in rows],
+        source_hash=source_hash,
+        status="queued",
+        confirmation_policy=getattr(library, "schema_confirmation_policy", "required"),
+        ontology_version_id=ontology.id,
+    )
+    db.add(run)
+    await db.flush()
+
+    placeholder = discovery_placeholder_snapshot(
+        ontology_version_id=ontology.id,
+        source_hash=source_hash,
+    )
+    placeholder_hash = canonical_graph_value_hash_v1(placeholder)
+    from app.services.graph_extraction_jobs import create_graph_extraction_job
+
+    for document, revision in rows:
+        await create_graph_extraction_job(
+            db,
+            library=library,
+            document=document,
+            revision=revision,
+            trigger_type="repair",
+            execution_mode="production",
+            requested_by=requested_by,
+            idempotency_key=None,
+            build_mode=getattr(library, "graph_extraction_build_mode", None),
+            ontology_version=ontology,
+            ontology_snapshot=placeholder,
+            ontology_snapshot_hash=placeholder_hash,
+            schema_discovery_run_id=run.id,
+            waiting_schema=True,
+        )
+    return run
+
+
 async def ensure_schema_discovery_run_for_revision(
     db: AsyncSession,
     *,

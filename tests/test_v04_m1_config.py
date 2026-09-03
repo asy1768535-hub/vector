@@ -18,11 +18,11 @@ EXPECTED_DEFAULTS = {
     "graph_extraction_auto_trigger_enabled": False,
     "graph_extraction_base_url": "https://api.deepseek.com/v1",
     "graph_extraction_model": "deepseek-v4-pro",
-    "graph_extraction_timeout_seconds": 120.0,
+    "graph_extraction_timeout_seconds": 240.0,
     "graph_extraction_temperature": 0.0,
     "graph_extraction_response_format": "json_object",
     "graph_extraction_max_context_chars": 24000,
-    "graph_extraction_context_window_tokens": 8192,
+    "graph_extraction_context_window_tokens": 10240,
     "graph_extraction_previous_chunks": 1,
     "graph_extraction_next_chunks": 1,
     "graph_extraction_default_build_mode": "standard",
@@ -32,7 +32,7 @@ EXPECTED_DEFAULTS = {
     "graph_extraction_max_output_tokens": 8000,
     "graph_extraction_minstral_base_url": "http://graph-minstral-3b:8000/v1",
     "graph_extraction_minstral_model": "graph-minstral-3b",
-    "graph_extraction_minstral_timeout_seconds": 120.0,
+    "graph_extraction_minstral_timeout_seconds": 240.0,
     "graph_extraction_minstral_max_output_tokens": 1000,
     "graph_extraction_qwen3_draft_max_output_tokens": 1000,
     "graph_schema_discovery_max_source_chunks": 8,
@@ -40,9 +40,10 @@ EXPECTED_DEFAULTS = {
     "graph_schema_discovery_timeout_seconds": 300.0,
     "graph_schema_discovery_context_window_tokens": 16384,
     "graph_schema_discovery_max_output_tokens": 8000,
-    "graph_extraction_batch_size": 8,
+    "graph_extraction_batch_size": 1,
     "graph_extraction_worker_concurrency": 6,
     "graph_extraction_provider_max_concurrency": 4,
+    "graph_extraction_review_max_concurrency": 1,
     "graph_extraction_provider_max_retries": 2,
     "graph_extraction_provider_backoff_base_seconds": 1.0,
     "graph_extraction_prompt_version": "v1",
@@ -61,7 +62,7 @@ EXPECTED_DEFAULTS = {
     "graph_extraction_auto_evidence_types": "direct_statement,table_cell",
     "graph_extraction_evidence_group_policy": "all_claims_valid",
     "graph_extraction_worker_poll_seconds": 3.0,
-    "graph_extraction_unit_lease_seconds": 180,
+    "graph_extraction_unit_lease_seconds": 360,
     "graph_extraction_unit_lease_renew_seconds": 30,
     "graph_extraction_worker_max_model_attempts": 3,
     "graph_extraction_context_retention_days": 30,
@@ -127,7 +128,7 @@ def test_startup_rejects_renew_at_or_above_half_lease(monkeypatch):
     _set_valid_runtime(monkeypatch)
     from app.main import settings
 
-    monkeypatch.setattr(settings, "graph_extraction_unit_lease_renew_seconds", 90)
+    monkeypatch.setattr(settings, "graph_extraction_unit_lease_renew_seconds", 180)
     with pytest.raises(RuntimeError, match="less than half"):
         assert_graph_extraction_startup_security()
 
@@ -153,7 +154,7 @@ def test_startup_rejects_timeout_at_or_above_lease(monkeypatch):
     _set_valid_runtime(monkeypatch)
     from app.main import settings
 
-    monkeypatch.setattr(settings, "graph_extraction_timeout_seconds", 180.0)
+    monkeypatch.setattr(settings, "graph_extraction_timeout_seconds", 360.0)
     with pytest.raises(RuntimeError, match="timeout"):
         assert_graph_extraction_startup_security()
 

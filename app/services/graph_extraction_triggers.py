@@ -76,26 +76,38 @@ async def graph_extraction_upload_configuration(db, library: Library) -> dict:
     )
     if not levels:
         reasons.append("security_levels_missing")
+    current_ontology_error = None
     try:
         active_ontology = await resolve_current_ontology(
             db,
             library=library,
             required=False,
         )
-    except CurrentOntologyError:
-        active_ontology = None
+    except CurrentOntologyError as exc:
+        if exc.code == "current_ontology_missing":
+            active_ontology = None
+        else:
+            active_ontology = None
+            current_ontology_error = exc.code
     ai_draft = bool(
         active_ontology is not None
         and str(getattr(active_ontology, "version_key", "")).startswith("ai-draft")
     )
     schema_ready = active_ontology is not None and not ai_draft
-    non_schema_reasons = [reason for reason in reasons if reason != "active_ontology_missing"]
-    if not schema_ready:
-        reasons.append("active_ontology_missing")
-    graph_ready = schema_mode in {"explore", "governed"} and not non_schema_reasons
-    exploration_available = graph_ready and schema_mode == "explore"
-    if schema_mode == "governed" and not schema_ready:
+    if current_ontology_error is not None:
+        reasons.append(current_ontology_error)
+        graph_ready = False
         exploration_available = False
+    else:
+        non_schema_reasons = [
+            reason for reason in reasons if reason != "active_ontology_missing"
+        ]
+        if not schema_ready:
+            reasons.append("active_ontology_missing")
+        graph_ready = schema_mode in {"explore", "governed"} and not non_schema_reasons
+        exploration_available = graph_ready and schema_mode == "explore"
+        if schema_mode == "governed" and not schema_ready:
+            exploration_available = False
     return {
         "available": graph_ready and schema_ready,
         "exploration_available": exploration_available,
@@ -188,6 +200,8 @@ async def enqueue_ready_revision_graph_extraction(
                     build_mode=_library_build_mode(library),
                 )
     except GraphExtractionJobError as exc:
+        raise GraphExtractionTriggerError(exc.code, str(exc)) from exc
+    except CurrentOntologyError as exc:
         raise GraphExtractionTriggerError(exc.code, str(exc)) from exc
     except IntegrityError as exc:
         raise GraphExtractionTriggerError(

@@ -54,6 +54,8 @@ SCHEMA_LIFECYCLE_ERROR_CODES = (
     "schema_lifecycle_idempotency_conflict",
     "schema_lifecycle_invalid_draft",
     "schema_lifecycle_dependency_conflict",
+    "current_ontology_missing",
+    "current_ontology_invalid",
     "schema_lifecycle_unavailable",
 )
 SCHEMA_LIFECYCLE_MAX_PAYLOAD_BYTES = 65_536

@@ -873,6 +873,26 @@ def test_one_discovery_run_binds_six_waiting_jobs_to_one_snapshot():
     )
 
 
+def test_repair_discovery_rejects_a_non_failed_run():
+    from app.models.schema_discovery_run import SchemaDiscoveryRun
+    from app.services.schema_discovery_runs import repair_schema_discovery_run
+
+    run = SimpleNamespace(library_id=uuid.uuid4(), status="queued")
+    library = SimpleNamespace(id=run.library_id)
+    db = SimpleNamespace(get=AsyncMock(return_value=run))
+
+    with pytest.raises(ValueError, match="schema_discovery_run_not_retryable"):
+        asyncio.run(
+            repair_schema_discovery_run(
+                db,
+                library=library,
+                run_id=uuid.uuid4(),
+            )
+        )
+
+    db.get.assert_awaited_once_with(SchemaDiscoveryRun, db.get.call_args.args[1], with_for_update=True)
+
+
 def test_confirmation_resumes_all_jobs_with_the_activated_snapshot():
     from app.services.schema_discovery_runs import (
         resume_schema_discovery_run_after_confirmation,

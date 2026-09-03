@@ -404,7 +404,11 @@ async def import_schema_version(
     if replay is not None:
         return replay
     try:
-        current = await resolve_current_ontology(db, library=library)
+        current = await resolve_current_ontology(
+            db,
+            library=library,
+            required=False,
+        )
     except CurrentOntologyError as exc:
         raise SchemaLifecycleError(exc.code, str(exc)) from exc
 
@@ -430,7 +434,7 @@ async def import_schema_version(
         version_no=max((row.version_no for row in family), default=0) + 1,
         status=_DRAFT,
         description=spec.description,
-        parent_version_id=current.id,
+        parent_version_id=current.id if current is not None else None,
     )
     entity_keys = [row.key for row in spec.entity_types]
     relation_keys = [row.key for row in spec.relation_types]

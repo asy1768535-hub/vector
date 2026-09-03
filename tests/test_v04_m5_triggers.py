@@ -5,6 +5,7 @@ import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from pydantic import SecretStr
 
 from app.config import settings
@@ -12,10 +13,12 @@ from app.models.document import Document
 from app.models.document_revision import DocumentRevision
 from app.models.library import Library
 from app.services.graph_extraction_triggers import (
+    GraphExtractionTriggerError,
     compensate_ready_graph_extractions,
     enqueue_ready_revision_graph_extraction,
     graph_extraction_upload_configuration,
 )
+from app.services.schema_lifecycle_read import CurrentOntologyError
 from app.workers import embedder
 
 
@@ -193,6 +196,7 @@ def test_upload_configuration_requires_runtime_library_security_and_ontology(mon
         id=uuid.uuid4(),
         library_id=LIB_ID,
         status="active",
+        confirmed=True,
         version_key="confirmed-v1",
     )
     library = SimpleNamespace(
@@ -241,6 +245,64 @@ def test_upload_configuration_explore_mode_does_not_require_active_schema(monkey
     assert result["schema_mode"] == "explore"
     assert result["requires_active_schema"] is False
     assert result["reasons"] == ["active_ontology_missing"]
+
+
+def test_upload_configuration_fails_closed_for_invalid_current_pointer(monkeypatch):
+    monkeypatch.setattr(settings, "graph_extraction_enabled", True)
+    monkeypatch.setattr(settings, "graph_extraction_api_key", SecretStr("test-key"))
+    library = SimpleNamespace(
+        id=LIB_ID,
+        current_ontology_version_id=uuid.uuid4(),
+        graph_extraction_enabled=True,
+        external_llm_enabled=True,
+        graph_extraction_allowed_security_levels=["internal"],
+        schema_mode="explore",
+    )
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_Scalar(None))
+
+    result = asyncio.run(graph_extraction_upload_configuration(db, library))
+
+    assert result["available"] is False
+    assert result["exploration_available"] is False
+    assert result["reasons"] == ["current_ontology_invalid"]
+
+
+def test_explore_enqueue_surfaces_invalid_current_pointer(monkeypatch):
+    _enable_auto_trigger(monkeypatch)
+    library, document, revision = _scope()
+    library.schema_mode = "explore"
+    library.current_ontology_version_id = uuid.uuid4()
+    session = TriggerSession(
+        objects={
+            (Library, LIB_ID): library,
+            (Document, DOC_ID): document,
+            (DocumentRevision, REV_ID): revision,
+        }
+    )
+    import_job = SimpleNamespace(batch_id=uuid.uuid4())
+    import_result = MagicMock()
+    import_result.scalars.return_value.first.return_value = import_job
+    session.execute = AsyncMock(return_value=import_result)
+
+    with patch(
+        "app.services.graph_extraction_triggers.ensure_schema_discovery_run_for_batch",
+        new=AsyncMock(
+            side_effect=CurrentOntologyError("current_ontology_invalid", "invalid")
+        ),
+    ):
+        with pytest.raises(GraphExtractionTriggerError) as exc_info:
+            asyncio.run(
+                enqueue_ready_revision_graph_extraction(
+                    library_id=LIB_ID,
+                    document_id=DOC_ID,
+                    revision_id=REV_ID,
+                    force=True,
+                    session_factory=TriggerFactory(session),
+                )
+            )
+
+    assert exc_info.value.code == "current_ontology_invalid"
 
 
 def test_explore_upload_with_confirmed_active_schema_starts_new_discovery_run(monkeypatch):

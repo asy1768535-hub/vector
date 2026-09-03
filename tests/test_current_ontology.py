@@ -11,7 +11,10 @@ from app.services.schema_lifecycle_read import (
     CurrentOntologyError,
     resolve_current_ontology,
 )
-from app.services.schema_lifecycle_contracts import SchemaLifecycleCommand
+from app.services.schema_lifecycle_contracts import (
+    SchemaLifecycleCommand,
+    SchemaLifecycleError,
+)
 
 
 LIBRARY_ID = uuid.UUID("10000000-0000-0000-0000-000000000001")
@@ -45,11 +48,12 @@ def _library(**overrides):
     return SimpleNamespace(**values)
 
 
-def _ontology(*, library_id=LIBRARY_ID, status="active"):
+def _ontology(*, library_id=LIBRARY_ID, status="active", confirmed=True):
     return SimpleNamespace(
         id=CURRENT_ID,
         library_id=library_id,
         status=status,
+        confirmed=confirmed,
         version_key="ai-discovery",
         version_no=2,
     )
@@ -85,6 +89,7 @@ def test_resolve_current_ontology_fails_closed_without_pointer():
     [
         (_ontology(library_id=uuid.UUID("30000000-0000-0000-0000-000000000001")), "current_ontology_invalid"),
         (_ontology(status="disabled"), "current_ontology_invalid"),
+        (_ontology(confirmed=False), "current_ontology_invalid"),
         (None, "current_ontology_invalid"),
     ],
 )
@@ -237,3 +242,124 @@ def test_ai_discovery_draft_parents_the_current_ontology_at_creation():
     assert draft.parent_version_id == current.id
     assert draft.version_key == "ai-discovery"
     assert draft.version_no == 5
+
+
+def _import_command_and_spec(*, version_key="bootstrap", idempotency_key="import-current-test"):
+    from app.schemas.schema_lifecycle import SchemaImportRequest
+    from app.services.schema_lifecycle_contracts import deterministic_schema_import_id
+
+    target_id = deterministic_schema_import_id(LIBRARY_ID, idempotency_key)
+    command = SchemaLifecycleCommand(
+        library_id=LIBRARY_ID,
+        ontology_version_id=target_id,
+        actor_user_id=None,
+        action_kind="import_version",
+        target_kind="ontology_version",
+        target_id=target_id,
+        expected_state_hash="0" * 64,
+        idempotency_key=idempotency_key,
+        payload={},
+    )
+    spec = SchemaImportRequest(
+        version_key=version_key,
+        idempotency_key=idempotency_key,
+    )
+    return command, spec
+
+
+class _ImportRows:
+    def scalars(self):
+        return self
+
+    def all(self):
+        return []
+
+
+class _ImportDB:
+    def __init__(self):
+        self.added = []
+        self.added_all = []
+
+    async def execute(self, _statement):
+        return _ImportRows()
+
+    def add(self, value):
+        self.added.append(value)
+
+    def add_all(self, values):
+        self.added_all.extend(values)
+
+    async def flush(self):
+        return None
+
+
+def test_schema_import_bootstraps_without_current_ontology():
+    from unittest.mock import AsyncMock, patch
+
+    from app.services import schema_lifecycle_actions as actions
+
+    command, spec = _import_command_and_spec()
+    library = SimpleNamespace(id=LIBRARY_ID, current_ontology_version_id=None)
+    db = _ImportDB()
+
+    async def _run():
+        with (
+            patch.object(actions, "_lock_library", new=AsyncMock()),
+            patch.object(actions, "_replay", new=AsyncMock(return_value=None)),
+            patch.object(actions, "resolve_current_ontology", new=AsyncMock(return_value=None)) as resolve,
+            patch.object(actions, "schema_version_state_hash", return_value="a" * 64),
+            patch.object(actions, "_record_action", new=AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4()))),
+        ):
+            result = await actions.import_schema_version(db, library, command, spec)
+        return result, resolve
+
+    result, resolve = asyncio.run(_run())
+
+    assert result.bundle.version.parent_version_id is None
+    resolve.assert_awaited_once_with(db, library=library, required=False)
+
+
+def test_schema_import_keeps_current_as_parent_and_rejects_invalid_pointer():
+    from unittest.mock import AsyncMock, patch
+
+    from app.services import schema_lifecycle_actions as actions
+
+    current = _ontology()
+    command, spec = _import_command_and_spec(idempotency_key="import-current-parent")
+    library = SimpleNamespace(id=LIBRARY_ID, current_ontology_version_id=current.id)
+
+    async def _run_with_current():
+        with (
+            patch.object(actions, "_lock_library", new=AsyncMock()),
+            patch.object(actions, "_replay", new=AsyncMock(return_value=None)),
+            patch.object(actions, "resolve_current_ontology", new=AsyncMock(return_value=current)),
+            patch.object(actions, "schema_version_state_hash", return_value="a" * 64),
+            patch.object(actions, "_record_action", new=AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4()))),
+        ):
+            return await actions.import_schema_version(_ImportDB(), library, command, spec)
+
+    result = asyncio.run(_run_with_current())
+    assert result.bundle.version.parent_version_id == current.id
+
+    invalid_command, invalid_spec = _import_command_and_spec(idempotency_key="import-current-invalid")
+
+    async def _run_invalid():
+        with (
+            patch.object(actions, "_lock_library", new=AsyncMock()),
+            patch.object(actions, "_replay", new=AsyncMock(return_value=None)),
+            patch.object(
+                actions,
+                "resolve_current_ontology",
+                new=AsyncMock(side_effect=CurrentOntologyError("current_ontology_invalid", "invalid")),
+            ),
+        ):
+            return await actions.import_schema_version(
+                _ImportDB(),
+                library,
+                invalid_command,
+                invalid_spec,
+            )
+
+    with pytest.raises(SchemaLifecycleError) as exc_info:
+        asyncio.run(_run_invalid())
+    assert exc_info.value.code == "current_ontology_invalid"

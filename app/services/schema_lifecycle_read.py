@@ -74,10 +74,11 @@ async def resolve_current_ontology(
         ontology is None
         or ontology.library_id != library.id
         or ontology.status != "active"
+        or ontology.confirmed is not True
     ):
         raise CurrentOntologyError(
             "current_ontology_invalid",
-            "library current ontology version is missing or not active",
+            "library current ontology version is missing, inactive, or unconfirmed",
         )
     return ontology
 

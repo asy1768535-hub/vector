@@ -37,7 +37,10 @@ from app.schemas.graph_extraction_jobs import (
 from app.services import graph_extraction_jobs
 from app.services.graph_extraction_jobs import GraphExtractionJobError
 from app.services.graph_extraction_triggers import graph_extraction_upload_configuration
-from app.services.schema_discovery_runs import ensure_schema_discovery_run_for_revision
+from app.services.schema_discovery_runs import (
+    ensure_schema_discovery_run_for_revision,
+    repair_schema_discovery_run,
+)
 from app.services.organization_authorization import (
     OrganizationAuthorizationError,
     authorize_library_management,
@@ -206,6 +209,26 @@ async def list_schema_discovery_runs(
         limit=limit,
         offset=offset,
     )
+
+
+@router.post("/schema-discovery-runs/{run_id}/repair", response_model=SchemaDiscoveryRunRead)
+async def repair_schema_discovery(
+    run_id: uuid.UUID,
+    library: Library = Depends(require_lib("insert")),
+    user: User = Depends(current_active_user),
+    db: AsyncSession = Depends(get_db),
+) -> SchemaDiscoveryRunRead:
+    try:
+        run = await repair_schema_discovery_run(
+            db,
+            library=library,
+            run_id=run_id,
+            requested_by=user,
+        )
+        await db.commit()
+        return SchemaDiscoveryRunRead.model_validate(run)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
 
 
 @router.get("/{job_id}", response_model=GraphExtractionJobRead)

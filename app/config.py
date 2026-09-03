@@ -385,11 +385,11 @@ class Settings(BaseSettings):
     graph_extraction_base_url: str = "https://api.deepseek.com/v1"
     graph_extraction_model: str = "deepseek-v4-pro"
     graph_extraction_api_key: SecretStr = SecretStr("")
-    graph_extraction_timeout_seconds: float = 120.0
+    graph_extraction_timeout_seconds: float = 240.0
     graph_extraction_temperature: float = 0.0
     graph_extraction_response_format: str = "json_object"
     graph_extraction_max_context_chars: int = 24_000
-    graph_extraction_context_window_tokens: int = 8_192
+    graph_extraction_context_window_tokens: int = 10_240
     graph_extraction_previous_chunks: int = 1
     graph_extraction_next_chunks: int = 1
     graph_extraction_default_build_mode: str = "standard"
@@ -401,15 +401,15 @@ class Settings(BaseSettings):
     graph_extraction_nuextract_review_library_ids: str = ""
     graph_extraction_nuextract_base_url: str = "http://nuextract3-gpu0:8000/v1"
     graph_extraction_nuextract_model: str = "nuextract3"
-    graph_extraction_nuextract_timeout_seconds: float = 120.0
+    graph_extraction_nuextract_timeout_seconds: float = 240.0
     graph_extraction_nuextract_max_output_tokens: int = 4_000
     graph_extraction_minstral_base_url: str = "http://graph-minstral-3b:8000/v1"
     graph_extraction_minstral_model: str = "graph-minstral-3b"
-    graph_extraction_minstral_timeout_seconds: float = 120.0
+    graph_extraction_minstral_timeout_seconds: float = 240.0
     graph_extraction_minstral_max_output_tokens: int = 1_000
     graph_extraction_qwen3_draft_base_url: str = "http://graph-qwen3-4b:8000/v1"
     graph_extraction_qwen3_draft_model: str = "graph-qwen3-4b"
-    graph_extraction_qwen3_draft_timeout_seconds: float = 120.0
+    graph_extraction_qwen3_draft_timeout_seconds: float = 240.0
     graph_extraction_qwen3_draft_max_output_tokens: int = 1_000
     graph_schema_discovery_max_source_chunks: int = 8
     graph_schema_discovery_concept_inventory_enabled: bool = False
@@ -435,13 +435,13 @@ class Settings(BaseSettings):
     graph_extraction_evidence_group_policy: str = "all_claims_valid"
 
     graph_extraction_worker_poll_seconds: float = 3.0
-    graph_extraction_unit_lease_seconds: int = 180
+    graph_extraction_unit_lease_seconds: int = 360
     graph_extraction_unit_lease_renew_seconds: int = 30
     graph_extraction_worker_max_model_attempts: int = 3
-    graph_extraction_batch_size: int = 8
+    graph_extraction_batch_size: int = 1
     graph_extraction_worker_concurrency: int = 6
     graph_extraction_provider_max_concurrency: int = 4
-    graph_extraction_review_max_concurrency: int = 4
+    graph_extraction_review_max_concurrency: int = 1
     graph_extraction_provider_max_retries: int = 2
     graph_extraction_provider_backoff_base_seconds: float = 1.0
 
