@@ -2,6 +2,10 @@
 
 状态：**P3.1 design = FROZEN**
 
+本次冻结包含 pending split correction 修订：Command Identity 与 Decision Payload
+Identity 已分离；此前将 partition 放入 command `request_fingerprint`、并对同 command
+不同 payload 返回 `idempotency_key_conflict` 的规则已废止。
+
 本文件是 P3.1 CanonicalEntity Evolution 的唯一设计真源。它以
 [`54-p3-identity-evolution-read-only-baseline.md`](./54-p3-identity-evolution-read-only-baseline.md)
 为上游约束，冻结后续实现必须遵守的语义、持久化模型、并发和验证契约。
@@ -130,65 +134,105 @@ Fact Resolution bridge。
 
 ### 5.1 `canonical_entity_evolution_commands`
 
-每一行是一个 immutable logical evolution command root，不是 Decision。它消除
-"一个 idempotency key 只能有一条 Decision" 与 append-only Decision lineage 之间的
-矛盾：一个 command 可以有多条 Decision，但一个 library 中一个 idempotency key 只能有
-一个 command root。
+每一行是一个 immutable logical evolution command root，不是 Decision。Command root 只
+标识一次 evolution intent；可修正的 proposal 内容属于其 Decision versions。一个 command
+可以有 D1、D2、D3 多条 Decision，但同一次修正不得创建第二个 root。
+
+Command Identity 精确由以下 normalized tuple 决定：
+
+```text
+library_id
+operation_kind
+source_identity
+command_scope
+```
+
+其中 `command_scope` 只描述 intent 的稳定边界，例如 merge 的 participant source set、
+split 的 source identity、reassign 的 projection identity。它不得承载如何完成该 intent
+的 proposal 细节。
 
 | Field | Contract |
 | --- | --- |
 | `id`, `library_id` | UUID primary ID，另有 `(id, library_id)` unique；library FK `RESTRICT`。 |
 | `idempotency_key` | 调用方提供的稳定 logical-command key；必须非空且有界。 |
-| `request_fingerprint` | 64-char hash，包含 contract version、operation kind、显式 inputs/targets、partition、expected precondition；不含时间或随机 UUID。 |
+| `command_identity_fingerprint` | 64-char hash，只包含 library、operation、source identity 和 normalized command scope。 |
 | `operation_kind` | `merge`、`split`、`reassign`；command root 的 immutable semantic kind。 |
+| `source_identity_snapshot` | 创建 root 时冻结的同库 source identity 或 normalized source set。 |
+| `command_scope_snapshot` | 创建 root 时冻结的 intent scope；不得含 proposal payload。 |
 | `contract_version` | 本 command 使用的 evolution/resolver contract version。 |
-| `supersedes_command_id` | 可空的同 library 直接前驱 command root；只用于 stale/pending command 被 fresh command 取代时的 command-chain 审计，不替代 Decision 的直接前驱。 |
 | `created_at` | 不可变审计时间。 |
+
+Command Identity 明确不包含：
+
+```text
+split partition
+successor / target detail
+projection assignment
+reason or evidence
+expected precondition snapshot
+```
 
 数据库必须建立：
 
 ```text
 UNIQUE (library_id, idempotency_key)
+UNIQUE (library_id, command_identity_fingerprint)
 UNIQUE (id, library_id)
-FK (supersedes_command_id, library_id) -> commands(id, library_id)
-UNIQUE (library_id, supersedes_command_id)           # NULL permitted; no branching command successor
 ```
 
-因此 `(library_id, idempotency_key)` 唯一标识一个 persisted command chain，而不是一条
-Decision 行。`request_fingerprint` 在 command 创建后不可变；同 key 的后续请求必须读取该
-command 后比较 fingerprint，不能创建第二个 root。
+同一 idempotency key 若再次提交不同的 Command Identity，才返回
+`REJECTED(idempotency_key_conflict)`。同一 Command Identity 的 proposal correction 必须
+复用原 root；partition、successor detail、projection assignment 或 evidence 变化都不能
+创建新 root。只有 operation、source identity 或 command scope 表示不同 evolution intent
+时，调用方才使用新的 idempotency key 创建新的 command root。
 
 ### 5.2 `canonical_entity_evolution_decisions`
 
 | Field | Contract |
 | --- | --- |
 | `id`, `library_id` | UUID primary ID，另有 `(id, library_id)` unique；library FK `RESTRICT`。 |
-| `command_id` | 非空 root command ID；以 `(command_id, library_id)` composite FK 指向 command。D1、D2、D3 经此字段共享同一 idempotency key、request fingerprint 和 contract version。 |
-| `operation_kind` | `merge`、`split`、`reassign`。`reassign` 只改变一个 Entity projection，不创建 global canonical successor。 |
+| `command_id` | 非空 root command ID；以 `(command_id, library_id)` composite FK 指向 command。D1、D2、D3 共享同一 Command Identity。 |
+| `decision_payload_fingerprint` | 64-char hash，标识本 Decision version 的 normalized immutable payload。 |
+| `operation_kind` | `merge`、`split`、`reassign`；必须等于 root operation。`reassign` 只改变一个 Entity projection，不创建 global canonical successor。 |
 | `lifecycle_status` | `pending`、`applied`、`rejected`、`stale`、`superseded`。`pending`/`rejected` 是审计状态；`stale` 独立于 `rejected`。 |
+| `successor_detail_snapshot` | 本 version 的 normalized survivor/target/target-spec proposal。 |
+| `split_partition_snapshot` | split 的完整 normalized partition；非 split 为 NULL。 |
+| `projection_assignment_snapshot` | 本 version 的 normalized projection assignment proposal。 |
 | `reason_code`, `reason_text` | 必须说明人工/规则依据；`reason_text` 有界且不可承载秘密或原始大 payload。 |
 | `method`, `confidence` | `method` 明确产生来源；`confidence` 为可选 `0..1` 审计值，永远不是 split 自动分流依据。 |
 | `evidence_refs` | JSONB array，沿用稳定 reference shape；只保留最小必要证据 locator。 |
-| `precondition_fingerprint` | 锁前 observation 的可验证摘要；锁后重新读取时不相同即 `STALE_OPERATION`。 |
+| `precondition_fingerprint` | 本 payload 的 expected observation 摘要；锁后重新读取时不相同即 `STALE_OPERATION`。 |
 | `supersedes_decision_id` | 可空的同 command 直接前驱；旧行保留。自引用 composite FK 必须同时携带 `library_id` 和本行 `command_id`，禁止跨 command predecessor。 |
 | `created_at` | 不可变审计时间。 |
 
-Decision payload 永远不更新。唯一允许的原地 lifecycle mutation 是：在同一 outer
-transaction 中插入直接 successor 后，将其直接前驱从 `pending` 标记为 `superseded`。
+Decision Payload Identity 至少包含 successor detail、split partition、projection
+assignment、reason、method、evidence 和 expected precondition；数组与集合必须先稳定排序
+和正规化。它不包含时间、random UUID、row insertion order 或 lifecycle status。
+
+Decision payload 永远不更新。唯一允许的原地 lifecycle mutation 是：作为追加直接
+successor 的同一 outer transaction 的一部分，将其直接前驱从 `pending` 标记为
+`superseded`。写入顺序必须满足 partial unique constraints；任一步失败则整笔回滚，不能
+留下已 supersede 但没有 successor 的旧行。
 `applied`、`rejected`、`stale` 与新 `pending` 均只能在新 Decision 行创建时写入；不得把
 同一行从 `pending` 原地改为 `applied`。
 
 ```text
 command C
-  D1: pending
-  D2: applied, command_id = C, supersedes_decision_id = D1
+  D1: pending, payload partition = A -> {B}
+  D2: applied or pending, payload partition = A -> {B, C}
+      command_id = C, supersedes_decision_id = D1
   D1.lifecycle_status: pending -> superseded   # the only mutable lifecycle transition
 ```
+
+D2 是同一 intent 的 correction，不是新 command。D1 的 payload、reason、evidence、source
+transition 和 projection assignment 均不得修改或删除；D2 必须追加完整的新 payload
+版本。若 D2 仍为 pending，后续 D3 以同一规则继续追加。
 
 数据库还必须建立以下可静态执行的 chain 约束：
 
 ```text
 UNIQUE (id, library_id, command_id)
+UNIQUE (library_id, command_id, decision_payload_fingerprint)
 FK (command_id, library_id) -> commands(id, library_id)
 FK (supersedes_decision_id, library_id, command_id)
   -> decisions(id, library_id, command_id)
@@ -209,6 +253,7 @@ id
 library_id
 decision_id
 source_canonical_entity_id
+supersedes_source_transition_id nullable
 resolution_state = pending | applied | superseded | historical_only
 created_at
 ```
@@ -225,6 +270,12 @@ WHERE resolution_state IN ('pending', 'applied')
 ```
 
 因此一个 historical canonical 不可能同时拥有两条 current/pending evolution 分支。
+Decision correction 必须为新 Decision 追加完整的新 source transition，并以
+`supersedes_source_transition_id` 指向同 command、同 source 的上一 proposal；旧行从
+`pending` 到 `superseded` 与新行插入必须属于同一 outer transaction，并按 partial
+unique constraints 的可执行顺序完成；任一步失败全部回滚。旧行的
+source identity 和其他 payload 不得覆盖或删除。
+
 `historical_only` 只能是显式 persisted terminal evolution state：该 source 已被声明为不再是
 current leaf，且没有 successor。P3.1 的 merge、split 与 reassign command 不创建该 terminal
 state；缺少这种 persisted state 时，resolver 不得从 CanonicalEntity operational status 或
@@ -247,7 +298,9 @@ stable UUID/target key 正规化用于 hashing 和 lock construction，永远不
 对于 fully resolved split，显式 new-target specification 在 transaction 内创建
 CanonicalEntity 后写入 `target_canonical_entity_id`。对于 pending split，只记录已存在
 target 或 immutable target specification，不产生 target CanonicalEntity，也不形成
-applied successor relation。
+applied successor relation。successor proposal 归属于本 Decision version；correction
+必须追加新 version 的 successor rows，旧 version 的 rows 通过其 source transition 的
+superseded lineage 保留，禁止原地改 target 或 target specification。
 
 ### 5.5 `canonical_entity_projection_assignments`
 
@@ -256,9 +309,10 @@ id
 library_id
 evolution_decision_id
 entity_id
+supersedes_assignment_id nullable
 from_canonical_entity_id
 target_canonical_entity_id nullable
-assignment_state = resolved | pending | rejected
+assignment_state = resolved | pending | rejected | superseded
 partition_basis_snapshot
 reason_code
 previous_entity_resolution_decision_id nullable
@@ -274,6 +328,11 @@ Fact reconciliation。它必须以 `(entity_id, library_id)`、`(canonical_entit
 
 每个 applied reassignment 都有完整的 old/new Decision link；`pending` projection 的 new
 Decision 和 target 均为 NULL。一个 projection 在同一 decision 中只能有一条 assignment。
+Decision correction 必须追加该 version 的 assignment rows，并以
+`supersedes_assignment_id` 指向同 command、同 Entity projection 的上一 proposal；旧
+assignment 的 `superseded` 标记与新行插入必须属于同一 outer transaction，失败时全部
+回滚；不得覆盖
+target、basis、reason 或 ER Decision links。
 
 ### 5.6 Schema invariants
 
@@ -287,8 +346,11 @@ JSON evidence/basis shapes are constrained
 current/pending source transition is partial-unique
 source != target for state-changing successor rows
 one library + idempotency key has exactly one command root
+one normalized Command Identity has exactly one command root
 all Decision rows reference one persisted command root
+one command + Decision Payload Identity has at most one Decision version
 one command has no parallel pending chain and no parallel applied terminal Decision
+source transitions and projection assignments preserve superseded proposal lineage
 ```
 
 跨 library、self successor、没有 successor 的 applied merge/split、split 少于两个
@@ -447,7 +509,7 @@ decision、complete partition、expected precondition fingerprint 和 cycle cond
 
 ```text
 APPLIED             all atomic effects staged in the owning transaction; durability follows outer commit
-REUSED              same idempotent semantic command already applied
+REUSED              same command and same Decision payload already persisted; return its existing lifecycle result
 PENDING             durable incomplete split/projection decision; no unsafe reassignment
 STALE_OPERATION     stale audit only, with no lineage or projection mutation; caller rebuilds from current state
 RETRYABLE_CONFLICT  no success claim; retry transaction from fresh read
@@ -460,25 +522,28 @@ REJECTED            invalid/scope/policy/cycle command, with explicit reason
 
 ### Replay
 
-`request_fingerprint` 使用已规范化的 stable inputs，包含 command 的 expected current
-preconditions，不能包含时间、random ID、candidate job ID 或 row insertion order。它与
-`idempotency_key` 均由 `canonical_entity_evolution_commands` root 行持久化，而不是作为
-Decision 行唯一键。
+`command_identity_fingerprint` 只规范化 Command Identity；`decision_payload_fingerprint`
+只规范化可修正 proposal。两者都不能包含时间、random ID、candidate job ID 或 row
+insertion order。
 
-- 同一 library、同一 idempotency key、同一 request fingerprint：读取唯一 command chain。
-  chain 已有 `applied` Decision 时返回 `REUSED`，不新增 Decision、source、successor、
-  assignment 或 EntityResolutionDecision；chain 当前有 `pending` Decision 时返回该
-  `PENDING` 状态，不得创建平行 pending chain。
-- 同一 idempotency key 配不同 request fingerprint：读取同一 command root 后返回
-  `REJECTED(idempotency_key_conflict)`；不得创建第二个 command root 或 Decision chain。
-- pending 完成必须 append successor Decision：`D1 pending -> D2 applied`
-  (`D2.supersedes_decision_id = D1`)，并仅将 D1 标记为 `superseded`。D1 不得原地变成
-  `applied`。
+- 同一 command + 同一 Decision Payload Identity：返回 `REUSED`，同时返回被复用
+  Decision 的既有 lifecycle result；不新增 Decision、source、successor、assignment 或
+  EntityResolutionDecision。pending payload 的原样 replay 同样是 `REUSED`，不是新
+  `PENDING` row。
+- 同一 command + 不同 Decision Payload Identity：在同一 command root 下追加新 Decision
+  version。新行以 `supersedes_decision_id` 指向当前 Decision；旧 Decision 仅标记
+  `superseded`，其 payload 永不修改。不得返回 `idempotency_key_conflict`。
+- correction 的新 Decision 可以是 `applied` 或 `pending`。它必须追加本 version 的
+  source transition、successor proposal 和 projection assignment rows，并 supersede 旧
+  proposal lineage；不得覆盖旧 proposal。
+- 同一 idempotency key 只有在提交的 Command Identity 不同，即 operation、source identity
+  或 command scope 表示不同 evolution intent 时，才返回
+  `REJECTED(idempotency_key_conflict)`。不同 intent 使用新的 idempotency key 创建新 root。
 - 历史上已存在等价 applied direct transition 时，即使调用方换了 idempotency key，也返回
   `REUSED`，不制造重复 lineage。
-- 被 supersede 的 pending/stale command 不可重新激活；调用方用 fresh precondition 和新的
-  idempotency key 发出新 command root，并以 `supersedes_command_id` 留下 command-chain 直接
-  历史。`supersedes_decision_id` 只连接同一 command 内的 D1 -> D2 直接前驱。
+- stale 表示某一 Decision payload 的 precondition 已失效，不会自动产生新 root。若 intent
+  不变，fresh precondition 作为新的 payload version 追加；只有 evolution intent 改变时才
+  创建新 command root。
 
 ### Cycle prevention
 
@@ -554,8 +619,12 @@ Fact lifecycle、RawClaim promotion semantics、Publication、Retrieval、graph 
 | Split resolver | 无 context 为 `forked`；唯一 Entity projection/subject context 为 `resolved`；pending/invalid context 为 `pending`；没有 first/latest fallback。 |
 | Projection partition | 覆盖全部 direct projections、重复/遗漏拒绝、pending 不改 Entity、resolved 原子更新 Entity 与新/旧 ER Decision。 |
 | History | 旧 EntityResolutionDecision 和所有 Fact/Assertion/Relation/Evidence bridges 不变。 |
-| Command replay | `(library_id, idempotency_key)` 只产生一个 command root；相同 fingerprint 的 applied chain 复用、pending chain 返回既有 `PENDING`、key 冲突拒绝；D1 pending -> D2 applied 必须 append 并仅将 D1 标记 superseded。 |
-| Replay | 相同 command 复用；key 冲突拒绝；`B -> A` 重放复用；`B -> C` 在 B 已解析为 A 时 stale。 |
+| Pending split correction | D1 `pending A->{B}` 可在同一 root 下追加 D2 `applied/pending A->{B,C}`；D2 supersedes D1，D1 payload 保留且 lifecycle 为 `superseded`。 |
+| Same command, different payload | partition、successor detail、projection assignment、reason、evidence 或 precondition 变化追加新 Decision version，不返回 idempotency conflict。 |
+| Replay same payload | 同 command + 同 payload 返回 `REUSED` 并指向既有 Decision/lifecycle；不新增任何 audit、lineage 或 ER Decision row。 |
+| Idempotency conflict boundary | 只有同 idempotency key 携带不同 operation、source identity 或 command scope，即不同 evolution intent，才返回 `idempotency_key_conflict`。 |
+| Superseded decision lineage | D2 直接指向 D1；旧 Decision、source transition、successor proposal 与 projection assignment 均保留并进入 superseded lineage，禁止覆盖或删除。 |
+| Replay | `B -> A` 相同 payload 重放复用；`B -> C` 若仍属同 intent 的 correction 则追加 Decision version 并按 fresh precondition 验证，若改变 command scope 则必须新建 root。 |
 | Cycle | 两节点、长环、多 source/target 环全部拒绝；损坏读时 fail closed。 |
 | Cross-library | schema/model/service 都拒绝跨 library source、target、Entity、Decision。 |
 | Lock API | complete set 去重后固定排序；Entity Resolution 与 GraphGovernance 共享 projection scope；锁后 stale re-read 返回正确 vocabulary。 |
@@ -603,7 +672,7 @@ D. four-state current resolver contract, strictly separate from CanonicalEntity 
 E. Entity reassignment plus EntityResolutionDecision supersede transaction
 F. GraphGovernance projection-level mutual exclusion
 G. shared lock API and fixed total order
-H. command-root replay and idempotency behavior with append-only Decision lineage
+H. separated Command/Decision identity, replay, correction, and superseded proposal lineage
 I. cycle prevention
 J. outer transaction ownership
 K. exact implementation boundary
@@ -611,6 +680,7 @@ L. required test matrix
 M. PostgreSQL runtime verification gap
 ```
 
-下一步仅能是一次单独授权的 P3.1 implementation。它开始前必须重新检查本文件、P3.0
-真源、当前 Alembic head、Git worktree 和每个将被修改 symbol 的 impact。P3.2、P3.3、
+下一步仅能是重新评估并单独授权 P3.1 / 0071 implementation；本设计冻结本身不构成
+implementation 授权。评估前必须重新检查本文件、P3.0 真源、当前 Alembic head、Git
+worktree 和每个将被修改 symbol 的 impact。P3.2、P3.3、
 P3.4、Publication、Retrieval、RawClaim promotion 和历史 Fact reconciliation 仍然不获授权。
