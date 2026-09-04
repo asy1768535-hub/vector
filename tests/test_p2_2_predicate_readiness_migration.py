@@ -88,7 +88,7 @@ def test_0067_offline_upgrade_and_downgrade_emit_targeted_sql():
     assert "predicate.resolution_status = 'pending'" in downgrade
 
 
-def test_0070_is_the_only_alembic_head():
+def test_0071_is_the_only_alembic_head():
     config = Config(str(ROOT / "alembic.ini"))
 
-    assert ScriptDirectory.from_config(config).get_heads() == ["0070"]
+    assert ScriptDirectory.from_config(config).get_heads() == ["0071"]

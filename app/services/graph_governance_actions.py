@@ -39,6 +39,11 @@ from app.services.graph_governance_contracts import (
     canonical_governance_expected_state_hash,
     graph_governance_transition,
 )
+from app.services.graph_identity_locks import (
+    ENTITY_PROJECTION_LOCK_SCOPE,
+    GraphIdentityLockScope,
+    lock_graph_identity_scopes,
+)
 from app.services.graph_normalization import normalize_graph_name_v1
 from app.services.organization_authorization import (
     OrganizationAuthorizationError,
@@ -1064,6 +1069,14 @@ async def stage_entity_merge(
     library = await _lock_library(db, command.library_id)
     await _require_access(
         db, library=library, actor_user_id=command.actor_user_id, management=True
+    )
+    await lock_graph_identity_scopes(
+        db,
+        library.id,
+        (
+            GraphIdentityLockScope(ENTITY_PROJECTION_LOCK_SCOPE, command.survivor_entity_id),
+            GraphIdentityLockScope(ENTITY_PROJECTION_LOCK_SCOPE, command.loser_entity_id),
+        ),
     )
     rows = tuple(
         (

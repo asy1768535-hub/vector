@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import hashlib
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Mapping
 
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from app.models.canonical_entity import CanonicalEntity
@@ -26,9 +25,18 @@ from app.models.entity_resolution_decision import (
 from app.models.entity_type import EntityType
 from app.models.graph_candidates import GraphEntityCandidate
 from app.models.library import Library
+from app.services.canonical_entity_evolution import (
+    CanonicalEvolutionContext,
+    resolve_current_canonical_identity,
+)
 from app.services.graph_canonical import canonical_graph_json_v1, canonical_graph_value_hash_v1
+from app.services.graph_identity_locks import (
+    ENTITY_RESOLUTION_SUBJECT_LOCK_SCOPE,
+    GraphIdentityLockScope,
+    graph_identity_lock_key,
+    lock_graph_identity_scopes,
+)
 from app.services.graph_normalization import normalize_graph_name_v1
-
 
 RESOLVER_VERSION = "entity_resolution_v1"
 MAX_CANDIDATE_SNAPSHOT = 50
@@ -36,7 +44,6 @@ MAX_EVIDENCE_REFS = 32
 MAX_SNAPSHOT_JSON_BYTES = 64 * 1024
 MAX_OBSERVED_NAME_LENGTH = 512
 MAX_SOURCE_FINGERPRINT_LENGTH = 512
-_RESOLUTION_LOCK_PREFIX = "vector-kb:canonical-entity-resolution:"
 _REQUIRED_EVIDENCE_KEYS = {
     "document_id",
     "document_revision_id",
@@ -318,21 +325,10 @@ async def _scoped_rows(db, model: type[Any], library_id: uuid.UUID) -> list[Any]
 
 
 def _resolution_subject_lock_key(library_id: uuid.UUID, subject_fingerprint: str) -> int:
-    digest = hashlib.sha256(
-        f"{_RESOLUTION_LOCK_PREFIX}{library_id}:{subject_fingerprint}".encode("ascii")
-    ).digest()
-    return int.from_bytes(digest[:8], byteorder="big", signed=True)
-
-
-def _database_dialect_name(db) -> str | None:
-    try:
-        bind = db.sync_session.get_bind()
-    except (AttributeError, RuntimeError):
-        try:
-            bind = db.get_bind()
-        except (AttributeError, RuntimeError):
-            return None
-    return getattr(getattr(bind, "dialect", None), "name", None)
+    return graph_identity_lock_key(
+        library_id,
+        GraphIdentityLockScope(ENTITY_RESOLUTION_SUBJECT_LOCK_SCOPE, subject_fingerprint),
+    )
 
 
 async def _lock_resolution_subject(
@@ -341,14 +337,10 @@ async def _lock_resolution_subject(
     library_id: uuid.UUID,
     subject_fingerprint: str,
 ) -> None:
-    dialect = _database_dialect_name(db)
-    if dialect == "sqlite":
-        return
-    if dialect not in {None, "postgresql"}:
-        raise ResolutionPersistenceError("resolution concurrency control requires PostgreSQL")
-    await db.execute(
-        text("SELECT pg_advisory_xact_lock(:lock_key)"),
-        {"lock_key": _resolution_subject_lock_key(library_id, subject_fingerprint)},
+    await lock_graph_identity_scopes(
+        db,
+        library_id,
+        (GraphIdentityLockScope(ENTITY_RESOLUTION_SUBJECT_LOCK_SCOPE, subject_fingerprint),),
     )
 
 
@@ -431,6 +423,19 @@ async def _candidate_snapshot(
         for row in await _scoped_rows(db, CanonicalEntity, library_id)
         if row.status == "active" and row.normalized_name == normalized_name
     ]
+    current_canonical_rows: dict[uuid.UUID, CanonicalEntity] = {}
+    for canonical in canonical_rows:
+        current = await resolve_current_canonical_identity(db, library_id, canonical.id)
+        if (
+            current.status != "resolved"
+            or not current.resolution_eligible
+            or current.current_canonical_entity_id is None
+        ):
+            continue
+        target = await _load_canonical(db, current.current_canonical_entity_id)
+        if target is not None and target.library_id == library_id:
+            current_canonical_rows[target.id] = target
+    canonical_rows = list(current_canonical_rows.values())
     alias_rows = [
         row
         for row in await _scoped_rows(db, EntityAlias, library_id)
@@ -454,8 +459,18 @@ async def _candidate_snapshot(
     by_id = {row.id: row for row in canonical_rows}
     for canonical_id in aliases_by_canonical:
         canonical = await db.get(CanonicalEntity, canonical_id)
-        if canonical is not None and canonical.library_id == library_id and canonical.status == "active":
-            by_id[canonical.id] = canonical
+        if canonical is None or canonical.library_id != library_id:
+            continue
+        current = await resolve_current_canonical_identity(db, library_id, canonical.id)
+        if (
+            current.status != "resolved"
+            or not current.resolution_eligible
+            or current.current_canonical_entity_id is None
+        ):
+            continue
+        target = await _load_canonical(db, current.current_canonical_entity_id)
+        if target is not None and target.library_id == library_id:
+            by_id[target.id] = target
 
     projections_by_canonical: dict[uuid.UUID, list[Entity]] = {}
     for entity in projection_rows:
@@ -807,6 +822,32 @@ async def resolve_canonical_entity(db, request: EntityResolutionInput) -> Entity
                 reason_code="canonical_scope_mismatch",
                 entity_id=existing_entity.id,
             )
+        if mapped is not None:
+            current = await resolve_current_canonical_identity(
+                db,
+                request.library_id,
+                mapped.id,
+                CanonicalEvolutionContext(entity_id=existing_entity.id),
+            )
+            if (
+                current.status != "resolved"
+                or not current.resolution_eligible
+                or current.current_canonical_entity_id is None
+            ):
+                return await _persist(
+                    db,
+                    prepared,
+                    request,
+                    candidate_id=candidate_id,
+                    candidate_snapshot=[],
+                    decision_kind=ENTITY_RESOLUTION_PENDING_REVIEW,
+                    canonical_entity=None,
+                    method="canonical_evolution_v1",
+                    confidence=None,
+                    reason_code=f"canonical_current_{current.status}",
+                    entity_id=existing_entity.id,
+                )
+            mapped = await _load_canonical(db, current.current_canonical_entity_id)
         type_rows = await _scoped_rows(db, EntityType, request.library_id)
         type_by_id = {row.id: row for row in type_rows}
         mapping_type_compatible = _type_compatible([existing_entity], type_by_id, request)

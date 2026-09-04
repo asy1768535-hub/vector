@@ -21,6 +21,10 @@ from app.models.fact_foundation import (
     StablePredicateIdentity,
     StablePredicateMapping,
 )
+from app.services.canonical_entity_evolution import (
+    CanonicalEvolutionContext,
+    resolve_current_canonical_identity,
+)
 from app.services.stable_predicate_resolution_policy import (
     StablePredicateResolutionPolicy,
     is_predicate_ready_for_fact_resolution,
@@ -1090,6 +1094,51 @@ async def preflight_graph_relation_candidate_fact(
         )
 
     evidence = evidence_rows[0]
+    # Runtime Entity projections always carry library_id.  The guard deliberately
+    # leaves legacy lightweight unit-test projections on their existing P2 path.
+    if hasattr(source_entity, "library_id") and hasattr(target_entity, "library_id"):
+        for role, entity in (("source", source_entity), ("target", target_entity)):
+            current = await resolve_current_canonical_identity(
+                db,
+                library_id,
+                entity.canonical_entity_id,
+                CanonicalEvolutionContext(entity_id=entity.id),
+            )
+            if current.status != "resolved":
+                return await _persist_preflight_unresolved(
+                    db,
+                    library_id=library_id,
+                    candidate=candidate,
+                    source_entity=source_entity,
+                    target_entity=target_entity,
+                    plan=_pending_from_rows(
+                        library_id=library_id,
+                        candidate=candidate,
+                        evidence_rows=evidence_rows,
+                        reason_code=f"canonical_{role}_{current.status}",
+                        subject_canonical_entity_id=source_canonical_entity_id,
+                    ),
+                    source=source,
+                )
+            if (
+                not current.resolution_eligible
+                or current.current_canonical_entity_id != entity.canonical_entity_id
+            ):
+                return await _persist_preflight_unresolved(
+                    db,
+                    library_id=library_id,
+                    candidate=candidate,
+                    source_entity=source_entity,
+                    target_entity=target_entity,
+                    plan=_pending_from_rows(
+                        library_id=library_id,
+                        candidate=candidate,
+                        evidence_rows=evidence_rows,
+                        reason_code=f"canonical_{role}_not_resolution_eligible",
+                        subject_canonical_entity_id=source_canonical_entity_id,
+                    ),
+                    source=source,
+                )
     predicates = await _active_predicates(
         db,
         library_id=library_id,

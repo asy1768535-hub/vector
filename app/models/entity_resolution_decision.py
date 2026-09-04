@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy import (
     CheckConstraint,
@@ -11,14 +11,15 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     String,
+    UniqueConstraint,
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PgUUID
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
-
 
 ENTITY_RESOLUTION_LINK_EXISTING = "link_existing"
 ENTITY_RESOLUTION_CREATE_NEW = "create_new"
@@ -66,6 +67,7 @@ class EntityResolutionDecision(Base):
             "jsonb_typeof(candidate_snapshot) = 'array' AND jsonb_typeof(evidence_refs) = 'array'",
             name="ck_entity_resolution_decisions_snapshot_json",
         ),
+        UniqueConstraint("id", "library_id", name="uq_entity_resolution_decisions_id_library"),
         Index(
             "uq_entity_resolution_decisions_library_fingerprint_active",
             "library_id",
@@ -99,7 +101,7 @@ class EntityResolutionDecision(Base):
     )
     subject_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     decision_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
-    graph_entity_candidate_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+    graph_entity_candidate_id: Mapped[uuid.UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey(
             "graph_entity_candidates.id",
@@ -108,7 +110,7 @@ class EntityResolutionDecision(Base):
         ),
         nullable=True,
     )
-    entity_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+    entity_id: Mapped[uuid.UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey(
             "entities.id",
@@ -117,11 +119,11 @@ class EntityResolutionDecision(Base):
         ),
         nullable=True,
     )
-    canonical_entity_id: Mapped[Optional[uuid.UUID]] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    canonical_entity_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
     observed_name: Mapped[str] = mapped_column(String(512), nullable=False)
     observed_normalized_name: Mapped[str] = mapped_column(String(512), nullable=False)
-    observed_type_key: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
-    identifier_snapshot: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    observed_type_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    identifier_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     candidate_snapshot: Mapped[list[dict[str, Any]]] = mapped_column(
         JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
     )
@@ -133,12 +135,12 @@ class EntityResolutionDecision(Base):
         String(32), nullable=False, default=ENTITY_RESOLUTION_STATUS_ACTIVE, server_default="active"
     )
     method: Mapped[str] = mapped_column(String(64), nullable=False, default="none", server_default="none")
-    confidence: Mapped[Optional[float]] = mapped_column(nullable=True)
-    reason_code: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    confidence: Mapped[float | None] = mapped_column(nullable=True)
+    reason_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     resolver_version: Mapped[str] = mapped_column(
         String(64), nullable=False, default="entity_resolution_v1", server_default="entity_resolution_v1"
     )
-    supersedes_decision_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+    supersedes_decision_id: Mapped[uuid.UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey(
             "entity_resolution_decisions.id",

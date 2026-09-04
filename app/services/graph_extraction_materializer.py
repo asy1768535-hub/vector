@@ -35,6 +35,13 @@ from app.models.raw_claim_projection_binding import GraphRawClaimProjectionBindi
 from app.models.relation_evidence import RelationEvidence
 from app.schemas.v03_graph import GraphEntityCreate, GraphRelationCreate
 from app.services import graph_entities, graph_evidence, graph_relations
+from app.services.canonical_entity_evolution import (
+    CanonicalEvolutionContext,
+    CanonicalReassignCommand,
+    apply_canonical_evolution,
+    build_evolution_precondition_fingerprint,
+    resolve_current_canonical_identity,
+)
 from app.services.canonical_entity_resolution import (
     MAX_EVIDENCE_REFS,
     EntityResolutionInput,
@@ -758,6 +765,52 @@ async def _materialize_job_transaction(
             job=job,
             expected_entity_type_id=type_rule.id,
         )
+        if (
+            matched is not None
+            and matched.canonical_entity_id is not None
+            and hasattr(matched, "library_id")
+            and hasattr(db, "sync_session")
+        ):
+            current = await resolve_current_canonical_identity(
+                db,
+                library.id,
+                matched.canonical_entity_id,
+                CanonicalEvolutionContext(entity_id=matched.id),
+            )
+            if (
+                current.status != "resolved"
+                or not current.resolution_eligible
+                or current.current_canonical_entity_id is None
+            ):
+                _mark_resolution_pending(candidate, f"canonical_current_{current.status}")
+                pending_entity_candidate_count += 1
+                continue
+            if current.current_canonical_entity_id != matched.canonical_entity_id:
+                reassignment = CanonicalReassignCommand(
+                    library_id=library.id,
+                    entity_id=matched.id,
+                    from_canonical_entity_id=matched.canonical_entity_id,
+                    target_canonical_entity_id=current.current_canonical_entity_id,
+                    idempotency_key=(
+                        f"canonical-evolution-reassign:{matched.id}:"
+                        f"{matched.canonical_entity_id}:{current.current_canonical_entity_id}"
+                    ),
+                    reason_code="materializer_current_canonical",
+                    reason_text="current canonical projection requires persisted reassignment",
+                    method="canonical_evolution_v1",
+                    evidence_refs=tuple(_resolution_evidence_refs(evidence_rows)),
+                )
+                reassignment = reassignment.with_expected_precondition(
+                    await build_evolution_precondition_fingerprint(db, reassignment)
+                )
+                result = await apply_canonical_evolution(db, reassignment)
+                if result.status not in {"APPLIED", "REUSED"}:
+                    _mark_resolution_pending(
+                        candidate,
+                        f"canonical_projection_{result.status.lower()}",
+                    )
+                    pending_entity_candidate_count += 1
+                    continue
         resolution = await resolve_canonical_entity(
             db,
             EntityResolutionInput(

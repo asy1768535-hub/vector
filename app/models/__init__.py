@@ -4,6 +4,13 @@ from app.models.audit import AuditLog
 from app.models.attribute_definition import AttributeDefinition
 from app.models.chat_history import ChatConversation, ChatMessage, ChatMessageSource
 from app.models.canonical_entity import CanonicalEntity
+from app.models.canonical_entity_evolution import (
+    CanonicalEntityEvolutionCommand,
+    CanonicalEntityEvolutionDecision,
+    CanonicalEntityEvolutionSource,
+    CanonicalEntityEvolutionSuccessor,
+    CanonicalEntityProjectionAssignment,
+)
 from app.models.classification_taxonomy import (
     ClassificationLabel,
     ClassificationTaxonomy,
@@ -107,6 +114,11 @@ __all__ = [
     "ChatMessage",
     "ChatMessageSource",
     "CanonicalEntity",
+    "CanonicalEntityEvolutionCommand",
+    "CanonicalEntityEvolutionDecision",
+    "CanonicalEntityEvolutionSource",
+    "CanonicalEntityEvolutionSuccessor",
+    "CanonicalEntityProjectionAssignment",
     "ClassificationLabel",
     "ClassificationTaxonomy",
     "DocumentClassificationDecision",
