@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import uuid
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -305,6 +306,59 @@ def test_pending_command_completion_appends_d2_and_supersedes_d1():
     assert completed.decision.supersedes_decision_id == first.decision.id
     assert first.decision.lifecycle_status == "superseded"
     assert completed.source_transitions[0].resolution_state == "applied"
+
+
+def test_pending_split_correction_reuses_root_when_partition_changes():
+    library_id = uuid.uuid4()
+    source = _canonical(library_id, "A")
+    left = _canonical(library_id, "B")
+    right = _canonical(library_id, "C")
+    first_entity = _entity(library_id, source.id)
+    second_entity = _entity(library_id, source.id)
+    db = _Db(
+        _library(library_id),
+        source,
+        left,
+        right,
+        first_entity,
+        second_entity,
+        _decision(library_id, first_entity, source.id),
+        _decision(library_id, second_entity, source.id),
+    )
+    command = CanonicalSplitCommand(
+        library_id=library_id,
+        source_canonical_entity_id=source.id,
+        targets=(left.id, right.id),
+        partition=(
+            EvolutionProjectionPartition(first_entity.id, left.id, {"rule": "left"}),
+            EvolutionProjectionPartition(second_entity.id, None, {"rule": "pending"}),
+        ),
+        idempotency_key="split-correction",
+        reason_code="identity_overload",
+        reason_text="operator needs a second review",
+        method="operator_review",
+        evidence_refs=({"source_ref": "p3.1-test"},),
+    )
+    command = command.with_expected_precondition(
+        _run(build_evolution_precondition_fingerprint(db, command))
+    )
+
+    first = _run(apply_canonical_evolution(db, command))
+    corrected = replace(
+        command,
+        partition=(
+            EvolutionProjectionPartition(first_entity.id, left.id, {"rule": "left"}),
+            EvolutionProjectionPartition(second_entity.id, right.id, {"rule": "right"}),
+        ),
+    )
+    completed = _run(complete_pending_canonical_evolution(db, corrected))
+
+    assert first.status == "PENDING"
+    assert completed.status == "APPLIED"
+    assert completed.command.id == first.command.id
+    assert completed.decision.supersedes_decision_id == first.decision.id
+    assert first.decision.lifecycle_status == "superseded"
+    assert second_entity.canonical_entity_id == right.id
 
 
 def test_fully_partitioned_split_creates_only_explicit_new_targets():

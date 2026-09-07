@@ -298,8 +298,31 @@ def _command_payload(command: EvolutionCommand, *, include_expected: bool) -> di
     return common
 
 
-def _request_fingerprint(command: EvolutionCommand) -> str:
-    return _fingerprint(_command_payload(command, include_expected=True))
+def _command_identity_payload(command: EvolutionCommand) -> dict[str, Any]:
+    """Return only the stable intent identity shared by all decision versions."""
+
+    common = {
+        "contract_version": EVOLUTION_CONTRACT_VERSION,
+        "library_id": command.library_id,
+        "operation_kind": command.operation_kind,
+    }
+    if isinstance(command, CanonicalMergeCommand):
+        common["source_identity"] = sorted(command.source_canonical_entity_ids, key=str)
+        common["command_scope"] = {"source_set": sorted(command.source_canonical_entity_ids, key=str)}
+    elif isinstance(command, CanonicalSplitCommand):
+        common["source_identity"] = command.source_canonical_entity_id
+        common["command_scope"] = {"source_canonical_entity_id": command.source_canonical_entity_id}
+    else:
+        common["source_identity"] = command.entity_id
+        common["command_scope"] = {
+            "entity_id": command.entity_id,
+            "from_canonical_entity_id": command.from_canonical_entity_id,
+        }
+    return common
+
+
+def _command_identity_fingerprint(command: EvolutionCommand) -> str:
+    return _fingerprint(_command_identity_payload(command))
 
 
 def _command_source_ids(command: EvolutionCommand) -> tuple[uuid.UUID, ...]:
@@ -559,9 +582,9 @@ async def _decision_rows(
 async def _replay_result(
     db,
     root: CanonicalEntityEvolutionCommand,
-    request_fingerprint: str,
+    command_identity_fingerprint: str,
 ) -> CanonicalEvolutionResult:
-    if root.request_fingerprint != request_fingerprint:
+    if root.request_fingerprint != command_identity_fingerprint:
         return CanonicalEvolutionResult("REJECTED", "idempotency_key_conflict", command=root)
     decisions = await _decision_rows(db, root.library_id, root.id)
     applied = next((row for row in decisions if row.lifecycle_status == EVOLUTION_DECISION_APPLIED), None)
@@ -603,12 +626,14 @@ async def _lock_command_scopes(db, command: EvolutionCommand) -> None:
     await lock_graph_identity_scopes(db, command.library_id, scopes)
 
 
-async def _new_root(db, command: EvolutionCommand, request_fingerprint: str) -> CanonicalEntityEvolutionCommand:
+async def _new_root(
+    db, command: EvolutionCommand, command_identity_fingerprint: str
+) -> CanonicalEntityEvolutionCommand:
     root = CanonicalEntityEvolutionCommand(
         id=uuid.uuid4(),
         library_id=command.library_id,
         idempotency_key=command.idempotency_key,
-        request_fingerprint=request_fingerprint,
+        request_fingerprint=command_identity_fingerprint,
         operation_kind=command.operation_kind,
         contract_version=EVOLUTION_CONTRACT_VERSION,
         supersedes_command_id=command.supersedes_command_id,
@@ -1140,16 +1165,16 @@ async def apply_canonical_evolution(db, command: EvolutionCommand) -> CanonicalE
     scope_error = await _scope_error(db, command)
     if scope_error == "library_not_found":
         return CanonicalEvolutionResult("REJECTED", scope_error)
-    request_fingerprint = _request_fingerprint(command)
+    command_identity_fingerprint = _command_identity_fingerprint(command)
     existing = await _existing_command(db, command.library_id, command.idempotency_key)
     if existing is not None:
-        return await _replay_result(db, existing, request_fingerprint)
+        return await _replay_result(db, existing, command_identity_fingerprint)
     await _lock_command_scopes(db, command)
     existing = await _existing_command(db, command.library_id, command.idempotency_key)
     if existing is not None:
-        return await _replay_result(db, existing, request_fingerprint)
+        return await _replay_result(db, existing, command_identity_fingerprint)
     actual_precondition = await build_evolution_precondition_fingerprint(db, command)
-    root = await _new_root(db, command, request_fingerprint)
+    root = await _new_root(db, command, command_identity_fingerprint)
     if validation_error is not None or scope_error is not None:
         return await _append_terminal(
             db,
@@ -1201,17 +1226,17 @@ async def complete_pending_canonical_evolution(
 
     if not isinstance(command, (CanonicalMergeCommand, CanonicalSplitCommand, CanonicalReassignCommand)):
         raise CanonicalEvolutionError("unsupported canonical evolution command")
-    request_fingerprint = _request_fingerprint(command)
+    command_identity_fingerprint = _command_identity_fingerprint(command)
     root = await _existing_command(db, command.library_id, command.idempotency_key)
     if root is None:
         return CanonicalEvolutionResult("REJECTED", "pending_command_not_found")
-    if root.request_fingerprint != request_fingerprint:
+    if root.request_fingerprint != command_identity_fingerprint:
         return CanonicalEvolutionResult("REJECTED", "idempotency_key_conflict", root)
     await _lock_command_scopes(db, command)
     decisions = await _decision_rows(db, command.library_id, root.id)
     pending = next((row for row in decisions if row.lifecycle_status == EVOLUTION_DECISION_PENDING), None)
     if pending is None:
-        return await _replay_result(db, root, request_fingerprint)
+        return await _replay_result(db, root, command_identity_fingerprint)
     if not await _pending_completion_is_ready(db, command):
         return CanonicalEvolutionResult("PENDING", pending.reason_code, root, pending)
     prior_sources = [
