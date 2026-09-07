@@ -20,6 +20,7 @@ from app.schemas.graph_governance import (
     GraphGovernanceCancelRequest,
     GraphGovernanceDecisionRequest,
     GraphGovernanceEntityCorrectionRequest,
+    GraphGovernanceEntityMergeGuardRead,
     GraphGovernanceEntityMergeRequest,
     GraphGovernanceManualEntityRequest,
     GraphGovernanceManualRelationRequest,
@@ -33,6 +34,7 @@ from app.schemas.graph_governance import (
 from app.services.graph_governance_actions import (
     GraphGovernanceActionResult,
     cancel_governance_action,
+    canonical_evolution_guard_fingerprint,
     get_governance_action,
     list_governance_actions,
     review_action,
@@ -47,6 +49,7 @@ from app.services.graph_governance_actions import (
     submit_manual_relation,
     submit_relation_correction,
 )
+from app.services.graph_governance_context import load_graph_governance_write_context
 from app.services.graph_governance_contracts import (
     CancelGraphGovernanceActionCommand,
     DecideGraphGovernanceActionCommand,
@@ -64,7 +67,6 @@ from app.services.graph_governance_contracts import (
     SubmitManualRelationCommand,
     SubmitRelationCorrectionCommand,
 )
-from app.services.graph_governance_context import load_graph_governance_write_context
 from app.services.graph_governance_publication import (
     plan_graph_governance_publication,
 )
@@ -73,7 +75,6 @@ from app.services.organization_authorization import (
     resolve_loaded_library_access,
     resolve_loaded_library_management,
 )
-
 
 router = APIRouter(
     prefix="/libraries/{slug}/graph-governance",
@@ -635,6 +636,7 @@ async def merge_entity_action(
                 body.idempotency_key,
                 body.expected_survivor_state_hash,
                 body.expected_loser_state_hash,
+                body.expected_canonical_evolution_guard_fingerprint,
                 tuple(
                     MergeConflictResolutionInput(
                         value.relation_id,
@@ -647,6 +649,25 @@ async def merge_entity_action(
             ),
         ),
     )
+
+
+@router.get("/entities/merge/guard", response_model=GraphGovernanceEntityMergeGuardRead)
+async def entity_merge_guard(
+    survivor_entity_id: uuid.UUID,
+    loser_entity_id: uuid.UUID,
+    context: GraphGovernanceContext = Depends(require_governance_management),
+    db: AsyncSession = Depends(get_db),
+) -> GraphGovernanceEntityMergeGuardRead:
+    try:
+        fingerprint, _has_live_intent = await canonical_evolution_guard_fingerprint(
+            db,
+            library_id=context.library.id,
+            entity_ids=(survivor_entity_id, loser_entity_id),
+        )
+    except GraphGovernanceError as exc:
+        await db.rollback()
+        raise _http_error(exc) from exc
+    return GraphGovernanceEntityMergeGuardRead(fingerprint=fingerprint)
 
 
 @router.post(

@@ -81,6 +81,22 @@ class EntityResolutionDecision(Base):
             ondelete="RESTRICT",
             name="fk_entity_resolution_decisions_canonical_entity",
         ),
+        ForeignKeyConstraint(
+            ["evolution_assignment_id", "library_id", "entity_id"],
+            [
+                "canonical_entity_projection_assignments.id",
+                "canonical_entity_projection_assignments.library_id",
+                "canonical_entity_projection_assignments.entity_id",
+            ],
+            ondelete="RESTRICT",
+            name="fk_entity_resolution_decisions_evolution_assignment",
+        ),
+        CheckConstraint(
+            "evolution_assignment_id IS NULL OR "
+            "(decision_kind = 'link_existing' AND entity_id IS NOT NULL "
+            "AND canonical_entity_id IS NOT NULL AND supersedes_decision_id IS NOT NULL)",
+            name="ck_entity_resolution_decisions_evolution_assignment",
+        ),
         Index("ix_entity_resolution_decisions_library_canonical", "library_id", "canonical_entity_id"),
         Index("ix_entity_resolution_decisions_library_subject", "library_id", "subject_fingerprint"),
         Index(
@@ -89,6 +105,13 @@ class EntityResolutionDecision(Base):
             "subject_fingerprint",
             unique=True,
             postgresql_where=text("lifecycle_status = 'active'"),
+        ),
+        Index(
+            "uq_entity_resolution_decisions_evolution_supersedes",
+            "library_id",
+            "supersedes_decision_id",
+            unique=True,
+            postgresql_where=text("evolution_assignment_id IS NOT NULL"),
         ),
     )
 
@@ -123,7 +146,9 @@ class EntityResolutionDecision(Base):
     observed_name: Mapped[str] = mapped_column(String(512), nullable=False)
     observed_normalized_name: Mapped[str] = mapped_column(String(512), nullable=False)
     observed_type_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    identifier_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    identifier_snapshot: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     candidate_snapshot: Mapped[list[dict[str, Any]]] = mapped_column(
         JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
     )
@@ -149,6 +174,7 @@ class EntityResolutionDecision(Base):
         ),
         nullable=True,
     )
+    evolution_assignment_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

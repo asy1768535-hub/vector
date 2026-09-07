@@ -16,7 +16,6 @@ from app.services.graph_canonical import (
     canonical_graph_value_hash_v1,
 )
 
-
 GRAPH_GOVERNANCE_CONTRACT_VERSION = "graph-governance-v1"
 GRAPH_GOVERNANCE_MAX_PAYLOAD_BYTES = 65_536
 GRAPH_GOVERNANCE_MAX_ITEMS = 1_000
@@ -579,6 +578,7 @@ class StageEntityMergeCommand:
     idempotency_key: str
     expected_survivor_state_hash: str
     expected_loser_state_hash: str
+    expected_canonical_evolution_guard_fingerprint: str
     resolutions: tuple[MergeConflictResolutionInput, ...] = ()
     reason_code: str | None = None
 
@@ -593,6 +593,7 @@ class StageEntityMergeCommand:
             _uuid(value)
         _hash(self.expected_survivor_state_hash)
         _hash(self.expected_loser_state_hash)
+        _hash(self.expected_canonical_evolution_guard_fingerprint)
         key = self.idempotency_key.strip() if isinstance(self.idempotency_key, str) else ""
         if (
             not key
