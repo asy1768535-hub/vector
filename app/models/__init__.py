@@ -101,6 +101,13 @@ from app.models.raw_claim_projection_binding import GraphRawClaimProjectionBindi
 from app.models.claim_decision import GraphClaimDecision
 from app.models.schema_lifecycle_action import SchemaLifecycleAction
 from app.models.schema_discovery_run import SchemaDiscoveryRun
+from app.models.stable_predicate_evolution import (
+    StablePredicateEvolutionCommand,
+    StablePredicateEvolutionDecision,
+    StablePredicateEvolutionSource,
+    StablePredicateEvolutionSuccessor,
+    StablePredicateMappingEvolutionAssignment,
+)
 from app.models.service_heartbeat import ServiceHeartbeat
 from app.models.sync_source import SyncSource
 from app.models.user import User
@@ -181,6 +188,11 @@ __all__ = [
     "MigrationBackfillState",
     "OntologyVersion",
     "SchemaDiscoveryRun",
+    "StablePredicateEvolutionCommand",
+    "StablePredicateEvolutionDecision",
+    "StablePredicateEvolutionSource",
+    "StablePredicateEvolutionSuccessor",
+    "StablePredicateMappingEvolutionAssignment",
     "Organization",
     "OrganizationCapabilityRollout",
     "OrganizationMembership",

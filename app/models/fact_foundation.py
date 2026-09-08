@@ -138,6 +138,22 @@ class StablePredicateMapping(Base):
             ondelete="RESTRICT",
             name="fk_stable_predicate_mappings_relation_type",
         ),
+        ForeignKeyConstraint(
+            ["evolution_assignment_id", "library_id"],
+            [
+                "stable_predicate_mapping_evolution_assignments.id",
+                "stable_predicate_mapping_evolution_assignments.library_id",
+            ],
+            ondelete="RESTRICT",
+            deferrable=True,
+            initially="DEFERRED",
+            name="fk_stable_predicate_mappings_evolution_assignment",
+        ),
+        UniqueConstraint(
+            "id",
+            "library_id",
+            name="uq_stable_predicate_mappings_id_library",
+        ),
         Index(
             "ix_stable_predicate_mappings_library_identity",
             "library_id",
@@ -169,6 +185,9 @@ class StablePredicateMapping(Base):
     )
     mapping_status: Mapped[str] = mapped_column(
         String(16), nullable=False, default="active", server_default="active"
+    )
+    evolution_assignment_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PgUUID(as_uuid=True), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

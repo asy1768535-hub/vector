@@ -20,12 +20,15 @@ from fastapi_users.exceptions import InvalidPasswordException
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.models.api_key import ApiKey
 from app.models.organization import Organization
 from app.models.organization_membership import OrganizationMembership
 from app.models.user import User
-from app.config import settings
 from app.services.organization_authorization import bind_credential_organization
+from app.services.stable_predicate_evolution_actor import (
+    bind_credential_api_key_audit_identity,
+)
 
 log = logging.getLogger(__name__)
 
@@ -105,6 +108,11 @@ class APIKeyStrategy(Strategy[User, uuid.UUID]):
             try:
                 user_uuid = candidate.user_id
                 user = await user_manager.get(user_uuid)
+                bind_credential_api_key_audit_identity(
+                    user,
+                    candidate.organization_id,
+                    candidate.id,
+                )
                 if settings.organization_authorization_enabled:
                     bind_credential_organization(
                         user,
