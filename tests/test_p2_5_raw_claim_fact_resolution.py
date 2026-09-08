@@ -4,7 +4,13 @@ import asyncio
 import uuid
 from types import SimpleNamespace
 
-from app.models.fact_foundation import StablePredicateIdentity
+from app.models.fact_foundation import StablePredicateIdentity, StablePredicateMapping
+from app.models.stable_predicate_evolution import (
+    StablePredicateEvolutionDecision,
+    StablePredicateEvolutionSource,
+    StablePredicateEvolutionSuccessor,
+    StablePredicateMappingEvolutionAssignment,
+)
 from app.services.graph_relation_fact_resolution import (
     FactResolutionSource,
     _decision,
@@ -130,9 +136,43 @@ class _ResolutionDb:
         self.objects = objects or {}
         self.added = []
 
-    async def execute(self, _statement, _params=None):
+    @property
+    def results(self):
+        return self._results
+
+    @results.setter
+    def results(self, value):
+        self._results = list(value)
+        if hasattr(self, "_mapping_rows"):
+            del self._mapping_rows
+
+    async def execute(self, statement, _params=None):
+        entities = {
+            description.get("entity")
+            for description in getattr(statement, "column_descriptions", ())
+        }
+        if StablePredicateIdentity in entities:
+            return _Result(
+                row
+                for (model, _identifier), row in self.objects.items()
+                if model is StablePredicateIdentity
+            )
+        if entities.intersection(
+            {
+                StablePredicateEvolutionDecision,
+                StablePredicateEvolutionSource,
+                StablePredicateEvolutionSuccessor,
+                StablePredicateMappingEvolutionAssignment,
+            }
+        ):
+            return _Result()
+        if StablePredicateMapping in entities and hasattr(self, "_mapping_rows"):
+            return _Result(self._mapping_rows)
         assert self.results, "unexpected fact-resolution query"
-        return self.results.pop(0)
+        result = self.results.pop(0)
+        if StablePredicateMapping in entities:
+            self._mapping_rows = result.rows
+        return result
 
     async def get(self, model, identifier):
         return self.objects.get((model, identifier))
@@ -295,12 +335,24 @@ def test_same_source_raw_claim_reuses_the_candidate_assertion_and_records_raw_de
         logical_fact_id=logical_fact.id,
         assertion_fingerprint=candidate_plan.assertion.assertion_fingerprint,
     )
-    mapping = SimpleNamespace(stable_predicate_identity_id=predicate.id)
+    relation_type_id = uuid.uuid4()
+    mapping = SimpleNamespace(
+        id=uuid.uuid4(),
+        library_id=LIBRARY_ID,
+        stable_predicate_identity_id=predicate.id,
+        relation_type_id=relation_type_id,
+        mapping_status="active",
+        evolution_assignment_id=None,
+    )
     db = _ResolutionDb(
         results=[_Result([mapping]), _Result(), _Result([logical_fact]), _Result([assertion]), _Result()],
         objects={(StablePredicateIdentity, predicate.id): predicate},
     )
-    relation = SimpleNamespace(id=uuid.uuid4(), relation_type_id=uuid.uuid4(), logical_fact_id=None)
+    relation = SimpleNamespace(
+        id=uuid.uuid4(),
+        relation_type_id=relation_type_id,
+        logical_fact_id=None,
+    )
     relation_evidence = SimpleNamespace(fact_assertion_id=None)
     source = FactResolutionSource.raw_claim(raw_claim.id)
     preflight = asyncio.run(
@@ -380,9 +432,21 @@ def test_same_source_raw_measurement_disagreement_stays_pending_without_a_second
         projection_candidate=projection,
         predicate=predicate,
     )
+    relation_type_id = uuid.uuid4()
     db = _ResolutionDb(
         results=[
-            _Result([SimpleNamespace(stable_predicate_identity_id=predicate.id)]),
+            _Result(
+                [
+                    SimpleNamespace(
+                        id=uuid.uuid4(),
+                        library_id=LIBRARY_ID,
+                        stable_predicate_identity_id=predicate.id,
+                        relation_type_id=relation_type_id,
+                        mapping_status="active",
+                        evolution_assignment_id=None,
+                    )
+                ]
+            ),
             _Result(),
             _Result(),
         ],
@@ -393,7 +457,7 @@ def test_same_source_raw_measurement_disagreement_stays_pending_without_a_second
             db,
             library_id=LIBRARY_ID,
             candidate=projection,
-            relation_type_id=uuid.uuid4(),
+            relation_type_id=relation_type_id,
             source_entity=source_entity,
             target_entity=target_entity,
             evidence_rows=[evidence],

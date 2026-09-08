@@ -55,7 +55,8 @@ class StablePredicateEvolutionCommand(Base):
             name="ck_stable_predicate_evolution_commands_fingerprint",
         ),
         CheckConstraint(
-            "jsonb_typeof(command_payload_snapshot) = 'object'",
+            "jsonb_typeof(command_payload_snapshot) = 'object' "
+            "AND octet_length(command_payload_snapshot::text) <= 262144",
             name="ck_stable_predicate_evolution_commands_payload",
         ),
         CheckConstraint(
@@ -118,6 +119,17 @@ class StablePredicateEvolutionDecision(Base):
             name="ck_stable_predicate_evolution_decisions_lifecycle",
         ),
         CheckConstraint(
+            "lifecycle_status = 'superseded' OR lifecycle_status = evaluated_outcome",
+            name="ck_stable_predicate_evolution_decisions_status_outcome",
+        ),
+        CheckConstraint(
+            "(requested_effect='stage' AND evaluated_outcome='pending') OR "
+            "(requested_effect='cancel' AND evaluated_outcome='cancelled') OR "
+            "(requested_effect='apply' AND evaluated_outcome IN "
+            "('pending','applied','rejected','stale'))",
+            name="ck_stable_predicate_evolution_decisions_effect_outcome",
+        ),
+        CheckConstraint(
             "confidence IS NULL OR (confidence >= 0 AND confidence <= 1)",
             name="ck_stable_predicate_evolution_decisions_confidence",
         ),
@@ -129,7 +141,9 @@ class StablePredicateEvolutionDecision(Base):
         ),
         CheckConstraint(
             "jsonb_typeof(operation_payload_snapshot) = 'object' "
-            "AND jsonb_typeof(evidence_refs) = 'array'",
+            "AND octet_length(operation_payload_snapshot::text) <= 1048576 "
+            "AND jsonb_typeof(evidence_refs) = 'array' "
+            "AND octet_length(evidence_refs::text) <= 262144",
             name="ck_stable_predicate_evolution_decisions_json",
         ),
         CheckConstraint(
@@ -331,12 +345,16 @@ class StablePredicateEvolutionSuccessor(Base):
         CheckConstraint(
             "(target_ref_kind = 'existing' AND target_predicate_id = planned_target_predicate_id "
             "AND target_spec_fingerprint IS NULL AND target_spec_snapshot IS NULL) OR "
-            "(target_ref_kind = 'new' AND target_spec_fingerprint IS NOT NULL "
+            "(target_ref_kind = 'new' AND "
+            "(target_predicate_id IS NULL OR target_predicate_id = planned_target_predicate_id) "
+            "AND target_spec_fingerprint ~ '^[0-9a-f]{64}$' "
             "AND target_spec_snapshot IS NOT NULL)",
             name="ck_stable_predicate_evolution_successors_shape",
         ),
         CheckConstraint(
-            "target_spec_snapshot IS NULL OR jsonb_typeof(target_spec_snapshot) = 'object'",
+            "target_spec_snapshot IS NULL OR "
+            "(jsonb_typeof(target_spec_snapshot) = 'object' "
+            "AND octet_length(target_spec_snapshot::text) <= 65536)",
             name="ck_stable_predicate_evolution_successors_spec",
         ),
         UniqueConstraint(
@@ -435,7 +453,8 @@ class StablePredicateMappingEvolutionAssignment(Base):
             name="ck_stable_predicate_mapping_evolution_assignments_state",
         ),
         CheckConstraint(
-            "jsonb_typeof(partition_basis_snapshot) = 'object'",
+            "jsonb_typeof(partition_basis_snapshot) = 'object' "
+            "AND octet_length(partition_basis_snapshot::text) <= 65536",
             name="ck_stable_predicate_mapping_evolution_assignments_basis",
         ),
         CheckConstraint(
@@ -582,6 +601,12 @@ class StablePredicateMappingEvolutionAssignment(Base):
             "old_mapping_id",
             unique=True,
             postgresql_where=text("assignment_state IN ('pending','resolved')"),
+        ),
+        Index(
+            "ix_sp_mapping_evolution_assignments_decision",
+            "library_id",
+            "command_id",
+            "evolution_decision_id",
         ),
     )
 

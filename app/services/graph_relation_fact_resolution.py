@@ -25,6 +25,17 @@ from app.services.canonical_entity_evolution import (
     CanonicalEvolutionContext,
     resolve_current_canonical_identity,
 )
+from app.services.graph_identity_locks import (
+    CANONICAL_ENTITY_LOCK_SCOPE,
+    LOGICAL_FACT_LOCK_SCOPE,
+    STABLE_PREDICATE_LOCK_SCOPE,
+    GraphIdentityLockScope,
+    lock_graph_identity_scopes,
+)
+from app.services.stable_predicate_evolution import (
+    StablePredicateEvolutionContext,
+    resolve_current_stable_predicate_identity,
+)
 from app.services.stable_predicate_resolution_policy import (
     StablePredicateResolutionPolicy,
     is_predicate_ready_for_fact_resolution,
@@ -34,6 +45,25 @@ from app.services.stable_predicate_resolution_policy import (
 
 class GraphRelationFactResolutionError(RuntimeError):
     pass
+
+
+async def _lock_fact_resolution_identity_scopes(
+    db: Any,
+    *,
+    library_id: uuid.UUID,
+    canonical_entity_ids: tuple[uuid.UUID, ...],
+    predicate_id: uuid.UUID,
+    logical_fact_fingerprint: str,
+) -> None:
+    scopes = [
+        *(
+            GraphIdentityLockScope(CANONICAL_ENTITY_LOCK_SCOPE, canonical_id)
+            for canonical_id in canonical_entity_ids
+        ),
+        GraphIdentityLockScope(STABLE_PREDICATE_LOCK_SCOPE, predicate_id),
+        GraphIdentityLockScope(LOGICAL_FACT_LOCK_SCOPE, logical_fact_fingerprint),
+    ]
+    await lock_graph_identity_scopes(db, library_id, scopes, wait=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -716,7 +746,12 @@ async def _first(db: Any, statement: Any) -> Any | None:
     return (await db.execute(statement)).scalars().first()
 
 
-async def _active_predicates(db: Any, *, library_id: uuid.UUID, relation_type_id: uuid.UUID) -> list[StablePredicateIdentity]:
+async def _active_predicates(
+    db: Any,
+    *,
+    library_id: uuid.UUID,
+    relation_type_id: uuid.UUID,
+) -> tuple[list[StablePredicateIdentity], str | None]:
     mappings = (
         await db.execute(
             select(StablePredicateMapping).where(
@@ -726,12 +761,31 @@ async def _active_predicates(db: Any, *, library_id: uuid.UUID, relation_type_id
             )
         )
     ).scalars().all()
+    if len(mappings) != 1:
+        return [], "predicate_mapping_ambiguous" if mappings else None
     predicates: list[StablePredicateIdentity] = []
     for mapping in mappings:
-        predicate = await db.get(StablePredicateIdentity, mapping.stable_predicate_identity_id)
-        if predicate is not None and predicate.library_id == library_id:
-            predicates.append(predicate)
-    return predicates
+        current = await resolve_current_stable_predicate_identity(
+            db,
+            library_id,
+            mapping.stable_predicate_identity_id,
+            StablePredicateEvolutionContext(
+                mapping_id=mapping.id,
+                relation_type_id=relation_type_id,
+            ),
+        )
+        if current.status != "resolved" or current.current_predicate_id is None:
+            reason_code = current.reason_code or {
+                "forked": "predicate_evolution_forked",
+                "pending": "predicate_evolution_pending",
+                "historical_only": "predicate_evolution_historical_only",
+            }.get(current.status, "predicate_evolution_integrity")
+            return [], reason_code
+        predicate = await db.get(StablePredicateIdentity, current.current_predicate_id)
+        if predicate is None or predicate.library_id != library_id:
+            return [], "predicate_evolution_integrity"
+        predicates.append(predicate)
+    return predicates, None
 
 
 def _decision(
@@ -1139,7 +1193,7 @@ async def preflight_graph_relation_candidate_fact(
                     ),
                     source=source,
                 )
-    predicates = await _active_predicates(
+    predicates, predicate_evolution_reason = await _active_predicates(
         db,
         library_id=library_id,
         relation_type_id=relation_type_id,
@@ -1149,7 +1203,7 @@ async def preflight_graph_relation_candidate_fact(
             library_id=library_id,
             candidate=candidate,
             evidence=evidence,
-            reason_code="predicate_mapping_pending",
+            reason_code=predicate_evolution_reason or "predicate_mapping_pending",
             subject_canonical_entity_id=source_canonical_entity_id,
         )
         return await _persist_preflight_unresolved(
@@ -1291,6 +1345,65 @@ async def preflight_graph_relation_candidate_fact(
         )
     plan = with_fact_resolution_source(plan, source=source)
 
+    assert plan.logical_fact is not None
+    canonical_scope_ids = tuple(
+        canonical_id
+        for canonical_id in (
+            getattr(source_entity, "canonical_entity_id", None),
+            getattr(target_entity, "canonical_entity_id", None),
+        )
+        if isinstance(canonical_id, uuid.UUID)
+    )
+    await _lock_fact_resolution_identity_scopes(
+        db,
+        library_id=library_id,
+        canonical_entity_ids=canonical_scope_ids,
+        predicate_id=predicate.id,
+        logical_fact_fingerprint=plan.logical_fact.identity_fingerprint,
+    )
+    locked_predicates, _locked_reason = await _active_predicates(
+        db,
+        library_id=library_id,
+        relation_type_id=relation_type_id,
+    )
+    identity_changed = (
+        len(locked_predicates) != 1 or locked_predicates[0].id != predicate.id
+    )
+    if not identity_changed and hasattr(source_entity, "library_id") and hasattr(
+        target_entity, "library_id"
+    ):
+        for entity in (source_entity, target_entity):
+            current = await resolve_current_canonical_identity(
+                db,
+                library_id,
+                entity.canonical_entity_id,
+                CanonicalEvolutionContext(entity_id=entity.id),
+            )
+            if (
+                current.status != "resolved"
+                or not current.resolution_eligible
+                or current.current_canonical_entity_id != entity.canonical_entity_id
+            ):
+                identity_changed = True
+                break
+    if identity_changed:
+        return await _persist_preflight_unresolved(
+            db,
+            library_id=library_id,
+            candidate=candidate,
+            source_entity=source_entity,
+            target_entity=target_entity,
+            plan=_pending_plan(
+                library_id=library_id,
+                candidate=candidate,
+                evidence=evidence,
+                reason_code="predicate_current_identity_changed",
+                predicate=predicate,
+                subject_canonical_entity_id=source_canonical_entity_id,
+            ),
+            source=source,
+        )
+
     await _lock_resolution_subject_v2(
         db,
         library_id=library_id,
@@ -1304,7 +1417,6 @@ async def preflight_graph_relation_candidate_fact(
     if existing is not None:
         if existing.status != "resolved":
             return GraphRelationFactPreflight(plan, existing, None, None, None)
-        assert plan.logical_fact is not None
         await _lock_logical_fact_v2(
             db,
             library_id=library_id,
@@ -1316,7 +1428,6 @@ async def preflight_graph_relation_candidate_fact(
             raise GraphRelationFactResolutionError("resolved decision has missing fact assertion links")
         return GraphRelationFactPreflight(plan, existing, logical_fact, assertion, None)
 
-    assert plan.logical_fact is not None
     assert plan.assertion is not None
     await _lock_logical_fact_v2(
         db,

@@ -67,3 +67,69 @@ def test_0073_is_transactional_fail_closed_and_uses_frozen_lock() -> None:
     assert "stable_predicate_mapping_evolution_assignments" in migration
     assert "ct_stable_predicate_evolution_decision_graph" in migration
     assert "P3_2_0073_NONEMPTY_AUDIT" in migration
+
+
+def test_0073_installs_frozen_membership_and_aggregate_guards() -> None:
+    migration = MIGRATION.read_text(encoding="utf-8")
+
+    assert "fn_stable_predicate_evolution_child_guard" in migration
+    assert "trg_stable_predicate_evolution_child_guard" in migration
+    for table in (
+        "stable_predicate_evolution_sources",
+        "stable_predicate_evolution_successors",
+        "stable_predicate_mapping_evolution_assignments",
+    ):
+        assert f'"{table}",' in migration
+    assert "BEFORE INSERT ON {table}" in migration
+
+    required_integrity_markers = {
+        "predicate_evolution_command_snapshot_mismatch",
+        "predicate_evolution_decision_snapshot_mismatch",
+        "predicate_evolution_decision_chain_invalid",
+        "predicate_evolution_source_chain_invalid",
+        "predicate_evolution_assignment_chain_invalid",
+        "predicate_evolution_predecessor_lifecycle_invalid",
+        "predicate_evolution_cancellation_predecessor_invalid",
+        "predicate_evolution_lineage_cycle",
+        "predicate_evolution_merge_graph_invalid",
+        "predicate_evolution_split_graph_invalid",
+        "predicate_evolution_reassign_graph_invalid",
+        "predicate_evolution_target_spec_mismatch",
+        "predicate_evolution_mapping_pair_mismatch",
+        "predicate_evolution_historical_only_forbidden",
+        "predicate_evolution_assignment_limit",
+    }
+    assert required_integrity_markers <= set(migration.split("'"))
+    assert "WITH RECURSIVE" in migration
+    assert "jsonb_array_length" in migration
+    assert ">4096" in migration.replace(" ", "")
+    assert "COALESCE(" in migration
+    assert "NEW.requested_effect='cancel'" in migration
+    assert "evolution_decision_id=NEW.supersedes_decision_id" in migration
+
+
+def test_0073_has_schema_prechecks_and_final_catalog_assertions() -> None:
+    migration = MIGRATION.read_text(encoding="utf-8")
+
+    assert "fn_p3_2_0073_assert_preconditions" in migration
+    assert "fn_p3_2_0073_assert_catalog" in migration
+    assert "P3_2_0073_PRECONDITION_FAILED" in migration
+    assert "P3_2_0073_CATALOG_MISMATCH" in migration
+    assert migration.index("fn_p3_2_0073_assert_preconditions") < migration.index(
+        "_create_tables()"
+    )
+    assert migration.index("_install_triggers()") < migration.rindex(
+        "fn_p3_2_0073_assert_catalog"
+    )
+
+
+def test_0073_downgrade_drops_every_new_trigger_and_function() -> None:
+    migration = MIGRATION.read_text(encoding="utf-8")
+    downgrade = migration[migration.index("def downgrade()") :]
+
+    assert "trg_stable_predicate_evolution_child_guard" in downgrade
+    assert "fn_stable_predicate_evolution_child_guard()" in downgrade
+    assert "fn_p3_2_0073_assert_catalog()" in downgrade
+    assert downgrade.index("op.drop_table(table)") < downgrade.index(
+        'op.drop_column("stable_predicate_mappings", "evolution_assignment_id")'
+    )
