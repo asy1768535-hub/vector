@@ -51,6 +51,14 @@ from app.models.fact_foundation import (
     StablePredicateIdentity,
     StablePredicateMapping,
 )
+from app.models.fact_reconciliation import (
+    FactReconciliationAssertionAssignment,
+    FactReconciliationCommand,
+    FactReconciliationDecision,
+    FactReconciliationSource,
+    FactReconciliationSourceTargetEdge,
+    FactReconciliationTargetSlot,
+)
 from app.models.external_graph_sync import (
     GraphExternalFactMapping,
     GraphExternalSyncConflict,
@@ -158,6 +166,12 @@ __all__ = [
     "LogicalFact",
     "FactAssertion",
     "FactResolutionDecision",
+    "FactReconciliationCommand",
+    "FactReconciliationDecision",
+    "FactReconciliationSource",
+    "FactReconciliationTargetSlot",
+    "FactReconciliationSourceTargetEdge",
+    "FactReconciliationAssertionAssignment",
     "GraphExternalFactMapping",
     "GraphExternalSyncConflict",
     "GraphExternalSyncOperation",

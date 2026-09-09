@@ -238,6 +238,17 @@ class LogicalFact(Base):
             ondelete="RESTRICT",
             name="fk_logical_facts_object_canonical",
         ),
+        ForeignKeyConstraint(
+            ["reconciliation_target_slot_id", "library_id"],
+            [
+                "fact_reconciliation_target_slots.id",
+                "fact_reconciliation_target_slots.library_id",
+            ],
+            ondelete="RESTRICT",
+            deferrable=True,
+            initially="DEFERRED",
+            name="fk_logical_facts_reconciliation_target_slot",
+        ),
         UniqueConstraint("id", "library_id", name="uq_logical_facts_id_library"),
         Index("ix_logical_facts_library_predicate", "library_id", "stable_predicate_identity_id"),
         Index("ix_logical_facts_library_subject", "library_id", "subject_canonical_entity_id"),
@@ -270,6 +281,9 @@ class LogicalFact(Base):
     temporal_identity_key: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     identity_policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
     identity_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    reconciliation_target_slot_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), nullable=True
+    )
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, default="active", server_default="active"
     )
