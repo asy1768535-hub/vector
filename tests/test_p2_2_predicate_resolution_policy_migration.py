@@ -3,10 +3,10 @@ from __future__ import annotations
 import io
 from pathlib import Path
 
-from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
+from alembic import command
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "alembic" / "versions" / "0068_p2_2_stable_predicate_resolution_policy.py"
@@ -66,4 +66,4 @@ def test_0068_offline_upgrade_and_downgrade_emit_expected_schema_sql():
 def test_0072_is_the_only_alembic_head():
     config = Config(str(ROOT / "alembic.ini"))
 
-    assert ScriptDirectory.from_config(config).get_heads() == ["0073"]
+    assert ScriptDirectory.from_config(config).get_heads() == ["0075"]

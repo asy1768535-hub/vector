@@ -5,22 +5,37 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from collections.abc import Iterable
 from datetime import date, datetime
 from itertools import combinations
-from typing import Any, Iterable
+from typing import Any
 
 from sqlalchemy import select, text
 
 from app.models.entity import Entity
-from app.models.fact_foundation import FactAssertion, FactResolutionDecision, LogicalFact, StablePredicateIdentity
+from app.models.fact_foundation import (
+    FactAssertion,
+    FactResolutionDecision,
+    LogicalFact,
+    StablePredicateIdentity,
+)
 from app.models.knowledge_relation import KnowledgeRelation
 from app.models.relation_evidence import RelationEvidence
 from app.models.relation_type_constraint import RelationTypeConstraint
+from app.services.fact_reconciliation import resolve_current_logical_fact
+from app.services.graph_identity_locks import (
+    LOGICAL_FACT_LOCK_SCOPE,
+    GraphIdentityLockScope,
+    lock_graph_identity_scopes,
+)
 from app.services.graph_relation_fact_resolution import _logical_fact_lock_key
-
 
 FACTUAL_MODALITIES = {"confirmed", "completed"}
 FUNCTIONAL_SOURCE_CARDINALITIES = {"one_to_one", "many_to_one"}
+
+
+class CurrentReconciledProjectionRetryableConflict(RuntimeError):
+    """Lineage changed between the current-projection read and its P3 lock."""
 
 
 def derive_assertion_lifecycle_status(
@@ -151,8 +166,9 @@ async def reconcile_fact_assertion_lifecycle(
     library_id: uuid.UUID,
     assertion_id: uuid.UUID,
     allow_reactivation: bool = False,
+    assertion: FactAssertion | None = None,
 ) -> uuid.UUID | None:
-    assertion = await db.get(FactAssertion, assertion_id)
+    assertion = assertion or await db.get(FactAssertion, assertion_id)
     if assertion is None or assertion.library_id != library_id:
         return None
     evidence_rows = await _rows(
@@ -176,8 +192,20 @@ async def reconcile_relation_evidence_lifecycle(
     library_id: uuid.UUID,
     relation_evidence_rows: Iterable[RelationEvidence],
 ) -> None:
+    assertion_ids = {
+        row.fact_assertion_id
+        for row in relation_evidence_rows
+        if row.fact_assertion_id is not None
+    }
+    if not assertion_ids:
+        return
+    await lock_current_reconciled_projection_for_assertions(
+        db,
+        library_id=library_id,
+        assertion_ids=assertion_ids,
+    )
     affected_facts: set[uuid.UUID] = set()
-    for assertion_id in {row.fact_assertion_id for row in relation_evidence_rows if row.fact_assertion_id is not None}:
+    for assertion_id in assertion_ids:
         fact_id = await reconcile_fact_assertion_lifecycle(
             db,
             library_id=library_id,
@@ -187,6 +215,12 @@ async def reconcile_relation_evidence_lifecycle(
             affected_facts.add(fact_id)
     for fact_id in affected_facts:
         await recalculate_logical_fact_status(db, library_id=library_id, logical_fact_id=fact_id)
+    await recalculate_current_reconciled_projection_for_assertions(
+        db,
+        library_id=library_id,
+        assertion_ids=assertion_ids,
+        scopes_locked=True,
+    )
 
 
 async def reconcile_resolved_fact_decision(
@@ -197,34 +231,58 @@ async def reconcile_resolved_fact_decision(
 ) -> None:
     if decision.library_id != library_id or decision.status != "resolved" or decision.fact_assertion_id is None:
         return
+    current_assertion = await db.get(FactAssertion, decision.fact_assertion_id)
+    if current_assertion is None or current_assertion.library_id != library_id:
+        return
+    previous = (
+        await db.get(FactResolutionDecision, decision.supersedes_decision_id)
+        if decision.supersedes_decision_id is not None
+        else None
+    )
+    assertion_ids = {decision.fact_assertion_id}
+    previous_assertion_id = getattr(previous, "fact_assertion_id", None)
+    if previous_assertion_id is not None:
+        assertion_ids.add(previous_assertion_id)
+    p3_projection_available = isinstance(current_assertion, FactAssertion)
+    if p3_projection_available:
+        await lock_current_reconciled_projection_for_assertions(
+            db,
+            library_id=library_id,
+            assertion_ids=assertion_ids,
+        )
     affected_facts: set[uuid.UUID] = set()
     current_fact_id = await reconcile_fact_assertion_lifecycle(
         db,
         library_id=library_id,
         assertion_id=decision.fact_assertion_id,
         allow_reactivation=True,
+        assertion=current_assertion,
     )
     if current_fact_id is not None:
         affected_facts.add(current_fact_id)
-    if decision.supersedes_decision_id is not None:
-        previous = await db.get(FactResolutionDecision, decision.supersedes_decision_id)
-        previous_assertion_id = getattr(previous, "fact_assertion_id", None)
-        if previous_assertion_id is not None and previous_assertion_id != decision.fact_assertion_id:
-            current_references = await _rows(
-                db,
-                select(FactResolutionDecision).where(
-                    FactResolutionDecision.library_id == library_id,
-                    FactResolutionDecision.fact_assertion_id == previous_assertion_id,
-                    FactResolutionDecision.status == "resolved",
-                ),
-            )
-            if not current_references:
-                previous_assertion = await db.get(FactAssertion, previous_assertion_id)
-                if previous_assertion is not None:
-                    previous_assertion.status = "superseded"
-                    affected_facts.add(previous_assertion.logical_fact_id)
+    if previous_assertion_id is not None and previous_assertion_id != decision.fact_assertion_id:
+        current_references = await _rows(
+            db,
+            select(FactResolutionDecision).where(
+                FactResolutionDecision.library_id == library_id,
+                FactResolutionDecision.fact_assertion_id == previous_assertion_id,
+                FactResolutionDecision.status == "resolved",
+            ),
+        )
+        if not current_references:
+            previous_assertion = await db.get(FactAssertion, previous_assertion_id)
+            if previous_assertion is not None:
+                previous_assertion.status = "superseded"
+                affected_facts.add(previous_assertion.logical_fact_id)
     for fact_id in affected_facts:
         await recalculate_logical_fact_status(db, library_id=library_id, logical_fact_id=fact_id)
+    if p3_projection_available:
+        await recalculate_current_reconciled_projection_for_assertions(
+            db,
+            library_id=library_id,
+            assertion_ids=assertion_ids,
+            scopes_locked=True,
+        )
 
 
 async def recalculate_logical_fact_status(
@@ -236,6 +294,12 @@ async def recalculate_logical_fact_status(
     fact = await db.get(LogicalFact, logical_fact_id)
     if fact is None or fact.library_id != library_id:
         return None
+    await lock_graph_identity_scopes(
+        db,
+        library_id,
+        (GraphIdentityLockScope(LOGICAL_FACT_LOCK_SCOPE, fact.identity_fingerprint),),
+        wait=False,
+    )
     await _lock_fact(db, library_id, fact.identity_fingerprint)
     predicate = await db.get(StablePredicateIdentity, fact.stable_predicate_identity_id)
     if predicate is None or predicate.library_id != library_id:
@@ -245,6 +309,273 @@ async def recalculate_logical_fact_status(
         return fact.status
     fact.status = await _derived_fact_status(db, library_id=library_id, fact=fact, predicate=predicate)
     return fact.status
+
+
+async def _current_projection_snapshot(
+    db: Any,
+    *,
+    library_id: uuid.UUID,
+    assertion_ids: set[uuid.UUID],
+) -> tuple[tuple[str, str, str | None], ...]:
+    assertions = [
+        assertion
+        for assertion in await _rows(
+        db,
+        select(FactAssertion).where(
+            FactAssertion.library_id == library_id,
+            FactAssertion.id.in_(assertion_ids),
+        ),
+        )
+        if isinstance(assertion, FactAssertion)
+    ]
+    snapshot: list[tuple[str, str, str | None]] = []
+    for assertion in assertions:
+        current = await resolve_current_logical_fact(
+            db,
+            library_id,
+            assertion.logical_fact_id,
+            fact_assertion_id=assertion.id,
+        )
+        snapshot.append(
+            (
+                str(assertion.id),
+                current.status,
+                str(current.current_logical_fact_id) if current.current_logical_fact_id else None,
+            )
+        )
+    return tuple(sorted(snapshot))
+
+
+async def _current_projection_scope_fingerprints(
+    db: Any,
+    *,
+    library_id: uuid.UUID,
+    assertion_ids: set[uuid.UUID],
+) -> tuple[str, ...]:
+    assertions = [
+        assertion
+        for assertion in await _rows(
+        db,
+        select(FactAssertion).where(
+            FactAssertion.library_id == library_id,
+            FactAssertion.id.in_(assertion_ids),
+        ),
+        )
+        if isinstance(assertion, FactAssertion)
+    ]
+    facts = {
+        row.id: row
+        for row in await _rows(db, select(LogicalFact).where(LogicalFact.library_id == library_id))
+    }
+    fingerprints = {
+        facts[assertion.logical_fact_id].identity_fingerprint
+        for assertion in assertions
+        if assertion.logical_fact_id in facts
+    }
+    for assertion in assertions:
+        current = await resolve_current_logical_fact(
+            db,
+            library_id,
+            assertion.logical_fact_id,
+            fact_assertion_id=assertion.id,
+        )
+        if current.status == "resolved" and current.current_logical_fact_id in facts:
+            fingerprints.add(facts[current.current_logical_fact_id].identity_fingerprint)
+    return tuple(sorted(fingerprints))
+
+
+async def lock_current_reconciled_projection_for_assertions(
+    db: Any,
+    *,
+    library_id: uuid.UUID,
+    assertion_ids: set[uuid.UUID],
+) -> tuple[tuple[str, str, str | None], ...]:
+    """Lock a complete current-projection scope, then verify the read did not move."""
+
+    before = await _current_projection_snapshot(
+        db,
+        library_id=library_id,
+        assertion_ids=assertion_ids,
+    )
+    fingerprints = await _current_projection_scope_fingerprints(
+        db,
+        library_id=library_id,
+        assertion_ids=assertion_ids,
+    )
+    await lock_graph_identity_scopes(
+        db,
+        library_id,
+        (GraphIdentityLockScope(LOGICAL_FACT_LOCK_SCOPE, fingerprint) for fingerprint in fingerprints),
+        wait=False,
+    )
+    after = await _current_projection_snapshot(
+        db,
+        library_id=library_id,
+        assertion_ids=assertion_ids,
+    )
+    if after != before:
+        raise CurrentReconciledProjectionRetryableConflict(
+            "current_projection_lock_snapshot_changed"
+        )
+    return after
+
+
+async def _projected_assertions_for_target(
+    db: Any,
+    *,
+    library_id: uuid.UUID,
+    target_logical_fact_id: uuid.UUID,
+) -> list[FactAssertion]:
+    projected: list[FactAssertion] = []
+    for assertion in await _rows(
+        db,
+        select(FactAssertion).where(FactAssertion.library_id == library_id),
+    ):
+        if not isinstance(assertion, FactAssertion):
+            continue
+        current = await resolve_current_logical_fact(
+            db,
+            library_id,
+            assertion.logical_fact_id,
+            fact_assertion_id=assertion.id,
+        )
+        if current.status == "resolved" and current.current_logical_fact_id == target_logical_fact_id:
+            projected.append(assertion)
+    return projected
+
+
+async def recalculate_current_reconciled_projection_for_assertions(
+    db: Any,
+    *,
+    library_id: uuid.UUID,
+    assertion_ids: set[uuid.UUID],
+    scopes_locked: bool = False,
+) -> set[uuid.UUID]:
+    """Recalculate only current target Facts from immutable Assertion membership."""
+
+    if not assertion_ids:
+        return set()
+    if not scopes_locked:
+        await lock_current_reconciled_projection_for_assertions(
+            db,
+            library_id=library_id,
+            assertion_ids=assertion_ids,
+        )
+    assertions = [
+        assertion
+        for assertion in await _rows(
+        db,
+        select(FactAssertion).where(
+            FactAssertion.library_id == library_id,
+            FactAssertion.id.in_(assertion_ids),
+        ),
+        )
+        if isinstance(assertion, FactAssertion)
+    ]
+    target_ids: set[uuid.UUID] = set()
+    for assertion in assertions:
+        current = await resolve_current_logical_fact(
+            db,
+            library_id,
+            assertion.logical_fact_id,
+            fact_assertion_id=assertion.id,
+        )
+        if current.status == "resolved" and current.current_logical_fact_id is not None:
+            target_ids.add(current.current_logical_fact_id)
+    for target_id in target_ids:
+        fact = await db.get(LogicalFact, target_id)
+        if fact is None or fact.library_id != library_id:
+            raise CurrentReconciledProjectionRetryableConflict("current_projection_target_missing")
+        predicate = await db.get(StablePredicateIdentity, fact.stable_predicate_identity_id)
+        if predicate is None or predicate.library_id != library_id:
+            raise CurrentReconciledProjectionRetryableConflict("current_projection_predicate_missing")
+        projected = await _projected_assertions_for_target(
+            db,
+            library_id=library_id,
+            target_logical_fact_id=target_id,
+        )
+        if predicate.temporal_class == "state_fact":
+            await recalculate_current_functional_fact_scope(
+                db,
+                library_id=library_id,
+                fact=fact,
+                predicate=predicate,
+            )
+        else:
+            fact.status = _status_from_assertions(
+                predicate.temporal_class,
+                projected,
+                await _evidence_by_assertion(db, library_id, projected),
+            )
+    return target_ids
+
+
+async def recalculate_current_functional_fact_scope(
+    db: Any,
+    *,
+    library_id: uuid.UUID,
+    fact: LogicalFact,
+    predicate: StablePredicateIdentity,
+) -> None:
+    """Apply the P2.4 functional rule to resolver-current projected assertions only."""
+
+    await _lock_functional_scope(db, library_id, fact)
+    candidates = [
+        row
+        for row in await _rows(
+            db,
+            select(LogicalFact).where(
+                LogicalFact.library_id == library_id,
+                LogicalFact.subject_canonical_entity_id == fact.subject_canonical_entity_id,
+                LogicalFact.stable_predicate_identity_id == fact.stable_predicate_identity_id,
+                LogicalFact.identity_policy_version == fact.identity_policy_version,
+            ),
+        )
+        if row.identity_qualifiers == fact.identity_qualifiers
+    ]
+    siblings: list[LogicalFact] = []
+    for candidate in candidates:
+        current = await resolve_current_logical_fact(db, library_id, candidate.id)
+        if current.status == "resolved" and current.current_logical_fact_id == candidate.id:
+            siblings.append(candidate)
+    projected_by_fact = {
+        row.id: await _projected_assertions_for_target(
+            db,
+            library_id=library_id,
+            target_logical_fact_id=row.id,
+        )
+        for row in siblings
+    }
+    all_assertions = [
+        assertion for assertions in projected_by_fact.values() for assertion in assertions
+    ]
+    evidence_by_assertion = await _evidence_by_assertion(db, library_id, all_assertions)
+    eligible_by_fact = {
+        fact_id: [
+            assertion
+            for assertion in assertions
+            if is_effectively_supported_assertion(
+                assertion, evidence_by_assertion.get(assertion.id, [])
+            )
+        ]
+        for fact_id, assertions in projected_by_fact.items()
+    }
+    conflicted_ids: set[uuid.UUID] = set()
+    for left, right in combinations(siblings, 2):
+        if await _facts_have_functional_conflict(
+            db,
+            library_id=library_id,
+            left_assertions=eligible_by_fact[left.id],
+            right_assertions=eligible_by_fact[right.id],
+        ):
+            conflicted_ids.update((left.id, right.id))
+    for sibling in siblings:
+        status = _status_from_assertions(
+            predicate.temporal_class,
+            projected_by_fact[sibling.id],
+            evidence_by_assertion,
+        )
+        sibling.status = "conflicted" if sibling.id in conflicted_ids else status
 
 
 async def recalculate_functional_fact_scope(

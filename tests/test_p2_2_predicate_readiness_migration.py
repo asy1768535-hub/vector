@@ -3,12 +3,11 @@ from __future__ import annotations
 import io
 from pathlib import Path
 
-from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
+from alembic import command
 from app.models.fact_foundation import StablePredicateIdentity
-
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "alembic" / "versions" / "0067_p2_2_historical_predicate_readiness.py"
@@ -91,4 +90,4 @@ def test_0067_offline_upgrade_and_downgrade_emit_targeted_sql():
 def test_0072_is_the_only_alembic_head():
     config = Config(str(ROOT / "alembic.ini"))
 
-    assert ScriptDirectory.from_config(config).get_heads() == ["0073"]
+    assert ScriptDirectory.from_config(config).get_heads() == ["0075"]

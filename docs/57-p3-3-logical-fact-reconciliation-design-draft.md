@@ -2,12 +2,20 @@
 
 状态：**P3.3 design = FROZEN**
 
-**P3.3 implementation = AUTHORIZED (P3.3-A only)**。
+**P3.3 implementation = AUTHORIZED (P3.3-A, P3.3-B)**。
 
 P3.3-A 的唯一范围是 `0074` 持久化基础、ORM 映射、PostgreSQL 约束，以及迁移和约束的
 数据库验证。它不接入 Fact Lifecycle、Fact Resolution、current resolver、Publication、Retrieval、
 API、UI、chat 图谱读取或部署；这些均须在 P3.3-A 验收后单独授权。P3.3-A 也不改变任何历史
 `LogicalFact`、`FactAssertion`、`KnowledgeRelation` 或 `RelationEvidence` bridge。
+
+P3.3-B 已获授权实现本设计已冻结的 reconciliation command/service、current LogicalFact resolver、
+P2.4 current-projection lifecycle wiring、Fact Resolution current-identity write guard，以及第 11 节
+规定的测试。例外：用户已单独授权 `0075` maintenance-only repair，只替换 `0074` 的五个共享
+P3.3 trigger function body，修复多表 trigger 对不存在 typed `NEW`/`OLD` 字段的访问，以及 pending
+Decision 被 supersede 后仍按原 outcome 或旧 parent state 校验 child graph 的实现错误；它不新增表、
+列、数据回填、bridge rewrite 或业务语义。除此之外 P3.3-B 不得修改或新增 migration，不得进入
+Publication、Retrieval、API、UI、chat 图谱读取、部署或 P3.4，且不得重写任何历史 bridge。
 
 ## 1. 目标、边界与当前基线
 
@@ -40,14 +48,13 @@ pairing。这是 pre-admission 的非持久化 `PENDING`：不创建 Command、D
 P3.0 = SEALED
 P3.1 = implemented and PostgreSQL-accepted
 P3.2 = implemented and PostgreSQL-accepted locally
-Alembic local head = 0073
+Alembic code head = 0075 (authorized maintenance repair; 0074 remains immutable)
 P3.2 repair commit = 3140e2ee4d1766b2251e1f5f22ee9f6a4ad255b7 (pushed)
-P3.3 = design frozen; P3.3-A authorized only
+P3.3 = design frozen; P3.3-A and P3.3-B authorized
 ```
 
-`3140e2e` 修的是 `0073` PostgreSQL trigger，未改变 P3.2 的语义合同。P3.3 可以据此起草，
-但在该提交被明确保留为 P3.2 基线并推送前，不得冻结 P3.3 implementation checkpoint、创建
-`0074` 或执行 P3.3 schema。
+`3140e2e` 修的是 `0073` PostgreSQL trigger，未改变 P3.2 的语义合同。该提交已保留并推送，
+是 P3.3 的冻结基线。
 
 唯一前置真源为：
 
@@ -234,10 +241,32 @@ shared P2 compiler，根据 resolved current canonical/predicate state 产生并
 `object_value`、qualifiers 的 exact JCS content 属于 identity；没有 name、fuzzy、embedding、LLM、
 latest/first row 的选择空间。`existing` ref 的 Fact ID 是调用方显式指定的 target；服务必须证明它是
 同库、unique resolved current leaf，且所有 immutable identity fields/fingerprint 与 `target_spec`
-完全相同。`new` ref 的 physical ID 是服务器以冻结 namespace UUIDv5 对
-`(command_identity_fingerprint, target_key)` 导出的 `planned_target_logical_fact_id`，不使用
-idempotency key 或随机 UUID。`new` 仅在不存在同 identity 的 physical Fact 时可创建；它不能替代
-显式 existing-target admission。
+完全相同。`new` ref 的 physical ID 只可按以下 UUIDv5 契约导出；不使用 idempotency key、随机 UUID
+或任何数据库行顺序：
+
+```text
+namespace = uuid.NAMESPACE_URL
+namespace UUID = 6ba7b811-9dad-11d1-80b4-00c04fd430c8
+name = "vector-kb:fact-reconciliation-target:v1:"
+       + command_identity_fingerprint + ":" + target_key
+planned_target_logical_fact_id = uuid.uuid5(namespace, name)
+```
+
+`name` 的 bytes 是该 exact Unicode string 的 UTF-8 编码。`command_identity_fingerprint` 必须是已经
+算出的 64 位 lowercase hexadecimal SHA-256 string；`target_key` 必须是 Command Identity 中已 NFC
+normalise 的 exact string。除该 NFC normalisation 外，不得 case-fold、lowercase、trim、重排或以
+别的序列化形式替换任一输入。ASCII 前缀、三个 `:` 分隔符和 `v1` 都是上述 literal 的一部分。
+
+固定 golden vector（测试不得运行时重算 expected UUID）：
+
+```text
+command_identity_fingerprint = 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+target_key = café  (single NFC U+00E9)
+name UTF-8 hex = 766563746f722d6b623a666163742d7265636f6e63696c696174696f6e2d7461726765743a76313a303132333435363738396162636465663031323334353637383961626364656630313233343536373839616263646566303132333435363738396162636465663a636166c3a9
+planned_target_logical_fact_id = 81c72659-3927-50c6-b47c-6a74ead9a518
+```
+
+`new` 仅在不存在同 identity 的 physical Fact 时可创建；它不能替代显式 existing-target admission。
 
 同 library：
 
@@ -363,8 +392,13 @@ take the released source slot in a later transaction.
 
 ## 6. Persistent lineage proposal
 
-The target migration number is **0074 only after 0073 is the frozen deployed baseline**. No migration is
-created by this draft.
+The frozen schema migration is **0074**, with `0073` as its retained baseline. It is maintenance-only and
+does not rewrite historical Fact bridges. `0075` is the sole authorized follow-up maintenance repair: it
+does not change schema or data, and replaces four polymorphic trigger bodies so table-specific fields are
+read through `to_jsonb(NEW/OLD)`, plus the Decision graph/child guard bodies so a superseded pending Decision
+and its existing child rows are no longer validated as their former pending graph. `0075` downgrade restores
+the exact original `0074` function bodies solely for an Alembic round trip; application mutation traffic must
+remain stopped while at that known-broken runtime revision.
 
 All new IDs are PostgreSQL UUID, audit timestamps are `TIMESTAMPTZ NOT NULL DEFAULT now()`, ordinary
 foreign keys are `RESTRICT NOT DEFERRABLE` unless explicitly identified as the target/LogicalFact circular
@@ -702,7 +736,10 @@ them. An `APPLIED` service result is not durable until caller commit succeeds.
 `0074` is maintenance-only and may be authored only after `0073` is the retained frozen baseline. It is one
 PostgreSQL transactional Alembic migration: no `COMMIT`, autocommit block, `CREATE INDEX CONCURRENTLY`,
 Python-side online/offline branch or second concurrent DDL path. Existing logical facts remain direct current
-leaves; the migration does no backfill, Fact/bridge rewrite or status recalculation.
+leaves; the migration does no backfill, Fact/bridge rewrite or status recalculation. `0075` retains the same
+maintenance admission lock and timeout contract, but changes only the five existing function definitions; it
+does not create/drop tables, constraints, triggers or data. Its downgrade is maintenance-only and restores
+the original `0074` bodies for rollback testing, never for application traffic.
 
 ### 10.1 Fixed upgrade admission and quiescence
 
@@ -794,8 +831,9 @@ non-empty. On any non-empty result it raises `P3_3_0074_NONEMPTY_AUDIT` and leav
 intact. Once a P3.3 row or paired Fact exists, rollback is roll-forward on a P3.3-aware binary while writers
 remain stopped; an old binary/downgrade is prohibited.
 
-Required evidence is offline `0073 -> 0074` SQL, offline `0074 -> 0073` SQL, a real disposable PostgreSQL
-upgrade/downgrade round trip, lock-contender failures for both directions and trigger-catalog inspection.
+Required evidence is offline `0073 -> 0074` SQL, offline `0074 -> 0073` SQL, offline `0074 <-> 0075` SQL,
+a real disposable PostgreSQL `0073 -> 0074 -> 0075 -> 0074 -> 0075` round trip, lock-contender failures for
+the schema directions and trigger-catalog inspection.
 SQLite/unit tests cannot replace PostgreSQL constraint-trigger, advisory-lock or concurrent-transaction
 acceptance.
 
@@ -812,7 +850,7 @@ acceptance.
 | atomicity | failure injection after old-pending supersede, target Fact insert, target-slot pairing, assignment insert and target lifecycle update; lifecycle-helper failure and cancellation rollback; all tables and statuses unchanged after rollback. |
 | concurrency | PostgreSQL two-connection overlapping reconciliation, same-fingerprint scope-30 contention with Fact Resolution, reconciliation versus lifecycle/current functional scope, lock ordering, fail-fast busy result, post-lock stale CAS and no partial writer. |
 | database enforcement | direct PostgreSQL INSERT/UPDATE/DELETE/COMMIT negatives for composite FKs, lifecycle, shape, target/Fact pairing, attempted old-Fact pointer claim/identity rewrite, permitted paired-new-Fact `status` plus `updated_at` update, complete coverage, source != target, applied DAG, cancellation child ban and source-slot ownership. |
-| migration | Alembic head, `0073 <-> 0074` offline SQL containing the fixed P3.3 advisory key and ordered `NOWAIT` locks, disposable PostgreSQL upgrade/downgrade, trigger catalog, pre-existing-writer `migration_busy` rejection, a post-lock writer with bounded client lock timeout rolling back without a partial P3.3 write, and non-empty downgrade refusal. |
+| migration | Alembic head, `0073 <-> 0074` and `0074 <-> 0075` offline SQL containing the fixed P3.3 advisory key and ordered `NOWAIT` locks, disposable PostgreSQL `0073 -> 0074 -> 0075 -> 0074 -> 0075` upgrade/downgrade, trigger catalog, pre-existing-writer `migration_busy` rejection, a post-lock writer with bounded client lock timeout rolling back without a partial P3.3 write, and non-empty `0074` downgrade refusal. |
 | regressions | P1/P2/P3.1/P3.2 focused suites, touched-file Ruff, compileall. Full-repository lint remains a separate historical-debt task. |
 
 When `VECTOR_KB_PG_TEST_DSN` is absent, PostgreSQL rows must be reported exactly as
@@ -821,12 +859,17 @@ acceptance.
 
 ## 12. Freeze record and stop condition
 
+修订记录（2026-09-09）：第 4.2 节原先只引用“冻结 namespace UUIDv5”，不足以使不同实现重放同一
+`new` target ID。本次冻结 `uuid.NAMESPACE_URL`、literal UUID、exact UTF-8 name format 和 fixed
+golden vector；不改变 P3.3 的 scope、migration direction 或 implementation authorization。
+
 以下冻结门已闭合：P3.2 repair `3140e2e` 已保留并推送；Command/Decision JSON、source-group
 derivation、target identity compiler、lifecycle matrix、数据库约束与 service invariant、resolver
 vocabulary、lock order、migration 和 rollback 语义已完成独立设计复审；本文件在专用 commit
-中冻结；用户已授权受限的 P3.3-A。
+中冻结；用户已授权受限的 P3.3-A、P3.3-B。
 
-P3.3-A 只能实现并验收第 10 节所定义的 `0074` 持久化合同和本阶段所需的 ORM 映射。其完成
-不自动授权 lifecycle 接入、Fact Resolution 接入、resolver、Publication、Retrieval、API、UI、
-chat 图谱读取、部署或任何后续 P3 子阶段。没有真实 PostgreSQL 迁移验证时，不得宣称 P3.3-A
-数据库验收通过；没有后续明确授权，不得写入上述非目标的 production 行为。
+P3.3-A 只能实现并验收第 10 节所定义的 `0074` 持久化合同和本阶段所需的 ORM 映射。`0075` 是上述
+已授权的窄 trigger repair，不改变该合同。P3.3-B 的
+授权记录已在本文开头列明；它的完成不自动授权 Publication、Retrieval、API、UI、chat 图谱读取、
+部署或任何后续 P3 子阶段。没有真实 PostgreSQL 迁移验证时，不得宣称 P3.3-A 数据库验收通过；
+没有后续明确授权，不得写入上述非目标的 production 行为。

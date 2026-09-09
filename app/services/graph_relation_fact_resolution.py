@@ -25,6 +25,7 @@ from app.services.canonical_entity_evolution import (
     CanonicalEvolutionContext,
     resolve_current_canonical_identity,
 )
+from app.services.fact_reconciliation import resolve_current_logical_fact
 from app.services.graph_identity_locks import (
     CANONICAL_ENTITY_LOCK_SCOPE,
     LOGICAL_FACT_LOCK_SCOPE,
@@ -32,6 +33,7 @@ from app.services.graph_identity_locks import (
     GraphIdentityLockScope,
     lock_graph_identity_scopes,
 )
+from app.services.logical_fact_identity import logical_fact_identity_fingerprint_v1
 from app.services.stable_predicate_evolution import (
     StablePredicateEvolutionContext,
     resolve_current_stable_predicate_identity,
@@ -160,6 +162,15 @@ _LOCK_PREFIX = "vector-kb:fact-resolution-subject:"
 
 def _unresolved_outcome(status: str) -> str:
     return "REJECT" if status == "rejected" else "PENDING"
+
+
+def _supports_current_reconciliation_guard(db: Any) -> bool:
+    """Only a bound database session can evaluate persisted P3.3 lineage."""
+
+    try:
+        return db.get_bind() is not None
+    except (AttributeError, RuntimeError):
+        return False
 
 
 def _canonical_json(value: Any) -> str:
@@ -659,21 +670,15 @@ def build_graph_relation_fact_plan(
     source_snapshot = _source_occurrence_snapshot(library_id, evidence)
     source_fingerprint = _fingerprint(source_snapshot)
     predicate_snapshot = _predicate_snapshot(predicate)
-    logical_fact_fingerprint = _fingerprint(
-        {
-            "identity_policy_version": predicate.identity_policy_version,
-            "identity_qualifiers": identity_qualifiers,
-            "library_id": str(library_id),
-            "object_canonical_entity_id": (
-                str(object_canonical_entity_id) if object_canonical_entity_id is not None else None
-            ),
-            "object_kind": object_kind,
-            "object_value": object_value,
-            "predicate": predicate_snapshot,
-            "schema_version": "logical_fact_identity_v1",
-            "subject_canonical_entity_id": str(source_canonical_entity_id),
-            "temporal_identity_key": temporal_identity_key,
-        }
+    logical_fact_fingerprint = logical_fact_identity_fingerprint_v1(
+        library_id=library_id,
+        predicate=predicate,
+        subject_canonical_entity_id=source_canonical_entity_id,
+        object_kind=object_kind,
+        object_canonical_entity_id=object_canonical_entity_id,
+        object_value=object_value,
+        identity_qualifiers=identity_qualifiers,
+        temporal_identity_key=temporal_identity_key,
     )
     assertion_fingerprint = _fingerprint(
         {
@@ -1426,6 +1431,25 @@ async def preflight_graph_relation_candidate_fact(
         assertion = await db.get(FactAssertion, existing.fact_assertion_id)
         if logical_fact is None or assertion is None:
             raise GraphRelationFactResolutionError("resolved decision has missing fact assertion links")
+        if isinstance(logical_fact, LogicalFact) and _supports_current_reconciliation_guard(db):
+            current = await resolve_current_logical_fact(db, library_id, logical_fact.id)
+            if current.status != "resolved" or current.current_logical_fact_id != logical_fact.id:
+                return await _persist_preflight_unresolved(
+                    db,
+                    library_id=library_id,
+                    candidate=candidate,
+                    source_entity=source_entity,
+                    target_entity=target_entity,
+                    plan=_pending_plan(
+                        library_id=library_id,
+                        candidate=candidate,
+                        evidence=evidence,
+                        reason_code="logical_fact_current_identity_changed",
+                        predicate=predicate,
+                        subject_canonical_entity_id=source_canonical_entity_id,
+                    ),
+                    source=source,
+                )
         return GraphRelationFactPreflight(plan, existing, logical_fact, assertion, None)
 
     assert plan.assertion is not None
@@ -1461,6 +1485,25 @@ async def preflight_graph_relation_candidate_fact(
             source=source,
         )
     logical_fact = facts[0] if facts else None
+    if isinstance(logical_fact, LogicalFact) and _supports_current_reconciliation_guard(db):
+        current = await resolve_current_logical_fact(db, library_id, logical_fact.id)
+        if current.status != "resolved" or current.current_logical_fact_id != logical_fact.id:
+            return await _persist_preflight_unresolved(
+                db,
+                library_id=library_id,
+                candidate=candidate,
+                source_entity=source_entity,
+                target_entity=target_entity,
+                plan=_pending_plan(
+                    library_id=library_id,
+                    candidate=candidate,
+                    evidence=evidence,
+                    reason_code="logical_fact_current_identity_changed",
+                    predicate=predicate,
+                    subject_canonical_entity_id=source_canonical_entity_id,
+                ),
+                source=source,
+            )
     assertion = await _first(
         db,
         select(FactAssertion).where(
