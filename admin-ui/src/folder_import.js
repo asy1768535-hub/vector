@@ -134,14 +134,12 @@ export function createImportBatchId(
     ].join('-');
 }
 
-export async function uploadFileInChunks({
+export async function createImportSessionForFile({
     api,
     slug,
     file,
     batchId,
-    configuration = DEFAULT_IMPORT_CONFIGURATION,
     options = {},
-    onProgress = () => {},
     resumeState = {},
     signal,
 }) {
@@ -152,7 +150,7 @@ export async function uploadFileInChunks({
     const sessionPayload = {
         batch_id: stableBatchId,
         file_name: file.name,
-        relative_path: relativePathForFile(file),
+        relative_path: options.replaceDocumentId ? null : relativePathForFile(file),
         content_type: file.type || null,
         size_bytes: file.size,
         last_modified_millis: file.lastModified || null,
@@ -169,6 +167,30 @@ export async function uploadFileInChunks({
         );
         resumeState.session = session;
     }
+    return session;
+}
+
+export async function uploadFileInChunks({
+    api,
+    slug,
+    file,
+    batchId,
+    configuration = DEFAULT_IMPORT_CONFIGURATION,
+    options = {},
+    onProgress = () => {},
+    resumeState = {},
+    signal,
+}) {
+    const session = await createImportSessionForFile({
+        api,
+        slug,
+        file,
+        batchId,
+        options,
+        resumeState,
+        signal,
+    });
+    const stableSlug = resumeState.slug;
     let offset = session.upload_offset;
     if (!Number.isInteger(offset) || offset < 0 || offset > file.size) {
         throw new Error('上传服务返回了无效偏移量');

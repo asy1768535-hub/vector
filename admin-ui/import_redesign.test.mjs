@@ -127,6 +127,15 @@ test('validateFile accepts legacy .xls through the bounded xlrd parser', () => {
     assert.equal(r.valid, true);
 });
 
+test('graph batches create all upload sessions before file transfer', () => {
+    const queueBatch = source.indexOf('const batchIds = createImportBatchIds(items);');
+    const sessionPreparation = source.indexOf('createImportSessionForFile({', queueBatch);
+    const contentUpload = source.indexOf('attemptedCount = await runConcurrent(', sessionPreparation + 1);
+    assert.ok(queueBatch >= 0, 'upload queue assigns batch IDs before transfer');
+    assert.ok(sessionPreparation >= 0, 'graph batch upload prepares sessions');
+    assert.ok(contentUpload > sessionPreparation, 'file transfer waits for session preparation');
+});
+
 test('validateFile accepts .doc only when the asynchronous import contract advertises it', () => {
     const r = validateFile(mockFile('old.doc', 1024), {
         allowed_extensions: [...ALLOWED_EXTENSIONS, '.doc'],

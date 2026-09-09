@@ -3,6 +3,7 @@ eval/graph_retrieval/*.jsonl text eol=lf
 eval/graph_retrieval/manifests/*.json text eol=lf
 eval/graph_retrieval/results/*.json text eol=lf
 .gitattributes text eol=lf
+*.sh text eol=lf
 docs/superpowers/specs/2026-07-17-v0.7-publication-scoped-entity-linking.md text eol=lf
 docs/superpowers/plans/2026-07-17-v0.7-publication-scoped-entity-linking-g2.md text eol=lf
 docs/testing/acceptance/v0.7-entity-linking-corrective-audit.md text eol=lf

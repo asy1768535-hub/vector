@@ -145,7 +145,7 @@ class _BoundedBytesIO(io.BytesIO):
         return super().write(data)
 
 
-def _render_page_png(data: PdfSource, page_index: int, dpi: int) -> bytes:
+def _render_page_png_once(data: PdfSource, page_index: int, dpi: int) -> bytes:
     """用 pypdfium2 把单页渲染成 PNG 字节（懒加载，只渲染该页）。
 
     缺依赖（pypdfium2/Pillow 未装）→ PdfOcrUnavailableError；
@@ -189,6 +189,15 @@ def _render_page_png(data: PdfSource, page_index: int, dpi: int) -> bytes:
         raise
     except Exception:  # noqa: BLE001  渲染失败转用户可读错误（消息不含内部栈/正文）
         raise PdfExtractError(f"PDF 第 {page_index + 1} 页渲染失败") from None
+
+
+def _render_page_png(data: PdfSource, page_index: int, dpi: int) -> bytes:
+    try:
+        return _render_page_png_once(data, page_index, dpi)
+    except (PdfOcrUnavailableError, PdfResourceLimitError):
+        raise
+    except PdfExtractError:
+        return _render_page_png_once(data, page_index, dpi)
 
 
 def _page_images(page: object) -> Iterable[Any]:

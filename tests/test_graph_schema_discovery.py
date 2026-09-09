@@ -1118,6 +1118,78 @@ def test_automatic_discovery_activates_the_exact_draft_and_queues_jobs():
     assert command.target_id == ontology_id
 
 
+def test_failed_discovery_cancels_only_queued_graph_units():
+    from app.models.schema_discovery_run import SchemaDiscoveryRun
+    from app.services.schema_discovery_runs import _fail_run
+
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        status="discovering",
+        error_code=None,
+        error_message=None,
+        finished_at=None,
+    )
+    jobs = [
+        SimpleNamespace(
+            status="waiting_schema",
+            current_stage="waiting_schema",
+            error_code=None,
+            error_message=None,
+            finished_at=None,
+        )
+    ]
+
+    class Result:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return list(jobs)
+
+    class Session:
+        def __init__(self):
+            self.statements = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        def begin(self):
+            return self
+
+        async def get(self, model, run_id, **_kwargs):
+            assert model is SchemaDiscoveryRun
+            assert run_id == run.id
+            return run
+
+        async def execute(self, statement):
+            self.statements.append(statement)
+            return Result() if len(self.statements) == 1 else SimpleNamespace(rowcount=2)
+
+    session = Session()
+    result = asyncio.run(
+        _fail_run(
+            lambda: session,
+            run.id,
+            "schema_discovery_failed",
+            "provider unavailable",
+        )
+    )
+
+    assert result is run
+    assert run.status == "failed"
+    assert jobs[0].status == "failed"
+    assert len(session.statements) == 2
+    unit_update = session.statements[1]
+    statement_params = unit_update.compile().params.values()
+    assert "update graph_extraction_units" in str(unit_update).lower()
+    assert "queued" in statement_params
+    assert "cancelled" in statement_params
+    assert "processing" not in statement_params
+
+
 def test_chinese_token_estimate_does_not_use_three_char_underestimate():
     text = "中文" * 2048
 

@@ -13,7 +13,8 @@ import {
     securityLevelLabel, BUILD_MODE_LABEL, buildModeLabel,
 } from '../import_ui.js';
 import {
-    createImportBatchId,
+    createImportBatchIds,
+    createImportSessionForFile,
     DEFAULT_IMPORT_CONFIGURATION,
     IMPORT_PROFILE_DAILY,
     IMPORT_PROFILE_INITIAL,
@@ -736,12 +737,43 @@ export default {
 
             batchReplacing.value = true;
             try {
+                const batchIds = createImportBatchIds(batchReplaceItems.value);
+                const batchIdsByFile = new Map(
+                    batchReplaceItems.value.map((item) => [item.file, batchIds.get(item)]),
+                );
+                const uploadOptions = graphUploadOptions();
+                const resumeStatesByFile = new Map();
+                if (graphRequested) {
+                    for (const item of submittableBatchReplaceItems(batchReplaceItems.value)) {
+                        const resumeState = {};
+                        resumeStatesByFile.set(item.file, resumeState);
+                        await createImportSessionForFile({
+                            api,
+                            slug: slug.value,
+                            file: item.file,
+                            batchId: batchIds.get(item),
+                            options: {
+                                ...uploadOptions,
+                                replaceDocumentId: item.matchedDocId,
+                            },
+                            resumeState,
+                        });
+                    }
+                }
                 const result = await submitBatchReplaceItems(
                     batchReplaceItems.value,
                     slug.value,
-                    api.importFile,
+                    (targetSlug, file, options) => uploadFileInChunks({
+                        api,
+                        slug: targetSlug,
+                        file,
+                        batchId: batchIdsByFile.get(file),
+                        configuration: importConfiguration.value,
+                        options,
+                        resumeState: resumeStatesByFile.get(file),
+                    }),
                     humanizeError,
-                    graphUploadOptions(),
+                    uploadOptions,
                 );
                 for (const item of batchReplaceItems.value) {
                     attachGraphTracking(item, item.importResponse, graphRequested);
@@ -897,7 +929,30 @@ export default {
             activeUploadController = uploadController;
             let attemptedCount = 0;
             try {
-                const batchId = createImportBatchId();
+                const batchIds = createImportBatchIds(items);
+                if (graphJobRequested.value && !onlyFailed) {
+                    await runConcurrent(
+                        items,
+                        uploadConfiguration,
+                        async (it) => {
+                            if (!it.file) return;
+                            it._uploadResumeState = it._uploadResumeState || {};
+                            await createImportSessionForFile({
+                                api,
+                                slug: targetSlug,
+                                file: it.file,
+                                batchId: batchIds.get(it),
+                                options: {
+                                    ...uploadOptions,
+                                    externalId: uploadExternalId,
+                                },
+                                resumeState: it._uploadResumeState,
+                                signal: uploadController.signal,
+                            });
+                        },
+                        (it) => queue.value.includes(it),
+                    );
+                }
                 attemptedCount = await runConcurrent(
                     items,
                     uploadConfiguration,
@@ -940,7 +995,7 @@ export default {
                                 api,
                                 slug: targetSlug,
                                 file: it.file,
-                                batchId,
+                                batchId: batchIds.get(it),
                                 configuration: uploadConfiguration,
                                 resumeState: it._uploadResumeState,
                                 options: {
