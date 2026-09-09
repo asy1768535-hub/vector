@@ -134,6 +134,10 @@ export function createImportBatchId(
     ].join('-');
 }
 
+export function createImportBatchIds(items, batchId = createImportBatchId()) {
+    return new Map(items.map((item) => [item, batchId]));
+}
+
 export async function createImportSessionForFile({
     api,
     slug,

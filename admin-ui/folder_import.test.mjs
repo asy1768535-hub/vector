@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
     createImportBatchId,
+    createImportBatchIds,
     DEFAULT_IMPORT_CONFIGURATION,
     IMPORT_PROFILE_DAILY,
     IMPORT_PROFILE_INITIAL,
@@ -61,6 +62,16 @@ test('batch id falls back to getRandomValues outside secure contexts', () => {
         createImportBatchId(cryptoWithoutRandomUuid),
         'abababab-abab-4bab-abab-abababababab',
     );
+});
+
+test('all items in one graph import batch share one batch ID', () => {
+    const first = { name: 'first.pdf' };
+    const second = { name: 'second.pdf' };
+    const batchIds = createImportBatchIds([first, second], 'batch-1');
+
+    assert.equal(batchIds.size, 2);
+    assert.equal(batchIds.get(first), 'batch-1');
+    assert.equal(batchIds.get(second), 'batch-1');
 });
 
 test('large file upload uses ordered configured chunks and completes session', async () => {
