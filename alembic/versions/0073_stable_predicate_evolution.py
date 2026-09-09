@@ -285,8 +285,8 @@ CREATE FUNCTION fn_stable_predicate_evolution_append_only() RETURNS trigger LANG
 BEGIN
   IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'predicate_evolution_append_only'; END IF;
   IF TG_TABLE_NAME = 'stable_predicate_evolution_decisions'
-     AND OLD.lifecycle_status IN ('pending','rejected','stale')
-     AND NEW.lifecycle_status = 'superseded'
+     AND to_jsonb(OLD)->>'lifecycle_status' IN ('pending','rejected','stale')
+     AND to_jsonb(NEW)->>'lifecycle_status' = 'superseded'
      AND to_jsonb(NEW) - 'lifecycle_status' = to_jsonb(OLD) - 'lifecycle_status'
      AND NOT EXISTS (
        SELECT 1 FROM stable_predicate_evolution_decisions child
@@ -294,21 +294,23 @@ BEGIN
          AND child.supersedes_decision_id=OLD.id
      ) THEN RETURN NEW; END IF;
   IF TG_TABLE_NAME = 'stable_predicate_evolution_sources'
-     AND OLD.evolution_status = 'pending' AND NEW.evolution_status = 'superseded'
+     AND to_jsonb(OLD)->>'evolution_status' = 'pending'
+     AND to_jsonb(NEW)->>'evolution_status' = 'superseded'
      AND to_jsonb(NEW) - 'evolution_status' = to_jsonb(OLD) - 'evolution_status'
      AND NOT EXISTS (
        SELECT 1 FROM stable_predicate_evolution_sources child
        WHERE child.library_id=OLD.library_id AND child.command_id=OLD.command_id
-         AND child.source_predicate_id=OLD.source_predicate_id
+         AND child.source_predicate_id=(to_jsonb(OLD)->>'source_predicate_id')::uuid
          AND child.supersedes_source_transition_id=OLD.id
      ) THEN RETURN NEW; END IF;
   IF TG_TABLE_NAME = 'stable_predicate_mapping_evolution_assignments'
-     AND OLD.assignment_state IN ('pending','resolved') AND NEW.assignment_state = 'superseded'
+     AND to_jsonb(OLD)->>'assignment_state' IN ('pending','resolved')
+     AND to_jsonb(NEW)->>'assignment_state' = 'superseded'
      AND to_jsonb(NEW) - 'assignment_state' = to_jsonb(OLD) - 'assignment_state'
      AND NOT EXISTS (
        SELECT 1 FROM stable_predicate_mapping_evolution_assignments child
        WHERE child.library_id=OLD.library_id AND child.command_id=OLD.command_id
-         AND child.old_mapping_id=OLD.old_mapping_id
+         AND child.old_mapping_id=(to_jsonb(OLD)->>'old_mapping_id')::uuid
          AND child.supersedes_assignment_id=OLD.id
      ) THEN RETURN NEW; END IF;
   RAISE EXCEPTION 'predicate_evolution_append_only';
@@ -375,7 +377,7 @@ BEGIN
       WHERE value->>'predicate_id'=NEW.planned_target_predicate_id::text;
       IF member IS NULL OR member->>'kind' IS DISTINCT FROM NEW.target_ref_kind
          OR (SELECT count(*) FROM jsonb_object_keys(member)) <>
-              CASE WHEN NEW.target_ref_kind='existing' THEN 2 ELSE 4 END
+              (CASE WHEN NEW.target_ref_kind='existing' THEN 2 ELSE 4 END)
          OR (NEW.target_ref_kind='new' AND (
               member->>'target_spec_fingerprint' IS DISTINCT FROM NEW.target_spec_fingerprint
               OR member->'target_spec_snapshot' IS DISTINCT FROM NEW.target_spec_snapshot
@@ -479,7 +481,7 @@ BEGIN
      OR command_row.command_payload_snapshot->>'operation' IS DISTINCT FROM command_row.operation_kind
      OR command_row.command_payload_snapshot->>'library_id' IS DISTINCT FROM command_row.library_id::text
      OR (SELECT count(*) FROM jsonb_object_keys(command_row.command_payload_snapshot))<>
-          CASE WHEN command_row.operation_kind='reassign' THEN 6 ELSE 5 END
+          (CASE WHEN command_row.operation_kind='reassign' THEN 6 ELSE 5 END)
   THEN RAISE EXCEPTION 'predicate_evolution_command_snapshot_mismatch'; END IF;
   IF (command_row.operation_kind='merge' AND
         command_row.command_payload_snapshot - ARRAY[
@@ -743,7 +745,7 @@ BEGIN
              SELECT s.source_predicate_id FROM stable_predicate_evolution_sources s
              WHERE s.evolution_decision_id=NEW.id
            )
-           AND mapping.mapping_status=CASE WHEN NEW.evaluated_outcome='pending' THEN 'active' ELSE 'superseded' END
+           AND mapping.mapping_status=(CASE WHEN NEW.evaluated_outcome='pending' THEN 'active' ELSE 'superseded' END)
            AND NOT EXISTS (
              SELECT 1 FROM stable_predicate_mapping_evolution_assignments a
              WHERE a.evolution_decision_id=NEW.id AND a.old_mapping_id=mapping.id
@@ -773,7 +775,7 @@ BEGIN
            ON s.evolution_decision_id=NEW.id
           AND s.source_predicate_id=mapping.stable_predicate_identity_id
          WHERE mapping.library_id=NEW.library_id
-           AND mapping.mapping_status=CASE WHEN NEW.evaluated_outcome='pending' THEN 'active' ELSE 'superseded' END
+           AND mapping.mapping_status=(CASE WHEN NEW.evaluated_outcome='pending' THEN 'active' ELSE 'superseded' END)
            AND NOT EXISTS (
              SELECT 1 FROM stable_predicate_mapping_evolution_assignments a
              WHERE a.evolution_decision_id=NEW.id AND a.old_mapping_id=mapping.id
@@ -866,8 +868,8 @@ CREATE CONSTRAINT TRIGGER ct_stable_predicate_evolution_decision_graph AFTER INS
 CREATE FUNCTION fn_stable_predicate_evolution_chain_local() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   IF TG_TABLE_NAME='stable_predicate_evolution_decisions' AND NOT EXISTS (SELECT 1 FROM stable_predicate_evolution_decisions n WHERE n.library_id=OLD.library_id AND n.command_id=OLD.command_id AND n.supersedes_decision_id=OLD.id) THEN RAISE EXCEPTION 'predicate_evolution_broken_decision_chain'; END IF;
-  IF TG_TABLE_NAME='stable_predicate_evolution_sources' AND NOT EXISTS (SELECT 1 FROM stable_predicate_evolution_sources n WHERE n.library_id=OLD.library_id AND n.command_id=OLD.command_id AND n.source_predicate_id=OLD.source_predicate_id AND n.supersedes_source_transition_id=OLD.id) AND NOT EXISTS (SELECT 1 FROM stable_predicate_evolution_decisions d WHERE d.library_id=OLD.library_id AND d.command_id=OLD.command_id AND d.supersedes_decision_id=OLD.evolution_decision_id AND d.lifecycle_status='cancelled') THEN RAISE EXCEPTION 'predicate_evolution_broken_source_chain'; END IF;
-  IF TG_TABLE_NAME='stable_predicate_mapping_evolution_assignments' AND NOT EXISTS (SELECT 1 FROM stable_predicate_mapping_evolution_assignments n WHERE n.library_id=OLD.library_id AND n.command_id=OLD.command_id AND n.old_mapping_id=OLD.old_mapping_id AND n.supersedes_assignment_id=OLD.id) AND NOT EXISTS (SELECT 1 FROM stable_predicate_evolution_decisions d WHERE d.library_id=OLD.library_id AND d.command_id=OLD.command_id AND d.supersedes_decision_id=OLD.evolution_decision_id AND d.lifecycle_status='cancelled') THEN RAISE EXCEPTION 'predicate_evolution_broken_assignment_chain'; END IF;
+  IF TG_TABLE_NAME='stable_predicate_evolution_sources' AND NOT EXISTS (SELECT 1 FROM stable_predicate_evolution_sources n WHERE n.library_id=OLD.library_id AND n.command_id=OLD.command_id AND n.source_predicate_id=(to_jsonb(OLD)->>'source_predicate_id')::uuid AND n.supersedes_source_transition_id=OLD.id) AND NOT EXISTS (SELECT 1 FROM stable_predicate_evolution_decisions d WHERE d.library_id=OLD.library_id AND d.command_id=OLD.command_id AND d.supersedes_decision_id=(to_jsonb(OLD)->>'evolution_decision_id')::uuid AND d.lifecycle_status='cancelled') THEN RAISE EXCEPTION 'predicate_evolution_broken_source_chain'; END IF;
+  IF TG_TABLE_NAME='stable_predicate_mapping_evolution_assignments' AND NOT EXISTS (SELECT 1 FROM stable_predicate_mapping_evolution_assignments n WHERE n.library_id=OLD.library_id AND n.command_id=OLD.command_id AND n.old_mapping_id=(to_jsonb(OLD)->>'old_mapping_id')::uuid AND n.supersedes_assignment_id=OLD.id) AND NOT EXISTS (SELECT 1 FROM stable_predicate_evolution_decisions d WHERE d.library_id=OLD.library_id AND d.command_id=OLD.command_id AND d.supersedes_decision_id=(to_jsonb(OLD)->>'evolution_decision_id')::uuid AND d.lifecycle_status='cancelled') THEN RAISE EXCEPTION 'predicate_evolution_broken_assignment_chain'; END IF;
   RETURN NULL;
 END $$;
 """)

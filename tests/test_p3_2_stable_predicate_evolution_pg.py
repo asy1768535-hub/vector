@@ -132,6 +132,67 @@ def test_postgresql_catalog_has_all_p3_2_constraint_triggers() -> None:
     asyncio.run(exercise())
 
 
+def test_postgresql_child_guard_rejects_invalid_rows_for_each_audit_table() -> None:
+    async def exercise() -> None:
+        engine = create_async_engine(_async_dsn())
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        shared = {
+            "library_id": uuid.uuid4(),
+            "command_id": uuid.uuid4(),
+            "decision_id": uuid.uuid4(),
+            "source_id": uuid.uuid4(),
+            "predicate_id": uuid.uuid4(),
+            "target_id": uuid.uuid4(),
+            "mapping_id": uuid.uuid4(),
+            "relation_type_id": uuid.uuid4(),
+        }
+        statements = (
+            """
+            INSERT INTO stable_predicate_evolution_sources (
+              id, library_id, command_id, evolution_decision_id,
+              source_predicate_id, evolution_status
+            ) VALUES (
+              :source_id, :library_id, :command_id, :decision_id,
+              :predicate_id, 'pending'
+            )
+            """,
+            """
+            INSERT INTO stable_predicate_evolution_successors (
+              id, library_id, command_id, evolution_decision_id,
+              source_transition_id, source_predicate_id, target_ref_kind,
+              planned_target_predicate_id, target_predicate_id
+            ) VALUES (
+              :target_id, :library_id, :command_id, :decision_id,
+              :source_id, :predicate_id, 'existing',
+              :target_id, :target_id
+            )
+            """,
+            """
+            INSERT INTO stable_predicate_mapping_evolution_assignments (
+              id, library_id, command_id, evolution_decision_id,
+              old_mapping_id, relation_type_id, source_predicate_id,
+              assignment_state, partition_basis_snapshot, reason_code
+            ) VALUES (
+              :target_id, :library_id, :command_id, :decision_id,
+              :mapping_id, :relation_type_id, :predicate_id,
+              'pending', '{}'::jsonb, 'test'
+            )
+            """,
+        )
+        try:
+            for statement in statements:
+                with pytest.raises(
+                    DBAPIError,
+                    match="predicate_evolution_child_decision_invalid",
+                ):
+                    async with sessions() as db, db.begin():
+                        await db.execute(text(statement), shared)
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
 def test_postgresql_fail_fast_partial_advisory_locks_release_on_outer_rollback() -> None:
     async def exercise() -> None:
         engine = create_async_engine(_async_dsn(), pool_size=3, max_overflow=0)
