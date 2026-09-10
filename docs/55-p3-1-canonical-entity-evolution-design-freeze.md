@@ -1,24 +1,24 @@
-# P3.1 CanonicalEntity Evolution Design Amendment
+# P3.1 CanonicalEntity Evolution Design Freeze
 
-状态：**P3.1 design = AMENDMENT REQUIRED**
+状态：**P3.1 design = FROZEN**
 
-本轮以 checkpoint `330d2c4e085764af8f1df17a0c47cae93ccd25e5` 为输入，继续修订
+本轮以 checkpoint `330d2c4e085764af8f1df17a0c47cae93ccd25e5` 为输入，修订
 Command Identity、Decision lifecycle、pending intent release、schema enforcement、result
-contract 和验证矩阵。在人工复审确认所有未闭合项前，本文件不得恢复为 `FROZEN`。
+contract 和验证矩阵；独立复审已确认设计契约闭合。
 
 本文件是 P3.1 CanonicalEntity Evolution 的唯一设计真源。它以
 [`54-p3-identity-evolution-read-only-baseline.md`](./54-p3-identity-evolution-read-only-baseline.md)
 为上游约束，冻结后续实现必须遵守的语义、持久化模型、并发和验证契约。
 
-本文件不是 implementation 授权。
+本文件授权后续 corrective `0072` 的编写与验证；不授权生产、私有或客户数据库执行 migration，也不授权部署。
 
 ```text
 P3.0 = SEALED
-P3.1 design = AMENDMENT REQUIRED
-P3.1 implementation = NOT AUTHORIZED
+P3.1 design = FROZEN
+P3.1 implementation = AUTHORIZED (corrective 0072 authoring and verification only)
 0071 migration execution = CONFIRMED
 0071 = IMMUTABLE; rewrite/reuse/delete = PROHIBITED
-future corrective revision = 0072; NOT AUTHORIZED
+future corrective revision = 0072; AUTHORIZED (authoring and verification only)
 0071 production/private deployment = UNKNOWN
 P3.2 / P3.3 / P3.4 = NOT AUTHORIZED
 ```
@@ -133,8 +133,8 @@ Fact Resolution bridge。
 
 ## 5. C. Evolution Audit and Lineage Schema
 
-本节冻结目标 schema contract，不授权创建、修改或执行 migration。具体 revision path
-受 5.0 的 migration-history gate 约束。
+本节冻结目标 schema contract。已授权创建和验证 corrective `0072`，但具体 migration execution
+仍受 5.0 的 migration-history gate 与 maintenance-only 边界约束。
 
 ### 5.0 `0071` Migration History Gate
 
@@ -145,7 +145,7 @@ Fact Resolution bridge。
 0071 CI execution = CONFIRMED
 0071 production/private execution = UNKNOWN
 0071 rewrite status = PROHIBITED
-future corrective revision = 0072; NOT AUTHORIZED
+future corrective revision = 0072; AUTHORIZED (authoring and verification only)
 ```
 
 revision `0071` 已存在于 commit `fb9a73528726a6761c7bb4ba76ca62c5d6fe8529`，其
@@ -155,17 +155,17 @@ PostgreSQL 16 job 中成功执行 `0070 -> 0071` 并报告 `0071 (head)`；这�
 artifact 已被执行过，但只证明 CI 临时数据库，不证明任何生产、私有或客户数据库状态。
 
 同一 `fb9a735` 也已经包含 pre-amendment P3.1 production code 和 tests；这是仓库真实状态，
-不是本修订对该实现的验收。本文的 `P3.1 implementation = NOT AUTHORIZED` 表示该既有实现
-不构成符合本目标契约的 implementation baseline，且本轮不得继续修改或部署它；第 12 节的
-future implementation 是后续另行授权的 corrective alignment，不是否认这些 artifact 已存在。
+不是本修订对该实现的验收。本文的 corrective implementation authorization 表示既有实现
+不构成符合本目标契约的 implementation baseline；第 12 节授权后续 corrective alignment，
+但不授权部署或执行 migration，不是否认这些 artifact 已存在。
 
 用户冻结规则以“任何环境执行过”为边界；disposable CI PostgreSQL 也属于环境。因此上述两次
 成功 upgrade 已足够证明 `0071` 进入过 migration history，结论固定为 **`0071` immutable**。
 即使未来证明所有生产、私有和客户数据库均未执行，也不得再原位重写、复用或删除 `0071`；
 缺少 production deployment evidence 只保留为运维事实未知，不得重新打开 rewrite 分支。
 
-未来若单独授权 schema correction，revision 必须是 `0072`，且只能遵循以下 forward-only
-data gate；本轮不创建、修改或执行 migration。gate 中的“五张表”固定且不允许实现自行扩展
+已授权的 schema correction 必须是 `0072`，且只能遵循以下 forward-only
+data gate；不得执行 migration。gate 中的“五张表”固定且不允许实现自行扩展
 或缩减为：
 
 ```text
@@ -1638,7 +1638,7 @@ RETURN-only 分支则始终保持零写入。
 
 ## 12. K. Exact Future P3.1 Implementation Scope
 
-在明确授权 P3.1 implementation 后，允许的最小范围是：
+当前已授权的 P3.1 implementation 最小范围是：
 
 1. `0071` 永久 immutable。只有另行授权的 corrective `0072` 可以实现第 5 节 tables、
    composite FKs、partial unique indexes、triggers，并在保留既有 EntityResolutionDecision
@@ -1839,7 +1839,7 @@ skip；ruff、compileall、Alembic heads、offline SQL generation 和非 Postgre
 
 ## 14. M. Known Limitations and PostgreSQL Runtime Requirements
 
-`VECTOR_KB_PG_TEST_DSN` 当前未配置。以下只能在 implementation 获准且提供 disposable
+`VECTOR_KB_PG_TEST_DSN` 当前未配置。以下只能在提供 disposable
 PostgreSQL 后验证，当前不能声称 runtime PASS：
 
 ```text
@@ -1873,7 +1873,7 @@ GitNexus MCP 当前不可用；P3.0 已记录 `npx gitnexus analyze` 因 `tree-s
 
 ## 15. Amendment Acceptance and Stop Condition
 
-本轮修订已经明确以下 contract，等待人工复审：
+本轮修订已经明确以下 contract，并已通过独立复审：
 
 ```text
 A. explicit existing merge survivor semantics
@@ -1895,12 +1895,11 @@ M. conditional implementation boundary, expanded test matrix, and PostgreSQL run
 
 ```text
 0071 production/private deployment and table cardinality = UNKNOWN
-human design review = PENDING
 PostgreSQL runtime integration = UNAVAILABLE in the current environment
 ```
 
-因此最终状态保持 `P3.1 design = AMENDMENT REQUIRED`。下一步只能是人工复审；不得进入
-implementation，不得修改/创建 `0071` 或 `0072`，不得
-提交、推送或部署。未来即使人工复审通过，implementation 仍须单独授权，并重新检查本文件、
-P3.0 真源、Alembic head、Git worktree 和每个待修改 symbol 的 impact。P3.2、P3.3、P3.4、
+因此 `P3.1 design = FROZEN`，并已授权 corrective `0072` 的本地编写与验证。不得修改/创建
+`0071`，不得执行 `0072` migration 于生产、私有或客户环境，不得部署。implementation 仍须在
+每个待修改 symbol 前重新检查本文件、P3.0 真源、Alembic head、Git worktree 和 impact。P3.2、P3.3、P3.4、
 Publication、Retrieval、RawClaim promotion 和历史 Fact reconciliation 继续不获授权。
+

@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime, time, timedelta, timezone
 from typing import Any
 
 from pydantic import ValidationError
@@ -34,6 +35,7 @@ from app.models.library import Library
 from app.models.ontology_version import OntologyVersion
 from app.models.relation_evidence import RelationEvidence
 from app.models.relation_type import RelationType
+from app.models.user import User
 from app.schemas.knowledge_catalog import (
     CatalogCapabilitiesRead,
     CatalogClassificationLabelRead,
@@ -51,6 +53,9 @@ from app.schemas.knowledge_catalog import (
     CatalogRelationKnowledgeUnitRead,
     CatalogRevisionFileRead,
     CatalogSummaryRead,
+    CatalogUploaderOptionRead,
+    CatalogUploaderOptionsRead,
+    CatalogUploaderRead,
 )
 from app.schemas.knowledge_artifact import OutlinePayloadV1, SummaryPayloadV1
 from app.services.evidence_read import get_evidence_detail
@@ -92,6 +97,7 @@ class _CatalogHydration:
     graph_jobs: dict[uuid.UUID, GraphExtractionJob]
     files: dict[uuid.UUID, DocumentRevisionFile]
     graph_counts: dict[uuid.UUID, CatalogGraphCountsRead]
+    uploaders: dict[uuid.UUID, User]
 
 
 def _not_found() -> KnowledgeCatalogError:
@@ -218,7 +224,71 @@ def _document_filter_predicates(query: CatalogDocumentQuery):
                 )
             )
         )
+    if query.uploader_id is not None:
+        predicates.append(Document.created_by == query.uploader_id)
+    elif query.include_system_uploader:
+        predicates.append(Document.created_by.is_(None))
+    if query.uploaded_from is not None:
+        predicates.append(
+            Document.created_at
+            >= datetime.combine(query.uploaded_from, time.min, tzinfo=timezone.utc)
+        )
+    if query.uploaded_to is not None:
+        predicates.append(
+            Document.created_at
+            < datetime.combine(
+                query.uploaded_to + timedelta(days=1),
+                time.min,
+                tzinfo=timezone.utc,
+            )
+        )
     return tuple(predicates)
+
+
+def _masked_email(value: str | None) -> str | None:
+    if not value:
+        return None
+    local, separator, domain = value.partition("@")
+    if not separator or not local or not domain:
+        return "***"
+    return f"{local[0]}***@{domain}"
+
+
+def catalog_uploader_read(
+    user: User | None,
+    *,
+    reveal_email: bool,
+) -> CatalogUploaderRead:
+    if user is None:
+        return CatalogUploaderRead(
+            display_name="系统或历史导入",
+            username=None,
+            email=None,
+            is_system=True,
+        )
+    if user.deleted_at is not None:
+        return CatalogUploaderRead(
+            display_name="已注销用户",
+            username=None,
+            email=None,
+            is_system=False,
+        )
+    display_name = user.display_name or user.username or _masked_email(user.email) or "未知上传人"
+    return CatalogUploaderRead(
+        display_name=display_name,
+        username=user.username,
+        email=user.email if reveal_email else _masked_email(user.email),
+        is_system=False,
+    )
+
+
+def _uploader_option_label(uploader: CatalogUploaderRead) -> str:
+    parts = [uploader.display_name]
+    if uploader.username and uploader.username != uploader.display_name:
+        parts.append(uploader.username)
+    if uploader.email:
+        parts.append(uploader.email)
+    return " · ".join(parts)
 
 
 def _document_title(document: Document, revision: DocumentRevision) -> str:
@@ -508,6 +578,28 @@ async def _current_files(
     return result
 
 
+async def _current_uploaders(
+    db,
+    *,
+    current_documents: tuple[_CurrentDocument, ...],
+) -> dict[uuid.UUID, User]:
+    uploader_ids = tuple(
+        {
+            item.document.created_by
+            for item in current_documents
+            if item.document.created_by is not None
+        }
+    )
+    if not uploader_ids:
+        return {}
+    rows = tuple(
+        (
+            await db.execute(select(User).where(User.id.in_(uploader_ids)))
+        ).scalars().all()
+    )
+    return {row.id: row for row in rows}
+
+
 def _publication_fact_base(library_id: uuid.UUID, item_kind: str):
     return (
         select(GraphPublicationItem, EvidenceUnit)
@@ -741,14 +833,19 @@ async def _hydrate_current_documents(
         current_documents=current_documents,
         enabled=config.graph_retrieval_enabled,
     )
+    uploaders = await _current_uploaders(
+        db,
+        current_documents=current_documents,
+    )
     return _CatalogHydration(
-        artifacts,
-        artifact_jobs,
-        classifications,
-        classification_jobs,
-        graph_jobs,
-        files,
-        graph_counts,
+        artifacts=artifacts,
+        artifact_jobs=artifact_jobs,
+        classifications=classifications,
+        classification_jobs=classification_jobs,
+        graph_jobs=graph_jobs,
+        files=files,
+        graph_counts=graph_counts,
+        uploaders=uploaders,
     )
 
 
@@ -845,12 +942,35 @@ def _summary_excerpt(artifact: KnowledgeArtifact | None) -> str | None:
     return payload.summary.strip()[:1000]
 
 
+def _document_uploader_read(
+    document: Document,
+    hydration: _CatalogHydration,
+    *,
+    reveal_email: bool,
+) -> CatalogUploaderRead:
+    if document.created_by is None:
+        return catalog_uploader_read(None, reveal_email=reveal_email)
+    uploader = hydration.uploaders.get(document.created_by)
+    if uploader is None:
+        return CatalogUploaderRead(
+            display_name="已注销用户",
+            username=None,
+            email=None,
+            is_system=False,
+        )
+    return catalog_uploader_read(uploader, reveal_email=reveal_email)
+
+
 def _list_item(
     current: _CurrentDocument,
     hydration: _CatalogHydration,
     *,
     library: Library,
     config: Settings,
+    include_uploader: bool = False,
+    reveal_uploader_email: bool = False,
+    viewer_id: uuid.UUID | None = None,
+    can_delete_any: bool = False,
 ) -> CatalogDocumentListItemRead:
     document, revision = current.document, current.revision
     artifacts = hydration.artifacts.get(revision.id, {})
@@ -907,6 +1027,24 @@ def _list_item(
         revision_status=revision.status,
         revision_content_hash=revision.content_hash,
         updated_at=document.updated_at,
+        uploaded_at=document.created_at,
+        uploader=(
+            _document_uploader_read(
+                document,
+                hydration,
+                reveal_email=reveal_uploader_email,
+            )
+            if include_uploader
+            else None
+        ),
+        can_delete=bool(
+            can_delete_any
+            or (
+                viewer_id is not None
+                and document.created_by is not None
+                and document.created_by == viewer_id
+            )
+        ),
         overall_state=projection.overall_state,
         capabilities=CatalogCapabilitiesRead(
             source=projection.source,
@@ -930,6 +1068,10 @@ async def list_catalog_documents(
     query: CatalogDocumentQuery,
     cursor_value: str | None = None,
     config: Settings = settings,
+    include_uploader: bool = False,
+    reveal_uploader_email: bool = False,
+    viewer_id: uuid.UUID | None = None,
+    can_delete_any: bool = False,
 ) -> CatalogDocumentPageRead:
     if not isinstance(library, Library) or not isinstance(query, CatalogDocumentQuery):
         raise KnowledgeCatalogError("catalog_request_invalid")
@@ -978,7 +1120,16 @@ async def list_catalog_documents(
         config=config,
     )
     items = [
-        _list_item(current, hydration, library=library, config=config)
+        _list_item(
+            current,
+            hydration,
+            library=library,
+            config=config,
+            include_uploader=include_uploader,
+            reveal_uploader_email=reveal_uploader_email,
+            viewer_id=viewer_id,
+            can_delete_any=can_delete_any,
+        )
         for current in current_documents
     ]
     next_cursor = None
@@ -988,6 +1139,54 @@ async def list_catalog_documents(
             CatalogDocumentCursor(last.updated_at, last.id, fingerprint)
         )
     return CatalogDocumentPageRead(items=items, total=total, next_cursor=next_cursor)
+
+
+async def list_catalog_uploader_options(
+    db,
+    *,
+    library: Library,
+    viewer: User,
+    reveal_email: bool,
+) -> CatalogUploaderOptionsRead:
+    uploader_ids = tuple(
+        row[0]
+        for row in (
+            await db.execute(
+                select(Document.created_by)
+                .where(
+                    Document.library_id == library.id,
+                    Document.deleted_at.is_(None),
+                )
+                .distinct()
+                .order_by(Document.created_by)
+                .limit(100)
+            )
+        ).all()
+    )
+    user_ids = tuple(item for item in uploader_ids if item is not None)
+    users: dict[uuid.UUID, User] = {}
+    if user_ids:
+        users = {
+            row.id: row
+            for row in (
+                await db.execute(select(User).where(User.id.in_(user_ids)))
+            ).scalars().all()
+        }
+    items = [CatalogUploaderOptionRead(value=str(viewer.id), label="我上传的")]
+    for uploader_id in user_ids:
+        if uploader_id == viewer.id:
+            continue
+        uploader = users.get(uploader_id)
+        if uploader is None:
+            label = "已注销用户"
+        else:
+            label = _uploader_option_label(
+                catalog_uploader_read(uploader, reveal_email=reveal_email)
+            )
+        items.append(CatalogUploaderOptionRead(value=str(uploader_id), label=label))
+    if None in uploader_ids:
+        items.append(CatalogUploaderOptionRead(value="system", label="系统或历史导入"))
+    return CatalogUploaderOptionsRead(items=items)
 
 
 def _summary_read(artifact: KnowledgeArtifact | None) -> CatalogSummaryRead | None:
@@ -1500,6 +1699,10 @@ async def get_catalog_document_detail(
     library: Library,
     document_id: uuid.UUID,
     config: Settings = settings,
+    include_uploader: bool = False,
+    reveal_uploader_email: bool = False,
+    viewer_id: uuid.UUID | None = None,
+    can_delete_any: bool = False,
 ) -> CatalogDocumentDetailRead:
     if not isinstance(library, Library) or not isinstance(document_id, uuid.UUID):
         raise KnowledgeCatalogError("catalog_request_invalid")
@@ -1514,7 +1717,16 @@ async def get_catalog_document_detail(
         current_documents=(current,),
         config=config,
     )
-    item = _list_item(current, hydration, library=library, config=config)
+    item = _list_item(
+        current,
+        hydration,
+        library=library,
+        config=config,
+        include_uploader=include_uploader,
+        reveal_uploader_email=reveal_uploader_email,
+        viewer_id=viewer_id,
+        can_delete_any=can_delete_any,
+    )
     artifacts = hydration.artifacts.get(current.revision.id, {})
     graph = await _document_graph(
         db,

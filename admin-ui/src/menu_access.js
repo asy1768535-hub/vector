@@ -32,6 +32,7 @@ export function menuAccess(user, permissions, organizations = []) {
         documents: can('read'),
         search: can('read'),
         chat: can('read'),
+        myFiles: can('insert'),
         import: can('insert'),
         organizationAdmin,
         retrievalTest: organizationAdmin,

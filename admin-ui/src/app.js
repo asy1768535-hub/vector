@@ -40,6 +40,7 @@ import Search from './views/Search.js';
 import Chat from './views/Chat.js';
 import ChatLogs from './views/ChatLogs.js';
 import Import from './views/Import.js';
+import MyFiles from './views/MyFiles.js';
 import ApiKeys from './views/ApiKeys.js';
 import Jobs from './views/Jobs.js';
 import RuntimeStatus from './views/RuntimeStatus.js';
@@ -145,6 +146,16 @@ const routes = [
                             title: '知识资产',
                             perm: 'read',
                             effectivePerm: 'read',
+                        },
+                    },
+                    {
+                        path: 'my-files',
+                        component: MyFiles,
+                        meta: {
+                            domain: 'knowledgeAssets',
+                            domainTitle: '知识资产',
+                            title: '我的任务',
+                            perm: 'insert',
                         },
                     },
                     {

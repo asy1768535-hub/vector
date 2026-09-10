@@ -157,20 +157,6 @@ export const deleteDocument = (slug, id) =>
 export const libraryStats = (slug, forceRefresh) => cachedRequest(`libraryStats:${slug}`, () => request(`/libraries/${slug}/stats`), 15000, forceRefresh);
 export const queryLibrary = (slug, data) =>
     request(`/libraries/${slug}/query`, jsonBody('POST', data));
-export const importFile = (slug, file, {
-    externalId = null,
-    replaceDocumentId = null,
-    securityLevel = null,
-    graphExtractionRequested = false,
-} = {}) => {
-    const formData = new FormData();
-    formData.append('file', file);
-    if (externalId) formData.append('external_id', externalId);
-    if (replaceDocumentId) formData.append('replace_document_id', replaceDocumentId);
-    if (securityLevel) formData.append('security_level', securityLevel);
-    if (graphExtractionRequested) formData.append('graph_extraction_requested', 'true');
-    return request(`/libraries/${slug}/import-file`, { method: 'POST', body: formData });
-};
 export const getImportConfiguration = (slug) =>
     request(`/libraries/${slug}/import-configuration`);
 export const updateImportConfiguration = (slug, data) =>
@@ -231,8 +217,29 @@ export const getImportJobProgress = (slug, jobIds, { signal } = {}) =>
         ...jsonBody('POST', { job_ids: jobIds }),
         signal,
     });
+export const getDocumentJobProgress = (slug, embeddingJobIds, { signal } = {}) =>
+    request(`/libraries/${slug}/documents/jobs/progress`, {
+        ...jsonBody('POST', { embedding_job_ids: embeddingJobIds }),
+        signal,
+    });
 export const retryImportJob = (slug, jobId) =>
     request(`/libraries/${slug}/import-jobs/${jobId}/retry`, { method: 'POST' });
+export const listPersonalImportTaskFiles = (params = {}, { signal } = {}) => {
+    const query = new URLSearchParams({
+        library_slug: String(params.librarySlug || ''),
+        scope: params.scope === 'all' ? 'all' : '30d',
+        page: String(Number.isInteger(params.page) && params.page > 0 ? params.page : 1),
+        page_size: String(params.pageSize === 50 ? 50 : 20),
+    });
+    if (typeof params.path === 'string' && params.path) query.set('path', params.path);
+    return request(`/me/import-task-files?${query.toString()}`, { signal });
+};
+export const getPersonalImportTaskSummary = (scope = '30d', { signal } = {}) =>
+    request(`/me/import-task-summary?${new URLSearchParams({
+        scope: scope === 'all' ? 'all' : '30d',
+    }).toString()}`, { signal });
+export const retryPersonalImportTask = (jobId) =>
+    request(`/me/import-tasks/${jobId}/retry`, { method: 'POST' });
 export const getUploadGraphExtractionConfiguration = (slug) =>
     request(`/libraries/${slug}/v04/graph-extractions/upload-configuration`);
 export const listGraphExtractions = (slug, params = {}) =>
@@ -241,8 +248,6 @@ export const retryGraphExtraction = (slug, jobId) =>
     request(`/libraries/${slug}/v04/graph-extractions/${jobId}/retry`, { method: 'POST' });
 export const listSchemaDiscoveryRuns = (slug, params = {}) =>
     request(`/libraries/${slug}/v04/graph-extractions/schema-discovery-runs?${new URLSearchParams(params).toString()}`);
-// 任务状态（库级，普通用户可查）：按文档列出
-export const listDocumentJobs = (slug, documentId, forceRefresh) => cachedRequest(`listDocumentJobs:${slug}:${documentId}`, () => request(`/libraries/${slug}/documents/${documentId}/jobs`), 15000, forceRefresh);
 export const getDocumentSource = (slug, documentId, chunkId) =>
     request(`/libraries/${slug}/documents/${documentId}/source?` + new URLSearchParams({ chunk_id: chunkId }).toString());
 export const getDocumentFullSource = (slug, documentId, params = {}) => {
@@ -283,9 +288,10 @@ export async function downloadDocumentFile(slug, documentId) {
 // ── v0.8 Knowledge Catalog（严格 current Revision 只读投影） ─────
 const CATALOG_QUERY_KEYS = [
     'title',
-    'status',
-    'classification_state',
-    'label_id',
+    'uploader_id',
+    'include_system_uploader',
+    'uploaded_from',
+    'uploaded_to',
     'limit',
     'cursor',
 ];
@@ -310,6 +316,12 @@ export const listCatalogDocuments = (slug, params = {}, forceRefresh) => {
         forceRefresh,
     );
 };
+export const listCatalogUploaderOptions = (slug, forceRefresh) => cachedRequest(
+    `listCatalogUploaderOptions:${slug}`,
+    () => request(`/libraries/${slug}/catalog/uploader-options`),
+    10000,
+    forceRefresh,
+);
 export const getCatalogDocument = (slug, documentId, forceRefresh) => cachedRequest(
     `getCatalogDocument:${slug}:${documentId}`,
     () => request(`/libraries/${slug}/catalog/documents/${documentId}`),

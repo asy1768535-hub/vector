@@ -3,16 +3,26 @@ from __future__ import annotations
 import uuid
 from types import SimpleNamespace
 
-from app.models.fact_foundation import FactAssertion, LogicalFact, StablePredicateIdentity
+from app.models.fact_foundation import (
+    FactAssertion,
+    LogicalFact,
+    StablePredicateIdentity,
+    StablePredicateMapping,
+)
+from app.models.stable_predicate_evolution import (
+    StablePredicateEvolutionDecision,
+    StablePredicateEvolutionSource,
+    StablePredicateEvolutionSuccessor,
+    StablePredicateMappingEvolutionAssignment,
+)
 from app.services.graph_relation_fact_resolution import (
-    _logical_fact_lock_key,
     _lock_logical_fact_v2,
+    _logical_fact_lock_key,
     build_graph_relation_fact_plan,
     preflight_graph_relation_candidate_fact,
     resolve_graph_relation_candidate_fact,
     source_occurrence_fingerprint_v1,
 )
-
 
 LIBRARY_ID = uuid.UUID("10000000-0000-0000-0000-000000000001")
 PREDICATE_ID = uuid.UUID("20000000-0000-0000-0000-000000000001")
@@ -134,9 +144,43 @@ class _ResolutionDb:
         self.added = []
         self.flush_count = 0
 
+    @property
+    def results(self):
+        return self._results
+
+    @results.setter
+    def results(self, value):
+        self._results = list(value)
+        if hasattr(self, "_mapping_rows"):
+            del self._mapping_rows
+
     async def execute(self, _statement, _params=None):
+        entities = {
+            description.get("entity")
+            for description in getattr(_statement, "column_descriptions", ())
+        }
+        if StablePredicateIdentity in entities:
+            return _Result(
+                row
+                for (model, _identifier), row in self.objects.items()
+                if model is StablePredicateIdentity
+            )
+        if entities.intersection(
+            {
+                StablePredicateEvolutionDecision,
+                StablePredicateEvolutionSource,
+                StablePredicateEvolutionSuccessor,
+                StablePredicateMappingEvolutionAssignment,
+            }
+        ):
+            return _Result()
+        if StablePredicateMapping in entities and hasattr(self, "_mapping_rows"):
+            return _Result(self._mapping_rows)
         assert self.results, "unexpected fact-resolution query"
-        return self.results.pop(0)
+        result = self.results.pop(0)
+        if StablePredicateMapping in entities:
+            self._mapping_rows = result.rows
+        return result
 
     async def get(self, model, identifier):
         return self.objects.get((model, identifier))
@@ -148,11 +192,21 @@ class _ResolutionDb:
         self.flush_count += 1
 
 
-def _relation():
+def _relation(relation_type_id: uuid.UUID | None = None):
     return SimpleNamespace(
         id=uuid.uuid4(),
-        relation_type_id=uuid.uuid4(),
+        relation_type_id=relation_type_id or uuid.uuid4(),
         logical_fact_id=None,
+    )
+
+
+def _mapping(predicate_id: uuid.UUID, relation_type_id: uuid.UUID):
+    return SimpleNamespace(
+        id=uuid.uuid4(),
+        library_id=LIBRARY_ID,
+        relation_type_id=relation_type_id,
+        stable_predicate_identity_id=predicate_id,
+        mapping_status="active",
     )
 
 
@@ -264,9 +318,9 @@ def test_unclassified_candidate_property_fails_closed_to_pending():
 
 def test_resolver_creates_fact_assertion_decision_and_projection_bridges():
     predicate = _predicate()
-    mapping = SimpleNamespace(stable_predicate_identity_id=predicate.id)
     candidate = _candidate()
     relation = _relation()
+    mapping = _mapping(predicate.id, relation.relation_type_id)
     relation_evidence = _relation_evidence()
     db = _ResolutionDb(
         results=[_Result([mapping]), _Result(), _Result(), _Result(), _Result()],
@@ -315,8 +369,8 @@ def test_missing_or_ambiguous_predicate_mapping_stays_pending_without_fact_write
         ([], {}, "predicate_mapping_pending"),
         (
             [
-                SimpleNamespace(stable_predicate_identity_id=first_predicate.id),
-                SimpleNamespace(stable_predicate_identity_id=second_predicate.id),
+                _mapping(first_predicate.id, relation.relation_type_id),
+                _mapping(second_predicate.id, relation.relation_type_id),
             ],
             {
                 (StablePredicateIdentity, first_predicate.id): first_predicate,
@@ -351,9 +405,9 @@ def test_missing_or_ambiguous_predicate_mapping_stays_pending_without_fact_write
 
 def test_multiple_logical_fact_rows_with_one_identity_stays_pending_without_bridge_mutation():
     predicate = _predicate()
-    mapping = SimpleNamespace(stable_predicate_identity_id=predicate.id)
     candidate = _candidate()
     relation = _relation()
+    mapping = _mapping(predicate.id, relation.relation_type_id)
     relation_evidence = _relation_evidence()
     duplicate_facts = [SimpleNamespace(id=uuid.uuid4()), SimpleNamespace(id=uuid.uuid4())]
     db = _ResolutionDb(
@@ -389,9 +443,9 @@ def test_multiple_logical_fact_rows_with_one_identity_stays_pending_without_brid
 
 def test_single_existing_logical_fact_is_reused_while_a_new_source_assertion_is_created():
     predicate = _predicate()
-    mapping = SimpleNamespace(stable_predicate_identity_id=predicate.id)
     existing_fact = SimpleNamespace(id=uuid.uuid4())
     relation = _relation()
+    mapping = _mapping(predicate.id, relation.relation_type_id)
     relation_evidence = _relation_evidence()
     db = _ResolutionDb(
         results=[
@@ -430,7 +484,6 @@ def test_single_existing_logical_fact_is_reused_while_a_new_source_assertion_is_
 
 def test_same_source_replay_reuses_current_decision_assertion_and_bridges():
     predicate = _predicate()
-    mapping = SimpleNamespace(stable_predicate_identity_id=predicate.id)
     logical_fact = SimpleNamespace(id=uuid.uuid4())
     assertion = SimpleNamespace(id=uuid.uuid4(), logical_fact_id=logical_fact.id)
     decision = SimpleNamespace(
@@ -439,6 +492,7 @@ def test_same_source_replay_reuses_current_decision_assertion_and_bridges():
         fact_assertion_id=assertion.id,
     )
     relation = _relation()
+    mapping = _mapping(predicate.id, relation.relation_type_id)
     relation_evidence = _relation_evidence()
     db = _ResolutionDb(
         results=[_Result([mapping]), _Result([decision])],
@@ -481,7 +535,8 @@ def test_same_source_replay_reuses_current_decision_assertion_and_bridges():
 def test_rejected_predicate_persists_rejected_decision_without_fact_writes():
     predicate = _predicate()
     predicate.resolution_status = "rejected"
-    mapping = SimpleNamespace(stable_predicate_identity_id=predicate.id)
+    relation = _relation()
+    mapping = _mapping(predicate.id, relation.relation_type_id)
     db = _ResolutionDb(
         results=[_Result([mapping]), _Result(), _Result()],
         objects={(StablePredicateIdentity, predicate.id): predicate},
@@ -492,7 +547,7 @@ def test_rejected_predicate_persists_rejected_decision_without_fact_writes():
             db,
             library_id=LIBRARY_ID,
             candidate=_candidate(),
-            relation=_relation(),
+            relation=relation,
             relation_evidence=_relation_evidence(),
             source_entity=_entity(SOURCE_CANONICAL_ID),
             target_entity=_entity(TARGET_CANONICAL_ID),
@@ -508,8 +563,9 @@ def test_rejected_predicate_persists_rejected_decision_without_fact_writes():
 
 def test_new_decision_supersedes_the_previous_current_decision_for_the_same_candidate():
     predicate = _predicate()
-    mapping = SimpleNamespace(stable_predicate_identity_id=predicate.id)
     candidate = _candidate()
+    relation = _relation()
+    mapping = _mapping(predicate.id, relation.relation_type_id)
     previous = SimpleNamespace(id=uuid.uuid4(), status="pending")
     db = _ResolutionDb(
         results=[
@@ -527,7 +583,7 @@ def test_new_decision_supersedes_the_previous_current_decision_for_the_same_cand
             db,
             library_id=LIBRARY_ID,
             candidate=candidate,
-            relation=_relation(),
+            relation=relation,
             relation_evidence=_relation_evidence(),
             source_entity=_entity(SOURCE_CANONICAL_ID),
             target_entity=_entity(TARGET_CANONICAL_ID),
@@ -568,7 +624,8 @@ def test_multiple_evidence_group_fails_closed_to_a_decision_without_formal_proje
 
 def test_cross_candidate_replay_and_a_b_a_keep_one_current_decision_per_source_subject():
     predicate = _predicate(policy=_policy(assertion_bearing=["observation"]))
-    mapping = SimpleNamespace(stable_predicate_identity_id=predicate.id)
+    relation_type_id = uuid.uuid4()
+    mapping = _mapping(predicate.id, relation_type_id)
     source = _entity(SOURCE_CANONICAL_ID)
     target = _entity(TARGET_CANONICAL_ID)
     occurrence = _evidence()
@@ -593,7 +650,7 @@ def test_cross_candidate_replay_and_a_b_a_keep_one_current_decision_per_source_s
             db,
             library_id=LIBRARY_ID,
             candidate=first_candidate,
-            relation=_relation(),
+            relation=_relation(relation_type_id),
             relation_evidence=_relation_evidence(),
             source_entity=source,
             target_entity=target,
@@ -612,7 +669,7 @@ def test_cross_candidate_replay_and_a_b_a_keep_one_current_decision_per_source_s
             db,
             library_id=LIBRARY_ID,
             candidate=_candidate(properties={"observation": "A"}),
-            relation=_relation(),
+            relation=_relation(relation_type_id),
             relation_evidence=_relation_evidence(),
             source_entity=source,
             target_entity=target,
@@ -635,7 +692,7 @@ def test_cross_candidate_replay_and_a_b_a_keep_one_current_decision_per_source_s
             db,
             library_id=LIBRARY_ID,
             candidate=second_candidate,
-            relation=_relation(),
+            relation=_relation(relation_type_id),
             relation_evidence=_relation_evidence(),
             source_entity=source,
             target_entity=target,
@@ -659,7 +716,7 @@ def test_cross_candidate_replay_and_a_b_a_keep_one_current_decision_per_source_s
             db,
             library_id=LIBRARY_ID,
             candidate=third_candidate,
-            relation=_relation(),
+            relation=_relation(relation_type_id),
             relation_evidence=_relation_evidence(),
             source_entity=source,
             target_entity=target,
@@ -678,7 +735,7 @@ def test_cross_candidate_replay_and_a_b_a_keep_one_current_decision_per_source_s
             db,
             library_id=LIBRARY_ID,
             candidate=_candidate(properties={"observation": "A"}),
-            relation=_relation(),
+            relation=_relation(relation_type_id),
             relation_evidence=_relation_evidence(),
             source_entity=source,
             target_entity=target,

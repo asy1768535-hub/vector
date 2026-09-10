@@ -151,6 +151,47 @@ export function fileKey(file) {
     return `${relativePath || file.name}|${file.size}|${file.lastModified}`;
 }
 
+const FILE_COMPARE_CHUNK_SIZE = 1024 * 1024;
+
+async function filesHaveSameContent(first, second, chunkSize) {
+    if (!first || !second || first.size !== second.size) return false;
+    if (first === second || first.size === 0) return true;
+    if (typeof first.slice !== 'function' || typeof second.slice !== 'function') return false;
+
+    const step = Math.max(1, Number(chunkSize) || FILE_COMPARE_CHUNK_SIZE);
+    for (let offset = 0; offset < first.size; offset += step) {
+        const end = Math.min(first.size, offset + step);
+        const [firstBuffer, secondBuffer] = await Promise.all([
+            first.slice(offset, end).arrayBuffer(),
+            second.slice(offset, end).arrayBuffer(),
+        ]);
+        const firstBytes = new Uint8Array(firstBuffer);
+        const secondBytes = new Uint8Array(secondBuffer);
+        if (firstBytes.length !== secondBytes.length) return false;
+        for (let index = 0; index < firstBytes.length; index += 1) {
+            if (firstBytes[index] !== secondBytes[index]) return false;
+        }
+    }
+    return true;
+}
+
+/** Confirm metadata-key collisions before the UI drops them as duplicates. */
+export async function verifyDuplicateFiles(candidates, filesByKey, chunkSize = FILE_COMPARE_CHUNK_SIZE) {
+    const duplicates = [];
+    const replacements = [];
+    for (const candidate of candidates || []) {
+        const key = fileKey(candidate.file);
+        const previousFile = filesByKey?.get(key);
+        if (!previousFile || await filesHaveSameContent(previousFile, candidate.file, chunkSize)) {
+            duplicates.push(candidate);
+            continue;
+        }
+        replacements.push({ ...candidate, key, previousFile });
+        filesByKey.set(key, candidate.file);
+    }
+    return { duplicates, replacements };
+}
+
 /** Human-readable file size (binary units). */
 export function formatSize(bytes) {
     if (bytes === 0) return '0 B';

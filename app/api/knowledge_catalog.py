@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -10,9 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import deps as deps_module
 from app.auth.backend import current_cookie_user
+from app.casbin.enforcer import has_permission
 from app.config import settings
 from app.db import get_db
-from app.deps import require_lib
+from app.deps import current_active_user, require_lib
 from app.models.library import Library
 from app.models.user import User
 from app.schemas.document_processing import (
@@ -24,11 +25,13 @@ from app.schemas.knowledge_catalog import (
     CatalogDocumentPageRead,
     CatalogEvidenceDetailRead,
     CatalogFileAccessRead,
+    CatalogUploaderOptionsRead,
 )
 from app.services.knowledge_catalog import (
     get_catalog_document_detail,
     get_catalog_evidence_detail,
     list_catalog_documents,
+    list_catalog_uploader_options,
     prepare_catalog_file_access,
 )
 from app.services.knowledge_catalog_contracts import (
@@ -104,6 +107,48 @@ def _processing_http_error(exc: DocumentProcessingError) -> HTTPException:
     return HTTPException(status.HTTP_409_CONFLICT, exc.code)
 
 
+async def _catalog_viewer_permissions(
+    db: AsyncSession,
+    *,
+    user: User,
+    library: Library,
+) -> tuple[bool, bool]:
+    can_manage = user.is_superuser
+    if not can_manage:
+        try:
+            await authorize_library_management(db, user=user, library=library)
+            can_manage = True
+        except OrganizationAuthorizationError:
+            pass
+    can_delete_any = bool(
+        user.is_superuser or has_permission(str(user.id), library.slug, "delete")
+    )
+    return can_manage, can_delete_any
+
+
+@router.get(
+    "/uploader-options",
+    response_model=CatalogUploaderOptionsRead,
+)
+async def catalog_uploader_options(
+    _: None = Depends(require_knowledge_catalog_enabled),
+    user: User = Depends(current_active_user),
+    library: Library = Depends(require_lib("read")),
+    db: AsyncSession = Depends(get_db),
+) -> CatalogUploaderOptionsRead:
+    try:
+        can_manage, _ = await _catalog_viewer_permissions(db, user=user, library=library)
+        return await list_catalog_uploader_options(
+            db,
+            library=library,
+            viewer=user,
+            reveal_email=can_manage,
+        )
+    except KnowledgeCatalogError as exc:
+        await db.rollback()
+        raise _http_error(exc) from exc
+
+
 @router.get(
     "/documents",
     response_model=CatalogDocumentPageRead,
@@ -120,13 +165,23 @@ async def catalog_documents(
         pattern="^(unclassified|pending_review|classified|failed)$",
     ),
     label_id: uuid.UUID | None = Query(default=None),
+    uploader_id: uuid.UUID | None = Query(default=None),
+    include_system_uploader: bool = Query(default=False),
+    uploaded_from: date | None = Query(default=None),
+    uploaded_to: date | None = Query(default=None),
     cursor: str | None = Query(default=None, min_length=1, max_length=2048),
-    limit: int = Query(default=50, ge=1, le=100),
+    limit: int = Query(default=20, ge=1, le=50),
     _: None = Depends(require_knowledge_catalog_enabled),
+    user: User = Depends(current_active_user),
     library: Library = Depends(require_lib("read")),
     db: AsyncSession = Depends(get_db),
 ) -> CatalogDocumentPageRead:
     try:
+        can_manage, can_delete_any = await _catalog_viewer_permissions(
+            db,
+            user=user,
+            library=library,
+        )
         return await list_catalog_documents(
             db,
             library=library,
@@ -135,9 +190,17 @@ async def catalog_documents(
                 document_status=document_status,
                 classification_state=classification_state,
                 label_id=label_id,
+                uploader_id=uploader_id,
+                include_system_uploader=include_system_uploader,
+                uploaded_from=uploaded_from,
+                uploaded_to=uploaded_to,
                 limit=limit,
             ),
             cursor_value=cursor,
+            include_uploader=True,
+            reveal_uploader_email=can_manage,
+            viewer_id=user.id,
+            can_delete_any=can_delete_any,
         )
     except KnowledgeCatalogError as exc:
         await db.rollback()
@@ -151,14 +214,24 @@ async def catalog_documents(
 async def catalog_document_detail(
     document_id: uuid.UUID,
     _: None = Depends(require_knowledge_catalog_enabled),
+    user: User = Depends(current_active_user),
     library: Library = Depends(require_lib("read")),
     db: AsyncSession = Depends(get_db),
 ) -> CatalogDocumentDetailRead:
     try:
+        can_manage, can_delete_any = await _catalog_viewer_permissions(
+            db,
+            user=user,
+            library=library,
+        )
         return await get_catalog_document_detail(
             db,
             library=library,
             document_id=document_id,
+            include_uploader=True,
+            reveal_uploader_email=can_manage,
+            viewer_id=user.id,
+            can_delete_any=can_delete_any,
         )
     except KnowledgeCatalogError as exc:
         await db.rollback()

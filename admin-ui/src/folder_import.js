@@ -30,6 +30,22 @@ const RETRYABLE_UPLOAD_CONFLICTS = new Set([
     'upload_claim_lost',
     'upload_offset_mismatch',
 ]);
+const IMAGE_IMPORT_EXTENSIONS = new Set([
+    '.bmp', '.jpeg', '.jpg', '.png', '.tif', '.tiff', '.webp',
+]);
+
+function importFileExtension(file) {
+    const name = String(file?.name || '').toLowerCase();
+    const dot = name.lastIndexOf('.');
+    return dot >= 0 ? name.slice(dot) : '';
+}
+
+export function importBatchGroup(file) {
+    const extension = importFileExtension(file);
+    if (extension === '.pdf') return 'pdf';
+    if (IMAGE_IMPORT_EXTENSIONS.has(extension)) return 'image';
+    return 'document';
+}
 
 function abortReason(signal) {
     if (!signal?.aborted) return null;
@@ -134,14 +150,17 @@ export function createImportBatchId(
     ].join('-');
 }
 
-export async function uploadFileInChunks({
+export function createImportBatchIds(items, batchId = createImportBatchId()) {
+    return new Map(items.map((item) => [item, batchId]));
+}
+
+export async function createImportSessionForFile({
+export async function createImportSessionForFile({
     api,
     slug,
     file,
     batchId,
-    configuration = DEFAULT_IMPORT_CONFIGURATION,
     options = {},
-    onProgress = () => {},
     resumeState = {},
     signal,
 }) {
@@ -152,7 +171,7 @@ export async function uploadFileInChunks({
     const sessionPayload = {
         batch_id: stableBatchId,
         file_name: file.name,
-        relative_path: relativePathForFile(file),
+        relative_path: options.replaceDocumentId ? null : relativePathForFile(file),
         content_type: file.type || null,
         size_bytes: file.size,
         last_modified_millis: file.lastModified || null,
@@ -169,6 +188,30 @@ export async function uploadFileInChunks({
         );
         resumeState.session = session;
     }
+    return session;
+}
+
+export async function uploadFileInChunks({
+    api,
+    slug,
+    file,
+    batchId,
+    configuration = DEFAULT_IMPORT_CONFIGURATION,
+    options = {},
+    onProgress = () => {},
+    resumeState = {},
+    signal,
+}) {
+    const session = await createImportSessionForFile({
+        api,
+        slug,
+        file,
+        batchId,
+        options,
+        resumeState,
+        signal,
+    });
+    const stableSlug = resumeState.slug;
     let offset = session.upload_offset;
     if (!Number.isInteger(offset) || offset < 0 || offset > file.size) {
         throw new Error('上传服务返回了无效偏移量');
@@ -236,6 +279,17 @@ export async function uploadFileInChunks({
     );
     reportProgress(job.current_stage || 'queued', job);
     return job;
+}
+
+export function createImportBatchIds(items, batchIdFactory = createImportBatchId) {
+    const batchIds = new Map();
+    const groups = new Map();
+    for (const item of items || []) {
+        const group = importBatchGroup(item?.file);
+        if (!groups.has(group)) groups.set(group, batchIdFactory());
+        batchIds.set(item, groups.get(group));
+    }
+    return batchIds;
 }
 
 const TERMINAL_IMPORT_STATUSES = new Set(['submitted', 'skipped', 'failed']);

@@ -21,6 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.backend import current_active_user
+from app.casbin.enforcer import has_permission
 from app.db import get_db
 from app.deps import require_lib
 from app.models.chunk import Chunk
@@ -30,6 +31,7 @@ from app.models.document_revision import DocumentRevision
 from app.models.document_revision_file import DocumentRevisionFile
 from app.models.document_source import DocumentSource
 from app.models.embedding_job import EmbeddingJob
+from app.models.graph_extraction_job import GraphExtractionJob
 from app.models.library import Library
 from app.models.user import User
 from app.schemas.admin import EmbeddingJobRead
@@ -37,6 +39,8 @@ from app.schemas.documents import (
     DocumentFullSourceResponse,
     DocumentIngestRequest,
     DocumentIngestResponse,
+    DocumentJobProgressRead,
+    DocumentJobProgressRequest,
     DocumentRead,
     DocumentSourceLocationResponse,
     ImportFileResponse,
@@ -909,11 +913,24 @@ async def get_document(
     return doc
 
 
+def can_delete_document(user: User, library: Library, document: Document) -> bool:
+    """Keep the existing library delete grant, with a narrow uploader exception."""
+    return bool(
+        user.is_superuser
+        or has_permission(str(user.id), library.slug, "delete")
+        or (
+            document.created_by is not None
+            and document.created_by == user.id
+        )
+    )
+
+
 @router.delete("/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_document(
     document_id: uuid.UUID,
     background: BackgroundTasks,
-    lib: Library = Depends(require_lib("delete")),
+    lib: Library = Depends(require_lib("read")),
+    user: User = Depends(current_active_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
     locked = await _lock_writable(db, lib)
@@ -922,6 +939,8 @@ async def delete_document(
     )).scalars().first()
     if doc is None or doc.library_id != lib.id or doc.deleted_at is not None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "document not found")
+    if not can_delete_document(user, lib, doc):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden")
     # #7：单事务 tombstone + supersede 在途 job + 入 cleanup outbox（移除不可靠的 BackgroundTask）。
     # 提交后检索立即不可见（按 deleted_at 过滤）；Qdrant 物理清理由 Cleanup Worker 幂等执行。
     now = datetime.now(timezone.utc)
@@ -1002,6 +1021,71 @@ async def list_document_jobs(
         .order_by(EmbeddingJob.created_at.desc())
     )
     return list(rows.scalars().all())
+
+
+@router.post("/documents/jobs/progress", response_model=list[DocumentJobProgressRead])
+async def list_document_job_progress(
+    body: DocumentJobProgressRequest,
+    lib: Library = Depends(require_lib("read")),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    """Project a bounded set of embedding and graph jobs for the upload UI."""
+    embedding_rows = (
+        await db.execute(
+            select(EmbeddingJob).where(
+                EmbeddingJob.library_id == lib.id,
+                EmbeddingJob.id.in_(set(body.embedding_job_ids)),
+            )
+        )
+    ).scalars().all()
+    embedding_by_id = {row.id: row for row in embedding_rows}
+    revision_ids = {
+        row.document_revision_id
+        for row in embedding_rows
+        if row.document_revision_id is not None
+    }
+    graph_by_revision: dict[uuid.UUID, GraphExtractionJob] = {}
+    if revision_ids:
+        ranked_graphs = (
+            select(
+                GraphExtractionJob.id.label("id"),
+                func.row_number()
+                .over(
+                    partition_by=GraphExtractionJob.document_revision_id,
+                    order_by=(GraphExtractionJob.created_at.desc(), GraphExtractionJob.id.desc()),
+                )
+                .label("rank"),
+            )
+            .where(
+                GraphExtractionJob.library_id == lib.id,
+                GraphExtractionJob.document_revision_id.in_(revision_ids),
+            )
+            .subquery()
+        )
+        graph_rows = (
+            await db.execute(
+                select(GraphExtractionJob)
+                .join(ranked_graphs, GraphExtractionJob.id == ranked_graphs.c.id)
+                .where(ranked_graphs.c.rank == 1)
+            )
+        ).scalars().all()
+        graph_by_revision = {row.document_revision_id: row for row in graph_rows}
+
+    result = []
+    for embedding_job_id in body.embedding_job_ids:
+        embedding_job = embedding_by_id.get(embedding_job_id)
+        if embedding_job is None:
+            continue
+        result.append(
+            {
+                "embedding_job_id": embedding_job.id,
+                "document_id": embedding_job.document_id,
+                "embedding_status": embedding_job.status,
+                "embedding_error": embedding_job.last_error,
+                "graph_job": graph_by_revision.get(embedding_job.document_revision_id),
+            }
+        )
+    return result
 
 
 @router.post("/query", response_model=QueryResponse)
@@ -1271,6 +1355,10 @@ async def import_file(
                 min_text_chars=settings.pdf_ocr_min_text_chars,
                 render_dpi=settings.pdf_ocr_render_dpi,
                 max_ocr_pages=settings.pdf_ocr_max_pages,
+                split_enabled=settings.pdf_split_enabled,
+                split_max_pages=settings.pdf_split_max_pages,
+                split_max_bytes=settings.pdf_split_max_bytes,
+                split_concurrency=settings.pdf_split_concurrency,
             )
         except pdf_extract.PdfExtractError as exc:
             # 含 PdfOcrUnavailableError（需 OCR 但依赖缺）——消息已是用户可读的提示

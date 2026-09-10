@@ -127,35 +127,39 @@ export async function submitBatchReplaceItems(
     uploadFn,
     humanize = (e) => e?.message || String(e),
     uploadOptions = {},
+    onStatusChange = null,
 ) {
-    const eligible = submittableBatchReplaceItems(items);
-    const eligibleKeys = new Set(eligible.map((item) => item._key));
+    const setStatus = typeof onStatusChange === 'function'
+        ? onStatusChange
+        : (item, status) => { item.status = status; };
+    let submitted = 0;
+    let failed = 0;
+    let skipped = 0;
 
     for (const item of items || []) {
-        if (!eligibleKeys.has(item._key) && item.status === 'pending') {
-            item.status = 'skipped';
+        if (!isBatchReplaceSubmittable(item)) {
+            if (item.status !== 'pending') continue;
+            setStatus(item, 'skipped');
             if (!item.error) item.error = '未唯一匹配或文件校验未通过，已跳过';
+            skipped += 1;
+            continue;
         }
-    }
 
-    for (const item of eligible) {
-        item.status = 'uploading';
+        setStatus(item, 'uploading');
         item.error = '';
         try {
             item.importResponse = await uploadFn(slug, item.file, {
                 ...uploadOptions,
                 replaceDocumentId: item.matchedDocId,
             });
-            item.status = 'submitted';
+            setStatus(item, 'submitted');
+            submitted += 1;
         } catch (e) {
-            item.status = 'failed';
+            setStatus(item, 'failed');
             item.error = humanize(e);
+            failed += 1;
         }
     }
 
-    return {
-        submitted: (items || []).filter((item) => item.status === 'submitted').length,
-        failed: (items || []).filter((item) => item.status === 'failed').length,
-        skipped: (items || []).filter((item) => item.status === 'skipped').length,
-    };
+    return { submitted, failed, skipped };
 }

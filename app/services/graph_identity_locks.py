@@ -29,6 +29,10 @@ class GraphIdentityLockError(ValueError):
     """A caller supplied a lock scope outside the frozen P3 contract."""
 
 
+class GraphIdentityLockBusy(RuntimeError):
+    """A fail-fast graph identity lock could not be acquired."""
+
+
 @dataclass(frozen=True, slots=True)
 class GraphIdentityLockScope:
     scope_type: int
@@ -84,9 +88,13 @@ async def lock_graph_identity_scopes(
     db,
     library_id: uuid.UUID,
     scopes: Iterable[GraphIdentityLockScope],
+    *,
+    wait: bool = True,
 ) -> None:
     """Lock all graph identity scopes in order without owning the transaction."""
 
+    if not isinstance(wait, bool):
+        raise GraphIdentityLockError("wait must be a boolean")
     ordered = normalized_graph_identity_scopes(library_id, scopes)
     dialect = _database_dialect_name(db)
     if dialect in {None, "sqlite"}:
@@ -94,10 +102,16 @@ async def lock_graph_identity_scopes(
     if dialect != "postgresql":
         raise GraphIdentityLockError("graph identity concurrency control requires PostgreSQL")
     for scope in ordered:
-        await db.execute(
-            text("SELECT pg_advisory_xact_lock(:lock_key)"),
+        result = await db.execute(
+            text(
+                "SELECT pg_advisory_xact_lock(:lock_key)"
+                if wait
+                else "SELECT pg_try_advisory_xact_lock(:lock_key)"
+            ),
             {"lock_key": _lock_key(library_id, scope)},
         )
+        if not wait and result.scalar_one() is not True:
+            raise GraphIdentityLockBusy("graph identity lock is busy")
 
 
 __all__ = [
@@ -106,6 +120,7 @@ __all__ = [
     "ENTITY_RESOLUTION_SUBJECT_LOCK_SCOPE",
     "LOGICAL_FACT_LOCK_SCOPE",
     "STABLE_PREDICATE_LOCK_SCOPE",
+    "GraphIdentityLockBusy",
     "GraphIdentityLockError",
     "GraphIdentityLockScope",
     "graph_identity_lock_key",

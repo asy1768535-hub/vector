@@ -340,6 +340,15 @@ def test_http_contracts_are_strict_bounded_and_require_explicit_fences():
             idempotency_key="merge-1",
         )
     with pytest.raises(ValidationError):
+        GraphGovernanceEntityMergeRequest(
+            ontology_version_id=uuid.uuid4(),
+            survivor_entity_id=uuid.uuid4(),
+            loser_entity_id=uuid.uuid4(),
+            expected_survivor_state_hash="a" * 64,
+            expected_loser_state_hash="b" * 64,
+            idempotency_key="merge-missing-evolution-guard",
+        )
+    with pytest.raises(ValidationError):
         GraphGovernancePublicationPlanRequest(
             ontology_version_id=uuid.uuid4(),
             action_ids=[same_id, same_id],

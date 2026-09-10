@@ -37,6 +37,7 @@ from app.models.document_revision_file import DocumentRevisionFile
 from app.models.document_source import DocumentSource
 from app.models.document import Document
 from app.models.document_import_job import DocumentImportJob
+from app.models.file_resource import FileResource
 from app.models.embedding_job import EmbeddingJob
 from app.models.entity import Entity
 from app.models.entity_alias import EntityAlias
@@ -50,6 +51,14 @@ from app.models.fact_foundation import (
     LogicalFact,
     StablePredicateIdentity,
     StablePredicateMapping,
+)
+from app.models.fact_reconciliation import (
+    FactReconciliationAssertionAssignment,
+    FactReconciliationCommand,
+    FactReconciliationDecision,
+    FactReconciliationSource,
+    FactReconciliationSourceTargetEdge,
+    FactReconciliationTargetSlot,
 )
 from app.models.external_graph_sync import (
     GraphExternalFactMapping,
@@ -101,6 +110,13 @@ from app.models.raw_claim_projection_binding import GraphRawClaimProjectionBindi
 from app.models.claim_decision import GraphClaimDecision
 from app.models.schema_lifecycle_action import SchemaLifecycleAction
 from app.models.schema_discovery_run import SchemaDiscoveryRun
+from app.models.stable_predicate_evolution import (
+    StablePredicateEvolutionCommand,
+    StablePredicateEvolutionDecision,
+    StablePredicateEvolutionSource,
+    StablePredicateEvolutionSuccessor,
+    StablePredicateMappingEvolutionAssignment,
+)
 from app.models.service_heartbeat import ServiceHeartbeat
 from app.models.sync_source import SyncSource
 from app.models.user import User
@@ -134,6 +150,7 @@ __all__ = [
     "CleanupOutbox",
     "Document",
     "DocumentImportJob",
+    "FileResource",
     "DocumentBlock",
     "DocumentFile",
     "DocumentRevision",
@@ -151,6 +168,12 @@ __all__ = [
     "LogicalFact",
     "FactAssertion",
     "FactResolutionDecision",
+    "FactReconciliationCommand",
+    "FactReconciliationDecision",
+    "FactReconciliationSource",
+    "FactReconciliationTargetSlot",
+    "FactReconciliationSourceTargetEdge",
+    "FactReconciliationAssertionAssignment",
     "GraphExternalFactMapping",
     "GraphExternalSyncConflict",
     "GraphExternalSyncOperation",
@@ -181,6 +204,11 @@ __all__ = [
     "MigrationBackfillState",
     "OntologyVersion",
     "SchemaDiscoveryRun",
+    "StablePredicateEvolutionCommand",
+    "StablePredicateEvolutionDecision",
+    "StablePredicateEvolutionSource",
+    "StablePredicateEvolutionSuccessor",
+    "StablePredicateMappingEvolutionAssignment",
     "Organization",
     "OrganizationCapabilityRollout",
     "OrganizationMembership",

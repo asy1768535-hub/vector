@@ -141,6 +141,23 @@ test('default routes and domain roots choose the first accessible leaf', () => {
     assert.equal(defaultRouteForAccess({ account: true, apiKeys: true }), APP_PATHS.profile);
 });
 
+test('my tasks is a separate knowledge asset page for upload-capable users', () => {
+    const access = { knowledgeAssets: true, myFiles: true };
+    assert.equal(APP_PATHS.myFiles, '/knowledge-assets/my-files');
+    assert.deepEqual(domainTabs('knowledgeAssets', access).map((item) => item.key), ['myFiles']);
+    assert.deepEqual(sidebarItems('knowledgeAssets', access), [{
+        key: 'myFiles',
+        label: '我的任务',
+        path: APP_PATHS.myFiles,
+        access: 'myFiles',
+        icon: 'sidebar:task',
+    }]);
+
+    const app = readFileSync(new URL('./src/app.js', import.meta.url), 'utf8');
+    assert.match(app, /path: 'my-files',[\s\S]*?component: MyFiles/);
+    assert.match(app, /path: 'my-files',[\s\S]*?title: '我的任务'/);
+});
+
 test('knowledge asset tabs translate Library context without leaking it to other domains', () => {
     assert.deepEqual(domainTabTarget(APP_PATHS.documents, { library: 'legal' }), {
         path: APP_PATHS.documents,
@@ -153,6 +170,9 @@ test('knowledge asset tabs translate Library context without leaking it to other
     assert.deepEqual(domainTabTarget(APP_PATHS.importData, { library: 'legal' }), {
         path: APP_PATHS.importData,
         query: { library: 'legal' },
+    });
+    assert.deepEqual(domainTabTarget(APP_PATHS.myFiles, { library: 'legal' }), {
+        path: APP_PATHS.myFiles,
     });
     assert.deepEqual(domainTabTarget(APP_PATHS.chat, { library: 'legal' }), {
         path: APP_PATHS.chat,

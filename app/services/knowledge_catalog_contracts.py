@@ -7,7 +7,7 @@ import re
 import unicodedata
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Literal
 
 
@@ -88,6 +88,10 @@ class CatalogDocumentQuery:
     document_status: str | None = None
     classification_state: CatalogClassificationState | None = None
     label_id: uuid.UUID | None = None
+    uploader_id: uuid.UUID | None = None
+    include_system_uploader: bool = False
+    uploaded_from: date | None = None
+    uploaded_to: date | None = None
     limit: int = 50
 
     def __post_init__(self) -> None:
@@ -101,6 +105,22 @@ class CatalogDocumentQuery:
             fail_catalog("catalog_filter_invalid")
         if self.label_id is not None and not isinstance(self.label_id, uuid.UUID):
             fail_catalog("catalog_filter_invalid")
+        if self.uploader_id is not None and not isinstance(self.uploader_id, uuid.UUID):
+            fail_catalog("catalog_filter_invalid")
+        if not isinstance(self.include_system_uploader, bool):
+            fail_catalog("catalog_filter_invalid")
+        if self.uploader_id is not None and self.include_system_uploader:
+            fail_catalog("catalog_filter_invalid")
+        if self.uploaded_from is not None and type(self.uploaded_from) is not date:
+            fail_catalog("catalog_filter_invalid")
+        if self.uploaded_to is not None and type(self.uploaded_to) is not date:
+            fail_catalog("catalog_filter_invalid")
+        if (
+            self.uploaded_from is not None
+            and self.uploaded_to is not None
+            and self.uploaded_from > self.uploaded_to
+        ):
+            fail_catalog("catalog_filter_invalid")
         if isinstance(self.limit, bool) or not isinstance(self.limit, int) or not 1 <= self.limit <= 100:
             fail_catalog("catalog_limit_invalid")
 
@@ -110,6 +130,10 @@ class CatalogDocumentQuery:
             "document_status": self.document_status,
             "classification_state": self.classification_state,
             "label_id": str(self.label_id) if self.label_id is not None else None,
+            "uploader_id": str(self.uploader_id) if self.uploader_id is not None else None,
+            "include_system_uploader": self.include_system_uploader,
+            "uploaded_from": self.uploaded_from.isoformat() if self.uploaded_from else None,
+            "uploaded_to": self.uploaded_to.isoformat() if self.uploaded_to else None,
             "limit": self.limit,
         }
 

@@ -217,10 +217,142 @@ class ImportJobRead(BaseModel):
     finished_at: datetime | None
 
 
+class PersonalImportTaskRead(BaseModel):
+    """Safe projection of one root upload task for its requesting user."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    document_id: uuid.UUID | None = None
+    file_name: str = Field(min_length=1, max_length=512)
+    relative_path: str | None = Field(default=None, max_length=2048)
+    library_id: uuid.UUID
+    library_name: str = Field(min_length=1, max_length=255)
+    library_slug: str = Field(min_length=1, max_length=128)
+    operation_type: Literal["import", "replace"]
+    status: Literal[
+        "uploading",
+        "queued",
+        "processing",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "superseded",
+    ]
+    stage: Literal[
+        "uploading",
+        "queued",
+        "converting",
+        "conversion_ready",
+        "validating",
+        "parsing",
+        "chunking",
+        "embedding",
+        "graph",
+        "completed",
+    ]
+    created_at: datetime
+    finished_at: datetime | None = None
+    failure_message: str | None = Field(default=None, max_length=255)
+    failure_action: str | None = Field(default=None, max_length=255)
+    can_retry: bool = False
+
+
+class PersonalImportTaskPageRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[PersonalImportTaskRead] = Field(max_length=50)
+    next_cursor: str | None = Field(default=None, max_length=512)
+
+
+class PersonalImportTaskFolderRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=255)
+    path: str = Field(min_length=1, max_length=2048)
+    file_total: int = Field(ge=0)
+
+
+class PersonalImportTaskFilePageRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    library_slug: str = Field(min_length=1, max_length=128)
+    path: str = Field(max_length=2048)
+    folders: list[PersonalImportTaskFolderRead] = Field(max_length=50)
+    items: list[PersonalImportTaskRead] = Field(max_length=50)
+    folder_total: int = Field(ge=0)
+    file_total: int = Field(ge=0)
+    page: int = Field(ge=1)
+    page_size: Literal[20, 50]
+
+
+class PersonalFileFolderRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    name: str = Field(min_length=1, max_length=255)
+    path: str = Field(min_length=1, max_length=2048)
+
+
+class PersonalFileRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    document_id: uuid.UUID
+    file_name: str = Field(min_length=1, max_length=512)
+    created_at: datetime
+
+
+class PersonalFilePageRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    library_slug: str = Field(min_length=1, max_length=128)
+    path: str = Field(max_length=2048)
+    folders: list[PersonalFileFolderRead] = Field(max_length=50)
+    files: list[PersonalFileRead] = Field(max_length=50)
+    folder_total: int = Field(ge=0)
+    file_total: int = Field(ge=0)
+    page: int = Field(ge=1)
+    page_size: Literal[20, 50]
+
+
+class PersonalImportTaskSummaryRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scope: Literal["30d", "all"]
+    total: int = Field(ge=0)
+    pending: int = Field(ge=0)
+    processing: int = Field(ge=0)
+    succeeded: int = Field(ge=0)
+    failed: int = Field(ge=0)
+
+
 class ImportJobProgressRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     job_ids: list[uuid.UUID] = Field(min_length=1, max_length=500)
+
+
+class DocumentJobProgressRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    embedding_job_ids: list[uuid.UUID] = Field(min_length=1, max_length=500)
+
+
+class DocumentGraphProgressRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    status: str
+    current_stage: str | None = None
+    statistics: dict[str, Any] = Field(default_factory=dict)
+
+
+class DocumentJobProgressRead(BaseModel):
+    embedding_job_id: uuid.UUID
+    document_id: uuid.UUID
+    embedding_status: str
+    embedding_error: str | None = None
+    graph_job: DocumentGraphProgressRead | None = None
 
 
 class ImportSessionRead(ImportJobRead):

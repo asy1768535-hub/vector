@@ -2,18 +2,20 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import * as api from '../api.js';
+import { APP_PATHS } from '../domain_navigation.js';
 import { store } from '../store.js';
 import { canManageLibrary } from '../menu_access.js';
 import { resolveImportEntry } from '../import_query.js';
 import { humanizeError } from './import_errors.js';
 import {
     ST_LABEL, ST_TAG, OP_LABEL, OP_TAG,
-    createBatchValidationState, validateBatchChunk, fileKey, formatSize, fileTypeIcon,
+    createBatchValidationState, validateBatchChunk, verifyDuplicateFiles, fileKey, formatSize, fileTypeIcon,
     MAX_BATCH_SIZE, validateFile, graphJobProgress, graphProgressDetail,
     securityLevelLabel, BUILD_MODE_LABEL, buildModeLabel,
 } from '../import_ui.js';
 import {
-    createImportBatchId,
+    createImportBatchIds,
+    createImportSessionForFile,
     DEFAULT_IMPORT_CONFIGURATION,
     IMPORT_PROFILE_DAILY,
     IMPORT_PROFILE_INITIAL,
@@ -29,8 +31,8 @@ import {
 import {
     BATCH_REPLACE_MATCH_LABEL, BATCH_REPLACE_MATCH_TAG,
     BATCH_REPLACE_STATUS_LABEL, BATCH_REPLACE_STATUS_TAG,
-    createBatchReplaceItems, setBatchReplaceTarget,
-    submittableBatchReplaceItems, submitBatchReplaceItems,
+    createBatchReplaceItems, isBatchReplaceSubmittable, setBatchReplaceTarget,
+    submitBatchReplaceItems, submittableBatchReplaceItems,
 } from '../batch_replace.js';
 import { uploadEmpty } from '../illustrations.js';
 
@@ -75,10 +77,13 @@ export default {
         const importResult = ref(null);
         const docQuery = ref('');
         const queue = ref([]);
+        const queueStatusCounts = ref({ pending: 0, submitted: 0, skipped: 0, failed: 0, invalid: 0 });
         const queuePage = ref(1);
         const queuePageSize = 100;
         const uploading = ref(false);
         const addingFiles = ref(false);
+        const selectionFileTotal = ref(0);
+        const selectionFilesProcessed = ref(0);
         const stats = ref(null);
         const dragOver = ref(false);
         const showExtId = ref(false);
@@ -87,7 +92,12 @@ export default {
         const routeReplaceError = ref('');
         const applyingRouteReplace = ref(false);
         const batchReplaceItems = ref([]);
+        const batchReplaceStatusCounts = ref({ pending: 0, uploading: 0, submitted: 0, failed: 0, skipped: 0 });
+        const batchReplaceReadyCount = ref(0);
+        const batchReplacePage = ref(1);
+        const batchReplacePageSize = 100;
         const batchReplacing = ref(false);
+        const batchReplaceAdding = ref(false);
         const graphExtractionRequested = ref(false);
         const graphExtractionConfig = ref(null);
         const graphExtractionConfigLoading = ref(false);
@@ -102,13 +112,127 @@ export default {
         let graphConfigRequestSeq = 0;
         let graphProgressRequestSeq = 0;
         let graphProgressTimer = null;
+        let graphProgressPollCursor = 0;
+        let graphProgressPollController = null;
+        let graphProgressPollPromise = null;
+        let graphProgressPollDelayIndex = -1;
+        let fileSelectionSequence = 0;
+        let batchReplaceSelectionSequence = 0;
+        const batchReplaceKeys = new Set();
         let importJobsTimer = null;
         let importJobsPollCursor = 0;
         let importJobsPollController = null;
         let importJobsPollPromise = null;
         let importJobsPollSequence = 0;
-        let importJobsPollDelayIndex = 0;
+        let importJobsPollDelayIndex = -1;
         let activeUploadController = null;
+
+        function isCountedQueueStatus(status) {
+            return Object.prototype.hasOwnProperty.call(queueStatusCounts.value, status);
+        }
+
+        function removeQueueItem(item) {
+            const idx = queue.value.indexOf(item);
+            if (idx < 0) return;
+            queue.value.splice(idx, 1);
+            if (isCountedQueueStatus(item.status)) queueStatusCounts.value[item.status] -= 1;
+        }
+
+        function setQueueItemStatus(item, status) {
+            if (item.status === status) return;
+            if (isCountedQueueStatus(item.status)) queueStatusCounts.value[item.status] -= 1;
+            item.status = status;
+            if (isCountedQueueStatus(status)) queueStatusCounts.value[status] += 1;
+        }
+
+        function resetQueue() {
+            fileSelectionSequence += 1;
+            queue.value = [];
+            queueStatusCounts.value = { pending: 0, submitted: 0, skipped: 0, failed: 0, invalid: 0 };
+            queuePage.value = 1;
+            addingFiles.value = false;
+            selectionFileTotal.value = 0;
+            selectionFilesProcessed.value = 0;
+        }
+
+        function replaceQueuedFile({ key, file }) {
+            const item = queue.value.find((candidate) => candidate._key === key);
+            if (!item) return;
+            const storedFile = Object.isExtensible(file) ? Object.freeze(file) : file;
+            setQueueItemStatus(item, 'pending');
+            Object.assign(item, {
+                file: storedFile,
+                name: file.name,
+                relativePath: file.webkitRelativePath || '',
+                size: file.size,
+                error: '',
+                progress: 0,
+                stageLabel: '',
+            });
+            delete item.importJobId;
+            delete item.importJob;
+            delete item.graphTracking;
+            delete item._uploadResumeState;
+        }
+
+        function batchReplaceMetrics(item) {
+            return {
+                status: item.status,
+                ready: isBatchReplaceSubmittable(item) ? 1 : 0,
+            };
+        }
+
+        function applyBatchReplaceMetrics(before, item) {
+            if (before && Object.hasOwn(batchReplaceStatusCounts.value, before.status)) {
+                batchReplaceStatusCounts.value[before.status] -= 1;
+                batchReplaceReadyCount.value -= before.ready;
+            }
+            if (!item) return;
+            const after = batchReplaceMetrics(item);
+            if (Object.hasOwn(batchReplaceStatusCounts.value, after.status)) {
+                batchReplaceStatusCounts.value[after.status] += 1;
+                batchReplaceReadyCount.value += after.ready;
+            }
+        }
+
+        function setBatchReplaceItemStatus(item, status) {
+            if (item.status === status) return;
+            const before = batchReplaceMetrics(item);
+            item.status = status;
+            applyBatchReplaceMetrics(before, item);
+        }
+
+        function appendBatchReplaceItems(items) {
+            for (const item of items) {
+                if (item.file && Object.isExtensible(item.file)) item.file = Object.freeze(item.file);
+                batchReplaceItems.value.push(item);
+                batchReplaceKeys.add(item._key);
+                applyBatchReplaceMetrics(null, item);
+            }
+        }
+
+        function replaceBatchQueuedFile({ key, file }) {
+            const index = batchReplaceItems.value.findIndex((item) => item._key === key);
+            if (index < 0) return;
+            const previous = batchReplaceItems.value[index];
+            const replacement = createBatchReplaceItems([file], docs.value)[0];
+            if (!replacement) return;
+            if (replacement.file && Object.isExtensible(replacement.file)) {
+                replacement.file = Object.freeze(replacement.file);
+            }
+            applyBatchReplaceMetrics(batchReplaceMetrics(previous), null);
+            batchReplaceItems.value.splice(index, 1, replacement);
+            applyBatchReplaceMetrics(null, replacement);
+        }
+
+        function resetBatchReplaceQueue() {
+            batchReplaceSelectionSequence += 1;
+            batchReplaceItems.value = [];
+            batchReplaceKeys.clear();
+            batchReplaceStatusCounts.value = { pending: 0, uploading: 0, submitted: 0, failed: 0, skipped: 0 };
+            batchReplaceReadyCount.value = 0;
+            batchReplacePage.value = 1;
+        }
 
         // ── Computed ─────────────────────────────────────────
         const displayDocs = computed(() => {
@@ -146,25 +270,15 @@ export default {
             supportedExtensionsLabel(importConfiguration.value)
         );
 
-        const pendingCount = computed(() =>
-            queue.value.filter((it) => it.status === 'pending').length
-        );
+        const pendingCount = computed(() => queueStatusCounts.value.pending);
         const displayQueue = computed(() => {
             const start = (queuePage.value - 1) * queuePageSize;
             return queue.value.slice(start, start + queuePageSize);
         });
-        const submittedCount = computed(() =>
-            queue.value.filter((it) => it.status === 'submitted').length
-        );
-        const skippedCount = computed(() =>
-            queue.value.filter((it) => it.status === 'skipped').length
-        );
-        const failedCount = computed(() =>
-            queue.value.filter((it) => it.status === 'failed').length
-        );
-        const invalidCount = computed(() =>
-            queue.value.filter((it) => it.status === 'invalid').length
-        );
+        const submittedCount = computed(() => queueStatusCounts.value.submitted);
+        const skippedCount = computed(() => queueStatusCounts.value.skipped);
+        const failedCount = computed(() => queueStatusCounts.value.failed);
+        const invalidCount = computed(() => queueStatusCounts.value.invalid);
         const hasFailed = computed(() => failedCount.value > 0);
         const graphExplorationMode = computed(() =>
             graphExtractionConfig.value?.schema_mode === 'explore'
@@ -230,12 +344,13 @@ export default {
             graphExtractionReady.value && !graphExtractionConfigLoading.value
         );
 
-        const batchReplaceReadyItems = computed(() =>
-            submittableBatchReplaceItems(batchReplaceItems.value)
-        );
+        const displayBatchReplaceItems = computed(() => {
+            const start = (batchReplacePage.value - 1) * batchReplacePageSize;
+            return batchReplaceItems.value.slice(start, start + batchReplacePageSize);
+        });
         const canBatchReplace = computed(() =>
-            mode.value === 'replace' && slug.value && batchReplaceReadyItems.value.length > 0 &&
-            !batchReplacing.value && !loading.value && !docsLoading.value &&
+            mode.value === 'replace' && slug.value && batchReplaceReadyCount.value > 0 &&
+            !batchReplacing.value && !batchReplaceAdding.value && !loading.value && !docsLoading.value &&
             graphExtractionReady.value && !graphExtractionConfigLoading.value
         );
 
@@ -461,86 +576,106 @@ export default {
             graphProgressRequestSeq += 1;
             if (graphProgressTimer) clearTimeout(graphProgressTimer);
             graphProgressTimer = null;
+            graphProgressPollCursor = 0;
+            graphProgressPollDelayIndex = -1;
+            if (graphProgressPollController) graphProgressPollController.abort();
+            graphProgressPollController = null;
+        }
+
+        function scheduleGraphProgressPolling(delay) {
+            if (graphProgressTimer || graphProgressPollPromise || globalThis.document?.hidden) return;
+            graphProgressTimer = setTimeout(pollGraphProgress, delay);
         }
 
         function startGraphProgressPolling() {
-            if (graphProgressTimer || !trackedGraphRows().length) return;
-            graphProgressTimer = setTimeout(pollGraphProgress, 200);
+            if (!trackedGraphRows().length) return;
+            scheduleGraphProgressPolling(0);
         }
 
-        async function pollGraphRow(row, activeSlug, requestSeq) {
-            const tracking = row.graphTracking;
-            if (!tracking || tracking.terminal) return;
-
-            if (tracking.phase === 'embedding') {
-                const jobs = await api.listDocumentJobs(activeSlug, tracking.documentId, true);
-                if (requestSeq !== graphProgressRequestSeq || slug.value !== activeSlug) return;
-                const job = (jobs || []).find((candidate) =>
-                    tracking.embeddingJobId && String(candidate.id) === String(tracking.embeddingJobId)
-                ) || (jobs || [])[0];
-                if (!job) {
-                    tracking.label = '等待向量化任务';
-                    tracking.progress = 8;
-                    return;
-                }
-                if (job.status === 'failed' || job.status === 'superseded') {
-                    tracking.label = job.status === 'failed'
-                        ? '向量化失败，未构建知识图谱'
-                        : '向量化任务已被替代';
-                    tracking.progress = 100;
-                    tracking.tone = 'exception';
-                    tracking.terminal = true;
-                    return;
-                }
-                if (job.status !== 'done') {
-                    tracking.label = job.status === 'processing' ? '正在向量化' : '等待向量化';
-                    tracking.progress = job.status === 'processing' ? 22 : 12;
-                    return;
-                }
-                tracking.phase = 'graph';
-                tracking.label = '等待图谱抽取任务';
-                tracking.progress = 30;
+        function nextGraphProgressBatch(rows, cursor = 0, limit = 500) {
+            const activeRows = rows.filter((row) => row.graphTracking?.embeddingJobId);
+            if (!activeRows.length) return { items: [], nextCursor: 0 };
+            const start = Math.max(0, Number(cursor) || 0) % activeRows.length;
+            const items = [];
+            for (let offset = 0; offset < activeRows.length && items.length < limit; offset += 1) {
+                items.push(activeRows[(start + offset) % activeRows.length]);
             }
-
-            const response = await api.listGraphExtractions(activeSlug, {
-                document_id: tracking.documentId,
-                limit: 5,
-            });
-            if (requestSeq !== graphProgressRequestSeq || slug.value !== activeSlug) return;
-            const earliest = tracking.startedAt - 10000;
-            const job = (response?.items || []).find((candidate) => {
-                const createdAt = Date.parse(candidate.created_at || '');
-                return !Number.isFinite(createdAt) || createdAt >= earliest;
-            });
-            if (!job) {
-                tracking.label = '等待图谱抽取任务';
-                tracking.progress = 30;
-                return;
-            }
-            Object.assign(tracking, graphJobProgress(job), {
-                phase: 'graph',
-                jobId: job.id,
-            });
+            return { items, nextCursor: (start + items.length) % activeRows.length };
         }
 
         async function pollGraphProgress() {
             graphProgressTimer = null;
+            if (graphProgressPollPromise) return graphProgressPollPromise;
             const activeSlug = slug.value;
             const requestSeq = graphProgressRequestSeq;
-            const rows = trackedGraphRows();
-            if (!activeSlug || !rows.length) return;
-            await Promise.all(rows.map(async (row) => {
+            const batch = nextGraphProgressBatch(trackedGraphRows(), graphProgressPollCursor);
+            graphProgressPollCursor = batch.nextCursor;
+            if (!activeSlug || !batch.items.length) return;
+            const pollController = new AbortController();
+            let changed = false;
+            const pollPromise = (async () => {
                 try {
-                    await pollGraphRow(row, activeSlug, requestSeq);
-                    row.graphTracking.pollError = '';
+                    const rows = await api.getDocumentJobProgress(
+                        activeSlug,
+                        batch.items.map((row) => row.graphTracking.embeddingJobId),
+                        { signal: pollController.signal },
+                    );
+                    if (requestSeq !== graphProgressRequestSeq || slug.value !== activeSlug) return;
+                    const byEmbeddingJobId = new Map(
+                        (rows || []).map((row) => [String(row.embedding_job_id), row]),
+                    );
+                    for (const row of batch.items) {
+                        const tracking = row.graphTracking;
+                        const progress = byEmbeddingJobId.get(String(tracking.embeddingJobId));
+                        if (!tracking || !progress) continue;
+                        const before = `${tracking.phase}|${tracking.progress}|${tracking.label}|${tracking.terminal}`;
+                        if (['failed', 'superseded'].includes(progress.embedding_status)) {
+                            tracking.label = progress.embedding_status === 'failed'
+                                ? '向量化失败，未构建知识图谱'
+                                : '向量化任务已被替代';
+                            tracking.progress = 100;
+                            tracking.tone = 'exception';
+                            tracking.terminal = true;
+                        } else if (progress.embedding_status !== 'done') {
+                            tracking.label = progress.embedding_status === 'processing' ? '正在向量化' : '等待向量化';
+                            tracking.progress = progress.embedding_status === 'processing' ? 22 : 12;
+                        } else if (!progress.graph_job) {
+                            tracking.phase = 'graph';
+                            tracking.label = '等待图谱抽取任务';
+                            tracking.progress = 30;
+                        } else {
+                            Object.assign(tracking, graphJobProgress(progress.graph_job), {
+                                phase: 'graph',
+                                jobId: progress.graph_job.id,
+                            });
+                        }
+                        changed = changed || before !== `${tracking.phase}|${tracking.progress}|${tracking.label}|${tracking.terminal}`;
+                        tracking.pollError = '';
+                    }
                 } catch (_) {
-                    if (requestSeq === graphProgressRequestSeq && slug.value === activeSlug) {
-                        row.graphTracking.pollError = '进度暂时无法刷新，正在重试';
+                    if (requestSeq !== graphProgressRequestSeq || slug.value !== activeSlug) return;
+                    for (const row of batch.items) {
+                        if (row.graphTracking && !row.graphTracking.terminal) {
+                            row.graphTracking.pollError = '进度暂时无法刷新，正在重试';
+                        }
                     }
                 }
-            }));
-            if (requestSeq === graphProgressRequestSeq && trackedGraphRows().length) {
-                graphProgressTimer = setTimeout(pollGraphProgress, 2000);
+            })();
+            graphProgressPollController = pollController;
+            graphProgressPollPromise = pollPromise;
+            try {
+                await pollPromise;
+            } finally {
+                if (graphProgressPollPromise === pollPromise) graphProgressPollPromise = null;
+                if (graphProgressPollController === pollController) graphProgressPollController = null;
+            }
+            if (requestSeq !== graphProgressRequestSeq || slug.value !== activeSlug) return;
+            if (nextGraphProgressBatch(trackedGraphRows(), graphProgressPollCursor).items.length) {
+                graphProgressPollDelayIndex = changed ? 0 : Math.min(
+                    graphProgressPollDelayIndex + 1,
+                    IMPORT_PROGRESS_POLL_DELAYS.length - 1,
+                );
+                scheduleGraphProgressPolling(IMPORT_PROGRESS_POLL_DELAYS[graphProgressPollDelayIndex]);
             }
         }
 
@@ -557,18 +692,29 @@ export default {
         async function addFiles(files) {
             if (uploading.value || addingFiles.value) return;
             if (!files || !files.length) return;
+            const total = Number(files.length) || 0;
+            selectionFileTotal.value = total;
+            selectionFilesProcessed.value = 0;
             addingFiles.value = true;
+            const selectionSequence = ++fileSelectionSequence;
+            const selectionSlug = slug.value;
             const validationState = createBatchValidationState(
                 queue.value.map((it) => it._key),
                 importConfiguration.value,
             );
+            const filesByKey = new Map(
+                queue.value.filter((item) => item.file).map((item) => [item._key, item.file]),
+            );
             const summary = { duplicates: 0, invalid: 0, ignored: [] };
-            const total = Number(files.length) || 0;
             try {
+                await yieldToBrowser();
                 for (let start = 0; start < total; start += FILE_SELECTION_CHUNK_SIZE) {
                     const chunk = Array.prototype.slice.call(files, start, start + FILE_SELECTION_CHUNK_SIZE);
                     const { accepted, duplicates, invalid, ignored } = validateBatchChunk(chunk, validationState);
-                    summary.duplicates += duplicates.length;
+                    for (const { file } of accepted) filesByKey.set(fileKey(file), file);
+                    const verifiedDuplicates = await verifyDuplicateFiles(duplicates, filesByKey);
+                    if (selectionSequence !== fileSelectionSequence || selectionSlug !== slug.value) return;
+                    summary.duplicates += verifiedDuplicates.duplicates.length;
                     summary.invalid += invalid.length;
                     summary.ignored.push(...ignored);
                     for (const { file } of accepted) {
@@ -583,6 +729,7 @@ export default {
                             progress: 0,
                             stageLabel: '',
                         });
+                        queueStatusCounts.value.pending += 1;
                     }
                     for (const { file, reason, failType } of invalid) {
                         queue.value.push({
@@ -595,11 +742,16 @@ export default {
                             error: reason,
                             _failType: failType || 'format',
                         });
+                        queueStatusCounts.value.invalid += 1;
                     }
+                    for (const replacement of verifiedDuplicates.replacements) {
+                        replaceQueuedFile(replacement);
+                    }
+                    selectionFilesProcessed.value = Math.min(start + chunk.length, total);
                     if (start + FILE_SELECTION_CHUNK_SIZE < total) await yieldToBrowser();
                 }
             } finally {
-                addingFiles.value = false;
+                if (selectionSequence === fileSelectionSequence) addingFiles.value = false;
             }
 
             const msgs = [];
@@ -642,14 +794,12 @@ export default {
 
         function removeItem(item) {
             if (uploading.value || addingFiles.value) return;
-            const idx = queue.value.indexOf(item);
-            if (idx >= 0) queue.value.splice(idx, 1);
+            removeQueueItem(item);
         }
 
         function clearQueue() {
             if (uploading.value || addingFiles.value) return;
-            queue.value = [];
-            queuePage.value = 1;
+            resetQueue();
         }
 
         // ── Replace mode file selection ──────────────────────
@@ -683,15 +833,62 @@ export default {
         }
 
         function triggerBatchReplaceFileSelect() {
+            if (batchReplacing.value || batchReplaceAdding.value) return;
             if (batchReplaceFileInput.value) batchReplaceFileInput.value.click();
         }
 
-        function addBatchReplaceFiles(files) {
-            if (!files || !files.length) return;
-            const existingKeys = batchReplaceItems.value.map((it) => it._key);
-            const items = createBatchReplaceItems(files, docs.value, existingKeys);
-            batchReplaceItems.value.push(...items);
-            if (items.length < files.length) ElMessage.warning('重复文件已跳过');
+        async function addBatchReplaceFiles(files) {
+            if (batchReplacing.value || batchReplaceAdding.value || !files || !files.length) return;
+            batchReplaceAdding.value = true;
+            const selectionSequence = ++batchReplaceSelectionSequence;
+            const selectionSlug = slug.value;
+            const validationState = createBatchValidationState([], importConfiguration.value);
+            validationState.seen = batchReplaceKeys;
+            validationState.totalAllowed = validationState.maxBatchSize - batchReplaceKeys.size;
+            const filesByKey = new Map(
+                batchReplaceItems.value
+                    .filter((item) => item.file)
+                    .map((item) => [item._key, item.file]),
+            );
+            const summary = { duplicates: 0, invalid: 0, ignored: [] };
+            const total = Number(files.length) || 0;
+            try {
+                for (let start = 0; start < total; start += FILE_SELECTION_CHUNK_SIZE) {
+                    const chunk = Array.prototype.slice.call(files, start, start + FILE_SELECTION_CHUNK_SIZE);
+                    const { accepted, duplicates, invalid, ignored } = validateBatchChunk(chunk, validationState);
+                    for (const { file } of accepted) filesByKey.set(fileKey(file), file);
+                    const verifiedDuplicates = await verifyDuplicateFiles(duplicates, filesByKey);
+                    if (selectionSequence !== batchReplaceSelectionSequence || selectionSlug !== slug.value) return;
+                    summary.duplicates += verifiedDuplicates.duplicates.length;
+                    summary.invalid += invalid.length;
+                    summary.ignored.push(...ignored);
+                    const items = createBatchReplaceItems(
+                        [...accepted, ...invalid].map(({ file }) => file),
+                        docs.value,
+                    );
+                    appendBatchReplaceItems(items);
+                    for (const replacement of verifiedDuplicates.replacements) {
+                        replaceBatchQueuedFile(replacement);
+                    }
+                    if (start + FILE_SELECTION_CHUNK_SIZE < total) await yieldToBrowser();
+                }
+            } finally {
+                if (selectionSequence === batchReplaceSelectionSequence) batchReplaceAdding.value = false;
+            }
+
+            const msgs = [];
+            if (summary.duplicates) msgs.push(`${summary.duplicates} 个重复文件已跳过`);
+            if (summary.invalid) msgs.push(`${summary.invalid} 个未通过校验`);
+            if (summary.ignored.length) {
+                const metadataCount = summary.ignored.filter(({ code }) => code === 'metadata_file').length;
+                const officeLockCount = summary.ignored.filter(({ code }) => code === 'office_lock_file').length;
+                const details = [
+                    metadataCount ? `macOS 元数据 ${metadataCount} 个` : '',
+                    officeLockCount ? `Office 临时锁文件 ${officeLockCount} 个` : '',
+                ].filter(Boolean).join('，');
+                msgs.push(`${summary.ignored.length} 个文件已忽略（${details}）`);
+            }
+            if (msgs.length) ElMessage.warning(msgs.join('；'));
         }
 
         function onBatchReplaceFileChange(e) {
@@ -706,12 +903,21 @@ export default {
         }
 
         function removeBatchReplaceItem(item) {
+            if (batchReplacing.value || batchReplaceAdding.value) return;
             const idx = batchReplaceItems.value.indexOf(item);
-            if (idx >= 0) batchReplaceItems.value.splice(idx, 1);
+            if (idx >= 0) {
+                applyBatchReplaceMetrics(batchReplaceMetrics(item), null);
+                batchReplaceItems.value.splice(idx, 1);
+                batchReplaceKeys.delete(item._key);
+                const lastPage = Math.max(1, Math.ceil(batchReplaceItems.value.length / batchReplacePageSize));
+                if (batchReplacePage.value > lastPage) batchReplacePage.value = lastPage;
+            }
         }
 
         function onBatchReplaceTargetChange(item, documentId) {
+            const before = batchReplaceMetrics(item);
             setBatchReplaceTarget(item, documentId, docs.value);
+            applyBatchReplaceMetrics(before, item);
         }
 
         function targetDocTitle(documentId) {
@@ -724,24 +930,57 @@ export default {
         }
 
         async function handleBatchReplace() {
-            const ready = batchReplaceReadyItems.value;
-            if (!slug.value || !ready.length) return;
+            const readyCount = batchReplaceReadyCount.value;
+            if (!slug.value || !readyCount) return;
             const graphRequested = graphJobRequested.value;
             try {
                 await ElMessageBox.confirm(
-                    `将覆盖 ${ready.length} 个已有文档；覆盖后会重新切分、重新向量化${graphConfirmationText()}；历史问答引用不会自动更新。`,
+                    `将覆盖 ${readyCount} 个已有文档；覆盖后会重新切分、重新向量化${graphConfirmationText()}；历史问答引用不会自动更新。`,
                     '确认批量替换', { type: 'warning' }
                 );
             } catch (_) { return; }
 
             batchReplacing.value = true;
             try {
+                const batchIds = createImportBatchIds(batchReplaceItems.value);
+                const batchIdsByFile = new Map(
+                    batchReplaceItems.value.map((item) => [item.file, batchIds.get(item)]),
+                );
+                const uploadOptions = graphUploadOptions();
+                const resumeStatesByFile = new Map();
+                if (graphRequested) {
+                    for (const item of submittableBatchReplaceItems(batchReplaceItems.value)) {
+                        const resumeState = {};
+                        resumeStatesByFile.set(item.file, resumeState);
+                        await createImportSessionForFile({
+                            api,
+                            slug: slug.value,
+                            file: item.file,
+                            batchId: batchIds.get(item),
+                            options: {
+                                ...uploadOptions,
+                                replaceDocumentId: item.matchedDocId,
+                            },
+                            resumeState,
+                        });
+                    }
+                }
                 const result = await submitBatchReplaceItems(
                     batchReplaceItems.value,
                     slug.value,
-                    api.importFile,
+                    (targetSlug, file, options) => uploadFileInChunks({
+                        api,
+                        slug: targetSlug,
+                        file,
+                        batchId: batchIdsByFile.get(file),
+                        configuration: importConfiguration.value,
+                        options,
+                        resumeState: resumeStatesByFile.get(file),
+                    }),
                     humanizeError,
-                    graphUploadOptions(),
+                    uploadOptions,
+                    uploadOptions,
+                    setBatchReplaceItemStatus,
                 );
                 for (const item of batchReplaceItems.value) {
                     attachGraphTracking(item, item.importResponse, graphRequested);
@@ -749,6 +988,7 @@ export default {
                 ElMessage.success(`批量替换完成：${result.submitted} 已提交，${result.skipped} 跳过${result.failed > 0 ? `，${result.failed} 失败` : ''}`);
                 await loadDocs();
                 await loadStats();
+                if (result.submitted) await router.push({ path: APP_PATHS.myFiles });
             } finally { batchReplacing.value = false; }
         }
 
@@ -758,13 +998,13 @@ export default {
             importJobsTimer = null;
             importJobsPollSequence += 1;
             importJobsPollCursor = 0;
-            importJobsPollDelayIndex = 0;
+            importJobsPollDelayIndex = -1;
             if (importJobsPollController) importJobsPollController.abort();
             importJobsPollController = null;
         }
 
         function scheduleImportJobsPolling(delay) {
-            if (importJobsTimer || globalThis.document?.hidden) return;
+            if (importJobsTimer || importJobsPollPromise || globalThis.document?.hidden) return;
             importJobsTimer = setTimeout(pollImportJobs, delay);
         }
 
@@ -798,13 +1038,13 @@ export default {
                     item.stageLabel = importStageLabel(job);
                     item.progress = importStageProgress(job, 100);
                     if (job.status === 'succeeded') {
-                        item.status = importDisplayStatus(job);
+                        setQueueItemStatus(item, importDisplayStatus(job));
                         item.error = '';
                     } else if (['failed', 'cancelled', 'superseded'].includes(job.status)) {
-                        item.status = importDisplayStatus(job);
+                        setQueueItemStatus(item, importDisplayStatus(job));
                         item.error = job.last_error || '导入失败';
                     } else {
-                        item.status = importDisplayStatus(job);
+                        setQueueItemStatus(item, importDisplayStatus(job));
                     }
                 }
             } catch (_) {
@@ -832,14 +1072,16 @@ export default {
         }
 
         function startImportJobsPolling() {
-            scheduleImportJobsPolling(300);
+            scheduleImportJobsPolling(0);
         }
 
         function onImportVisibilityChange() {
             if (globalThis.document?.hidden) {
+                stopGraphProgressPolling();
                 stopImportJobsPolling();
                 return;
             }
+            startGraphProgressPolling();
             if (nextImportProgressBatch(queue.value, importJobsPollCursor).items.length) {
                 startImportJobsPolling();
             }
@@ -897,13 +1139,36 @@ export default {
             activeUploadController = uploadController;
             let attemptedCount = 0;
             try {
-                const batchId = createImportBatchId();
+                const batchIds = createImportBatchIds(items);
+                if (graphJobRequested.value && !onlyFailed) {
+                    await runConcurrent(
+                        items,
+                        uploadConfiguration,
+                        async (it) => {
+                            if (!it.file) return;
+                            it._uploadResumeState = it._uploadResumeState || {};
+                            await createImportSessionForFile({
+                                api,
+                                slug: targetSlug,
+                                file: it.file,
+                                batchId: batchIds.get(it),
+                                options: {
+                                    ...uploadOptions,
+                                    externalId: uploadExternalId,
+                                },
+                                resumeState: it._uploadResumeState,
+                                signal: uploadController.signal,
+                            });
+                        },
+                        (it) => queue.value.includes(it),
+                    );
+                }
                 attemptedCount = await runConcurrent(
                     items,
                     uploadConfiguration,
                     async (it) => {
                         if (!it.file) return;
-                        it.status = 'uploading';
+                        setQueueItemStatus(it, 'uploading');
                         it.error = '';
                         try {
                             if (onlyFailed && it.importJobId && it.importJob?.status === 'failed') {
@@ -920,7 +1185,7 @@ export default {
                                         retry_target_type: null,
                                         retry_target_id: null,
                                     };
-                                    it.status = importDisplayStatus(it.importJob);
+                                    setQueueItemStatus(it, importDisplayStatus(it.importJob));
                                     it.error = '';
                                     it.stageLabel = importStageLabel(it.importJob);
                                     it.progress = importStageProgress(it.importJob, 100);
@@ -931,7 +1196,7 @@ export default {
                                 }
                                 const retried = await api.retryImportJob(targetSlug, it.importJobId);
                                 it.importJob = retried;
-                                it.status = importDisplayStatus(retried);
+                                setQueueItemStatus(it, importDisplayStatus(retried));
                                 it.stageLabel = importStageLabel(retried);
                                 return;
                             }
@@ -940,7 +1205,7 @@ export default {
                                 api,
                                 slug: targetSlug,
                                 file: it.file,
-                                batchId,
+                                  batchId: batchIds.get(it),
                                 configuration: uploadConfiguration,
                                 resumeState: it._uploadResumeState,
                                 options: {
@@ -964,12 +1229,12 @@ export default {
                             });
                             it.importJobId = job.id;
                             it.importJob = job;
-                            it.status = importDisplayStatus(job);
+                            setQueueItemStatus(it, importDisplayStatus(job));
                             it.stageLabel = importStageLabel(job);
                             it.progress = importStageProgress(job, 100);
                         } catch (e) {
                             if (e?.name === 'AbortError' || uploadController.signal.aborted) throw e;
-                            it.status = 'failed';
+                            setQueueItemStatus(it, 'failed');
                             it.error = humanizeError(e);
                         }
                     },
@@ -1005,7 +1270,6 @@ export default {
                 return;
             }
             const file = replaceFile.value;
-            const graphRequested = graphJobRequested.value;
             try {
                 await ElMessageBox.confirm(
                     `确认用 "${file.name}" 替换当前文档？文档内容将完全覆盖，文档版本号递增，并重新向量化${graphConfirmationText()}。`,
@@ -1014,26 +1278,26 @@ export default {
             } catch (_) { return; }
             loading.value = true;
             try {
-                const resp = await api.importFile(slug.value, file, {
-                    ...graphUploadOptions(),
-                    replaceDocumentId: replaceDocId.value,
+                const batchItem = { file };
+                const batchId = createImportBatchIds([batchItem]).get(batchItem);
+                const job = await uploadFileInChunks({
+                    api,
+                    slug: slug.value,
+                    file,
+                    batchId,
+                    configuration: importConfiguration.value,
+                    options: {
+                        ...graphUploadOptions(),
+                        replaceDocumentId: replaceDocId.value,
+                    },
                 });
-                importResult.value = resp;
-                for (const document of (resp?.documents || [])) {
-                    attachGraphTracking(document, document, graphRequested);
-                }
-                const docs = (resp && resp.documents) ? resp.documents : [];
-                const allUnchanged = docs.length > 0 && docs.every((d) => d.operation === 'unchanged');
-                if (allUnchanged) {
-                    ElMessage.warning('内容未变更，文档保持原样');
-                } else {
-                    ElMessage.success('替换成功');
-                }
+                importResult.value = job;
+                ElMessage.success('替换任务已提交，可在“我的任务”查看状态');
                 replaceFile.value = null;
                 replaceFileError.value = '';
                 if (!routeReplaceActive.value) replaceDocId.value = null;
-                await loadDocs();
                 await loadStats();
+                await router.push({ path: APP_PATHS.myFiles });
             } catch (e) {
                 ElMessage.error(humanizeError(e));
             } finally { loading.value = false; }
@@ -1061,8 +1325,8 @@ export default {
             graphExtractionConfig.value = null;
             graphExtractionConfigError.value = '';
             graphExtractionSecurityLevel.value = '';
-            queue.value = [];
-            batchReplaceItems.value = [];
+            resetQueue();
+            resetBatchReplaceQueue();
             importResult.value = null;
             if (!routeReplaceActive.value) replaceDocId.value = null;
             replaceFile.value = null;
@@ -1087,8 +1351,8 @@ export default {
         watch(mode, () => {
             stopGraphProgressPolling();
             importResult.value = null;
-            clearQueue();
-            batchReplaceItems.value = [];
+            resetQueue();
+            resetBatchReplaceQueue();
             replaceFile.value = null;
             replaceFileError.value = '';
             if (mode.value !== 'replace') {
@@ -1119,13 +1383,15 @@ export default {
             libs, slug, mode, fileInput, folderInput, batchReplaceFileInput, externalId, showExtId, replaceDocId,
             replaceFile, replaceFileError, routeReplaceDocumentId, routeReplaceTitle,
             routeReplaceError, routeReplaceActive, replaceTargetTitle, selectedReplaceDoc,
-            applyingRouteReplace, batchReplaceItems, batchReplacing, batchReplaceReadyItems,
+            applyingRouteReplace, batchReplaceItems, batchReplaceStatusCounts, batchReplaceReadyCount,
+            batchReplacePage, batchReplacePageSize, batchReplacing, batchReplaceAdding, displayBatchReplaceItems,
             graphExtractionRequested, graphExtractionConfig, graphExtractionConfigLoading,
             graphExtractionConfigError, graphExtractionSecurityLevel,
             graphExtractionReady, graphExtractionStatus, buildModeLabel, schemaModeLabel,
             graphJobRequested,
             docs, docsLoading, loading, importResult, docQuery,
-            queue, queuePage, queuePageSize, uploading, addingFiles, stats, dragOver, importConfiguration, importConfigurationLoading,
+            queue, queueStatusCounts, queuePage, queuePageSize, uploading, addingFiles,
+            selectionFileTotal, selectionFilesProcessed, stats, dragOver, importConfiguration, importConfigurationLoading,
             importAccept, importFormatLabel,
             importConfigurationDialogVisible, importConfigurationSaving,
             importConfigurationProfile, importConfigurationForm, canConfigureImport,
@@ -1289,6 +1555,11 @@ export default {
 
             <!-- Right: file list -->
             <section class="import-file-card">
+                <div v-if="selectionFileTotal" class="import-selection-status" aria-live="polite">
+                    <span>已发现 {{ selectionFileTotal }} 个文件</span>
+                    <span v-if="addingFiles">已检查 {{ selectionFilesProcessed }} / {{ selectionFileTotal }}</span>
+                    <span v-else>检查完成</span>
+                </div>
                 <div class="import-file-table-shell">
                     <el-table :data="displayQueue" empty-text="暂无文件，请从左侧添加">
                         <el-table-column label="文件" min-width="230">
@@ -1454,7 +1725,7 @@ export default {
                         <p>拖入多个文件，按文件名自动匹配目标文档；未匹配和多候选必须手动选择，不会静默新增。</p>
                     </div>
                     <el-button type="primary" :loading="batchReplacing" :disabled="!canBatchReplace"
-                               @click="handleBatchReplace">批量提交 {{ batchReplaceReadyItems.length }} 个</el-button>
+                               @click="handleBatchReplace">批量提交 {{ batchReplaceReadyCount }} 个</el-button>
                 </div>
                 <div class="import-batch-replace-dropzone"
                      :class="{ 'is-dragover': dragOver }"
@@ -1470,7 +1741,7 @@ export default {
                        class="import-file-input-hidden"
                        @change="onBatchReplaceFileChange" />
                 <div class="import-file-table-shell import-batch-replace-table-shell">
-                    <el-table :data="batchReplaceItems" empty-text="暂无批量替换文件">
+                    <el-table :data="displayBatchReplaceItems" empty-text="暂无批量替换文件">
                         <el-table-column label="新文件名" min-width="180">
                             <template #default="{row}">
                                 <div class="import-file-name-cell">
@@ -1484,7 +1755,7 @@ export default {
                             <template #default="{row}">
                                 <el-select :model-value="row.matchedDocId"
                                            filterable clearable
-                                           :disabled="batchReplacing"
+                                           :disabled="batchReplacing || batchReplaceAdding"
                                            placeholder="选择目标文档"
                                            class="import-batch-target-select"
                                            @change="(v) => onBatchReplaceTargetChange(row, v)">
@@ -1530,17 +1801,23 @@ export default {
                         </el-table-column>
                         <el-table-column label="操作" width="70" align="center">
                             <template #default="{row}">
-                                <el-button link type="danger" :disabled="batchReplacing" @click="removeBatchReplaceItem(row)">移除</el-button>
+                                <el-button link type="danger" :disabled="batchReplacing || batchReplaceAdding" @click="removeBatchReplaceItem(row)">移除</el-button>
                             </template>
                         </el-table-column>
                     </el-table>
                 </div>
+                <el-pagination v-if="batchReplaceItems.length > batchReplacePageSize"
+                               v-model:current-page="batchReplacePage"
+                               :page-size="batchReplacePageSize"
+                               layout="prev, pager, next, total"
+                               :total="batchReplaceItems.length"
+                               class="import-queue-pagination" />
                 <div class="import-summary-bar">
                     <div class="import-summary-stats">
                         <span>总数 <b>{{ batchReplaceItems.length }}</b></span>
-                        <span class="import-stat-ok">可提交 <b>{{ batchReplaceReadyItems.length }}</b></span>
-                        <span class="import-stat-skip">已跳过 <b>{{ batchReplaceItems.filter((it) => it.status === 'skipped').length }}</b></span>
-                        <span class="import-stat-fail">失败 <b>{{ batchReplaceItems.filter((it) => it.status === 'failed').length }}</b></span>
+                        <span class="import-stat-ok">可提交 <b>{{ batchReplaceReadyCount }}</b></span>
+                        <span class="import-stat-skip">已跳过 <b>{{ batchReplaceStatusCounts.skipped }}</b></span>
+                        <span class="import-stat-fail">失败 <b>{{ batchReplaceStatusCounts.failed }}</b></span>
                     </div>
                 </div>
             </section>

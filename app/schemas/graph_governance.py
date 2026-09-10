@@ -14,7 +14,6 @@ from app.services.graph_governance_contracts import (
     normalize_governance_payload,
 )
 
-
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _REASON_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
@@ -153,6 +152,7 @@ class GraphGovernanceEntityMergeRequest(GraphGovernanceCommandRequest):
     loser_entity_id: uuid.UUID
     expected_survivor_state_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     expected_loser_state_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    expected_canonical_evolution_guard_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     reason_code: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,63}$")
     resolutions: list[GraphGovernanceMergeResolution] = Field(
         default_factory=list,
@@ -167,6 +167,10 @@ class GraphGovernanceEntityMergeRequest(GraphGovernanceCommandRequest):
         if len(set(relation_ids)) != len(relation_ids):
             raise ValueError("merge resolutions must be unique")
         return self
+
+
+class GraphGovernanceEntityMergeGuardRead(StrictGovernanceModel):
+    fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class GraphGovernancePublicationPlanRequest(GraphGovernanceCommandRequest):

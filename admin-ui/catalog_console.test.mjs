@@ -24,6 +24,7 @@ import {
     getCatalogDocumentProcessing,
     getDocumentFullSource,
     listCatalogDocuments,
+    listCatalogUploaderOptions,
     retryCatalogDocumentProcessing,
     setDocumentClassification,
 } from './src/api.js';
@@ -194,7 +195,7 @@ test('accepts only safe proxy or HTTP signed file URLs', () => {
     );
 });
 
-test('catalog list API serializes only the strict query allowlist', async () => {
+test('catalog list API serializes only the uploader-aware query allowlist', async () => {
     const originalFetch = globalThis.fetch;
     let requestedPath = '';
     globalThis.fetch = async (path) => {
@@ -210,6 +211,10 @@ test('catalog list API serializes only the strict query allowlist', async () => 
             status: 'ready',
             classification_state: 'classified',
             label_id: 'label-1',
+            uploader_id: 'uploader-1',
+            include_system_uploader: true,
+            uploaded_from: '2026-09-01',
+            uploaded_to: '2026-09-03',
             limit: 20,
             cursor: 'opaque-cursor',
             object_key: 'must-not-leak',
@@ -219,7 +224,28 @@ test('catalog list API serializes only the strict query allowlist', async () => 
     }
     assert.equal(
         requestedPath,
-        '/libraries/allowed-library/catalog/documents?title=contract&status=ready&classification_state=classified&label_id=label-1&limit=20&cursor=opaque-cursor',
+        '/libraries/allowed-library/catalog/documents?title=contract&uploader_id=uploader-1&include_system_uploader=true&uploaded_from=2026-09-01&uploaded_to=2026-09-03&limit=20&cursor=opaque-cursor',
+    );
+});
+
+test('catalog uploader options stay inside the selected library', async () => {
+    const originalFetch = globalThis.fetch;
+    let requestedPath = '';
+    globalThis.fetch = async (path) => {
+        requestedPath = String(path);
+        return new Response(JSON.stringify({ items: [] }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+        });
+    };
+    try {
+        await listCatalogUploaderOptions('allowed-library', true);
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+    assert.equal(
+        requestedPath,
+        '/libraries/allowed-library/catalog/uploader-options',
     );
 });
 
@@ -352,6 +378,47 @@ test('view keeps list, deep-linked detail, evidence, and file access in one read
     assert.ok(!view.includes('api.listLibraries'), 'member Catalog must not use admin Library list');
     assert.ok(!view.includes('console.'), 'Catalog must not log content or signed URLs');
     assert.doesNotMatch(view, /style="[^"]*"/, 'Catalog template must not use inline styles');
+});
+
+test('a document opened from My Tasks returns to its original directory', () => {
+    assert.match(view, /route\.query\.from === 'my-tasks'/);
+    assert.match(view, /path:\s*APP_PATHS\.myFiles/);
+    assert.match(view, /path:\s*String\(route\.query\.taskPath \|\| ''\)/);
+});
+
+test('catalog list filters are title, uploader, and upload time only', () => {
+    for (const token of [
+        'filterDraft.uploaderId',
+        'filterDraft.uploadedDateRange',
+        'api.listCatalogUploaderOptions',
+        'uploader_id:',
+        'include_system_uploader:',
+        'uploaded_from:',
+        'uploaded_to:',
+        '上传人',
+        '上传时间',
+        '首次上传时间',
+        'row.can_delete',
+    ]) assert.ok(view.includes(token), `missing Catalog uploader contract ${token}`);
+    for (const token of [
+        'filterDraft.status',
+        'filterDraft.classificationState',
+        'filterDraft.labelId',
+        'labelOptions',
+        'rowInDateRange',
+        'visibleItems',
+        ':disabled="!canDelete"',
+    ]) assert.ok(!view.includes(token), `obsolete Catalog filter or delete guard ${token}`);
+});
+
+test('document detail keeps user-facing metadata and hides technical identifiers', () => {
+    assert.ok(!view.includes('<small v-if="row.uploader?.email">'));
+    assert.ok(!view.includes('<small v-if="detail.data.uploader?.email">'));
+    for (const token of ['<dt>文档 ID</dt>', '<dt>Revision ID</dt>', '<dt>内容哈希</dt>']) {
+        assert.ok(!view.includes(token), `technical field should be hidden: ${token}`);
+    }
+    assert.match(view, /<el-button v-if="canManageProcessing && canInsert" plain @click="openEdit\(detail\.data\)">/);
+    assert.match(view, /<el-button v-if="canManageProcessing && detail\.data\.can_delete" type="danger"/);
 });
 
 test('document detail shows content directly and only surfaces processing failures', () => {

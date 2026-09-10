@@ -786,6 +786,10 @@ async def _materialize_job_transaction(
                 pending_entity_candidate_count += 1
                 continue
             if current.current_canonical_entity_id != matched.canonical_entity_id:
+                if not isinstance(job.requested_by, uuid.UUID):
+                    _mark_resolution_pending(candidate, "canonical_evolution_actor_missing")
+                    pending_entity_candidate_count += 1
+                    continue
                 reassignment = CanonicalReassignCommand(
                     library_id=library.id,
                     entity_id=matched.id,
@@ -799,12 +803,21 @@ async def _materialize_job_transaction(
                     reason_text="current canonical projection requires persisted reassignment",
                     method="canonical_evolution_v1",
                     evidence_refs=tuple(_resolution_evidence_refs(evidence_rows)),
+                    actor_type="user",
+                    actor_id=job.requested_by,
+                    request_id=f"graph-extraction-job:{job.id}:candidate:{candidate.id}",
                 )
                 reassignment = reassignment.with_expected_precondition(
                     await build_evolution_precondition_fingerprint(db, reassignment)
                 )
                 result = await apply_canonical_evolution(db, reassignment)
-                if result.status not in {"APPLIED", "REUSED"}:
+                replayed_applied = (
+                    result.status == "REUSED"
+                    and result.effective_outcome == "APPLIED"
+                    and result.current_decision_status == "applied"
+                    and result.reused_decision_id == result.current_decision_id
+                )
+                if result.status != "APPLIED" and not replayed_applied:
                     _mark_resolution_pending(
                         candidate,
                         f"canonical_projection_{result.status.lower()}",

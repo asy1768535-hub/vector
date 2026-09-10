@@ -26,7 +26,6 @@ from app.services.graph_governance_contracts import (
     SubmitManualEntityCommand,
 )
 
-
 NOW = datetime(2026, 7, 22, 12, 0, tzinfo=timezone.utc)
 
 
@@ -275,8 +274,13 @@ def test_merge_is_same_scope_type_and_preserves_rows_until_activation(monkeypatc
         status="active",
         created_at=NOW,
         updated_at=NOW,
-    )
+        )
     _patch_common(monkeypatch, library)
+    monkeypatch.setattr(
+        service,
+        "canonical_evolution_guard_fingerprint",
+        AsyncMock(return_value=("a" * 64, False)),
+    )
     db = _DB(
         _Result(rows=(survivor, loser)),
         _Result(rows=(relation,)),
@@ -295,6 +299,7 @@ def test_merge_is_same_scope_type_and_preserves_rows_until_activation(monkeypatc
                 "merge-1",
                 service.entity_governance_state_hash(survivor),
                 service.entity_governance_state_hash(loser),
+                "a" * 64,
             ),
             now=NOW,
         )
@@ -326,6 +331,7 @@ def test_merge_is_same_scope_type_and_preserves_rows_until_activation(monkeypatc
                     "merge-2",
                     service.entity_governance_state_hash(survivor),
                     service.entity_governance_state_hash(incompatible),
+                    "a" * 64,
                 ),
                 now=NOW,
             )

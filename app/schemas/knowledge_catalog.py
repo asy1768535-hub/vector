@@ -56,6 +56,22 @@ class CatalogGraphCountsRead(StrictBaseModel):
     relations: int = Field(ge=0)
 
 
+class CatalogUploaderRead(StrictBaseModel):
+    display_name: str = Field(min_length=1, max_length=128)
+    username: str | None = Field(default=None, max_length=64)
+    email: str | None = Field(default=None, max_length=255)
+    is_system: bool = False
+
+
+class CatalogUploaderOptionRead(StrictBaseModel):
+    value: str = Field(min_length=1, max_length=64)
+    label: str = Field(min_length=1, max_length=255)
+
+
+class CatalogUploaderOptionsRead(StrictBaseModel):
+    items: list[CatalogUploaderOptionRead] = Field(max_length=101)
+
+
 class CatalogDocumentListItemRead(StrictBaseModel):
     document_id: uuid.UUID
     library_id: uuid.UUID
@@ -66,6 +82,9 @@ class CatalogDocumentListItemRead(StrictBaseModel):
     revision_status: str = Field(min_length=1, max_length=32)
     revision_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     updated_at: datetime
+    uploaded_at: datetime | None = None
+    uploader: CatalogUploaderRead | None = None
+    can_delete: bool = False
     overall_state: Literal["processing", "usable", "partial", "failed"]
     capabilities: CatalogCapabilitiesRead
     classification: CatalogClassificationRead

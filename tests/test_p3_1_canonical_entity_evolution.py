@@ -9,15 +9,19 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.models.canonical_entity import CanonicalEntity
+from app.models.canonical_entity_evolution import CanonicalEntityEvolutionCommand
 from app.models.entity import Entity
 from app.models.entity_resolution_decision import (
     ENTITY_RESOLUTION_LINK_EXISTING,
     ENTITY_RESOLUTION_STATUS_ACTIVE,
+    ENTITY_RESOLUTION_STATUS_SUPERSEDED,
     EntityResolutionDecision,
 )
 from app.models.library import Library
+from app.services import canonical_entity_evolution as evolution
 from app.services import graph_relation_fact_resolution as fact_resolution
 from app.services.canonical_entity_evolution import (
+    CanonicalEvolutionCancellation,
     CanonicalEvolutionContext,
     CanonicalMergeCommand,
     CanonicalReassignCommand,
@@ -27,6 +31,8 @@ from app.services.canonical_entity_evolution import (
     NewCanonicalSplitTarget,
     apply_canonical_evolution,
     build_evolution_precondition_fingerprint,
+    cancel_pending_canonical_evolution,
+    canonical_evolution_json_bytes,
     complete_pending_canonical_evolution,
     resolve_current_canonical_identity,
 )
@@ -38,6 +44,8 @@ from app.services.graph_identity_locks import (
     lock_graph_identity_scopes,
     normalized_graph_identity_scopes,
 )
+
+_AUDIT_ACTOR_ID = uuid.UUID("90000000-0000-4000-8000-000000000001")
 
 
 def _run(coro):
@@ -180,6 +188,113 @@ def _merge_command(library_id, source_id, survivor_id, *, key="merge-a"):
         reason_text="operator confirmed duplicate canonical identities",
         method="operator_review",
         evidence_refs=({"source_ref": "p3.1-test"},),
+        actor_type="user",
+        actor_id=_AUDIT_ACTOR_ID,
+        request_id=f"p31:{key}",
+    )
+
+
+def test_command_identity_golden_vectors_use_rfc8785_jcs_bytes():
+    library_id = uuid.UUID("00000000-0000-4000-8000-000000000001")
+    first = uuid.UUID("10000000-0000-4000-8000-000000000001")
+    second = uuid.UUID("10000000-0000-4000-8000-000000000002")
+    third = uuid.UUID("10000000-0000-4000-8000-000000000003")
+    entity_id = uuid.UUID("20000000-0000-4000-8000-000000000001")
+
+    merge = _merge_command(library_id, second, first)
+    split = CanonicalSplitCommand(
+        library_id=library_id,
+        source_canonical_entity_id=first,
+        targets=(third, second),
+        partition=(),
+        idempotency_key="split",
+        reason_code="manual_split",
+        reason_text="partition A into B and C",
+        method="manual",
+        evidence_refs=(),
+        actor_type="user",
+        actor_id=_AUDIT_ACTOR_ID,
+        request_id="p31:split-golden",
+    )
+    reassign = CanonicalReassignCommand(
+        library_id=library_id,
+        entity_id=entity_id,
+        from_canonical_entity_id=first,
+        target_canonical_entity_id=second,
+        idempotency_key="reassign",
+        reason_code="manual_reassign",
+        reason_text="move E1 from A to B",
+        method="manual",
+        evidence_refs=(),
+        actor_type="user",
+        actor_id=_AUDIT_ACTOR_ID,
+        request_id="p31:reassign-golden",
+    )
+
+    expected = (
+        (
+            merge,
+            b'{"command_scope":{"survivor_canonical_entity_id":"10000000-0000-4000-8000-000000000001"},"contract_version":"canonical_entity_evolution/v1","library_id":"00000000-0000-4000-8000-000000000001","operation_kind":"merge","source_identity":{"participant_canonical_entity_ids":["10000000-0000-4000-8000-000000000001","10000000-0000-4000-8000-000000000002"]}}',
+            "b4b17cdf0050dfc609920f611148d4430ccee579a6803b78c0a6ab6ea3b29cec",
+        ),
+        (
+            split,
+            b'{"command_scope":{"target_refs":[{"canonical_entity_id":"10000000-0000-4000-8000-000000000002","kind":"existing"},{"canonical_entity_id":"10000000-0000-4000-8000-000000000003","kind":"existing"}]},"contract_version":"canonical_entity_evolution/v1","library_id":"00000000-0000-4000-8000-000000000001","operation_kind":"split","source_identity":{"source_canonical_entity_id":"10000000-0000-4000-8000-000000000001"}}',
+            "6f88900a4a4d7cb9b5a5f3e490e34c205f4ef2acf96cfd953f11e1d568d75465",
+        ),
+        (
+            reassign,
+            b'{"command_scope":{"from_canonical_entity_id":"10000000-0000-4000-8000-000000000001","target_canonical_entity_id":"10000000-0000-4000-8000-000000000002"},"contract_version":"canonical_entity_evolution/v1","library_id":"00000000-0000-4000-8000-000000000001","operation_kind":"reassign","source_identity":{"entity_projection_id":"20000000-0000-4000-8000-000000000001"}}',
+            "6212d479317b2a466f16f57b146e79b67dc5e537d6d9a024d1d3b6a8c356041f",
+        ),
+    )
+
+    for command, expected_bytes, expected_hash in expected:
+        encoded = canonical_evolution_json_bytes(command, identity=True)
+        assert encoded == expected_bytes
+        assert __import__("hashlib").sha256(encoded).hexdigest() == expected_hash
+
+
+def test_decision_payload_golden_vectors_include_merge_projections_and_cancellation_cas():
+    library_id = uuid.UUID("00000000-0000-4000-8000-000000000001")
+    survivor = uuid.UUID("10000000-0000-4000-8000-000000000001")
+    source = uuid.UUID("10000000-0000-4000-8000-000000000002")
+    entity_id = uuid.UUID("20000000-0000-4000-8000-000000000001")
+    expected = "a" * 64
+    merge = CanonicalMergeCommand(
+        library_id=library_id,
+        source_canonical_entity_ids=(source,),
+        survivor_canonical_entity_id=survivor,
+        idempotency_key="merge-golden",
+        reason_code="manual_merge",
+        reason_text="merge B into A",
+        method="manual",
+        evidence_refs=(),
+        actor_type="user",
+        actor_id=_AUDIT_ACTOR_ID,
+        request_id="p31:merge-golden",
+        expected_precondition_fingerprint=expected,
+        projection_assignments=(
+            EvolutionProjectionPartition(entity_id, source, {}, "merge_survivor"),
+        ),
+    )
+    cancellation = CanonicalEvolutionCancellation(
+        command_id=uuid.uuid4(),
+        original_idempotency_key="split-cancel",
+        expected_pending_decision_id=uuid.UUID("30000000-0000-4000-8000-000000000001"),
+        reason_code="incorrect_pending_intent",
+        reason_text="cancel incorrect pending split",
+        evidence_refs=(),
+        actor_type="user",
+        actor_id=_AUDIT_ACTOR_ID,
+        request_id="p31:cancel-golden",
+    )
+
+    assert evolution._decision_payload_fingerprint(merge) == (
+        "da1de0e83a1ec3e95585b963c5c11983f0a6479460c097a8ab7f8653e3f2dd16"
+    )
+    assert evolution._cancellation_payload_fingerprint(cancellation, expected) == (
+        "17a8d1230e96fc15dea7bb9b6e816583c0c99f7e611bc2fb7d7e4ff790953564"
     )
 
 
@@ -204,12 +319,21 @@ def test_merge_records_append_only_lineage_and_reassigns_projection():
     assert result.decision.operation_kind == "merge"
     assert result.source_transitions[0].source_canonical_entity_id == loser.id
     assert result.successors[0].target_canonical_entity_id == survivor.id
-    assert result.assignments[0].previous_entity_resolution_decision_id == previous.id
-    assert result.assignments[0].new_entity_resolution_decision_id is not None
+    assert result.assignments[0].target_successor_id == result.successors[0].id
+    replacement = next(
+        row
+        for row in db.rows[EntityResolutionDecision].values()
+        if row.supersedes_decision_id == previous.id
+    )
+    assert replacement.evolution_assignment_id == result.assignments[0].id
 
     replay = _run(apply_canonical_evolution(db, command))
     assert replay.status == "REUSED"
     assert replay.decision.id == result.decision.id
+    assert replay.reused_decision_id == result.decision.id
+    assert replay.effective_outcome == "APPLIED"
+    assert replay.current_decision_status == "applied"
+    assert replay.current_decision_id == result.decision.id
 
 
 def test_split_returns_forked_without_context_and_resolves_by_persisted_projection():
@@ -237,6 +361,9 @@ def test_split_returns_forked_without_context_and_resolves_by_persisted_projecti
         reason_text="operator partitioned projections",
         method="operator_review",
         evidence_refs=({"source_ref": "p3.1-test"},),
+        actor_type="user",
+        actor_id=_AUDIT_ACTOR_ID,
+        request_id="p31:split-a",
     ).with_expected_precondition(None)
     command = command.with_expected_precondition(
         _run(build_evolution_precondition_fingerprint(db, command))
@@ -272,6 +399,9 @@ def test_ambiguous_split_is_pending_and_does_not_change_projection():
         reason_text="projection cannot be uniquely partitioned",
         method="operator_review",
         evidence_refs=({"source_ref": "p3.1-test"},),
+        actor_type="user",
+        actor_id=_AUDIT_ACTOR_ID,
+        request_id="p31:split-pending",
     )
     command = command.with_expected_precondition(
         _run(build_evolution_precondition_fingerprint(db, command))
@@ -300,7 +430,11 @@ def test_pending_command_completion_appends_d2_and_supersedes_d1():
     assert first.decision is not None
 
     db._store(_decision(library_id, entity, loser.id))
-    completed = _run(complete_pending_canonical_evolution(db, command))
+    correction = command.with_expected_precondition(
+        _run(build_evolution_precondition_fingerprint(db, command))
+    )
+    correction = replace(correction, expected_predecessor_decision_id=first.decision.id)
+    completed = _run(complete_pending_canonical_evolution(db, correction))
 
     assert completed.status == "APPLIED"
     assert completed.decision.supersedes_decision_id == first.decision.id
@@ -338,6 +472,9 @@ def test_pending_split_correction_reuses_root_when_partition_changes():
         reason_text="operator needs a second review",
         method="operator_review",
         evidence_refs=({"source_ref": "p3.1-test"},),
+        actor_type="user",
+        actor_id=_AUDIT_ACTOR_ID,
+        request_id="p31:split-correction",
     )
     command = command.with_expected_precondition(
         _run(build_evolution_precondition_fingerprint(db, command))
@@ -351,6 +488,10 @@ def test_pending_split_correction_reuses_root_when_partition_changes():
             EvolutionProjectionPartition(second_entity.id, right.id, {"rule": "right"}),
         ),
     )
+    corrected = corrected.with_expected_precondition(
+        _run(build_evolution_precondition_fingerprint(db, corrected))
+    )
+    corrected = replace(corrected, expected_predecessor_decision_id=first.decision.id)
     completed = _run(complete_pending_canonical_evolution(db, corrected))
 
     assert first.status == "PENDING"
@@ -359,6 +500,181 @@ def test_pending_split_correction_reuses_root_when_partition_changes():
     assert completed.decision.supersedes_decision_id == first.decision.id
     assert first.decision.lifecycle_status == "superseded"
     assert second_entity.canonical_entity_id == right.id
+
+
+def test_rejected_pending_split_correction_preserves_current_intent():
+    library_id = uuid.uuid4()
+    source = _canonical(library_id, "A")
+    left = _canonical(library_id, "B")
+    right = _canonical(library_id, "C")
+    first_entity = _entity(library_id, source.id)
+    second_entity = _entity(library_id, source.id)
+    db = _Db(
+        _library(library_id),
+        source,
+        left,
+        right,
+        first_entity,
+        second_entity,
+        _decision(library_id, first_entity, source.id),
+        _decision(library_id, second_entity, source.id),
+    )
+    command = CanonicalSplitCommand(
+        library_id=library_id,
+        source_canonical_entity_id=source.id,
+        targets=(left.id, right.id),
+        partition=(
+            EvolutionProjectionPartition(first_entity.id, left.id, {"rule": "left"}),
+            EvolutionProjectionPartition(second_entity.id, None, {"rule": "pending"}),
+        ),
+        idempotency_key="split-rejected-correction",
+        reason_code="identity_overload",
+        reason_text="projection requires review",
+        method="operator_review",
+        evidence_refs=(),
+        actor_type="user",
+        actor_id=_AUDIT_ACTOR_ID,
+        request_id="p31:split-rejected-correction",
+    )
+    command = command.with_expected_precondition(
+        _run(build_evolution_precondition_fingerprint(db, command))
+    )
+    pending = _run(apply_canonical_evolution(db, command))
+    assert pending.decision is not None
+
+    rejected = replace(
+        command,
+        partition=(EvolutionProjectionPartition(first_entity.id, left.id, {"rule": "left"}),),
+    )
+    rejected = rejected.with_expected_precondition(
+        _run(build_evolution_precondition_fingerprint(db, rejected))
+    )
+    rejected = replace(
+        rejected,
+        expected_predecessor_decision_id=pending.decision.id,
+    )
+    result = _run(complete_pending_canonical_evolution(db, rejected))
+
+    assert result.status == "REJECTED"
+    assert result.reason_code == "projection_partition_incomplete"
+    assert pending.decision.lifecycle_status == "pending"
+    assert len(db.rows[type(pending.decision)]) == 1
+    assert {row.assignment_state for row in pending.assignments} == {"pending"}
+
+
+def test_pending_cancellation_appends_terminal_decision_and_releases_source_slot():
+    library_id = uuid.uuid4()
+    source = _canonical(library_id, "A")
+    left = _canonical(library_id, "B")
+    right = _canonical(library_id, "C")
+    entity = _entity(library_id, source.id)
+    db = _Db(_library(library_id), source, left, right, entity, _decision(library_id, entity, source.id))
+    command = CanonicalSplitCommand(
+        library_id=library_id,
+        source_canonical_entity_id=source.id,
+        targets=(left.id, right.id),
+        partition=(EvolutionProjectionPartition(entity.id, None, {"rule": "ambiguous"}),),
+        idempotency_key="split-cancel",
+        reason_code="identity_overload",
+        reason_text="projection requires review",
+        method="operator_review",
+        evidence_refs=(),
+        actor_type="user",
+        actor_id=_AUDIT_ACTOR_ID,
+        request_id="p31:split-cancel",
+    )
+    command = command.with_expected_precondition(
+        _run(build_evolution_precondition_fingerprint(db, command))
+    )
+    pending = _run(apply_canonical_evolution(db, command))
+
+    cancellation = CanonicalEvolutionCancellation(
+        command_id=pending.command.id,
+        original_idempotency_key=command.idempotency_key,
+        expected_pending_decision_id=pending.decision.id,
+        reason_code="incorrect_pending_intent",
+        reason_text="cancel incorrect pending split",
+        evidence_refs=(),
+        actor_type="user",
+        actor_id=_AUDIT_ACTOR_ID,
+        request_id="p31:cancel-split",
+    )
+    cancelled = _run(cancel_pending_canonical_evolution(db, library_id, cancellation))
+
+    assert cancelled.status == "CANCELLED"
+    assert cancelled.decision.supersedes_decision_id == pending.decision.id
+    assert pending.decision.lifecycle_status == "superseded"
+    assert pending.source_transitions[0].resolution_state == "superseded"
+    assert pending.assignments[0].assignment_state == "superseded"
+    assert cancelled.source_transitions == ()
+    assert cancelled.successors == ()
+    assert cancelled.assignments == ()
+
+
+def test_pending_source_slot_rejects_new_identity_until_cancellation_commits():
+    library_id = uuid.uuid4()
+    source = _canonical(library_id, "A")
+    left = _canonical(library_id, "B")
+    right = _canonical(library_id, "C")
+    extra = _canonical(library_id, "D")
+    entity = _entity(library_id, source.id)
+    db = _Db(_library(library_id), source, left, right, extra, entity, _decision(library_id, entity, source.id))
+    first = CanonicalSplitCommand(
+        library_id=library_id,
+        source_canonical_entity_id=source.id,
+        targets=(left.id, right.id),
+        partition=(EvolutionProjectionPartition(entity.id, None, {"rule": "ambiguous"}),),
+        idempotency_key="split-slot-first",
+        reason_code="identity_overload",
+        reason_text="projection requires review",
+        method="operator_review",
+        evidence_refs=(),
+        actor_type="user",
+        actor_id=_AUDIT_ACTOR_ID,
+        request_id="p31:slot-first",
+    )
+    first = first.with_expected_precondition(_run(build_evolution_precondition_fingerprint(db, first)))
+    assert _run(apply_canonical_evolution(db, first)).status == "PENDING"
+
+    competing = replace(first, targets=(left.id, extra.id), idempotency_key="split-slot-second")
+    competing = competing.with_expected_precondition(
+        _run(build_evolution_precondition_fingerprint(db, competing))
+    )
+    result = _run(apply_canonical_evolution(db, competing))
+
+    assert result.status == "STALE_OPERATION"
+    assert result.reason_code == "source_or_projection_slot_occupied"
+    assert len(db.rows[CanonicalEntityEvolutionCommand]) == 1
+
+
+def test_projection_reassignment_replaces_every_active_supporting_subject():
+    library_id = uuid.uuid4()
+    loser = _canonical(library_id, "A")
+    survivor = _canonical(library_id, "B")
+    entity = _entity(library_id, loser.id)
+    first_previous = _decision(library_id, entity, loser.id, subject="a" * 64)
+    second_previous = _decision(library_id, entity, loser.id, subject="b" * 64)
+    db = _Db(_library(library_id), loser, survivor, entity, first_previous, second_previous)
+    command = _merge_command(library_id, loser.id, survivor.id, key="merge-many-subjects")
+    command = command.with_expected_precondition(
+        _run(build_evolution_precondition_fingerprint(db, command))
+    )
+
+    result = _run(apply_canonical_evolution(db, command))
+
+    assert result.status == "APPLIED"
+    assert first_previous.lifecycle_status == ENTITY_RESOLUTION_STATUS_SUPERSEDED
+    assert second_previous.lifecycle_status == ENTITY_RESOLUTION_STATUS_SUPERSEDED
+    replacements = [
+        row
+        for row in db.rows[EntityResolutionDecision].values()
+        if row.evolution_assignment_id == result.assignments[0].id
+    ]
+    assert {row.supersedes_decision_id for row in replacements} == {
+        first_previous.id,
+        second_previous.id,
+    }
+    assert {row.subject_fingerprint for row in replacements} == {"a" * 64, "b" * 64}
 
 
 def test_fully_partitioned_split_creates_only_explicit_new_targets():
@@ -390,6 +706,9 @@ def test_fully_partitioned_split_creates_only_explicit_new_targets():
         reason_text="operator supplied both successor identities",
         method="operator_review",
         evidence_refs=({"source_ref": "p3.1-test"},),
+        actor_type="user",
+        actor_id=_AUDIT_ACTOR_ID,
+        request_id="p31:split-new-targets",
     )
     command = command.with_expected_precondition(
         _run(build_evolution_precondition_fingerprint(db, command))
@@ -425,7 +744,9 @@ def test_idempotency_conflict_and_cycle_are_rejected_without_new_lineage():
     reverse = reverse.with_expected_precondition(
         _run(build_evolution_precondition_fingerprint(db, reverse))
     )
-    assert _run(apply_canonical_evolution(db, reverse)).reason_code == "cycle"
+    reverse_result = _run(apply_canonical_evolution(db, reverse))
+    assert reverse_result.status == "STALE_OPERATION"
+    assert reverse_result.reason_code == "current_identity_changed"
 
 
 def test_standalone_projection_reassignment_has_no_global_lineage():
@@ -444,6 +765,9 @@ def test_standalone_projection_reassignment_has_no_global_lineage():
         reason_text="operator corrected this ontology projection",
         method="operator_review",
         evidence_refs=({"source_ref": "p3.1-test"},),
+        actor_type="user",
+        actor_id=_AUDIT_ACTOR_ID,
+        request_id="p31:reassign-a",
     )
     command = command.with_expected_precondition(
         _run(build_evolution_precondition_fingerprint(db, command))
@@ -596,3 +920,4 @@ def test_migration_declares_scoped_append_only_evolution_contract():
     assert "uq_entity_resolution_decisions_id_library" in source
     assert "lifecycle_status = 'pending'" in source
     assert "lifecycle_status = 'applied'" in source
+

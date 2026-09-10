@@ -3,6 +3,7 @@ import { useRoute, useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 
 import * as api from '../api.js';
+import { APP_PATHS } from '../domain_navigation.js';
 import {
     advanceCatalogCursor,
     capabilityEntries,
@@ -19,7 +20,6 @@ import {
     classificationPrimary,
     classificationSecondary,
     classificationStateLabel,
-    collectCatalogLabels,
     formatCatalogBytes,
     formatCatalogConfidence,
     formatCatalogTime,
@@ -57,18 +57,15 @@ import { hasPermission, store } from '../store.js';
 
 const EMPTY_FILTERS = {
     title: '',
-    status: '',
-    classificationState: '',
-    labelId: '',
-    dateRange: [],
+    uploaderId: '',
+    uploadedDateRange: [],
 };
 
 function copyFilters(target, source) {
     target.title = String(source?.title || '').trim();
-    target.status = String(source?.status || '');
-    target.classificationState = String(source?.classificationState || '');
-    target.labelId = String(source?.labelId || '');
-    target.dateRange = Array.isArray(source?.dateRange) ? [...source.dateRange] : [];
+    target.uploaderId = String(source?.uploaderId || '');
+    target.uploadedDateRange = Array.isArray(source?.uploadedDateRange)
+        ? [...source.uploadedDateRange] : [];
 }
 
 function fixedErrorMessage(kind) {
@@ -84,27 +81,16 @@ function fixedProcessingErrorMessage(kind) {
     return '文档处理详情加载失败，请稍后重试';
 }
 
-function rowInDateRange(row, filters) {
-    const [startText, endText] = Array.isArray(filters?.dateRange) ? filters.dateRange : [];
-    const start = startText ? new Date(`${startText}T00:00:00`) : null;
-    const end = endText ? new Date(`${endText}T23:59:59.999`) : null;
-    if (!start && !end) return true;
-    if ((start && Number.isNaN(start.getTime())) || (end && Number.isNaN(end.getTime()))) return false;
-    const updated = new Date(row?.updated_at);
-    if (Number.isNaN(updated.getTime())) return false;
-    if (start && updated < start) return false;
-    if (end && updated > end) return false;
-    return true;
-}
-
 function hasFilterValues(filters) {
     return Boolean(
         filters.title
-        || filters.status
-        || filters.classificationState
-        || filters.labelId
-        || (Array.isArray(filters.dateRange) && filters.dateRange.length)
+        || filters.uploaderId
+        || (Array.isArray(filters.uploadedDateRange) && filters.uploadedDateRange.length)
     );
+}
+
+function uploadedDateRangeKey(value) {
+    return (Array.isArray(value) ? value : []).map((item) => String(item || '')).join('|');
 }
 
 export default {
@@ -127,7 +113,7 @@ export default {
             errorKind: '',
             errorMessage: '',
         });
-        const labelOptions = ref([]);
+        const uploaderOptions = ref([]);
         const detail = reactive({
             data: null,
             loading: false,
@@ -204,10 +190,6 @@ export default {
             Boolean(selectedSlug.value)
             && (store.user?.is_superuser || hasPermission(selectedSlug.value, 'insert'))
         ));
-        const canDelete = computed(() => (
-            Boolean(selectedSlug.value)
-            && (store.user?.is_superuser || hasPermission(selectedSlug.value, 'delete'))
-        ));
         const canManageProcessing = computed(() => canManageLibrary(
             store.permissions,
             store.organizations,
@@ -218,7 +200,6 @@ export default {
         ));
         const hasAppliedFilters = computed(() => hasFilterValues(appliedFilters));
         const hasDraftFilters = computed(() => hasFilterValues(filterDraft));
-        const visibleItems = computed(() => (page.items || []).filter((row) => rowInDateRange(row, appliedFilters)));
         const processingIssues = computed(() => (processing.data?.stages || []).filter((stage) => (
             stage?.safe_error_code
             || processingStageRetryable(stage)
@@ -520,24 +501,34 @@ export default {
             evidence.errorMessage = '';
         }
 
-        function mergeLabelOptions(items) {
-            const merged = collectCatalogLabels([
-                ...page.items,
-                ...(items || []),
-                ...labelOptions.value.map((label) => ({ classification: { labels: [label] } })),
-            ]);
-            labelOptions.value = merged;
-        }
-
         function listParams() {
+            const [uploadedFrom, uploadedTo] = Array.isArray(appliedFilters.uploadedDateRange)
+                ? appliedFilters.uploadedDateRange : [];
             return {
                 title: appliedFilters.title || null,
-                status: appliedFilters.status || null,
-                classification_state: appliedFilters.classificationState || null,
-                label_id: appliedFilters.labelId || null,
+                uploader_id: appliedFilters.uploaderId === 'system'
+                    ? null : (appliedFilters.uploaderId || null),
+                include_system_uploader: appliedFilters.uploaderId === 'system' ? true : null,
+                uploaded_from: uploadedFrom || null,
+                uploaded_to: uploadedTo || null,
                 cursor: cursor.current || null,
                 limit: pageSize.value,
             };
+        }
+
+        async function loadUploaderOptions(forceRefresh = false) {
+            if (!selectedSlug.value) {
+                uploaderOptions.value = [];
+                return;
+            }
+            const slug = selectedSlug.value;
+            try {
+                const response = await api.listCatalogUploaderOptions(slug, forceRefresh);
+                if (selectedSlug.value !== slug) return;
+                uploaderOptions.value = Array.isArray(response?.items) ? response.items : [];
+            } catch (_) {
+                if (selectedSlug.value === slug) uploaderOptions.value = [];
+            }
         }
 
         async function loadStats(forceRefresh = false) {
@@ -579,7 +570,6 @@ export default {
                 page.total = Number(response?.total || 0);
                 page.next_cursor = response?.next_cursor || null;
                 page.loaded = true;
-                mergeLabelOptions(page.items);
                 void loadStats(forceRefresh);
             } catch (error) {
                 if (token !== requestSeq) return;
@@ -736,7 +726,7 @@ export default {
             const libraryChanged = selectedSlug.value !== nextSlug;
             if (libraryChanged) {
                 selectedSlug.value = nextSlug;
-                labelOptions.value = [];
+                uploaderOptions.value = [];
                 classificationEditor.labels = [];
                 page.loaded = false;
                 copyFilters(filterDraft, EMPTY_FILTERS);
@@ -744,6 +734,7 @@ export default {
                 resetCursor();
                 clearDetail();
             }
+            if (libraryChanged) void loadUploaderOptions();
             if (libraryChanged || !page.loaded) await loadList(false, true);
             if (documentId.value) await loadDetail(documentId.value);
             else clearDetail();
@@ -844,7 +835,7 @@ export default {
 
         async function deleteDocument(row) {
             if (!selectedSlug.value || !row) return;
-            if (!canDelete.value) {
+            if (!row.can_delete) {
                 ElMessage.warning('没有删除权限');
                 return;
             }
@@ -971,9 +962,9 @@ export default {
         async function applyFilters() {
             const serverChanged = (
                 appliedFilters.title !== String(filterDraft.title || '').trim()
-                || appliedFilters.status !== String(filterDraft.status || '')
-                || appliedFilters.classificationState !== String(filterDraft.classificationState || '')
-                || appliedFilters.labelId !== String(filterDraft.labelId || '')
+                || appliedFilters.uploaderId !== String(filterDraft.uploaderId || '')
+                || uploadedDateRangeKey(appliedFilters.uploadedDateRange)
+                    !== uploadedDateRangeKey(filterDraft.uploadedDateRange)
             );
             copyFilters(appliedFilters, filterDraft);
             if (serverChanged) await loadList(false, true);
@@ -982,13 +973,11 @@ export default {
         async function resetFilters() {
             const serverChanged = Boolean(
                 appliedFilters.title
-                || appliedFilters.status
-                || appliedFilters.classificationState
-                || appliedFilters.labelId
+                || appliedFilters.uploaderId
+                || uploadedDateRangeKey(appliedFilters.uploadedDateRange)
             );
             copyFilters(filterDraft, EMPTY_FILTERS);
             copyFilters(appliedFilters, EMPTY_FILTERS);
-            labelOptions.value = [];
             if (serverChanged) await loadList(false, true);
         }
 
@@ -1017,6 +1006,16 @@ export default {
         }
 
         async function backToList() {
+            if (route.query.from === 'my-tasks') {
+                await router.push({
+                    path: APP_PATHS.myFiles,
+                    query: {
+                        library: selectedSlug.value || String(route.query.library || ''),
+                        path: String(route.query.taskPath || ''),
+                    },
+                });
+                return;
+            }
             if (!selectedSlug.value) return;
             await router.push({
                 path: '/knowledge-assets/catalog',
@@ -1123,9 +1122,9 @@ export default {
 
         return {
             libraries, selectedSlug, selectedLibrary,
-            stats, processingCount, canInsert, canDelete,
-            filterDraft, appliedFilters, hasAppliedFilters, hasDraftFilters, labelOptions,
-            pageSize, page, pageNumber, cursor, visibleItems,
+            stats, processingCount, canInsert,
+            filterDraft, appliedFilters, hasAppliedFilters, hasDraftFilters, uploaderOptions,
+            pageSize, page, pageNumber, cursor,
             showingDetail, detail, detailPrimary, detailSecondary,
             sourceReader, sourceText, sourceMatchCount, highlightedSourceParts, dialog,
             evidence, evidenceParts, fileLoadingId,
@@ -1200,24 +1199,13 @@ export default {
                     placeholder="搜索文档标题" @keyup.enter="applyFilters">
             <template #prefix><local-icon icon="mdi:text-search"></local-icon></template>
           </el-input>
-          <el-select v-model="filterDraft.status" clearable placeholder="文档状态">
-            <el-option label="等待中" value="pending" />
-            <el-option label="处理中" value="processing" />
-            <el-option label="可用" value="ready" />
-            <el-option label="失败" value="failed" />
+          <el-select v-model="filterDraft.uploaderId" clearable filterable placeholder="上传人">
+            <el-option v-for="uploader in uploaderOptions" :key="uploader.value"
+                       :label="uploader.label" :value="uploader.value" />
           </el-select>
-          <el-select v-model="filterDraft.classificationState" clearable placeholder="分类状态">
-            <el-option label="未分类" value="unclassified" />
-            <el-option label="待审核" value="pending_review" />
-            <el-option label="已分类" value="classified" />
-            <el-option label="分类失败" value="failed" />
-          </el-select>
-          <el-select v-model="filterDraft.labelId" clearable filterable placeholder="分类标签">
-            <el-option v-for="label in labelOptions" :key="label.id"
-                       :label="label.label" :value="label.id" />
-          </el-select>
-          <el-date-picker v-model="filterDraft.dateRange" type="daterange" value-format="YYYY-MM-DD"
-                          start-placeholder="开始日期" end-placeholder="结束日期" />
+          <el-date-picker v-model="filterDraft.uploadedDateRange" type="daterange"
+                          value-format="YYYY-MM-DD" start-placeholder="上传开始日期"
+                          end-placeholder="上传结束日期" />
           <div class="catalog-filter-actions">
             <el-button :disabled="!hasAppliedFilters && !hasDraftFilters"
                        @click="resetFilters">重置</el-button>
@@ -1237,7 +1225,7 @@ export default {
             <span>第 {{ pageNumber }} 页</span>
           </div>
           <div class="catalog-table-shell">
-            <el-table :data="visibleItems" v-loading="page.loading" row-key="document_id">
+            <el-table :data="page.items" v-loading="page.loading" row-key="document_id">
               <template #empty>
                 <div class="illustration-empty-wrapper">
                   <img :src="dataEmpty" class="illustration-data-empty" alt="" aria-hidden="true" />
@@ -1295,11 +1283,18 @@ export default {
                   </div>
                 </template>
               </el-table-column>
-              <el-table-column label="版本/更新时间" width="170">
+              <el-table-column label="上传人" min-width="160">
+                <template #default="{row}">
+                  <div class="catalog-uploader-cell">
+                    <span>{{ row.uploader?.display_name || '系统或历史导入' }}</span>
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column label="版本/首次上传时间" width="170">
                 <template #default="{row}">
                   <div class="catalog-version-cell">
                     <b>v{{ row.revision_no }}</b>
-                    <span>{{ formatCatalogTime(row.updated_at) }}</span>
+                    <span>{{ formatCatalogTime(row.uploaded_at) }}</span>
                   </div>
                 </template>
               </el-table-column>
@@ -1317,7 +1312,7 @@ export default {
                         <el-dropdown-menu>
                           <el-dropdown-item command="edit" :disabled="!canInsert">编辑</el-dropdown-item>
                           <el-dropdown-item command="replace" :disabled="!canInsert">替换导入</el-dropdown-item>
-                          <el-dropdown-item command="delete" :disabled="!canDelete" divided>删除</el-dropdown-item>
+                          <el-dropdown-item command="delete" :disabled="!row.can_delete" divided>删除</el-dropdown-item>
                         </el-dropdown-menu>
                       </template>
                     </el-dropdown>
@@ -1364,7 +1359,7 @@ export default {
                 <el-tag :type="catalogOverallTag(detail.data.overall_state)">
                   {{ catalogOverallLabel(detail.data.overall_state) }}
                 </el-tag>
-                <span>当前 Revision v{{ detail.data.revision_no }}</span>
+                <span>版本 v{{ detail.data.revision_no }}</span>
               </div>
               <el-button v-if="detail.data.file" type="primary" plain
                          :loading="fileLoadingId === String(detail.data.file.id)"
@@ -1373,15 +1368,15 @@ export default {
               </el-button>
               <div class="catalog-detail-actions">
                 <el-button plain @click="openFullSource(detail.data)">阅读原文</el-button>
-                <el-button plain :disabled="!canInsert" @click="openEdit(detail.data)">编辑</el-button>
-                <el-button plain :disabled="!canInsert" @click="openReplaceImport(detail.data)">替换导入</el-button>
-                <el-button type="danger" plain :disabled="!canDelete" @click="deleteDocument(detail.data)">删除</el-button>
+                <el-button v-if="canManageProcessing && canInsert" plain @click="openEdit(detail.data)">编辑</el-button>
+                <el-button v-if="canManageProcessing && canInsert" plain @click="openReplaceImport(detail.data)">替换导入</el-button>
+                <el-button v-if="canManageProcessing && detail.data.can_delete" type="danger" plain
+                           @click="deleteDocument(detail.data)">删除</el-button>
               </div>
             </div>
             <dl class="catalog-identity-grid">
-              <div><dt>文档 ID</dt><dd :title="detail.data.document_id">{{ shortCatalogId(detail.data.document_id) }}</dd></div>
-              <div><dt>Revision ID</dt><dd :title="detail.data.revision_id">{{ shortCatalogId(detail.data.revision_id) }}</dd></div>
-              <div><dt>内容哈希</dt><dd :title="detail.data.revision_content_hash">{{ shortCatalogId(detail.data.revision_content_hash, 16) }}</dd></div>
+              <div><dt>上传人</dt><dd>{{ detail.data.uploader?.display_name || '系统或历史导入' }}</dd></div>
+              <div><dt>首次上传时间</dt><dd>{{ formatCatalogTime(detail.data.uploaded_at) }}</dd></div>
               <div><dt>更新时间</dt><dd>{{ formatCatalogTime(detail.data.updated_at) }}</dd></div>
               <div v-if="detail.data.file"><dt>源文件</dt><dd :title="detail.data.file.file_name">{{ detail.data.file.file_name }}</dd></div>
               <div v-if="detail.data.file"><dt>文件大小</dt><dd>{{ formatCatalogBytes(detail.data.file.size_bytes) }}</dd></div>

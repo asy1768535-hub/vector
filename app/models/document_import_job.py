@@ -14,6 +14,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
@@ -70,6 +71,10 @@ class DocumentImportJob(Base):
             "batch_id",
             "relative_path",
             "file_name",
+        ),
+        UniqueConstraint(
+            "file_resource_id",
+            name="uq_document_import_jobs_file_resource",
         ),
     )
 
@@ -141,6 +146,11 @@ class DocumentImportJob(Base):
     document_revision_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("document_revisions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    file_resource_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("file_resources.id", ondelete="RESTRICT"),
         nullable=True,
     )
     embedding_job_id: Mapped[Optional[uuid.UUID]] = mapped_column(

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -7,8 +9,23 @@ from typing import Any, Literal
 
 from sqlalchemy import func, or_, select
 
+from app.models.canonical_entity import CanonicalEntity
+from app.models.canonical_entity_evolution import (
+    EVOLUTION_ASSIGNMENT_PENDING,
+    EVOLUTION_ASSIGNMENT_RESOLVED,
+    EVOLUTION_DECISION_PENDING,
+    EVOLUTION_SOURCE_SUPERSEDED,
+    CanonicalEntityEvolutionCommand,
+    CanonicalEntityEvolutionDecision,
+    CanonicalEntityEvolutionSource,
+    CanonicalEntityProjectionAssignment,
+)
 from app.models.entity import Entity
 from app.models.entity_alias import EntityAlias
+from app.models.entity_resolution_decision import (
+    ENTITY_RESOLUTION_STATUS_ACTIVE,
+    EntityResolutionDecision,
+)
 from app.models.graph_governance_action import (
     GraphGovernanceAction,
     GraphGovernanceActionItem,
@@ -17,6 +34,7 @@ from app.models.knowledge_relation import KnowledgeRelation
 from app.models.library import Library
 from app.models.user import User
 from app.services import audit_log, graph_schema_validator
+from app.services.canonical_entity_evolution import canonical_evolution_json_bytes
 from app.services.graph_canonical import canonical_graph_value_hash_v1
 from app.services.graph_governance_contracts import (
     CancelGraphGovernanceActionCommand,
@@ -1059,6 +1077,249 @@ def _resolution_map(
     return {value.relation_id: value for value in values}
 
 
+async def _has_live_canonical_evolution_intent(
+    db,
+    *,
+    library_id: uuid.UUID,
+    entity_ids: tuple[uuid.UUID, uuid.UUID],
+) -> bool:
+    """Read the P3 pending projection slot after the shared scope-40 lock."""
+
+    if not hasattr(db, "sync_session"):
+        return False
+    decisions = tuple(
+        (
+            await db.execute(
+                select(CanonicalEntityEvolutionDecision).where(
+                    CanonicalEntityEvolutionDecision.library_id == library_id,
+                    CanonicalEntityEvolutionDecision.lifecycle_status
+                    == EVOLUTION_DECISION_PENDING,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    pending_ids = {row.id for row in decisions}
+    if not pending_ids:
+        return False
+    assignments = tuple(
+        (
+            await db.execute(
+                select(CanonicalEntityProjectionAssignment).where(
+                    CanonicalEntityProjectionAssignment.library_id == library_id,
+                    CanonicalEntityProjectionAssignment.entity_id.in_(entity_ids),
+                    CanonicalEntityProjectionAssignment.evolution_decision_id.in_(pending_ids),
+                    CanonicalEntityProjectionAssignment.assignment_state.in_(
+                        (EVOLUTION_ASSIGNMENT_PENDING, EVOLUTION_ASSIGNMENT_RESOLVED)
+                    ),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return bool(assignments)
+
+
+async def canonical_evolution_guard_fingerprint(
+    db,
+    *,
+    library_id: uuid.UUID,
+    entity_ids: tuple[uuid.UUID, uuid.UUID],
+) -> tuple[str, bool]:
+    """Sign the P3.1 state GraphGovernance must re-check after scope-40 locks."""
+
+    if len(set(entity_ids)) != 2:
+        raise GraphGovernanceError("graph_governance_state_changed")
+    entities = tuple(
+        (
+            await db.execute(
+                select(Entity)
+                .where(Entity.library_id == library_id, Entity.id.in_(entity_ids))
+                .order_by(Entity.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if len(entities) != 2:
+        raise GraphGovernanceError("graph_governance_state_changed")
+    active_decisions = tuple(
+        (
+            await db.execute(
+                select(EntityResolutionDecision).where(
+                    EntityResolutionDecision.library_id == library_id,
+                    EntityResolutionDecision.entity_id.in_(entity_ids),
+                    EntityResolutionDecision.lifecycle_status == ENTITY_RESOLUTION_STATUS_ACTIVE,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    canonical_ids = tuple(
+        sorted({row.canonical_entity_id for row in entities if row.canonical_entity_id is not None}, key=str)
+    )
+    canonicals = {
+        row.id: row
+        for row in (
+            (
+                await db.execute(
+                    select(CanonicalEntity).where(
+                        CanonicalEntity.library_id == library_id,
+                        CanonicalEntity.id.in_(canonical_ids),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+            if canonical_ids
+            else ()
+        )
+    }
+    if len(canonicals) != len(canonical_ids):
+        raise GraphGovernanceError("graph_governance_state_changed")
+    sources = tuple(
+        (
+            await db.execute(
+                select(CanonicalEntityEvolutionSource).where(
+                    CanonicalEntityEvolutionSource.library_id == library_id,
+                    CanonicalEntityEvolutionSource.source_canonical_entity_id.in_(canonical_ids),
+                    CanonicalEntityEvolutionSource.resolution_state != EVOLUTION_SOURCE_SUPERSEDED,
+                )
+            )
+        )
+        .scalars()
+        .all()
+        if canonical_ids
+        else ()
+    )
+    source_by_canonical: dict[uuid.UUID, CanonicalEntityEvolutionSource] = {}
+    for source in sources:
+        if source.source_canonical_entity_id in source_by_canonical:
+            raise GraphGovernanceError("graph_governance_state_changed")
+        source_by_canonical[source.source_canonical_entity_id] = source
+    decisions = tuple(
+        (
+            await db.execute(
+                select(CanonicalEntityEvolutionDecision).where(
+                    CanonicalEntityEvolutionDecision.library_id == library_id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    commands = {
+        row.id: row
+        for row in (
+            (
+                await db.execute(
+                    select(CanonicalEntityEvolutionCommand).where(
+                        CanonicalEntityEvolutionCommand.library_id == library_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    }
+    child_ids = {row.supersedes_decision_id for row in decisions if row.supersedes_decision_id}
+    heads = {
+        row.command_id: row
+        for row in decisions
+        if row.id not in child_ids
+    }
+    if len(heads) != len({row.command_id for row in decisions}):
+        raise GraphGovernanceError("graph_governance_state_changed")
+    assignments = tuple(
+        (
+            await db.execute(
+                select(CanonicalEntityProjectionAssignment).where(
+                    CanonicalEntityProjectionAssignment.library_id == library_id,
+                    CanonicalEntityProjectionAssignment.entity_id.in_(entity_ids),
+                    CanonicalEntityProjectionAssignment.assignment_state.in_(
+                        (EVOLUTION_ASSIGNMENT_PENDING, EVOLUTION_ASSIGNMENT_RESOLVED)
+                    ),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    intent_entities: dict[tuple[uuid.UUID, uuid.UUID], set[uuid.UUID]] = {}
+    for assignment in assignments:
+        head = heads.get(assignment.command_id)
+        command = commands.get(assignment.command_id)
+        if head is None or command is None:
+            raise GraphGovernanceError("graph_governance_state_changed")
+        if head.id == assignment.evolution_decision_id and head.lifecycle_status == EVOLUTION_DECISION_PENDING:
+            intent_entities.setdefault((command.id, head.id), set()).add(assignment.entity_id)
+    payload = {
+        "canonical_states": [
+            {
+                "canonical_entity_id": str(canonical_id),
+                "current_source_resolution_state": (
+                    source_by_canonical[canonical_id].resolution_state
+                    if canonical_id in source_by_canonical
+                    else None
+                ),
+                "current_source_transition_id": (
+                    str(source_by_canonical[canonical_id].id)
+                    if canonical_id in source_by_canonical
+                    else None
+                ),
+                "operational_status": canonicals[canonical_id].status,
+            }
+            for canonical_id in canonical_ids
+        ],
+        "contract_version": "canonical_entity_evolution/v1",
+        "entity_states": [
+            {
+                "active_resolution_decisions": [
+                    {
+                        "canonical_entity_id": (
+                            str(decision.canonical_entity_id)
+                            if decision.canonical_entity_id is not None
+                            else None
+                        ),
+                        "decision_fingerprint": decision.decision_fingerprint,
+                        "decision_id": str(decision.id),
+                        "decision_kind": decision.decision_kind,
+                        "subject_fingerprint": decision.subject_fingerprint,
+                    }
+                    for decision in sorted(
+                        (row for row in active_decisions if row.entity_id == entity.id),
+                        key=lambda row: (row.subject_fingerprint, str(row.id)),
+                    )
+                ],
+                "canonical_entity_id": (
+                    str(entity.canonical_entity_id)
+                    if entity.canonical_entity_id is not None
+                    else None
+                ),
+                "entity_id": str(entity.id),
+            }
+            for entity in entities
+        ],
+        "library_id": str(library_id),
+        "live_evolution_intents": [
+            {
+                "command_id": str(command_id),
+                "current_decision_id": str(decision_id),
+                "entity_ids": [str(entity_id) for entity_id in sorted(ids, key=str)],
+                "operation_kind": commands[command_id].operation_kind,
+            }
+            for (command_id, decision_id), ids in sorted(
+                intent_entities.items(), key=lambda item: (str(item[0][0]), str(item[0][1]))
+            )
+        ],
+        "operation_kind": "graph_governance_entity_merge",
+    }
+    return hashlib.sha256(canonical_evolution_json_bytes(payload)).hexdigest(), bool(intent_entities)
+
+
 async def stage_entity_merge(
     db,
     command: StageEntityMergeCommand,
@@ -1113,6 +1374,18 @@ async def stage_entity_merge(
         or loser_hash != command.expected_loser_state_hash
         or survivor.status != "active"
         or loser.status != "active"
+    ):
+        raise GraphGovernanceError("graph_governance_state_changed")
+    guard_fingerprint, has_live_intent = await canonical_evolution_guard_fingerprint(
+        db,
+        library_id=library.id,
+        entity_ids=(survivor.id, loser.id),
+    )
+    if (
+        not hmac.compare_digest(
+            guard_fingerprint, command.expected_canonical_evolution_guard_fingerprint
+        )
+        or has_live_intent
     ):
         raise GraphGovernanceError("graph_governance_state_changed")
     relations = tuple(
@@ -1290,6 +1563,7 @@ async def stage_entity_merge(
         command.idempotency_key,
         "entity_merge",
         {
+            "expected_canonical_evolution_guard_fingerprint": guard_fingerprint,
             "conflict_count": conflict_count,
             "effect_count": len(effects),
             "loser_state_hash": loser_hash,

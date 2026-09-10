@@ -7,6 +7,7 @@ export const APP_PATHS = Object.freeze({
     knowledgeAssets: '/knowledge-assets',
     documents: '/knowledge-assets/documents',
     catalog: '/knowledge-assets/catalog',
+    myFiles: '/knowledge-assets/my-files',
     importData: '/knowledge-assets/import',
     knowledgeGovernance: '/knowledge-governance',
     knowledgeGraph: '/knowledge-governance/graph',
@@ -70,6 +71,10 @@ export const DOMAIN_TABS = Object.freeze({
         {
             key: 'catalog', label: '知识资产', path: APP_PATHS.catalog,
             access: 'catalog', icon: 'mdi:bookshelf',
+        },
+        {
+            key: 'myFiles', label: '我的任务', path: APP_PATHS.myFiles,
+            access: 'myFiles', icon: 'sidebar:task',
         },
         {
             key: 'import', label: '导入与替换', path: APP_PATHS.importData,
@@ -251,6 +256,8 @@ export function sidebarItems(domain, access) {
                 icon: 'sidebar:document',
             });
         }
+        const myFilesItem = DOMAIN_TABS.knowledgeAssets.find((item) => item.key === 'myFiles');
+        if (access?.myFiles && myFilesItem) items.push(myFilesItem);
         const importItem = DOMAIN_TABS.knowledgeAssets.find((item) => item.key === 'import');
         if (access?.import && importItem) items.push(importItem);
         return items;
@@ -309,6 +316,7 @@ export function defaultRouteForAccess(access) {
 export function domainTabTarget(path, currentQuery = {}) {
     const target = { path };
     if (!path.startsWith(`${APP_PATHS.knowledgeAssets}/`)) return target;
+    if (path === APP_PATHS.myFiles) return target;
 
     const library = String(currentQuery.library || currentQuery.slug || '');
     if (!library) return target;

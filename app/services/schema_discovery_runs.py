@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Sequence
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -21,6 +21,7 @@ from app.models.document import Document
 from app.models.document_import_job import DocumentImportJob
 from app.models.document_revision import DocumentRevision
 from app.models.graph_extraction_job import GraphExtractionJob
+from app.models.graph_extraction_unit import GraphExtractionUnit
 from app.models.library import Library
 from app.models.ontology_version import OntologyVersion
 from app.models.schema_discovery_run import SchemaDiscoveryRun
@@ -498,28 +499,61 @@ async def _current_run_texts(
     return texts, source_hash
 
 
+async def _fail_locked_run(
+    db: AsyncSession,
+    *,
+    run: SchemaDiscoveryRun,
+    code: str,
+    message: str,
+) -> SchemaDiscoveryRun:
+    failed_at = _now()
+    error_message = message[:4000]
+    run.status = "failed"
+    run.error_code = code
+    run.error_message = error_message
+    run.finished_at = failed_at
+    jobs = (
+        await db.execute(
+            select(GraphExtractionJob)
+            .where(GraphExtractionJob.schema_discovery_run_id == run.id)
+            .with_for_update()
+        )
+    ).scalars().all()
+    for job in jobs:
+        job.status = "failed"
+        job.current_stage = None
+        job.error_code = code
+        job.error_message = error_message
+        job.finished_at = failed_at
+    await db.execute(
+        update(GraphExtractionUnit)
+        .where(
+            GraphExtractionUnit.job_id.in_(
+                select(GraphExtractionJob.id).where(
+                    GraphExtractionJob.schema_discovery_run_id == run.id
+                )
+            ),
+            GraphExtractionUnit.status == "queued",
+        )
+        .values(
+            status="cancelled",
+            retryable=False,
+            error_code=code,
+            error_message=error_message,
+            finished_at=failed_at,
+            updated_at=failed_at,
+        )
+    )
+    return run
+
+
 async def _fail_run(session_factory, run_id: uuid.UUID, code: str, message: str) -> SchemaDiscoveryRun | None:
     async with session_factory() as db:
         async with db.begin():
             run = await db.get(SchemaDiscoveryRun, run_id, with_for_update=True)
             if run is None:
                 return None
-            run.status = "failed"
-            run.error_code = code
-            run.error_message = message[:4000]
-            run.finished_at = _now()
-            jobs = (
-                await db.execute(
-                    select(GraphExtractionJob).where(GraphExtractionJob.schema_discovery_run_id == run.id)
-                )
-            ).scalars().all()
-            for job in jobs:
-                job.status = "failed"
-                job.current_stage = None
-                job.error_code = code
-                job.error_message = message[:4000]
-                job.finished_at = _now()
-            return run
+            return await _fail_locked_run(db, run=run, code=code, message=message)
 
 
 async def resume_schema_discovery_run_after_confirmation(
@@ -602,41 +636,19 @@ async def process_next_schema_discovery_run(*, session_factory, provider=None) -
             run.started_at = _now()
             texts, source_hash = await _current_run_texts(db, run)
             if source_hash != run.source_hash:
-                run.status = "failed"
-                run.error_code = "source_set_changed"
-                run.error_message = "current ready revisions no longer match the discovery source set"
-                run.finished_at = _now()
-                jobs = (
-                    await db.execute(
-                        select(GraphExtractionJob).where(
-                            GraphExtractionJob.schema_discovery_run_id == run.id
-                        )
-                    )
-                ).scalars().all()
-                for job in jobs:
-                    job.status = "failed"
-                    job.error_code = "source_set_changed"
-                    job.error_message = run.error_message
-                    job.finished_at = _now()
-                return run
+                return await _fail_locked_run(
+                    db,
+                    run=run,
+                    code="source_set_changed",
+                    message="current ready revisions no longer match the discovery source set",
+                )
             if not texts:
-                run.status = "failed"
-                run.error_code = "schema_discovery_empty"
-                run.error_message = "no current ready revision chunks are available"
-                run.finished_at = _now()
-                jobs = (
-                    await db.execute(
-                        select(GraphExtractionJob).where(
-                            GraphExtractionJob.schema_discovery_run_id == run.id
-                        )
-                    )
-                ).scalars().all()
-                for job in jobs:
-                    job.status = "failed"
-                    job.error_code = "schema_discovery_empty"
-                    job.error_message = run.error_message
-                    job.finished_at = _now()
-                return run
+                return await _fail_locked_run(
+                    db,
+                    run=run,
+                    code="schema_discovery_empty",
+                    message="no current ready revision chunks are available",
+                )
             library = await db.get(Library, run.library_id)
     output_budget = (
         settings.graph_schema_discovery_max_output_tokens
@@ -677,31 +689,21 @@ async def process_next_schema_discovery_run(*, session_factory, provider=None) -
                 return locked_run
             texts_now, source_hash_now = await _current_run_texts(db, locked_run)
             if source_hash_now != locked_run.source_hash or not texts_now:
-                locked_run.status = "failed"
-                locked_run.error_code = "source_set_changed"
-                locked_run.error_message = "source revisions changed during Schema discovery"
-                locked_run.finished_at = _now()
-                jobs = (
-                    await db.execute(
-                        select(GraphExtractionJob).where(
-                            GraphExtractionJob.schema_discovery_run_id == locked_run.id
-                        )
-                    )
-                ).scalars().all()
-                for job in jobs:
-                    job.status = "failed"
-                    job.error_code = "source_set_changed"
-                    job.error_message = locked_run.error_message
-                    job.finished_at = _now()
-                return locked_run
+                return await _fail_locked_run(
+                    db,
+                    run=locked_run,
+                    code="source_set_changed",
+                    message="source revisions changed during Schema discovery",
+                )
             ontology_version = await db.get(OntologyVersion, locked_run.ontology_version_id, with_for_update=True)
             library = await db.get(Library, locked_run.library_id)
             if ontology_version is None or library is None or ontology_version.status != "draft":
-                locked_run.status = "failed"
-                locked_run.error_code = "schema_discovery_state_changed"
-                locked_run.error_message = "AI draft is no longer writable"
-                locked_run.finished_at = _now()
-                return locked_run
+                return await _fail_locked_run(
+                    db,
+                    run=locked_run,
+                    code="schema_discovery_state_changed",
+                    message="AI draft is no longer writable",
+                )
             snapshot = await persist_business_schema_draft(
                 db,
                 library=library,

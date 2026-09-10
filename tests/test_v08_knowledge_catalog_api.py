@@ -73,6 +73,11 @@ def test_catalog_list_uses_existing_library_read_boundary():
             patch.object(settings, "organization_authorization_enabled", True),
             patch.object(settings, "knowledge_catalog_enabled", True),
             patch("app.deps.authorize_library", new=AsyncMock(return_value=library)) as authorize,
+            patch.object(
+                api,
+                "_catalog_viewer_permissions",
+                new=AsyncMock(return_value=(False, False)),
+            ),
             patch.object(api, "list_catalog_documents", new=AsyncMock(return_value=page)) as read,
         ):
             response = TestClient(app).get("/libraries/catalog/catalog/documents?limit=10")
@@ -80,6 +85,41 @@ def test_catalog_list_uses_existing_library_read_boundary():
         assert response.json()["contract_version"] == "catalog-documents-v1"
         authorize.assert_awaited_once()
         read.assert_awaited_once()
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_catalog_list_forwards_uploader_filters_and_viewer_policy():
+    user, library, db = _user(), _library(), AsyncMock()
+    page = CatalogDocumentPageRead(items=[], total=0, next_cursor=None)
+    uploader_id = uuid.uuid4()
+    _override_library(user, library, db)
+    try:
+        with (
+            patch.object(settings, "organization_authorization_enabled", True),
+            patch.object(settings, "knowledge_catalog_enabled", True),
+            patch("app.deps.authorize_library", new=AsyncMock(return_value=library)),
+            patch.object(
+                api,
+                "_catalog_viewer_permissions",
+                new=AsyncMock(return_value=(True, True)),
+            ),
+            patch.object(api, "list_catalog_documents", new=AsyncMock(return_value=page)) as read,
+        ):
+            response = TestClient(app).get(
+                "/libraries/catalog/catalog/documents"
+                f"?uploader_id={uploader_id}&uploaded_from=2026-08-01"
+                "&uploaded_to=2026-08-31&limit=20"
+            )
+        assert response.status_code == 200, response.text
+        kwargs = read.await_args.kwargs
+        assert kwargs["query"].uploader_id == uploader_id
+        assert kwargs["query"].uploaded_from.isoformat() == "2026-08-01"
+        assert kwargs["query"].uploaded_to.isoformat() == "2026-08-31"
+        assert kwargs["include_uploader"] is True
+        assert kwargs["reveal_uploader_email"] is True
+        assert kwargs["viewer_id"] == user.id
+        assert kwargs["can_delete_any"] is True
     finally:
         app.dependency_overrides.clear()
 

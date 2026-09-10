@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import {
     ALLOWED_EXTENSIONS, MAX_FILE_SIZE, MAX_BATCH_SIZE, LEGACY_SAVE_AS,
     validateFile, validateBatch, createBatchValidationState, validateBatchChunk,
+    verifyDuplicateFiles,
     fileKey, formatSize, fileTypeIcon,
     ST_LABEL, ST_TAG, OP_LABEL, OP_TAG, graphJobProgress, graphProgressDetail,
     SECURITY_LEVEL_LABEL, securityLevelLabel,
@@ -18,10 +19,22 @@ import {
 const source = readFileSync(new URL('./src/views/Import.js', import.meta.url), 'utf8');
 const css = readFileSync(new URL('./style.css', import.meta.url), 'utf8');
 const apiSource = readFileSync(new URL('./src/api.js', import.meta.url), 'utf8');
+const folderImportSource = readFileSync(new URL('./src/folder_import.js', import.meta.url), 'utf8');
+const documentsApiSource = readFileSync(new URL('../app/api/documents.py', import.meta.url), 'utf8');
 
 // ── Helpers for creating test File-like objects ──
 function mockFile(name, size, lastModified = 1700000000000) {
     return { name, size, lastModified };
+}
+
+function contentFile(name, content, lastModified = 1700000000000, relativePath = '') {
+    const blob = new Blob([content]);
+    Object.defineProperties(blob, {
+        name: { value: name },
+        lastModified: { value: lastModified },
+        webkitRelativePath: { value: relativePath },
+    });
+    return blob;
 }
 
 test('graphJobProgress maps real stages and extraction counts', () => {
@@ -125,6 +138,15 @@ test('validateFile rejects legacy .doc with save-as message', () => {
 test('validateFile accepts legacy .xls through the bounded xlrd parser', () => {
     const r = validateFile(mockFile('sheet.xls', 1024));
     assert.equal(r.valid, true);
+});
+
+test('graph batches create all upload sessions before file transfer', () => {
+    const queueBatch = source.indexOf('const batchIds = createImportBatchIds(items);');
+    const sessionPreparation = source.indexOf('createImportSessionForFile({', queueBatch);
+    const contentUpload = source.indexOf('attemptedCount = await runConcurrent(', sessionPreparation + 1);
+    assert.ok(queueBatch >= 0, 'upload queue assigns batch IDs before transfer');
+    assert.ok(sessionPreparation >= 0, 'graph batch upload prepares sessions');
+    assert.ok(contentUpload > sessionPreparation, 'file transfer waits for session preparation');
 });
 
 test('validateFile accepts .doc only when the asynchronous import contract advertises it', () => {
@@ -322,6 +344,70 @@ test('batch replace failure of one item does not stop later items', async () => 
     assert.equal(result.submitted, 1);
 });
 
+test('duplicate verification skips only files whose bytes are actually identical', async () => {
+    const existing = contentFile('a.pdf', 'same', 123);
+    const identical = contentFile('a.pdf', 'same', 123);
+    const changed = contentFile('a.pdf', 'diff', 123);
+    const key = fileKey(existing);
+
+    const sameResult = await verifyDuplicateFiles(
+        [{ file: identical, reason: '重复文件' }],
+        new Map([[key, existing]]),
+        2,
+    );
+    assert.equal(sameResult.duplicates.length, 1);
+    assert.equal(sameResult.replacements.length, 0);
+
+    const changedResult = await verifyDuplicateFiles(
+        [{ file: changed, reason: '重复文件' }],
+        new Map([[key, existing]]),
+        2,
+    );
+    assert.equal(changedResult.duplicates.length, 0);
+    assert.equal(changedResult.replacements.length, 1);
+    assert.equal(changedResult.replacements[0].previousFile, existing);
+    assert.equal(changedResult.replacements[0].file, changed);
+});
+
+test('duplicate verification reads large candidates in bounded slices', async () => {
+    const reads = [];
+    const makeTrackedFile = (bytes) => ({
+        name: 'large.pdf',
+        size: bytes.length,
+        lastModified: 456,
+        slice(start, end) {
+            reads.push(end - start);
+            return new Blob([bytes.slice(start, end)]);
+        },
+    });
+    const first = makeTrackedFile('abcdefghij');
+    const second = makeTrackedFile('abcdefghij');
+
+    const result = await verifyDuplicateFiles(
+        [{ file: second, reason: '重复文件' }],
+        new Map([[fileKey(first), first]]),
+        4,
+    );
+
+    assert.equal(result.duplicates.length, 1);
+    assert.equal(result.replacements.length, 0);
+    assert.deepEqual(reads, [4, 4, 4, 4, 2, 2]);
+});
+
+test('batch replacement reports every status transition to its queue owner', async () => {
+    const items = createBatchReplaceItems([mockFile('Alpha.pdf', 100, 1)], docsForReplace);
+    const transitions = [];
+    await submitBatchReplaceItems(
+        items,
+        'lib',
+        async () => ({}),
+        undefined,
+        {},
+        (_item, status) => transitions.push(status),
+    );
+    assert.deepEqual(transitions, ['uploading', 'submitted']);
+});
+
 test('batch replace never calls add upload path', async () => {
     const items = createBatchReplaceItems([mockFile('Alpha.pdf', 100, 1)], docsForReplace);
     await submitBatchReplaceItems(items, 'lib', async (_slug, _file, options) => {
@@ -401,6 +487,58 @@ test('library admins can select daily, initial-import, or custom upload limits',
     assert.match(apiSource, /import-configuration`, jsonBody\('PUT'/);
 });
 
+test('batch replacement limits rendered rows to its current page', () => {
+    for (const token of [
+        'batchReplacePageSize',
+        'displayBatchReplaceItems',
+        ':data="displayBatchReplaceItems"',
+        'v-model:current-page="batchReplacePage"',
+    ]) assert.ok(source.includes(token), `missing batch replacement pagination token: ${token}`);
+});
+
+test('queue summary maintains status totals at queue mutation points', () => {
+    for (const token of [
+        'queueStatusCounts',
+        'removeQueueItem',
+        'setQueueItemStatus',
+        'queueStatusCounts.value.pending',
+        'queueStatusCounts.value.submitted',
+    ]) assert.ok(source.includes(token), `missing incremental queue summary token: ${token}`);
+});
+
+test('batch replacement selection is chunked and maintains its summary incrementally', () => {
+    for (const token of [
+        'batchReplaceSelectionSequence',
+        'batchReplaceStatusCounts',
+        'batchReplaceReadyCount',
+        'createBatchValidationState(',
+        'validateBatchChunk(chunk, validationState)',
+        'await yieldToBrowser()',
+    ]) assert.ok(source.includes(token), `missing bounded batch replacement token: ${token}`);
+    assert.equal(source.includes('batchReplaceItems.filter((it) => it.status'), false);
+});
+
+test('file selection shows the discovered total before chunk validation and reports progress', () => {
+    const addFilesSource = source.match(
+        /async function addFiles\(files\) \{([\s\S]*?)\r?\n        \}\r?\n\r?\n        function onFileChange/,
+    )?.[1] || '';
+    const totalIndex = addFilesSource.indexOf('selectionFileTotal.value = total;');
+    const firstYieldIndex = addFilesSource.indexOf('await yieldToBrowser();');
+    const validationIndex = addFilesSource.indexOf('validateBatchChunk(chunk, validationState)');
+
+    assert.ok(totalIndex >= 0, 'selected file total is stored immediately');
+    assert.ok(firstYieldIndex > totalIndex, 'the UI yields after storing the selected total');
+    assert.ok(validationIndex > firstYieldIndex, 'chunk validation starts after the first UI render');
+    assert.ok(
+        addFilesSource.includes('selectionFilesProcessed.value = Math.min(start + chunk.length, total);'),
+        'selection progress advances after each validation chunk',
+    );
+    assert.match(source, /selectionFileTotal\.value = 0;[\s\S]*?selectionFilesProcessed\.value = 0;/);
+    assert.match(source, /aria-live="polite"/);
+    assert.ok(source.includes('已发现 {{ selectionFileTotal }} 个文件'));
+    assert.ok(source.includes('已检查 {{ selectionFilesProcessed }} / {{ selectionFileTotal }}'));
+});
+
 test('template uses _failType not error text for check columns', () => {
     assert.ok(source.includes('格式校验'), 'format check column');
     assert.ok(source.includes('大小校验'), 'size check column');
@@ -453,10 +591,18 @@ test('replace route query auto-selects target document and handles not-found sta
 });
 
 test('replace submission preserves target document id and never falls back to add', () => {
-    assert.match(source, /api\.importFile\(slug\.value, file, \{[\s\S]*?replaceDocumentId: replaceDocId\.value,[\s\S]*?\}\)/, 'submits selected replace target');
+    assert.match(source, /uploadFileInChunks\(\{[\s\S]*?replaceDocumentId: replaceDocId\.value,[\s\S]*?\}\)/, 'submits selected replace target through the task-producing upload flow');
     assert.ok(source.includes('!routeReplaceError.value'), 'canReplace blocks not-found target');
     assert.ok(source.includes('if (!routeReplaceActive.value) replaceDocId.value = null'), 'route-driven target is not cleared after replace');
-    assert.equal(source.includes('api.importFile(slug.value, file, {})'), false, 'replace mode does not upload without target');
+    assert.equal(source.includes('api.importFile(slug.value, file, {}'), false, 'replace mode does not upload without target');
+});
+
+test('import page leaves personal task browsing to the dedicated page', () => {
+    assert.equal(source.includes('<el-radio value="tasks">我的任务</el-radio>'), false);
+    assert.equal(source.includes("mode === 'tasks'"), false);
+    assert.equal(source.includes("mode.value = 'tasks'"), false);
+    assert.equal(source.includes('personalTask'), false);
+    assert.match(source, /router\.push\(\{ path: APP_PATHS\.myFiles \}\)/);
 });
 
 test('upload area confirms graph extraction configuration before submitting', () => {
@@ -474,8 +620,8 @@ test('upload area confirms graph extraction configuration before submitting', ()
         'securityLevel: graphExtractionSecurityLevel.value',
     ]) assert.ok(source.includes(token), `missing graph upload token: ${token}`);
     assert.match(css, /\.import-graph-option\s*\{/);
-    assert.match(apiSource, /formData\.append\('graph_extraction_requested', 'true'\)/);
-    assert.match(apiSource, /formData\.append\('security_level', securityLevel\)/);
+    assert.match(folderImportSource, /security_level: options\.securityLevel/);
+    assert.match(folderImportSource, /graph_extraction_requested: Boolean\(options\.graphExtractionRequested\)/);
     assert.match(apiSource, /v04\/graph-extractions\/upload-configuration/);
 });
 
@@ -501,16 +647,20 @@ test('AI self-extraction sends graph jobs without requiring Schema activation', 
 test('uploaded files track vectorization and graph extraction progress', () => {
     for (const token of [
         'attachGraphTracking',
-        'listDocumentJobs',
-        'listGraphExtractions',
+        'getDocumentJobProgress',
         'pollGraphProgress',
+        'graphProgressPollPromise',
+        'graphProgressPollController',
         '等待图谱抽取任务',
         '知识图谱构建',
         'graphProgressDetail',
         'stopGraphProgressPolling();',
     ]) assert.ok(source.includes(token) || apiSource.includes(token), `missing graph progress token: ${token}`);
     assert.match(css, /\.import-graph-progress\s*\{/);
-    assert.match(apiSource, /v04\/graph-extractions\/\?/);
+    assert.match(apiSource, /documents\/jobs\/progress/);
+    assert.match(documentsApiSource, /@router\.post\("\/documents\/jobs\/progress"/);
+    assert.equal(source.includes('api.listDocumentJobs('), false);
+    assert.equal(source.includes('api.listGraphExtractions('), false);
 });
 
 test('failed graph construction retries the graph job instead of the completed import', () => {
