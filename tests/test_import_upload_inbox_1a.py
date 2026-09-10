@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import multiprocessing
 import struct
 import uuid
@@ -97,6 +98,10 @@ class _ConditionalDb:
         self.execute_calls = []
         self.commit_count = 0
         self.rollback_count = 0
+        self.added = []
+
+    def add(self, value) -> None:
+        self.added.append(value)
 
     async def execute(self, statement):
         self.execute_calls.append(statement)
@@ -133,6 +138,10 @@ def _config(tmp_path: Path) -> SimpleNamespace:
         import_upload_claim_stale_seconds=300,
         import_upload_retry_after_seconds=2,
         doc_conversion_max_bytes=1024,
+        document_storage_provider="local",
+        document_files_dir=str(tmp_path / "objects"),
+        document_storage_endpoint_ref="primary",
+        document_storage_max_read_bytes=1024 * 1024,
     )
 
 
@@ -146,6 +155,10 @@ def _claim(*, offset: int = 4, size: int = 7, operation: str = "content"):
         size_bytes=size,
         upload_offset=offset,
         already_queued=False,
+        library_id=uuid.uuid4(),
+        uploaded_by_user_id=uuid.uuid4(),
+        relative_path="folder/sample.txt",
+        content_type="text/plain",
     )
 
 
@@ -523,9 +536,11 @@ def test_complete_validates_file_before_conditional_queued_commit(
         events.append("stat")
         return real_fstat(fd)
 
+    real_sha256 = import_uploads._sha256_handle
+
     def sha256(_handle, _stop_event=None):
         events.append("sha256")
-        return "a" * 64
+        return real_sha256(_handle, _stop_event)
 
     monkeypatch.setattr(import_uploads, "keep_upload_claim_alive", _noop_claim_lease)
     monkeypatch.setattr(import_uploads.os, "fstat", fstat)
@@ -539,8 +554,14 @@ def test_complete_validates_file_before_conditional_queued_commit(
         )
     )
 
-    assert digest == "a" * 64
-    assert events == ["stat", "sha256", "conditional-update", "queued-commit"]
+    assert digest == hashlib.sha256(b"content").hexdigest()
+    assert events == [
+        "stat",
+        "sha256",
+        "stat",
+        "conditional-update",
+        "queued-commit",
+    ]
 
 
 def test_complete_hash_failure_releases_claim_without_queuing(
@@ -627,9 +648,13 @@ def test_complete_claim_is_idempotent_after_upload_has_finished(
 ) -> None:
     job = SimpleNamespace(
         id=uuid.uuid4(),
+        library_id=uuid.uuid4(),
+        requested_by_user_id=uuid.uuid4(),
         status=status,
         staging_key=f"{uuid.uuid4().hex}.upload",
         file_name="sample.txt",
+        relative_path=None,
+        content_type="text/plain",
         size_bytes=7,
         upload_offset=7,
     )
@@ -663,9 +688,13 @@ def test_complete_claim_does_not_treat_cancelled_as_success(
 ) -> None:
     job = SimpleNamespace(
         id=uuid.uuid4(),
+        library_id=uuid.uuid4(),
+        requested_by_user_id=uuid.uuid4(),
         status="cancelled",
         staging_key=f"{uuid.uuid4().hex}.upload",
         file_name="sample.txt",
+        relative_path=None,
+        content_type="text/plain",
         size_bytes=7,
         upload_offset=7,
     )
@@ -694,7 +723,7 @@ def test_complete_claim_does_not_treat_cancelled_as_success(
     assert exc_info.value.code == "upload_not_active"
 
 
-def test_complete_doc_validation_precedes_hash_and_queued_commit(
+def test_complete_does_not_parse_office_before_resource_persistence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -708,6 +737,10 @@ def test_complete_doc_validation_precedes_hash_and_queued_commit(
         file_name="legacy.doc",
         size_bytes=base.size_bytes,
         upload_offset=base.upload_offset,
+        library_id=base.library_id,
+        uploaded_by_user_id=base.uploaded_by_user_id,
+        relative_path=base.relative_path,
+        content_type=base.content_type,
     )
     (tmp_path / claim.staging_key).write_bytes(payload)
     events: list[str] = []
@@ -717,16 +750,13 @@ def test_complete_doc_validation_precedes_hash_and_queued_commit(
             events.append("conditional-update")
             return _ScalarResult(claim.job_id)
 
-    def validate(_path, *, max_bytes):
-        assert max_bytes == 1024
-        events.append("doc-validation")
+    real_sha256 = import_uploads._sha256_handle
 
     def sha256(_handle, _stop_event=None):
         events.append("sha256")
-        return "b" * 64
+        return real_sha256(_handle, _stop_event)
 
     monkeypatch.setattr(import_uploads, "keep_upload_claim_alive", _noop_claim_lease)
-    monkeypatch.setattr("app.services.doc_conversion.validate_doc_source", validate)
     monkeypatch.setattr(import_uploads, "_sha256_handle", sha256)
 
     asyncio.run(
@@ -737,7 +767,7 @@ def test_complete_doc_validation_precedes_hash_and_queued_commit(
         )
     )
 
-    assert events == ["doc-validation", "sha256", "conditional-update"]
+    assert events == ["sha256", "conditional-update"]
 
 
 def test_claim_keeps_cross_user_job_hidden() -> None:

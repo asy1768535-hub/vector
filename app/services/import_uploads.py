@@ -23,8 +23,13 @@ from app.models.graph_extraction_job import GraphExtractionJob
 from app.models.library import Library
 from app.models.user import User
 from app.schemas.documents import ImportSessionCreate
+from app.services.file_resources import (
+    build_file_resource,
+    prepare_file_resource,
+    resource_id_for_upload_context,
+)
 from app.services.import_upload_preflight import inspect_office_upload
-
+from app.services.object_storage import build_object_storage_adapter
 
 IMAGE_IMPORT_EXTENSIONS = (
     ".bmp",
@@ -225,6 +230,10 @@ class UploadOperationClaim:
     size_bytes: int
     upload_offset: int
     already_queued: bool = False
+    library_id: uuid.UUID | None = None
+    uploaded_by_user_id: uuid.UUID | None = None
+    relative_path: str | None = None
+    content_type: str | None = None
 
 
 class UploadClaimLease:
@@ -693,6 +702,10 @@ async def claim_upload_operation(
             size_bytes=job.size_bytes,
             upload_offset=job.upload_offset,
             already_queued=True,
+            library_id=job.library_id,
+            uploaded_by_user_id=job.requested_by_user_id,
+            relative_path=job.relative_path,
+            content_type=job.content_type,
         )
     if job.status != "uploading":
         raise ImportUploadError(
@@ -776,6 +789,10 @@ async def claim_upload_operation(
         file_name=job.file_name,
         size_bytes=job.size_bytes,
         upload_offset=job.upload_offset,
+        library_id=job.library_id,
+        uploaded_by_user_id=job.requested_by_user_id,
+        relative_path=job.relative_path,
+        content_type=job.content_type,
     )
 
 
@@ -1160,8 +1177,6 @@ async def complete_claimed_upload(
     locked = False
     lease: UploadClaimLease | None = None
     sha256: str | None = None
-    preflight_error: ImportUploadError | None = None
-    cleanup_pending_marker: str | None = None
     try:
         _try_lock_file(
             handle,
@@ -1179,113 +1194,77 @@ async def complete_claimed_upload(
                         status_code=409,
                         upload_offset=claim.upload_offset,
                     )
-                if Path(claim.file_name).suffix.lower() == ".doc":
-                    from app.services.doc_conversion import (
-                        DocConversionError,
-                        validate_doc_source,
-                    )
-
-                    try:
-                        await _to_thread_before_cancellation(
-                            validate_doc_source,
-                            path,
-                            max_bytes=config.doc_conversion_max_bytes,
-                        )
-                    except DocConversionError as exc:
-                        raise ImportUploadError(
-                            "invalid_doc_file",
-                            str(exc),
-                            status_code=415,
-                            upload_offset=claim.upload_offset,
-                        ) from exc
                 sha256 = await _to_thread_before_cancellation(
                     _sha256_handle,
                     handle,
                     lease.thread_stop_event,
                 )
-                try:
-                    await _to_thread_before_cancellation(
-                        preflight_completed_upload,
-                        path,
-                        claim.file_name,
-                        handle=handle,
-                    )
-                except ImportUploadError as exc:
-                    if exc.code not in _UPLOAD_PREFLIGHT_CODES:
-                        raise
-                    preflight_error = exc
                 lease.ensure_current()
             except asyncio.CancelledError:
                 if lease._lost_error is not None:
                     raise lease._lost_error from None
                 raise
 
+            # The staging handle is locked while the upload is validated. The
+            # storage adapter opens the source path independently; release the
+            # OS file lock before that copy so Windows does not deny the second
+            # reader. The database claim still fences other upload operations.
+            _unlock_file(handle)
+            locked = False
+            if claim.library_id is None:
+                raise ValueError("complete claim is missing library identity")
+            adapter = build_object_storage_adapter(config)
+            prepared = await prepare_file_resource(
+                adapter=adapter,
+                library_id=claim.library_id,
+                upload_context_id=claim.job_id,
+                file_name=claim.file_name,
+                content_type=claim.content_type,
+                relative_path=claim.relative_path,
+                source_path=path,
+                expected_size_bytes=claim.size_bytes,
+                expected_sha256=sha256,
+            )
+            resource = build_file_resource(
+                prepared,
+                library_id=claim.library_id,
+                uploaded_by_user_id=claim.uploaded_by_user_id,
+                file_name=claim.file_name,
+                relative_path=claim.relative_path,
+                resource_id=resource_id_for_upload_context(claim.job_id),
+            )
+            db.add(resource)
             await lease.stop_renewal()
             lease.ensure_current()
-            if preflight_error is not None:
-                cleanup_pending_marker = _encode_upload_preflight_error(
-                    preflight_error,
-                    cleanup_state="cleanup_pending",
+            result = await db.execute(
+                update(DocumentImportJob)
+                .where(
+                    DocumentImportJob.id == claim.job_id,
+                    DocumentImportJob.status == "uploading",
+                    DocumentImportJob.worker_id == claim.owner_token,
+                    DocumentImportJob.upload_offset == claim.size_bytes,
                 )
-                result = await db.execute(
-                    update(DocumentImportJob)
-                    .where(
-                        DocumentImportJob.id == claim.job_id,
-                        DocumentImportJob.status == "uploading",
-                        DocumentImportJob.worker_id == claim.owner_token,
-                        DocumentImportJob.upload_offset == claim.size_bytes,
-                    )
-                    .values(
-                        sha256=sha256,
-                        status="failed",
-                        current_stage="completed",
-                        last_error=cleanup_pending_marker,
-                        finished_at=datetime.now(timezone.utc),
-                        worker_id=None,
-                        claimed_at=None,
-                    )
-                    .returning(DocumentImportJob.id)
+                .values(
+                    sha256=sha256,
+                    file_resource_id=resource.id,
+                    status="queued",
+                    current_stage="queued",
+                    upload_completed_at=datetime.now(timezone.utc),
+                    worker_id=None,
+                    claimed_at=None,
                 )
-                if result.scalar_one_or_none() is None:
-                    await db.rollback()
-                    raise ImportUploadError(
-                        "upload_claim_lost",
-                        "upload ownership was lost; retry from the committed offset",
-                        status_code=409,
-                        upload_offset=claim.upload_offset,
-                        retry_after_seconds=config.import_upload_retry_after_seconds,
-                    )
-                await db.commit()
-            else:
-                assert sha256 is not None
-                result = await db.execute(
-                    update(DocumentImportJob)
-                    .where(
-                        DocumentImportJob.id == claim.job_id,
-                        DocumentImportJob.status == "uploading",
-                        DocumentImportJob.worker_id == claim.owner_token,
-                        DocumentImportJob.upload_offset == claim.size_bytes,
-                    )
-                    .values(
-                        sha256=sha256,
-                        status="queued",
-                        current_stage="queued",
-                        upload_completed_at=datetime.now(timezone.utc),
-                        worker_id=None,
-                        claimed_at=None,
-                    )
-                    .returning(DocumentImportJob.id)
+                .returning(DocumentImportJob.id)
+            )
+            if result.scalar_one_or_none() is None:
+                await db.rollback()
+                raise ImportUploadError(
+                    "upload_claim_lost",
+                    "upload ownership was lost; retry from the committed offset",
+                    status_code=409,
+                    upload_offset=claim.upload_offset,
+                    retry_after_seconds=config.import_upload_retry_after_seconds,
                 )
-                if result.scalar_one_or_none() is None:
-                    await db.rollback()
-                    raise ImportUploadError(
-                        "upload_claim_lost",
-                        "upload ownership was lost; retry from the committed offset",
-                        status_code=409,
-                        upload_offset=claim.upload_offset,
-                        retry_after_seconds=config.import_upload_retry_after_seconds,
-                    )
-                await db.commit()
+            await db.commit()
     except BaseException:
         with suppress(Exception):
             await db.rollback()
@@ -1297,32 +1276,6 @@ async def complete_claimed_upload(
                 _unlock_file(handle)
         handle.close()
 
-    if preflight_error is not None:
-        if await remove_staging_file(claim.staging_key, config):
-            cleanup_complete_marker = _encode_upload_preflight_error(
-                preflight_error,
-                cleanup_state="cleanup_complete",
-            )
-            try:
-                result = await db.execute(
-                    update(DocumentImportJob)
-                    .where(
-                        DocumentImportJob.id == claim.job_id,
-                        DocumentImportJob.status == "failed",
-                        DocumentImportJob.current_stage == "completed",
-                        DocumentImportJob.last_error == cleanup_pending_marker,
-                    )
-                    .values(last_error=cleanup_complete_marker)
-                    .returning(DocumentImportJob.id)
-                )
-                if result.scalar_one_or_none() is not None:
-                    await db.commit()
-                else:
-                    await db.rollback()
-            except Exception:
-                with suppress(Exception):
-                    await db.rollback()
-        raise preflight_error
     assert sha256 is not None
     return sha256
 

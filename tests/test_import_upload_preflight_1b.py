@@ -39,6 +39,10 @@ def _config(tmp_path: Path) -> SimpleNamespace:
         import_upload_global_inflight_limit=10,
         import_upload_user_inflight_limit=1,
         import_worker_max_attempts=3,
+        document_storage_provider="local",
+        document_files_dir=str(tmp_path / "objects"),
+        document_storage_endpoint_ref="primary",
+        document_storage_max_read_bytes=1024 * 1024,
     )
 
 
@@ -825,6 +829,10 @@ class _CompletionDb:
         self.pending_status = None
         self.pending_stage = None
         self.pending_error = None
+        self.added = []
+
+    def add(self, value) -> None:
+        self.added.append(value)
 
     async def execute(self, statement):
         status = _updated_value(statement, "status")
@@ -903,10 +911,14 @@ def _complete_claim(tmp_path: Path) -> import_uploads.UploadOperationClaim:
         file_name="encrypted.xlsx",
         size_bytes=1536,
         upload_offset=1536,
+        library_id=uuid.uuid4(),
+        uploaded_by_user_id=uuid.uuid4(),
+        relative_path="folder/encrypted.xlsx",
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
 
-def test_complete_rejection_commits_failed_then_unlinks_then_marks_cleanup_complete(
+def test_complete_keeps_office_processing_out_of_save_success(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -916,167 +928,19 @@ def test_complete_rejection_commits_failed_then_unlinks_then_marks_cleanup_compl
     db = _CompletionDb(job_id=claim.job_id, staging_path=path)
     monkeypatch.setattr(import_uploads, "keep_upload_claim_alive", _noop_claim_lease)
 
-    with pytest.raises(import_uploads.ImportUploadError) as exc_info:
-        asyncio.run(
-            import_uploads.complete_claimed_upload(
-                db,
-                claim=claim,
-                config=_config(tmp_path),
-            )
-        )
-
-    assert exc_info.value.code == "encrypted_office_file"
-    updates = [event for event in db.events if event[0] == "update"]
-    pending = next(
-        event
-        for event in updates
-        if isinstance(event[3], str)
-        and event[3].startswith(
-            f"{_PREFLIGHT_PREFIX}cleanup_pending:encrypted_office_file:"
+    digest = asyncio.run(
+        import_uploads.complete_claimed_upload(
+            db,
+            claim=claim,
+            config=_config(tmp_path),
         )
     )
-    assert pending[1] == "failed"
-    assert pending[2] == "completed"
-    pending_commit_index = next(
-        index
-        for index, event in enumerate(db.events)
-        if event[0] == "commit" and event[3] == pending[3]
-    )
-    complete_update_index = next(
-        index
-        for index, event in enumerate(db.events)
-        if event[0] == "update"
-        and isinstance(event[3], str)
-        and event[3].startswith(
-            f"{_PREFLIGHT_PREFIX}cleanup_complete:encrypted_office_file:"
-        )
-    )
-    assert db.events[pending_commit_index][4] is True
-    assert complete_update_index > pending_commit_index
-    assert db.events[complete_update_index][4] is False
-    assert path.exists() is False
 
-
-def test_complete_rejection_does_not_unlink_when_failed_transition_loses_claim(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    claim = _complete_claim(tmp_path)
-    path = tmp_path / claim.staging_key
-    _write_cfb(path, "EncryptionInfo", "EncryptedPackage")
-    db = _CompletionDb(
-        job_id=claim.job_id,
-        staging_path=path,
-        reject_failed_transition=True,
-    )
-    monkeypatch.setattr(import_uploads, "keep_upload_claim_alive", _noop_claim_lease)
-
-    with pytest.raises(import_uploads.ImportUploadError) as exc_info:
-        asyncio.run(
-            import_uploads.complete_claimed_upload(
-                db,
-                claim=claim,
-                config=_config(tmp_path),
-            )
-        )
-
-    assert exc_info.value.code == "upload_claim_lost"
-    assert any(event[0] == "update" and event[1] == "failed" for event in db.events)
+    assert len(digest) == 64
+    assert len(db.added) == 1
+    assert db.added[0].storage_status == "available"
+    assert any(event[0] == "update" and event[1] == "queued" for event in db.events)
     assert path.exists() is True
-
-
-def test_complete_rejection_keeps_cleanup_pending_when_staging_unlink_fails(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    claim = _complete_claim(tmp_path)
-    path = tmp_path / claim.staging_key
-    _write_cfb(path, "EncryptionInfo", "EncryptedPackage")
-    db = _CompletionDb(job_id=claim.job_id, staging_path=path)
-    cleanup_calls: list[str] = []
-
-    async def fail_cleanup(staging_key: str, config=None) -> bool:
-        cleanup_calls.append(staging_key)
-        return False
-
-    monkeypatch.setattr(import_uploads, "keep_upload_claim_alive", _noop_claim_lease)
-    monkeypatch.setattr(import_uploads, "remove_staging_file", fail_cleanup)
-
-    with pytest.raises(import_uploads.ImportUploadError) as exc_info:
-        asyncio.run(
-            import_uploads.complete_claimed_upload(
-                db,
-                claim=claim,
-                config=_config(tmp_path),
-            )
-        )
-
-    assert exc_info.value.code == "encrypted_office_file"
-    assert cleanup_calls == [claim.staging_key]
-    stored_errors = [
-        event[3]
-        for event in db.events
-        if event[0] == "update" and isinstance(event[3], str)
-    ]
-    assert any(
-        error.startswith(
-            f"{_PREFLIGHT_PREFIX}cleanup_pending:encrypted_office_file:"
-        )
-        for error in stored_errors
-    )
-    assert not any(
-        error.startswith(
-            f"{_PREFLIGHT_PREFIX}cleanup_complete:encrypted_office_file:"
-        )
-        for error in stored_errors
-    )
-    assert path.exists() is True
-
-
-def test_complete_rejection_keeps_cleanup_pending_when_final_marker_commit_fails(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    claim = _complete_claim(tmp_path)
-    path = tmp_path / claim.staging_key
-    _write_cfb(path, "EncryptionInfo", "EncryptedPackage")
-    db = _CompletionDb(
-        job_id=claim.job_id,
-        staging_path=path,
-        fail_cleanup_complete_commit=True,
-    )
-    monkeypatch.setattr(import_uploads, "keep_upload_claim_alive", _noop_claim_lease)
-
-    with pytest.raises(import_uploads.ImportUploadError) as exc_info:
-        asyncio.run(
-            import_uploads.complete_claimed_upload(
-                db,
-                claim=claim,
-                config=_config(tmp_path),
-            )
-        )
-
-    assert exc_info.value.code == "encrypted_office_file"
-    assert path.exists() is False
-    assert any(
-        event[0] == "commit"
-        and isinstance(event[3], str)
-        and event[3].startswith(
-            f"{_PREFLIGHT_PREFIX}cleanup_pending:encrypted_office_file:"
-        )
-        and event[4] is True
-        for event in db.events
-    )
-    assert any(
-        event[0] == "commit"
-        and isinstance(event[3], str)
-        and event[3].startswith(
-            f"{_PREFLIGHT_PREFIX}cleanup_complete:encrypted_office_file:"
-        )
-        and event[4] is False
-        for event in db.events
-    )
-    assert db.events[-1][0] == "rollback"
 
 
 def test_legacy_complete_upload_uses_the_same_content_preflight(
@@ -1335,6 +1199,8 @@ def test_1a_complete_claim_and_offset_mismatch_remain_idempotent(
         status="queued",
         staging_key=f"{uuid.uuid4().hex}.upload",
         file_name="sample.txt",
+        relative_path=None,
+        content_type="text/plain",
         size_bytes=7,
         upload_offset=7,
     )

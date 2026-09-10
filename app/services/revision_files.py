@@ -17,7 +17,6 @@ from app.models.document_revision_file import DocumentRevisionFile
 from app.schemas.storage import SourceLocatorV1, StorageLocatorV1
 from app.services.object_storage_contracts import ObjectStorageError
 
-
 _SAFE_SUFFIX = re.compile(r"\.[a-z0-9][a-z0-9._-]{0,15}")
 
 
@@ -112,6 +111,23 @@ async def _verify_object(
             "object_verification_failed", "stored object content verification failed"
         )
     return content
+
+
+async def verify_stored_object(
+    *,
+    adapter,
+    locator: StorageLocatorV1,
+    expected_sha256: str,
+    expected_size_bytes: int,
+) -> bytes:
+    """Verify a stored object before any database row claims its ownership."""
+
+    return await _verify_object(
+        adapter=adapter,
+        locator=locator,
+        expected_sha256=expected_sha256,
+        expected_size_bytes=expected_size_bytes,
+    )
 
 
 async def prepare_managed_file_object(

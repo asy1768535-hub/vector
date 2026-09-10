@@ -136,6 +136,7 @@
 | 20 | [修订与删除一致性](./20-revision-and-deletion-consistency.md) | revision / 删除 outbox / 三阶段重建 |
 | 21 | [批次 A 实施方案](./21-batch-a-implementation-plan.md) | 一致性实现记录 |
 | 22 | [内部试运行清单](./22-internal-pilot-checklist.md) | 上线门槛 + 六步验收 |
+| 58 | [文件资源与知识处理解耦：阶段实施规划](./58-file-resource-processing-decoupling-plan.md) | 原文件资源库、后台知识处理与可重处理边界 |
 
 ## 历史版本与阶段记录（保留原时点）
 

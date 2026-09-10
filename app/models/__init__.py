@@ -37,6 +37,7 @@ from app.models.document_revision_file import DocumentRevisionFile
 from app.models.document_source import DocumentSource
 from app.models.document import Document
 from app.models.document_import_job import DocumentImportJob
+from app.models.file_resource import FileResource
 from app.models.embedding_job import EmbeddingJob
 from app.models.entity import Entity
 from app.models.entity_alias import EntityAlias
@@ -134,6 +135,7 @@ __all__ = [
     "CleanupOutbox",
     "Document",
     "DocumentImportJob",
+    "FileResource",
     "DocumentBlock",
     "DocumentFile",
     "DocumentRevision",
