@@ -37,12 +37,6 @@ from app.services.file_resources import (
     resource_id_for_upload_context,
 )
 from app.services.import_upload_preflight import inspect_office_upload
-from app.services.file_resources import (
-    build_file_resource,
-    prepare_file_resource,
-    resource_id_for_upload_context,
-)
-from app.services.import_upload_preflight import inspect_office_upload
 from app.services.object_storage import build_object_storage_adapter
 
 log = logging.getLogger(__name__)
