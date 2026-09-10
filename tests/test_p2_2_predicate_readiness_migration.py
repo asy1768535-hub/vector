@@ -90,4 +90,4 @@ def test_0067_offline_upgrade_and_downgrade_emit_targeted_sql():
 def test_0072_is_the_only_alembic_head():
     config = Config(str(ROOT / "alembic.ini"))
 
-    assert ScriptDirectory.from_config(config).get_heads() == ["0075"]
+    assert ScriptDirectory.from_config(config).get_heads() == ["0076"]

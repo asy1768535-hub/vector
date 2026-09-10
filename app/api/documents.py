@@ -1355,10 +1355,6 @@ async def import_file(
                 min_text_chars=settings.pdf_ocr_min_text_chars,
                 render_dpi=settings.pdf_ocr_render_dpi,
                 max_ocr_pages=settings.pdf_ocr_max_pages,
-                split_enabled=settings.pdf_split_enabled,
-                split_max_pages=settings.pdf_split_max_pages,
-                split_max_bytes=settings.pdf_split_max_bytes,
-                split_concurrency=settings.pdf_split_concurrency,
             )
         except pdf_extract.PdfExtractError as exc:
             # 含 PdfOcrUnavailableError（需 OCR 但依赖缺）——消息已是用户可读的提示
@@ -1590,4 +1586,3 @@ async def import_file(
         "documents": ingested,
         "errors": errors,
     }
-
