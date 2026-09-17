@@ -180,7 +180,13 @@ def test_document_and_revision_cleanup_call_graph_purge_in_the_same_write_path()
     with (
         patch(
             "app.services.graph_evidence.mark_document_graph_evidence_stale",
-            new=AsyncMock(),
+            new=AsyncMock(
+                return_value=SimpleNamespace(
+                    stale_entity_mentions=0,
+                    stale_relation_evidence=0,
+                    stale_relations=0,
+                )
+            ),
         ),
         patch(
             "app.services.graph_evidence.mark_document_revision_graph_evidence_stale",

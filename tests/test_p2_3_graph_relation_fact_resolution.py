@@ -16,9 +16,11 @@ from app.models.stable_predicate_evolution import (
     StablePredicateMappingEvolutionAssignment,
 )
 from app.services.graph_relation_fact_resolution import (
+    GraphRelationFactPreflight,
     _lock_logical_fact_v2,
     _logical_fact_lock_key,
     build_graph_relation_fact_plan,
+    materialize_resolved_graph_relation_fact,
     preflight_graph_relation_candidate_fact,
     resolve_graph_relation_candidate_fact,
     source_occurrence_fingerprint_v1,
@@ -530,6 +532,37 @@ def test_same_source_replay_reuses_current_decision_assertion_and_bridges():
     assert relation.logical_fact_id == logical_fact.id
     assert relation_evidence.fact_assertion_id == assertion.id
     assert db.added == []
+
+
+def test_materialization_flushes_new_logical_fact_before_adding_its_assertion():
+    predicate = _predicate()
+    candidate = _candidate()
+    relation = _relation()
+    plan = _plan(predicate=predicate, candidate=candidate, evidence=_evidence())
+    preflight = GraphRelationFactPreflight(
+        plan=plan,
+        decision=None,
+        logical_fact=None,
+        assertion=None,
+        supersedes=None,
+    )
+    db = _ResolutionDb(results=[])
+
+    materialization = __import__("asyncio").run(
+        materialize_resolved_graph_relation_fact(
+            db,
+            library_id=LIBRARY_ID,
+            candidate=candidate,
+            relation=relation,
+            source_entity=_entity(SOURCE_CANONICAL_ID),
+            preflight=preflight,
+        )
+    )
+
+    assert materialization.logical_outcome == "CREATE"
+    assert materialization.assertion_outcome == "CREATE"
+    assert [type(row) for row in db.added] == [LogicalFact, FactAssertion]
+    assert db.flush_count == 1
 
 
 def test_rejected_predicate_persists_rejected_decision_without_fact_writes():

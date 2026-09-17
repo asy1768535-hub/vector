@@ -10,7 +10,9 @@ export const DEFAULT_IMPORT_CONFIGURATION = Object.freeze({
         '.txt', '.md', '.markdown', '.rst', '.log', '.ini', '.cfg', '.conf',
         '.json', '.yaml', '.yml', '.xml', '.html', '.htm', '.csv', '.tsv',
         '.doc', '.docx', '.pptx', '.xls', '.xlsx', '.pdf',
-        '.bmp', '.jpeg', '.jpg', '.png', '.tif', '.tiff', '.webp',
+        '.bmp', '.jpeg', '.jpg', '.png', '.tif', '.tiff', '.webp', '.zip',
+        '.mp4', '.mov', '.mkv', '.avi', '.webm',
+        '.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.opus',
     ],
 });
 
@@ -305,6 +307,14 @@ export async function runConcurrent(items, concurrency, worker, shouldRun = () =
 }
 
 export function importDisplayStatus(job) {
+    // Source transfer owns the import screen. Downstream processing failures
+    // must not override an already stored original file.
+    const sourceSaved = job?.file_status === 'available'
+        || (job?.file_status == null && Boolean(job?.upload_completed_at));
+    if (sourceSaved) {
+        return job?.result_operation === 'unchanged' ? 'skipped' : 'submitted';
+    }
+    if (['failed', 'error'].includes(job?.file_status)) return 'failed';
     if (job?.status === 'succeeded') {
         return job?.result_operation === 'unchanged' ? 'skipped' : 'submitted';
     }
@@ -315,37 +325,24 @@ export function importDisplayStatus(job) {
 }
 
 export function importStageProgress(job, uploadPercent = 0) {
-    const stage = job?.current_stage || 'uploading';
-    if (stage === 'uploading') return Math.min(45, Math.round(uploadPercent * 0.45));
-    if (stage === 'queued' || stage === 'validating') return 48;
-    if (stage === 'converting') return 52;
-    if (stage === 'conversion_ready') return 54;
-    if (stage === 'parsing') return 56;
-    if (stage === 'chunking') return 66;
-    if (stage === 'embedding') return 78;
-    if (stage === 'graph') return 90;
-    return 100;
+    if (job?.file_status === 'available'
+        || (job?.file_status == null && job?.upload_completed_at)) return 100;
+    return Math.max(0, Math.min(100, Math.round(Number(uploadPercent) || 0)));
 }
 
 export const IMPORT_STAGE_LABEL = Object.freeze({
     uploading: '上传中',
-    queued: '已接收/排队',
-    converting: '转换旧版 Word',
-    conversion_ready: '等待解析转换结果',
-    validating: '校验文件',
-    parsing: '解析中',
-    chunking: '生成切片',
-    embedding: '向量化中',
-    graph: '图谱/审核中',
-    completed: '处理完成',
+    queued: '等待上传',
+    submitted: '文件已保存',
+    skipped: '文件未变化',
+    failed: '上传失败',
 });
 
 export function importStageLabel(job) {
-    if (
-        job?.current_stage === 'graph'
-        && job?.schema_discovery_state === 'waiting_schema'
-    ) {
-        return '等待批次 Schema';
+    if (job?.file_status === 'available'
+        || (job?.file_status == null && job?.upload_completed_at)) {
+        return job?.result_operation === 'unchanged' ? IMPORT_STAGE_LABEL.skipped : IMPORT_STAGE_LABEL.submitted;
     }
-    return IMPORT_STAGE_LABEL[job?.current_stage] || '等待处理';
+    if (['failed', 'error'].includes(job?.file_status)) return IMPORT_STAGE_LABEL.failed;
+    return IMPORT_STAGE_LABEL[job?.current_stage] || IMPORT_STAGE_LABEL[job?.status] || '等待上传';
 }

@@ -152,6 +152,38 @@ def assert_revision_file_storage_startup_security() -> None:
             ) from None
 
 
+async def check_object_storage_startup() -> None:
+    """Verify the configured object-storage bucket before serving uploads.
+
+    The check is intentionally skipped only for the default local/development
+    mode.  A remote provider is checked even when the legacy revision-file
+    flag is off because FileResource-backed imports use the same adapter.
+    """
+    if (
+        settings.document_storage_provider == "local"
+        and not settings.revision_file_storage_enabled
+    ):
+        return
+    from app.services.deployment_bootstrap import (
+        DeploymentBootstrapError,
+        prepare_document_storage,
+    )
+
+    try:
+        await prepare_document_storage(settings)
+    except DeploymentBootstrapError as exc:
+        message = str(exc)
+        categories = (
+            "network_error",
+            "tls_error",
+            "authentication_error",
+            "bucket_not_found",
+            "permission_denied",
+        )
+        category = next((item for item in categories if item in message), "provider_unavailable")
+        raise RuntimeError(f"[storage] configured object storage is unavailable: {category}") from None
+
+
 def assert_revision_retention_startup_security() -> None:
     validate_revision_retention_startup(settings)
     validate_revision_cleanup_startup(settings)
@@ -247,6 +279,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     assert_graph_extraction_startup_security()
     assert_knowledge_artifact_startup_security()
     assert_revision_file_storage_startup_security()
+    await check_object_storage_startup()
     assert_revision_retention_startup_security()
     assert_graph_publication_startup_security()
     assert_graph_retrieval_startup_security()

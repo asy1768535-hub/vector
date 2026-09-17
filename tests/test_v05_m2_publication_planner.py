@@ -365,6 +365,32 @@ def test_dry_run_planner_is_deterministic_and_persists_nothing():
     assert db1.added == []
 
 
+def test_explicit_disabled_ontology_is_allowed_only_when_requested():
+    ontology = _ontology()
+    ontology.status = "disabled"
+    objects = _scope_objects()
+    objects[(OntologyVersion, ONTOLOGY_ID)] = ontology
+    db = FakeDB(objects=objects)
+
+    with pytest.raises(GraphPublicationPlanError) as exc_info:
+        _plan(db, dry_run=True)
+
+    assert exc_info.value.code == "ontology_not_active"
+
+    allowed = FakeDB(
+        objects=objects,
+        query_rows=_query_rows(
+            include_lock_query=False,
+            include_idempotency_query=False,
+            include_reuse_query=False,
+        ),
+    )
+    result = _plan(allowed, dry_run=True, allow_explicit_disabled=True)
+
+    assert result.publication.entity_count == 2
+    assert result.publication.relation_count == 1
+
+
 def test_planner_enforces_configured_item_limit_by_default():
     db = FakeDB(
         objects=_scope_objects(),

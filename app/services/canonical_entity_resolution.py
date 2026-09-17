@@ -104,6 +104,10 @@ class EntityResolutionInput:
     observed_properties: Mapping[str, Any] | None = None
     context: Mapping[str, Any] | None = None
     graph_entity_candidate_id: uuid.UUID | None = None
+    # This is deliberately inert unless a management-gated caller sets it.
+    # It records an explicit choice to create a distinct canonical identity
+    # when automatic cross-ontology matching cannot establish one safely.
+    confirm_create_new_identity: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -373,6 +377,27 @@ async def _active_subject_decision(db, *, library_id: uuid.UUID, subject_fingerp
     if len(active) > 1:
         raise ResolutionPersistenceError("multiple active decisions for one subject")
     return active[0] if active else None
+
+
+async def _active_manual_candidate_decision(
+    db,
+    *,
+    library_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+) -> EntityResolutionDecision | None:
+    result = await db.execute(
+        select(EntityResolutionDecision).where(
+            EntityResolutionDecision.library_id == library_id,
+            EntityResolutionDecision.graph_entity_candidate_id == candidate_id,
+            EntityResolutionDecision.decision_kind == ENTITY_RESOLUTION_CREATE_NEW,
+            EntityResolutionDecision.method == "manual_create_new_identity",
+            EntityResolutionDecision.lifecycle_status == ENTITY_RESOLUTION_STATUS_ACTIVE,
+        )
+    )
+    rows = list(result.scalars().all())
+    if len(rows) > 1:
+        raise ResolutionPersistenceError("multiple active manual candidate decisions")
+    return rows[0] if rows else None
 
 
 async def _load_canonical(db, canonical_id: uuid.UUID | None) -> CanonicalEntity | None:
@@ -877,11 +902,51 @@ async def resolve_canonical_entity(db, request: EntityResolutionInput) -> Entity
                 entity_id=existing_entity.id,
             )
 
+    if candidate_id is not None:
+        manual_candidate = await _active_manual_candidate_decision(
+            db,
+            library_id=request.library_id,
+            candidate_id=candidate_id,
+        )
+        if manual_candidate is not None and manual_candidate.canonical_entity_id is not None:
+            manual_canonical = await _load_canonical(
+                db, manual_candidate.canonical_entity_id
+            )
+            if (
+                manual_canonical is not None
+                and manual_canonical.library_id == request.library_id
+                and manual_canonical.status == "active"
+            ):
+                return EntityResolutionResult(
+                    manual_candidate,
+                    manual_canonical,
+                    False,
+                    False,
+                )
+
     active_subject = await _active_subject_decision(
         db,
         library_id=request.library_id,
         subject_fingerprint=prepared.subject_fingerprint,
     )
+    if (
+        active_subject is not None
+        and active_subject.decision_kind == ENTITY_RESOLUTION_CREATE_NEW
+        and active_subject.method == "manual_create_new_identity"
+        and active_subject.canonical_entity_id is not None
+    ):
+        active_canonical = await _load_canonical(db, active_subject.canonical_entity_id)
+        if (
+            active_canonical is not None
+            and active_canonical.library_id == request.library_id
+            and active_canonical.status == "active"
+        ):
+            return EntityResolutionResult(
+                active_subject,
+                active_canonical,
+                False,
+                False,
+            )
     excluded_canonical_ids = {
         active_subject.canonical_entity_id
     } if active_subject is not None and active_subject.decision_kind == ENTITY_RESOLUTION_CREATE_NEW and active_subject.canonical_entity_id else set()
@@ -892,6 +957,20 @@ async def resolve_canonical_entity(db, request: EntityResolutionInput) -> Entity
         request=request,
         excluded_canonical_ids=excluded_canonical_ids,
     )
+    if request.confirm_create_new_identity:
+        return await _persist(
+            db,
+            prepared,
+            request,
+            candidate_id=candidate_id,
+            candidate_snapshot=candidate_snapshot,
+            decision_kind=ENTITY_RESOLUTION_CREATE_NEW,
+            canonical_entity=None,
+            method="manual_create_new_identity",
+            confidence=1.0,
+            reason_code=None,
+            entity_id=existing_entity.id if existing_entity is not None else None,
+        )
     if len(eligible) == 1:
         if prepared.identifier_snapshot is not None:
             return await _persist(

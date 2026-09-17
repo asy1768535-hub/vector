@@ -144,7 +144,9 @@ DELETE /libraries/{slug}/documents/{doc_id}
 ```
 
 - 列表支持 `status` / `external_id` 过滤
-- 删除 = 软删 PG + BackgroundTasks 异步删 Qdrant points（按 payload.document_id 过滤）
+- 删除 = 软删 PG + 事务性清理队列异步删除 Qdrant points 和对应 FileResource 原始对象；对象删除失败会重试
+
+当对象存储提供方为 `minio` 时，兼容入口 `POST /import-file` 只负责完成源文件上传、FileResource 校验和任务入队，不再在 HTTP 请求中等待解析、Embedding 或图谱抽取。
 
 ## 失败排查
 
@@ -192,10 +194,16 @@ text 和 chunk；因此 OCR 结果错误时仍可按文件名检索，没有可�
 `Upload-Offset` 续传。全部字节写入并 `fsync` 后，客户端调用
 `POST /libraries/{slug}/import-sessions/{job_id}/complete`。
 
-Complete 只有在文件大小、旧版 DOC 结构和 SHA-256 校验完成、任务提交为 `queued` 后
-才返回 `202`。页面显示“已接收/排队”后可以关闭浏览器；Importer、Embedding、图谱
-抽取和审核均由后台继续，不在上传请求内执行。`409` 或 `429` 响应可能带
+Complete 只有在文件大小、格式预检和 SHA-256 校验完成、原文件资源持久化后才返回
+`202`；普通文件随后提交为 `queued`。页面显示“文件已保存”后可以关闭浏览器；
+Importer、Embedding、图谱抽取和审核均由后台继续，不在上传进度中展示。`409` 或 `429` 响应可能带
 `Upload-Offset` 与 `Retry-After`，重试必须以服务端已提交 offset 为准，避免重复字节。
+
+`.zip` 使用同一套上传会话，不提供单独的压缩包入口。Complete 会先持久化原 ZIP，
+再安全解压其中的受支持文件；子文件以普通导入任务进入后台处理，并保存到
+`压缩包名 [ZIP]` 文件夹。原 ZIP 不作为知识文档解析或展示。目录穿越、绝对路径、
+重复路径、符号链接、加密条目和超过条目数、单文件大小、解压总量或压缩率上限的
+压缩包会被拒绝展开；不支持的普通文件类型会被忽略。
 
 ## 批量摄入
 

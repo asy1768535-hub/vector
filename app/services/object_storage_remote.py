@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import io
+import os
+import ssl
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable
@@ -13,8 +15,31 @@ from app.services.object_storage_contracts import (
     StorageObjectVersion,
 )
 
-
 _NOT_FOUND_CODES = {"NoSuchKey", "NoSuchObject", "NoSuchVersion", "NotFound"}
+
+
+def classify_remote_storage_error(error: object) -> str:
+    """Return a stable category without exposing provider exception text."""
+    current = error
+    for _ in range(5):
+        code = getattr(current, "code", None)
+        if code in {"InvalidAccessKeyId", "SignatureDoesNotMatch", "InvalidToken", "ExpiredToken"}:
+            return "authentication_error"
+        if code in {"AccessDenied", "AllAccessDisabled"}:
+            return "permission_denied"
+        if code in {"NoSuchBucket", "NoSuchBucketPolicy"}:
+            return "bucket_not_found"
+        if isinstance(current, ssl.SSLError):
+            return "tls_error"
+        if isinstance(current, (ConnectionError, TimeoutError, OSError)):
+            return "network_error"
+        next_error = getattr(current, "__cause__", None) or getattr(
+            current, "__context__", None
+        )
+        if next_error is None or next_error is current:
+            break
+        current = next_error
+    return "provider_unavailable"
 
 
 def _validate_remote_key(object_key: str) -> None:
@@ -91,7 +116,11 @@ class MinioObjectStorageAdapter:
                 raise ObjectStorageError(
                     "object_not_found", "stored object was not found"
                 ) from None
-            raise ObjectStorageError(code, "remote object storage operation failed") from None
+            category = classify_remote_storage_error(exc)
+            error_code = code if category == "provider_unavailable" else f"provider_{category}"
+            raise ObjectStorageError(
+                error_code, "remote object storage operation failed"
+            ) from None
 
     async def put(
         self, object_key: str, content: bytes, content_type: str | None
@@ -153,6 +182,43 @@ class MinioObjectStorageAdapter:
                     release()
 
         return await self._call("provider_read_failed", operation)
+
+    async def materialize(
+        self, object_key: str, object_version: str | None, destination_path: Path
+    ) -> None:
+        _validate_remote_key(object_key)
+
+        def operation() -> None:
+            destination = Path(destination_path)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temporary = destination.with_name(f".{destination.name}.part")
+            response = self._client.get_object(
+                self.bucket, object_key, version_id=object_version
+            )
+            total = 0
+            try:
+                with temporary.open("wb") as handle:
+                    while chunk := response.read(1024 * 1024):
+                        total += len(chunk)
+                        if total > self._max_read_bytes:
+                            raise ObjectStorageError(
+                                "object_too_large", "stored object exceeds the read limit"
+                            )
+                        handle.write(chunk)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, destination)
+            finally:
+                if temporary.exists():
+                    temporary.unlink(missing_ok=True)
+                close = getattr(response, "close", None)
+                if callable(close):
+                    close()
+                release = getattr(response, "release_conn", None)
+                if callable(release):
+                    release()
+
+        await self._call("provider_read_failed", operation)
 
     async def stat(
         self, object_key: str, object_version: str | None
@@ -220,7 +286,11 @@ class OssObjectStorageAdapter:
                 raise ObjectStorageError(
                     "object_not_found", "stored object was not found"
                 ) from None
-            raise ObjectStorageError(code, "remote object storage operation failed") from None
+            category = classify_remote_storage_error(exc)
+            error_code = code if category == "provider_unavailable" else f"provider_{category}"
+            raise ObjectStorageError(
+                error_code, "remote object storage operation failed"
+            ) from None
 
     @staticmethod
     def _params(object_version: str | None) -> dict[str, str] | None:
@@ -271,6 +341,40 @@ class OssObjectStorageAdapter:
             return content
 
         return await self._call("provider_read_failed", operation)
+
+    async def materialize(
+        self, object_key: str, object_version: str | None, destination_path: Path
+    ) -> None:
+        _validate_remote_key(object_key)
+
+        def operation() -> None:
+            destination = Path(destination_path)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temporary = destination.with_name(f".{destination.name}.part")
+            result = self._bucket_client.get_object(
+                object_key, params=self._params(object_version)
+            )
+            total = 0
+            try:
+                with temporary.open("wb") as handle:
+                    while chunk := result.read(1024 * 1024):
+                        total += len(chunk)
+                        if total > self._max_read_bytes:
+                            raise ObjectStorageError(
+                                "object_too_large", "stored object exceeds the read limit"
+                            )
+                        handle.write(chunk)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, destination)
+            finally:
+                if temporary.exists():
+                    temporary.unlink(missing_ok=True)
+                close = getattr(result, "close", None)
+                if callable(close):
+                    close()
+
+        await self._call("provider_read_failed", operation)
 
     async def stat(
         self, object_key: str, object_version: str | None

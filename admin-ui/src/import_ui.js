@@ -5,7 +5,9 @@ export const ALLOWED_EXTENSIONS = new Set([
     '.txt', '.md', '.markdown', '.rst', '.log', '.ini', '.cfg', '.conf',
     '.json', '.yaml', '.yml', '.xml', '.html', '.htm', '.csv', '.tsv',
     '.docx', '.pptx', '.xls', '.xlsx', '.pdf',
-    '.bmp', '.jpeg', '.jpg', '.png', '.tif', '.tiff', '.webp',
+    '.bmp', '.jpeg', '.jpg', '.png', '.tif', '.tiff', '.webp', '.zip',
+    '.mp4', '.mov', '.mkv', '.avi', '.webm',
+    '.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.opus',
 ]);
 
 export const MAX_FILE_SIZE = 500 * 1024 * 1024;
@@ -35,6 +37,7 @@ export function securityLevelLabel(value) {
 export const LEGACY_SAVE_AS = {
     '.doc': '请另存为 .docx 后再上传',
 };
+const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.mkv', '.avi', '.webm']);
 
 export const OP_LABEL = { created: '新建', updated: '已更新', unchanged: '未变更' };
 export const OP_TAG = { created: 'success', updated: 'warning', unchanged: 'info' };
@@ -226,7 +229,9 @@ export function validateFile(file, configuration = null) {
     // 3) Size check
     const effectiveMaxBytes = ext === '.doc' && configuration?.doc_max_file_bytes
         ? Math.min(maxFileBytes, configuration.doc_max_file_bytes)
-        : maxFileBytes;
+        : VIDEO_EXTENSIONS.has(ext) && configuration?.video_max_file_bytes
+            ? Math.min(maxFileBytes, configuration.video_max_file_bytes)
+            : maxFileBytes;
     if (file.size > effectiveMaxBytes) {
         return {
             valid: false,

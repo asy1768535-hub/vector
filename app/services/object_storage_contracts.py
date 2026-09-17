@@ -39,6 +39,11 @@ class ObjectStorageAdapter(Protocol):
 
     async def read(self, object_key: str, object_version: str | None) -> bytes: ...
 
+    async def materialize(
+        self, object_key: str, object_version: str | None, destination_path: Path
+    ) -> None: ...
+
+
     async def stat(
         self, object_key: str, object_version: str | None
     ) -> StorageObjectStat: ...

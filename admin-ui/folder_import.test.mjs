@@ -40,6 +40,7 @@ test('upload configuration keeps daily defaults, admin maximums, and legacy form
     );
     assert.equal(DEFAULT_IMPORT_CONFIGURATION.allowed_extensions.includes('.doc'), true);
     assert.equal(DEFAULT_IMPORT_CONFIGURATION.allowed_extensions.includes('.xls'), true);
+    assert.equal(DEFAULT_IMPORT_CONFIGURATION.allowed_extensions.includes('.zip'), true);
     assert.equal(DEFAULT_IMPORT_CONFIGURATION.chunk_bytes, 32 * 1024 * 1024);
     assert.equal(DEFAULT_IMPORT_CONFIGURATION.upload_concurrency, 1);
 });
@@ -157,25 +158,23 @@ test('concurrency pool skips a pending item removed from the live queue', async 
     assert.equal(executed, 1);
 });
 
-test('unified progress reserves stages for parsing embedding and graph', () => {
-    assert.equal(importStageProgress({ current_stage: 'uploading' }, 50), 23);
-    assert.equal(importStageProgress({ current_stage: 'converting' }, 100), 52);
-    assert.equal(importStageProgress({ current_stage: 'conversion_ready' }, 100), 54);
-    assert.equal(importStageProgress({ current_stage: 'parsing' }, 100), 56);
-    assert.equal(importStageProgress({ current_stage: 'embedding' }, 100), 78);
-    assert.equal(importStageProgress({ current_stage: 'graph' }, 100), 90);
+test('upload progress reports source bytes only', () => {
+    assert.equal(importStageProgress({ current_stage: 'uploading' }, 50), 50);
+    assert.equal(importStageProgress({ current_stage: 'converting' }, 100), 100);
+    assert.equal(importStageProgress({ current_stage: 'graph' }, 100), 100);
     assert.equal(importStageProgress({ current_stage: 'completed' }, 100), 100);
 });
 
-test('legacy Word conversion stages have user-facing labels', () => {
-    assert.equal(importStageLabel({ current_stage: 'converting' }), '转换旧版 Word');
-    assert.equal(importStageLabel({ current_stage: 'conversion_ready' }), '等待解析转换结果');
+test('upload labels describe source receipt', () => {
+    assert.equal(importStageLabel({ current_stage: 'uploading' }), '上传中');
+    assert.equal(importStageLabel({ file_status: 'available', upload_completed_at: 'now' }), '文件已保存');
 });
 
-test('schema coordination is not labeled as active graph extraction', () => {
+test('downstream failure does not change a stored source label', () => {
     assert.equal(importStageLabel({
+        status: 'failed',
         current_stage: 'graph',
-        schema_discovery_state: 'waiting_schema',
-    }), '等待批次 Schema');
-    assert.equal(importStageLabel({ current_stage: 'graph' }), '图谱/审核中');
+        file_status: 'available',
+        upload_completed_at: 'now',
+    }), '文件已保存');
 });

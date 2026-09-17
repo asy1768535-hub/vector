@@ -558,6 +558,7 @@ def test_complete_validates_file_before_conditional_queued_commit(
     assert events == [
         "stat",
         "sha256",
+        "queued-commit",
         "stat",
         "conditional-update",
         "queued-commit",

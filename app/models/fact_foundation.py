@@ -16,11 +16,11 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PgUUID
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
-
 
 STABLE_PREDICATE_TEMPORAL_CLASSES = (
     "static_fact",
@@ -274,7 +274,9 @@ class LogicalFact(Base):
     object_canonical_entity_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         PgUUID(as_uuid=True), nullable=True, index=True
     )
-    object_value: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    object_value: Mapped[Optional[dict[str, Any]]] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     identity_qualifiers: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )
@@ -374,14 +376,20 @@ class FactAssertion(Base):
     asserted_object_canonical_entity_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         PgUUID(as_uuid=True), nullable=True
     )
-    asserted_value: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    asserted_value: Mapped[Optional[dict[str, Any]]] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     polarity: Mapped[str] = mapped_column(String(16), nullable=False, default="affirmed", server_default="affirmed")
     modality: Mapped[str] = mapped_column(String(16), nullable=False, default="unknown", server_default="unknown")
     qualifiers: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )
-    valid_time: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
-    effective_time: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    valid_time: Mapped[Optional[dict[str, Any]]] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    effective_time: Mapped[Optional[dict[str, Any]]] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active", server_default="active")
     confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     source_kind: Mapped[str] = mapped_column(String(32), nullable=False, default="manual", server_default="manual")

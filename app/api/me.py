@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.documents import _lock_writable
 from app.auth.backend import current_active_user
 from app.casbin import service as casbin_service
 from app.config import settings
@@ -19,6 +20,7 @@ from app.models.library import Library
 from app.models.user import User
 from app.schemas.admin import PermissionMatrixRow
 from app.schemas.documents import (
+    PersonalFileFolderDeleteResponse,
     PersonalFileFolderRead,
     PersonalFilePageRead,
     PersonalFileRead,
@@ -27,6 +29,11 @@ from app.schemas.documents import (
     PersonalImportTaskPageRead,
     PersonalImportTaskRead,
     PersonalImportTaskSummaryRead,
+    StoredFileDeleteRead,
+    StoredFileDownloadRead,
+    StoredFileFolderRead,
+    StoredFilePageRead,
+    StoredFileRead,
 )
 from app.services import import_uploads
 from app.services.organization_authorization import (
@@ -68,7 +75,7 @@ def _raise_personal_task_error(exc: import_uploads.ImportUploadError) -> None:
             status.HTTP_404_NOT_FOUND,
             {"code": "folder_not_found", "message": "文件夹不存在或无权访问"},
         ) from exc
-    if exc.code == "job_not_found":
+    if exc.code in {"job_not_found", "stored_file_not_found"}:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
             {"code": "task_not_found", "message": "任务不存在或无权访问"},
@@ -91,6 +98,9 @@ def _raise_personal_task_error(exc: import_uploads.ImportUploadError) -> None:
         "task_stale": "文件已更新或删除，请刷新任务状态",
         "attempt_budget_exhausted": "重试次数已用完，请重新上传文件",
         "job_not_retryable": "当前任务暂不可重试，请刷新后再试",
+        "stored_file_delete_document_required": "该文件已生成知识资产，请使用现有删除功能",
+        "stored_file_processing_active": "文件仍在处理中，暂时不能删除",
+        "stored_file_download_unavailable": "文件下载暂不可用，请稍后重试",
     }
     raise HTTPException(
         status.HTTP_409_CONFLICT,
@@ -192,6 +202,176 @@ async def list_my_files(
         file_total=result.file_total,
         page=result.page,
         page_size=result.page_size,
+    )
+
+
+@router.get("/stored-files", response_model=StoredFilePageRead)
+async def list_my_stored_files(
+    library_slug: str = Query(min_length=1, max_length=128),
+    path: str = Query(default="", max_length=2048),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50),
+    user: User = Depends(current_active_user),
+    db: AsyncSession = Depends(get_db),
+) -> StoredFilePageRead:
+    """Net-disk view of verified originals, including storage-only media."""
+
+    libraries_by_id = await _personal_task_libraries(db, user=user)
+    library = next(
+        (item for item in libraries_by_id.values() if item.slug == library_slug),
+        None,
+    )
+    if library is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            {"code": "library_not_found", "message": "知识库不存在或无权访问"},
+        )
+    try:
+        result = await import_uploads.list_stored_files(
+            db,
+            user_id=user.id,
+            library_id=library.id,
+            path=path,
+            page=page,
+            page_size=page_size,
+        )
+    except import_uploads.ImportUploadError as exc:
+        _raise_personal_task_error(exc)
+    return StoredFilePageRead(
+        library_slug=library.slug,
+        path=result.path,
+        folders=[
+            StoredFileFolderRead(
+                name=folder.name,
+                path=folder.path,
+                file_total=folder.file_total,
+            )
+            for folder in result.folders
+        ],
+        files=[
+            StoredFileRead(
+                file_resource_id=file.file_resource_id,
+                document_id=file.document_id,
+                file_name=file.file_name,
+                relative_path=file.relative_path,
+                content_type=file.content_type,
+                size_bytes=file.size_bytes,
+                storage_status=file.storage_status,
+                processing_status=file.processing_status,
+                processing_stage=file.processing_stage,
+                result_operation=file.result_operation,
+                created_at=file.created_at,
+            )
+            for file in result.files
+        ],
+        folder_total=result.folder_total,
+        file_total=result.file_total,
+        page=result.page,
+        page_size=result.page_size,
+    )
+
+
+@router.get(
+    "/stored-files/{file_resource_id}/download",
+    response_model=StoredFileDownloadRead,
+)
+async def download_my_stored_file(
+    file_resource_id: uuid.UUID,
+    library_slug: str = Query(min_length=1, max_length=128),
+    user: User = Depends(current_active_user),
+    db: AsyncSession = Depends(get_db),
+) -> StoredFileDownloadRead:
+    libraries_by_id = await _personal_task_libraries(db, user=user)
+    library = next(
+        (item for item in libraries_by_id.values() if item.slug == library_slug),
+        None,
+    )
+    if library is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            {"code": "library_not_found", "message": "知识库不存在或无权访问"},
+        )
+    try:
+        url = await import_uploads.owned_stored_file_download_url(
+            db,
+            user_id=user.id,
+            library_id=library.id,
+            file_resource_id=file_resource_id,
+        )
+    except import_uploads.ImportUploadError as exc:
+        _raise_personal_task_error(exc)
+    return StoredFileDownloadRead(
+        url=url,
+        expires_in_seconds=settings.document_storage_signed_url_seconds,
+    )
+
+
+@router.delete(
+    "/stored-files/{file_resource_id}",
+    response_model=StoredFileDeleteRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def delete_my_stored_file(
+    file_resource_id: uuid.UUID,
+    library_slug: str = Query(min_length=1, max_length=128),
+    user: User = Depends(current_active_user),
+    db: AsyncSession = Depends(get_db),
+) -> StoredFileDeleteRead:
+    libraries_by_id = await _personal_task_libraries(db, user=user)
+    library = next(
+        (item for item in libraries_by_id.values() if item.slug == library_slug),
+        None,
+    )
+    if library is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            {"code": "library_not_found", "message": "知识库不存在或无权访问"},
+        )
+    try:
+        await import_uploads.request_owned_stored_file_delete(
+            db,
+            user_id=user.id,
+            library=library,
+            file_resource_id=file_resource_id,
+        )
+        await db.commit()
+    except import_uploads.ImportUploadError as exc:
+        await db.rollback()
+        _raise_personal_task_error(exc)
+    return StoredFileDeleteRead(status="deleting")
+
+
+@router.delete("/files/folder", response_model=PersonalFileFolderDeleteResponse)
+async def delete_my_files_folder(
+    library_slug: str = Query(min_length=1, max_length=128),
+    path: str = Query(min_length=1, max_length=2048),
+    user: User = Depends(current_active_user),
+    db: AsyncSession = Depends(get_db),
+) -> PersonalFileFolderDeleteResponse:
+    libraries_by_id = await _personal_task_libraries(db, user=user)
+    library = next(
+        (item for item in libraries_by_id.values() if item.slug == library_slug),
+        None,
+    )
+    if library is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            {"code": "library_not_found", "message": "知识库不存在或无权访问"},
+        )
+    try:
+        locked = await _lock_writable(db, library)
+        deleted_count, folder_deleted = await import_uploads.delete_personal_file_folder(
+            db,
+            user_id=user.id,
+            library=locked,
+            path=path,
+        )
+        await db.commit()
+    except import_uploads.ImportUploadError as exc:
+        _raise_personal_task_error(exc)
+    return PersonalFileFolderDeleteResponse(
+        deleted_count=deleted_count,
+        folder_deleted=folder_deleted,
     )
 
 

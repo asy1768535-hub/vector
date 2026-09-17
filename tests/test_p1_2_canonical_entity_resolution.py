@@ -186,6 +186,7 @@ def _input(
     properties=None,
     context=None,
     candidate_id=None,
+    confirm_create_new_identity=False,
 ):
     return EntityResolutionInput(
         library_id=library_id,
@@ -204,6 +205,7 @@ def _input(
             else tuple(evidence)
         ),
         graph_entity_candidate_id=candidate_id,
+        confirm_create_new_identity=confirm_create_new_identity,
         source_fingerprint=source,
     )
 
@@ -430,6 +432,48 @@ def test_cross_ontology_same_name_stays_pending_without_a_type_mapping():
     assert result.decision.decision_kind == ENTITY_RESOLUTION_PENDING_REVIEW
     assert result.decision.reason_code == "cross_ontology_weak_identity"
     assert result.decision.canonical_entity_id is None
+
+
+def test_explicit_confirmation_creates_new_cross_ontology_identity_and_reuses_it():
+    library_id = uuid.uuid4()
+    v1_type = _type(library_id, key="company")
+    v2_type = _type(library_id, key="company")
+    canonical = _canonical(library_id, name="项目A", normalized="项目a")
+    projection = _entity(library_id, v1_type, canonical, name="项目A")
+    db = _Db(_library(library_id), v1_type, v2_type, canonical, projection)
+    request = _input(
+        library_id,
+        name="项目A",
+        type_id=v2_type.id,
+        type_key=v2_type.key,
+        ontology_version_id=v2_type.ontology_version_id,
+        source="cross-ontology-project-a-confirmed",
+    )
+
+    pending = _run(resolve_canonical_entity(db, request))
+    confirmed = _run(
+        resolve_canonical_entity(
+            db,
+            _input(
+                library_id,
+                name="项目A",
+                type_id=v2_type.id,
+                type_key=v2_type.key,
+                ontology_version_id=v2_type.ontology_version_id,
+                source="cross-ontology-project-a-confirmed",
+                confirm_create_new_identity=True,
+            ),
+        )
+    )
+    replay = _run(resolve_canonical_entity(db, request))
+
+    assert pending.decision.decision_kind == ENTITY_RESOLUTION_PENDING_REVIEW
+    assert confirmed.decision.decision_kind == ENTITY_RESOLUTION_CREATE_NEW
+    assert confirmed.decision.method == "manual_create_new_identity"
+    assert confirmed.canonical_created is True
+    assert replay.decision.id == confirmed.decision.id
+    assert replay.canonical_entity.id == confirmed.canonical_entity.id
+    assert replay.canonical_created is False
 
 
 def test_invalid_name_or_evidence_is_rejected_without_canonical():

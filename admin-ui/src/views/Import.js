@@ -10,7 +10,7 @@ import { humanizeError } from './import_errors.js';
 import {
     ST_LABEL, ST_TAG, OP_LABEL, OP_TAG,
     createBatchValidationState, validateBatchChunk, verifyDuplicateFiles, fileKey, formatSize, fileTypeIcon,
-    MAX_BATCH_SIZE, validateFile, graphJobProgress, graphProgressDetail,
+    MAX_BATCH_SIZE, validateFile,
     securityLevelLabel, BUILD_MODE_LABEL, buildModeLabel,
 } from '../import_ui.js';
 import {
@@ -19,10 +19,8 @@ import {
     DEFAULT_IMPORT_CONFIGURATION,
     IMPORT_PROFILE_DAILY,
     IMPORT_PROFILE_INITIAL,
-    importDisplayStatus,
     importStageLabel,
     importStageProgress,
-    nextImportProgressBatch,
     runConcurrent,
     supportedExtensionsAccept,
     supportedExtensionsLabel,
@@ -45,7 +43,6 @@ const GRAPH_CONFIG_REASON = {
     active_ontology_missing: '当前知识库没有生效中的知识结构（Schema）',
 };
 const SCHEMA_MODE_LABEL = { disabled: '普通上传', explore: 'AI 探索', governed: 'Schema 治理' };
-const IMPORT_PROGRESS_POLL_DELAYS = [2000, 5000, 10000, 30000];
 const FILE_SELECTION_CHUNK_SIZE = 500;
 
 function yieldToBrowser() {
@@ -110,25 +107,18 @@ export default {
         const importConfigurationProfile = ref('daily');
         const importConfigurationForm = ref({ max_file_mib: 500, max_files_per_selection: 1000 });
         let graphConfigRequestSeq = 0;
-        let graphProgressRequestSeq = 0;
-        let graphProgressTimer = null;
-        let graphProgressPollCursor = 0;
-        let graphProgressPollController = null;
-        let graphProgressPollPromise = null;
-        let graphProgressPollDelayIndex = -1;
         let fileSelectionSequence = 0;
         let batchReplaceSelectionSequence = 0;
         const batchReplaceKeys = new Set();
-        let importJobsTimer = null;
-        let importJobsPollCursor = 0;
-        let importJobsPollController = null;
-        let importJobsPollPromise = null;
-        let importJobsPollSequence = 0;
-        let importJobsPollDelayIndex = -1;
         let activeUploadController = null;
 
         function isCountedQueueStatus(status) {
             return Object.prototype.hasOwnProperty.call(queueStatusCounts.value, status);
+        }
+
+        function normalizeQueuePage() {
+            const pageCount = Math.max(1, Math.ceil(queue.value.length / queuePageSize));
+            if (queuePage.value > pageCount) queuePage.value = pageCount;
         }
 
         function removeQueueItem(item) {
@@ -136,6 +126,7 @@ export default {
             if (idx < 0) return;
             queue.value.splice(idx, 1);
             if (isCountedQueueStatus(item.status)) queueStatusCounts.value[item.status] -= 1;
+            normalizeQueuePage();
         }
 
         function setQueueItemStatus(item, status) {
@@ -171,7 +162,6 @@ export default {
             });
             delete item.importJobId;
             delete item.importJob;
-            delete item.graphTracking;
             delete item._uploadResumeState;
         }
 
@@ -542,143 +532,6 @@ export default {
         }
 
         // ── File handling (add mode) ─────────────────────────
-        function attachGraphTracking(item, response, requested = graphExtractionRequested.value) {
-            if (!requested || !item || !response) return;
-            const document = (response.documents || [])[0] || response;
-            if (!document.document_id) return;
-            item.graphTracking = {
-                documentId: document.document_id,
-                embeddingJobId: document.job_id || null,
-                startedAt: Date.now(),
-                phase: 'embedding',
-                progress: 8,
-                tone: 'primary',
-                label: document.job_id ? '等待向量化' : '等待向量化任务',
-                terminal: document.operation === 'unchanged',
-            };
-            if (document.operation === 'unchanged') {
-                item.graphTracking.progress = 100;
-                item.graphTracking.tone = 'success';
-                item.graphTracking.label = '内容未变化，无需重新构建图谱';
-            }
-            startGraphProgressPolling();
-        }
-
-        function trackedGraphRows() {
-            return [
-                ...queue.value,
-                ...batchReplaceItems.value,
-                ...(importResult.value?.documents || []),
-            ].filter((row) => row.graphTracking && !row.graphTracking.terminal);
-        }
-
-        function stopGraphProgressPolling() {
-            graphProgressRequestSeq += 1;
-            if (graphProgressTimer) clearTimeout(graphProgressTimer);
-            graphProgressTimer = null;
-            graphProgressPollCursor = 0;
-            graphProgressPollDelayIndex = -1;
-            if (graphProgressPollController) graphProgressPollController.abort();
-            graphProgressPollController = null;
-        }
-
-        function scheduleGraphProgressPolling(delay) {
-            if (graphProgressTimer || graphProgressPollPromise || globalThis.document?.hidden) return;
-            graphProgressTimer = setTimeout(pollGraphProgress, delay);
-        }
-
-        function startGraphProgressPolling() {
-            if (!trackedGraphRows().length) return;
-            scheduleGraphProgressPolling(0);
-        }
-
-        function nextGraphProgressBatch(rows, cursor = 0, limit = 500) {
-            const activeRows = rows.filter((row) => row.graphTracking?.embeddingJobId);
-            if (!activeRows.length) return { items: [], nextCursor: 0 };
-            const start = Math.max(0, Number(cursor) || 0) % activeRows.length;
-            const items = [];
-            for (let offset = 0; offset < activeRows.length && items.length < limit; offset += 1) {
-                items.push(activeRows[(start + offset) % activeRows.length]);
-            }
-            return { items, nextCursor: (start + items.length) % activeRows.length };
-        }
-
-        async function pollGraphProgress() {
-            graphProgressTimer = null;
-            if (graphProgressPollPromise) return graphProgressPollPromise;
-            const activeSlug = slug.value;
-            const requestSeq = graphProgressRequestSeq;
-            const batch = nextGraphProgressBatch(trackedGraphRows(), graphProgressPollCursor);
-            graphProgressPollCursor = batch.nextCursor;
-            if (!activeSlug || !batch.items.length) return;
-            const pollController = new AbortController();
-            let changed = false;
-            const pollPromise = (async () => {
-                try {
-                    const rows = await api.getDocumentJobProgress(
-                        activeSlug,
-                        batch.items.map((row) => row.graphTracking.embeddingJobId),
-                        { signal: pollController.signal },
-                    );
-                    if (requestSeq !== graphProgressRequestSeq || slug.value !== activeSlug) return;
-                    const byEmbeddingJobId = new Map(
-                        (rows || []).map((row) => [String(row.embedding_job_id), row]),
-                    );
-                    for (const row of batch.items) {
-                        const tracking = row.graphTracking;
-                        const progress = byEmbeddingJobId.get(String(tracking.embeddingJobId));
-                        if (!tracking || !progress) continue;
-                        const before = `${tracking.phase}|${tracking.progress}|${tracking.label}|${tracking.terminal}`;
-                        if (['failed', 'superseded'].includes(progress.embedding_status)) {
-                            tracking.label = progress.embedding_status === 'failed'
-                                ? '向量化失败，未构建知识图谱'
-                                : '向量化任务已被替代';
-                            tracking.progress = 100;
-                            tracking.tone = 'exception';
-                            tracking.terminal = true;
-                        } else if (progress.embedding_status !== 'done') {
-                            tracking.label = progress.embedding_status === 'processing' ? '正在向量化' : '等待向量化';
-                            tracking.progress = progress.embedding_status === 'processing' ? 22 : 12;
-                        } else if (!progress.graph_job) {
-                            tracking.phase = 'graph';
-                            tracking.label = '等待图谱抽取任务';
-                            tracking.progress = 30;
-                        } else {
-                            Object.assign(tracking, graphJobProgress(progress.graph_job), {
-                                phase: 'graph',
-                                jobId: progress.graph_job.id,
-                            });
-                        }
-                        changed = changed || before !== `${tracking.phase}|${tracking.progress}|${tracking.label}|${tracking.terminal}`;
-                        tracking.pollError = '';
-                    }
-                } catch (_) {
-                    if (requestSeq !== graphProgressRequestSeq || slug.value !== activeSlug) return;
-                    for (const row of batch.items) {
-                        if (row.graphTracking && !row.graphTracking.terminal) {
-                            row.graphTracking.pollError = '进度暂时无法刷新，正在重试';
-                        }
-                    }
-                }
-            })();
-            graphProgressPollController = pollController;
-            graphProgressPollPromise = pollPromise;
-            try {
-                await pollPromise;
-            } finally {
-                if (graphProgressPollPromise === pollPromise) graphProgressPollPromise = null;
-                if (graphProgressPollController === pollController) graphProgressPollController = null;
-            }
-            if (requestSeq !== graphProgressRequestSeq || slug.value !== activeSlug) return;
-            if (nextGraphProgressBatch(trackedGraphRows(), graphProgressPollCursor).items.length) {
-                graphProgressPollDelayIndex = changed ? 0 : Math.min(
-                    graphProgressPollDelayIndex + 1,
-                    IMPORT_PROGRESS_POLL_DELAYS.length - 1,
-                );
-                scheduleGraphProgressPolling(IMPORT_PROGRESS_POLL_DELAYS[graphProgressPollDelayIndex]);
-            }
-        }
-
         function triggerFileSelect() {
             if (uploading.value || addingFiles.value) return;
             if (fileInput.value) fileInput.value.click();
@@ -691,8 +544,13 @@ export default {
 
         async function addFiles(files) {
             if (uploading.value || addingFiles.value) return;
-            if (!files || !files.length) return;
-            const total = Number(files.length) || 0;
+            // The change handler clears its input immediately so the same
+            // file can be selected again. Keep a stable copy before yielding
+            // to the browser; a FileList can otherwise become empty.
+            const selectedFiles = Array.from(files || []);
+            if (!selectedFiles.length) return;
+            queuePage.value = 1;
+            const total = selectedFiles.length;
             selectionFileTotal.value = total;
             selectionFilesProcessed.value = 0;
             addingFiles.value = true;
@@ -709,10 +567,31 @@ export default {
             try {
                 await yieldToBrowser();
                 for (let start = 0; start < total; start += FILE_SELECTION_CHUNK_SIZE) {
-                    const chunk = Array.prototype.slice.call(files, start, start + FILE_SELECTION_CHUNK_SIZE);
-                    const { accepted, duplicates, invalid, ignored } = validateBatchChunk(chunk, validationState);
+                    const chunk = Array.prototype.slice.call(selectedFiles, start, start + FILE_SELECTION_CHUNK_SIZE);
+                    let accepted;
+                    let duplicates;
+                    let invalid;
+                    let ignored;
+                    try {
+                        ({ accepted, duplicates, invalid, ignored } = validateBatchChunk(chunk, validationState));
+                    } catch (_) {
+                        // Keep the selection usable when a browser File object is malformed.
+                        accepted = chunk.map((file) => ({ file }));
+                        duplicates = [];
+                        invalid = [];
+                        ignored = [];
+                        ElMessage.warning('文件检查异常，已跳过本批次重复校验');
+                    }
                     for (const { file } of accepted) filesByKey.set(fileKey(file), file);
-                    const verifiedDuplicates = await verifyDuplicateFiles(duplicates, filesByKey);
+                    let verifiedDuplicates;
+                    try {
+                        verifiedDuplicates = await verifyDuplicateFiles(duplicates, filesByKey);
+                    } catch (_) {
+                        // Duplicate comparison is a convenience check. A browser
+                        // File API failure must not discard an otherwise valid batch.
+                        verifiedDuplicates = { duplicates: [], replacements: [] };
+                        ElMessage.warning('重复文件校验失败，已继续添加有效文件');
+                    }
                     if (selectionSequence !== fileSelectionSequence || selectionSlug !== slug.value) return;
                     summary.duplicates += verifiedDuplicates.duplicates.length;
                     summary.invalid += invalid.length;
@@ -749,6 +628,10 @@ export default {
                     }
                     selectionFilesProcessed.value = Math.min(start + chunk.length, total);
                     if (start + FILE_SELECTION_CHUNK_SIZE < total) await yieldToBrowser();
+                }
+            } catch (error) {
+                if (selectionSequence === fileSelectionSequence) {
+                    ElMessage.error(`文件检查失败：${error?.message || '浏览器未能读取所选文件'}`);
                 }
             } finally {
                 if (selectionSequence === fileSelectionSequence) addingFiles.value = false;
@@ -982,9 +865,6 @@ export default {
                     uploadOptions,
                     setBatchReplaceItemStatus,
                 );
-                for (const item of batchReplaceItems.value) {
-                    attachGraphTracking(item, item.importResponse, graphRequested);
-                }
                 ElMessage.success(`批量替换完成：${result.submitted} 已提交，${result.skipped} 跳过${result.failed > 0 ? `，${result.failed} 失败` : ''}`);
                 await loadDocs();
                 await loadStats();
@@ -993,100 +873,6 @@ export default {
         }
 
         // ── Upload ───────────────────────────────────────────
-        function stopImportJobsPolling() {
-            if (importJobsTimer) clearTimeout(importJobsTimer);
-            importJobsTimer = null;
-            importJobsPollSequence += 1;
-            importJobsPollCursor = 0;
-            importJobsPollDelayIndex = -1;
-            if (importJobsPollController) importJobsPollController.abort();
-            importJobsPollController = null;
-        }
-
-        function scheduleImportJobsPolling(delay) {
-            if (importJobsTimer || importJobsPollPromise || globalThis.document?.hidden) return;
-            importJobsTimer = setTimeout(pollImportJobs, delay);
-        }
-
-        async function pollImportJobs() {
-            importJobsTimer = null;
-            if (importJobsPollPromise) return importJobsPollPromise;
-            const targetSlug = slug.value;
-            const batch = nextImportProgressBatch(queue.value, importJobsPollCursor);
-            importJobsPollCursor = batch.nextCursor;
-            if (!targetSlug || !batch.items.length) return;
-            const requestSeq = importJobsPollSequence;
-            const pollController = new AbortController();
-            let changed = false;
-            const pollPromise = (async () => {
-            try {
-                const jobs = await api.getImportJobProgress(
-                    targetSlug,
-                    batch.items.map((item) => item.importJobId),
-                    { signal: pollController.signal },
-                );
-                if (requestSeq !== importJobsPollSequence || targetSlug !== slug.value) return;
-                const byId = new Map((jobs || []).map((job) => [String(job.id), job]));
-                for (const item of batch.items) {
-                    if (!queue.value.includes(item) || String(item.importJobId) === '') continue;
-                    const job = byId.get(String(item.importJobId));
-                    if (!job) continue;
-                    changed = changed
-                        || item.status !== importDisplayStatus(job)
-                        || item.stageLabel !== importStageLabel(job);
-                    item.importJob = job;
-                    item.stageLabel = importStageLabel(job);
-                    item.progress = importStageProgress(job, 100);
-                    if (job.status === 'succeeded') {
-                        setQueueItemStatus(item, importDisplayStatus(job));
-                        item.error = '';
-                    } else if (['failed', 'cancelled', 'superseded'].includes(job.status)) {
-                        setQueueItemStatus(item, importDisplayStatus(job));
-                        item.error = job.last_error || '导入失败';
-                    } else {
-                        setQueueItemStatus(item, importDisplayStatus(job));
-                    }
-                }
-            } catch (_) {
-                // Keep the last known stage and retry polling.
-            }
-            })();
-            importJobsPollController = pollController;
-            importJobsPollPromise = pollPromise;
-            try {
-                await pollPromise;
-            } finally {
-                if (importJobsPollPromise === pollPromise) importJobsPollPromise = null;
-                if (importJobsPollController === pollController) importJobsPollController = null;
-            }
-            if (requestSeq !== importJobsPollSequence || targetSlug !== slug.value) return;
-            if (nextImportProgressBatch(queue.value, importJobsPollCursor).items.length) {
-                importJobsPollDelayIndex = changed ? 0 : Math.min(
-                    importJobsPollDelayIndex + 1,
-                    IMPORT_PROGRESS_POLL_DELAYS.length - 1,
-                );
-                scheduleImportJobsPolling(IMPORT_PROGRESS_POLL_DELAYS[importJobsPollDelayIndex]);
-            } else {
-                loadStats();
-            }
-        }
-
-        function startImportJobsPolling() {
-            scheduleImportJobsPolling(0);
-        }
-
-        function onImportVisibilityChange() {
-            if (globalThis.document?.hidden) {
-                stopGraphProgressPolling();
-                stopImportJobsPolling();
-                return;
-            }
-            startGraphProgressPolling();
-            if (nextImportProgressBatch(queue.value, importJobsPollCursor).items.length) {
-                startImportJobsPolling();
-            }
-        }
-
         async function retryGraphImport(importJob, targetSlug) {
             try {
                 return await api.retryGraphExtraction(
@@ -1185,10 +971,10 @@ export default {
                                         retry_target_type: null,
                                         retry_target_id: null,
                                     };
-                                    setQueueItemStatus(it, importDisplayStatus(it.importJob));
+                                    setQueueItemStatus(it, 'submitted');
                                     it.error = '';
-                                    it.stageLabel = importStageLabel(it.importJob);
-                                    it.progress = importStageProgress(it.importJob, 100);
+                                    it.stageLabel = '文件已保存';
+                                    it.progress = 100;
                                     return;
                                 }
                                 if (it.importJob.retry_target_type !== 'import') {
@@ -1196,8 +982,9 @@ export default {
                                 }
                                 const retried = await api.retryImportJob(targetSlug, it.importJobId);
                                 it.importJob = retried;
-                                setQueueItemStatus(it, importDisplayStatus(retried));
+                                setQueueItemStatus(it, retried?.result_operation === 'unchanged' ? 'skipped' : 'submitted');
                                 it.stageLabel = importStageLabel(retried);
+                                it.progress = 100;
                                 return;
                             }
                             it._uploadResumeState = it._uploadResumeState || {};
@@ -1229,9 +1016,13 @@ export default {
                             });
                             it.importJobId = job.id;
                             it.importJob = job;
-                            setQueueItemStatus(it, importDisplayStatus(job));
+                            // completeImportSession resolves only after the original
+                            // bytes are accepted; background stages are tracked in My Tasks.
+                            const sourceStatus = job?.result_operation === 'unchanged' ? 'skipped' : 'submitted';
+                            setQueueItemStatus(it, sourceStatus);
                             it.stageLabel = importStageLabel(job);
                             it.progress = importStageProgress(job, 100);
+                            if (sourceStatus !== 'failed') it.error = '';
                         } catch (e) {
                             if (e?.name === 'AbortError' || uploadController.signal.aborted) throw e;
                             setQueueItemStatus(it, 'failed');
@@ -1252,7 +1043,6 @@ export default {
             }
 
             if (uploadController.signal.aborted) return;
-            startImportJobsPolling();
             const fail = items.filter((item) => item.status === 'failed').length;
             const ok = Math.max(0, attemptedCount - fail);
             ElMessage.success(`上传完成：${ok} 成功${fail > 0 ? `，${fail} 失败` : ''}`);
@@ -1319,8 +1109,6 @@ export default {
 
         // ── Watchers ─────────────────────────────────────────
         watch(slug, () => {
-            stopGraphProgressPolling();
-            stopImportJobsPolling();
             graphConfigRequestSeq += 1;
             graphExtractionConfig.value = null;
             graphExtractionConfigError.value = '';
@@ -1349,7 +1137,6 @@ export default {
             }
         });
         watch(mode, () => {
-            stopGraphProgressPolling();
             importResult.value = null;
             resetQueue();
             resetBatchReplaceQueue();
@@ -1368,15 +1155,11 @@ export default {
         });
 
         onMounted(() => {
-            globalThis.document?.addEventListener('visibilitychange', onImportVisibilityChange);
             loadLibs();
         });
         onBeforeUnmount(() => {
             activeUploadController?.abort();
             activeUploadController = null;
-            stopGraphProgressPolling();
-            stopImportJobsPolling();
-            globalThis.document?.removeEventListener('visibilitychange', onImportVisibilityChange);
         });
 
         return {
@@ -1398,7 +1181,6 @@ export default {
             displayDocs, displayQueue, extIdSet, multiBlockedByExtId,
             pendingCount, submittedCount, skippedCount, failedCount, invalidCount,
             hasFailed, canStart, canReplace, canBatchReplace,
-            graphProgressDetail,
             loadLibs, loadDocs, triggerFileSelect, triggerFolderSelect,
             openImportConfigurationDialog, applyImportConfigurationProfile, saveImportConfiguration,
             triggerBatchReplaceFileSelect, onFileChange, onFolderChange,
@@ -1595,7 +1377,7 @@ export default {
                                 <el-tag :type="ST_TAG[row.status]" size="small">{{ ST_LABEL[row.status] }}</el-tag>
                             </template>
                         </el-table-column>
-                        <el-table-column label="处理进度" min-width="220">
+                        <el-table-column label="上传进度" min-width="220">
                             <template #default="{row}">
                                 <div v-if="row.importJobId" class="import-graph-progress">
                                     <div class="import-graph-progress-head">
@@ -1606,17 +1388,7 @@ export default {
                                                  :status="row.status === 'failed' ? 'exception' : (row.status === 'submitted' || row.status === 'skipped') ? 'success' : undefined"
                                                  :stroke-width="6" :show-text="false" />
                                 </div>
-                                <div v-else-if="row.graphTracking" class="import-graph-progress">
-                                    <div class="import-graph-progress-head">
-                                        <span>{{ graphProgressDetail(row.graphTracking) }}</span>
-                                        <b>{{ row.graphTracking.progress }}%</b>
-                                    </div>
-                                    <el-progress :percentage="row.graphTracking.progress"
-                                                 :status="row.graphTracking.tone === 'primary' ? undefined : row.graphTracking.tone"
-                                                 :stroke-width="6" :show-text="false" />
-                                    <small v-if="row.graphTracking.pollError">{{ row.graphTracking.pollError }}</small>
-                                </div>
-                                <span v-else class="import-graph-progress-empty">上传后开始</span>
+                                <span v-else class="import-graph-progress-empty">等待上传</span>
                             </template>
                         </el-table-column>
                         <el-table-column label="错误原因" min-width="120">
@@ -1780,20 +1552,6 @@ export default {
                                 <el-tag :type="BATCH_REPLACE_STATUS_TAG[row.status]" size="small">{{ BATCH_REPLACE_STATUS_LABEL[row.status] }}</el-tag>
                             </template>
                         </el-table-column>
-                        <el-table-column label="知识图谱构建" min-width="220">
-                            <template #default="{row}">
-                                <div v-if="row.graphTracking" class="import-graph-progress">
-                                    <div class="import-graph-progress-head">
-                                        <span>{{ graphProgressDetail(row.graphTracking) }}</span>
-                                        <b>{{ row.graphTracking.progress }}%</b>
-                                    </div>
-                                    <el-progress :percentage="row.graphTracking.progress"
-                                                 :status="row.graphTracking.tone === 'primary' ? undefined : row.graphTracking.tone"
-                                                 :stroke-width="6" :show-text="false" />
-                                </div>
-                                <span v-else class="import-graph-progress-empty">{{ graphExtractionRequested ? '上传后开始' : '未开启' }}</span>
-                            </template>
-                        </el-table-column>
                         <el-table-column label="错误原因" min-width="140">
                             <template #default="{row}">
                                 <span class="import-error-text">{{ row.error || '—' }}</span>
@@ -1838,20 +1596,6 @@ export default {
                         </el-table-column>
                         <el-table-column label="分片数" width="80" align="center">
                             <template #default="{row}">{{ row.chunk_count ?? '—' }}</template>
-                        </el-table-column>
-                        <el-table-column label="知识图谱构建" min-width="220">
-                            <template #default="{row}">
-                                <div v-if="row.graphTracking" class="import-graph-progress">
-                                    <div class="import-graph-progress-head">
-                                        <span>{{ graphProgressDetail(row.graphTracking) }}</span>
-                                        <b>{{ row.graphTracking.progress }}%</b>
-                                    </div>
-                                    <el-progress :percentage="row.graphTracking.progress"
-                                                 :status="row.graphTracking.tone === 'primary' ? undefined : row.graphTracking.tone"
-                                                 :stroke-width="6" :show-text="false" />
-                                </div>
-                                <span v-else class="import-graph-progress-empty">{{ graphExtractionRequested ? '上传后开始' : '未开启' }}</span>
-                            </template>
                         </el-table-column>
                     </el-table>
                 </div>

@@ -64,8 +64,16 @@ class BootstrapResult:
 async def prepare_document_storage(config: Settings) -> None:
     """Create local storage or verify the configured remote bucket."""
     from app.services.object_storage import build_object_storage_adapter
+    from app.services.object_storage_remote import classify_remote_storage_error
 
-    adapter = build_object_storage_adapter(config)
+    try:
+        adapter = build_object_storage_adapter(config)
+    except Exception as exc:
+        # Keep startup diagnostics bounded and never expose SDK constructor
+        # details (which may contain endpoint/query information).
+        raise DeploymentBootstrapError(
+            "configured document storage adapter is unavailable"
+        ) from exc
     if adapter.provider == "local":
         root = Path(config.document_files_dir)
         root = root if root.is_absolute() else BASE_DIR / root
@@ -79,15 +87,17 @@ async def prepare_document_storage(config: Settings) -> None:
                 adapter._client.bucket_exists, adapter.bucket  # noqa: SLF001
             )
             if not available:
-                raise DeploymentBootstrapError("remote document storage bucket is unavailable")
+                raise DeploymentBootstrapError(
+                    "remote document storage probe failed: bucket_not_found"
+                )
         else:
             await asyncio.to_thread(adapter._bucket_client.get_bucket_info)  # noqa: SLF001
     except DeploymentBootstrapError:
         raise
     except Exception as exc:
         raise DeploymentBootstrapError(
-            "remote document storage bucket is unavailable"
-        ) from exc
+            f"remote document storage probe failed: {classify_remote_storage_error(exc)}"
+        ) from None
 
 
 async def initialize_supported_deployment(db, command: BootstrapCommand) -> BootstrapResult:

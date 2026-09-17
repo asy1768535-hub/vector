@@ -8,6 +8,8 @@ from typing import Any, Literal
 
 import httpx
 
+from app.services.minimax_openai import json_request_options
+
 
 ProviderErrorCategory = Literal[
     "timeout", "network_error", "http_error", "invalid_envelope"
@@ -76,13 +78,14 @@ class OpenAICompatibleSummaryProvider:
     async def generate(
         self, messages: list[dict[str, str]]
     ) -> SummaryProviderResponse:
-        payload = {
+        payload: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
-            "temperature": 0,
             "stream": False,
-            "response_format": {"type": "json_object"},
         }
+        payload.update(
+            json_request_options(base_url=self._endpoint, model=self._model)
+        )
         if "gemma" in self._model.lower():
             payload["chat_template_kwargs"] = {"enable_thinking": False}
         payload_hash = hashlib.sha256(

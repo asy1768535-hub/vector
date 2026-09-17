@@ -17,6 +17,10 @@ class GraphExtractionRerun(BaseModel):
     client_idempotency_key: str = Field(min_length=8, max_length=128)
 
 
+class GraphExtractionCandidateApproveAsNew(BaseModel):
+    candidate_ids: list[uuid.UUID] = Field(min_length=1, max_length=50)
+
+
 class GraphExtractionUploadConfiguration(BaseModel):
     available: bool
     exploration_available: bool = False

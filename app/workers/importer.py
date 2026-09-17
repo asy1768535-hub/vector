@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import BASE_DIR, settings
@@ -27,12 +27,14 @@ from app.models.document_file import DocumentFile
 from app.models.document_import_job import DocumentImportJob
 from app.models.document_revision import DocumentRevision
 from app.models.document_revision_file import DocumentRevisionFile
+from app.models.file_resource import FileResource
 from app.models.library import Library
-from app.schemas.storage import SourceLocatorV1
+from app.schemas.storage import SourceLocatorV1, StorageLocatorV1
+from app.services import file_resources, import_staging_cleanup, import_uploads
 from app.services import folders as folders_service
 from app.services import ingest as ingest_service
-from app.services import import_staging_cleanup
 from app.services.doc_conversion import converted_staging_path, sha256_file
+from app.services.evidence_write_path import validate_parser_segments
 from app.services.import_parsing import ParsedImport, parse_import_file, rebind_converted_doc
 from app.services.import_uploads import (
     folder_path_for_job,
@@ -47,7 +49,6 @@ from app.services.revision_files import (
     persist_revision_file_capture,
     prepare_managed_file_path,
 )
-from app.services.evidence_write_path import validate_parser_segments
 
 logging.basicConfig(
     level=logging.INFO,
@@ -71,6 +72,7 @@ class _ParserLibrarySnapshot:
 @dataclass(frozen=True, slots=True)
 class _ImportReadSnapshot:
     library_id: uuid.UUID
+    file_resource: FileResource | None
     staging_key: str
     file_name: str
     content_type: str | None
@@ -221,6 +223,24 @@ async def _mark_failed(job_id: uuid.UUID, error: Exception) -> None:
         job.claimed_at = None
         job.finished_at = datetime.now(timezone.utc)
         job.last_error = message[:4000]
+        if Path(job.file_name).suffix.lower() == ".zip":
+            job.current_stage = "validating"
+            job.graph_extraction_requested = False
+            await db.execute(
+                update(DocumentImportJob)
+                .where(
+                    DocumentImportJob.library_id == job.library_id,
+                    DocumentImportJob.batch_id == job.batch_id,
+                    DocumentImportJob.id != job.id,
+                    DocumentImportJob.status == "uploading",
+                )
+                .values(
+                    status="failed",
+                    current_stage="validating",
+                    finished_at=job.finished_at,
+                    last_error="压缩包展开未完成",
+                )
+            )
         await db.commit()
 
 
@@ -358,6 +378,27 @@ async def _prepare_revision_file(
     source: Path,
 ) -> PreparedStoredFile | _PreparedLegacyFile:
     if settings.revision_file_storage_enabled:
+        if snapshot.file_resource is not None:
+            resource = snapshot.file_resource
+            return PreparedStoredFile(
+                library_id=resource.library_id,
+                file_name=resource.file_name,
+                content_type=resource.content_type,
+                size_bytes=resource.size_bytes,
+                sha256=resource.sha256,
+                locator=StorageLocatorV1(
+                    provider=resource.storage_provider,
+                    endpoint_ref=resource.endpoint_ref,
+                    bucket=resource.bucket,
+                    object_key=resource.object_key,
+                    object_version=resource.object_version,
+                    etag=resource.etag,
+                    immutability_mode=resource.immutability_mode,
+                ),
+                managed_snapshot=True,
+                source_locator=SourceLocatorV1(kind="upload"),
+                verified_at=resource.storage_verified_at,
+            )
         return await prepare_managed_file_path(
             adapter=build_object_storage_adapter(),
             library_id=snapshot.library_id,
@@ -429,34 +470,135 @@ async def _apply_import_revision_scope(
         }
 
 
-async def _process_claimed_job(job_id: uuid.UUID) -> None:
-    await _set_stage(job_id, "parsing")
+async def _process_archive_job(job_id: uuid.UUID) -> None:
+    resource_source: Path | None = None
     async with async_session_factory() as read_db:
         job = await read_db.get(DocumentImportJob, job_id)
         if job is None:
             return
-        library = await read_db.get(Library, job.library_id)
-        if library is None or library.deleted_at is not None:
-            raise RuntimeError("library is unavailable")
-        snapshot = _ImportReadSnapshot(
-            library_id=job.library_id,
+        resource = None
+        if job.file_resource_id is not None:
+            resource = await read_db.get(FileResource, job.file_resource_id)
+            if (
+                resource is None
+                or resource.library_id != job.library_id
+                or resource.storage_status != "available"
+            ):
+                raise RuntimeError("archive file resource is unavailable")
+        claim = import_uploads.UploadOperationClaim(
+            job_id=job.id,
+            owner_token=job.worker_id,
+            operation="complete",
             staging_key=job.staging_key,
             file_name=job.file_name,
-            content_type=job.content_type,
             size_bytes=job.size_bytes,
-            sha256=job.sha256,
-            conversion_sha256=getattr(job, "conversion_sha256", None),
-            converter_version=getattr(job, "converter_version", None),
-            parser_library=_ParserLibrarySnapshot(
-                chunk_size=library.chunk_size,
-                chunk_overlap=library.chunk_overlap,
-                ocr_enabled=library.ocr_enabled,
-                docx_table_aware=library.docx_table_aware,
-            ),
+            upload_offset=job.upload_offset,
+            library_id=job.library_id,
+            uploaded_by_user_id=job.requested_by_user_id,
+            relative_path=job.relative_path,
+            content_type=job.content_type,
         )
 
-    canonical_source = staging_path(snapshot.staging_key)
-    await _wait_for_staging_file(canonical_source, snapshot.size_bytes)
+    adapter = (
+        build_object_storage_adapter(provider=resource.storage_provider)
+        if resource is not None
+        else build_object_storage_adapter()
+    )
+    if resource is None:
+        source = staging_path(claim.staging_key)
+        await _wait_for_staging_file(source, claim.size_bytes)
+    else:
+        descriptor, temporary_name = tempfile.mkstemp(prefix=".import-archive-", suffix=".zip")
+        os.close(descriptor)
+        resource_source = Path(temporary_name)
+        await file_resources.materialize_file_resource(
+            adapter=adapter,
+            resource=resource,
+            destination_path=resource_source,
+        )
+        source = resource_source
+
+    try:
+        async with async_session_factory() as db:
+            await import_uploads._expand_zip_upload(
+                db,
+                claim=claim,
+                path=source,
+                adapter=adapter,
+                config=settings,
+            )
+        if not await remove_staging_file(claim.staging_key):
+            log.warning("failed to remove expanded archive staging file key=%s", claim.staging_key)
+    finally:
+        if resource_source is not None:
+            resource_source.unlink(missing_ok=True)
+
+
+async def _process_claimed_job(job_id: uuid.UUID) -> None:
+    async with async_session_factory() as read_db:
+        job = await read_db.get(DocumentImportJob, job_id)
+        if job is None:
+            return
+        is_archive = Path(job.file_name).suffix.lower() == ".zip"
+        if is_archive:
+            snapshot = None
+        else:
+            library = await read_db.get(Library, job.library_id)
+            if library is None or library.deleted_at is not None:
+                raise RuntimeError("library is unavailable")
+            file_resource = None
+            file_resource_id = getattr(job, "file_resource_id", None)
+            if file_resource_id is not None:
+                file_resource = await read_db.get(FileResource, file_resource_id)
+                if (
+                    file_resource is None
+                    or file_resource.library_id != job.library_id
+                    or file_resource.storage_status != "available"
+                ):
+                    raise RuntimeError("file resource is unavailable")
+            snapshot = _ImportReadSnapshot(
+                library_id=job.library_id,
+                file_resource=file_resource,
+                staging_key=job.staging_key,
+                file_name=job.file_name,
+                content_type=job.content_type,
+                size_bytes=job.size_bytes,
+                sha256=job.sha256,
+                conversion_sha256=getattr(job, "conversion_sha256", None),
+                converter_version=getattr(job, "converter_version", None),
+                parser_library=_ParserLibrarySnapshot(
+                    chunk_size=library.chunk_size,
+                    chunk_overlap=library.chunk_overlap,
+                    ocr_enabled=library.ocr_enabled,
+                    docx_table_aware=library.docx_table_aware,
+                ),
+            )
+
+    if is_archive:
+        await _process_archive_job(job_id)
+        return
+    assert snapshot is not None
+    await _set_stage(job_id, "parsing")
+
+    resource_source: Path | None = None
+    if snapshot.file_resource is None:
+        canonical_source = staging_path(snapshot.staging_key)
+        await _wait_for_staging_file(canonical_source, snapshot.size_bytes)
+    else:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".import-resource-",
+            suffix=Path(snapshot.file_name).suffix.lower(),
+        )
+        os.close(descriptor)
+        resource_source = Path(temporary_name)
+        await file_resources.materialize_file_resource(
+            adapter=build_object_storage_adapter(
+                provider=snapshot.file_resource.storage_provider
+            ),
+            resource=snapshot.file_resource,
+            destination_path=resource_source,
+        )
+        canonical_source = resource_source
     parser_library = cast(Library, snapshot.parser_library)
     if Path(snapshot.file_name).suffix.lower() == ".doc":
         if not snapshot.conversion_sha256 or not snapshot.converter_version:
@@ -627,6 +769,8 @@ async def _process_claimed_job(job_id: uuid.UUID) -> None:
     finally:
         if isinstance(prepared_file, _PreparedLegacyFile):
             prepared_file.path.unlink(missing_ok=True)
+        if resource_source is not None:
+            resource_source.unlink(missing_ok=True)
 
 
 async def run_once() -> int:

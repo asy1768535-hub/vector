@@ -118,7 +118,7 @@ async def _process(db: AsyncSession, row: CleanupOutbox) -> None:
     # 先捕获标量：失败路径会 rollback 使 ORM 对象过期，之后再访问会触发异步 lazy load（MissingGreenlet）
     row_id, attempt, key = row.id, (row.attempt_count or 0), row.idempotency_key
     try:
-        await cleanup_service.execute_event(row)   # 幂等：不存在 point/collection 视为成功
+        await cleanup_service.execute_event(row, db=db)   # 幂等：不存在对象视为成功
         await db.execute(
             update(CleanupOutbox).where(CleanupOutbox.id == row_id).values(
                 status="done", finished_at=datetime.now(timezone.utc), last_error=None

@@ -43,6 +43,12 @@ def _config(tmp_path: Path) -> SimpleNamespace:
         document_files_dir=str(tmp_path / "objects"),
         document_storage_endpoint_ref="primary",
         document_storage_max_read_bytes=1024 * 1024,
+        video_transcription_enabled=False,
+        video_transcription_provider="funasr",
+        video_transcription_base_url="",
+        video_transcription_model="",
+        video_transcription_max_input_bytes=1024 * 1024,
+        video_transcription_max_audio_bytes=1024 * 1024,
     )
 
 
@@ -115,6 +121,7 @@ def _directory_entry(
     name: str,
     *,
     object_type: int,
+    color: int = 1,
     right_sibling: int = 0xFFFFFFFF,
     child: int = 0xFFFFFFFF,
 ) -> bytes:
@@ -124,14 +131,14 @@ def _directory_entry(
     entry[: len(encoded_name)] = encoded_name
     struct.pack_into("<H", entry, 64, len(encoded_name))
     entry[66] = object_type
-    entry[67] = 1
+    entry[67] = color
     struct.pack_into("<III", entry, 68, 0xFFFFFFFF, right_sibling, child)
     struct.pack_into("<I", entry, 116, 0xFFFFFFFE)
     struct.pack_into("<Q", entry, 120, 0)
     return bytes(entry)
 
 
-def _write_cfb(path: Path, *stream_names: str) -> None:
+def _write_cfb(path: Path, *stream_names: str, root_color: int = 1) -> None:
     header = bytearray(512)
     header[:8] = bytes.fromhex("D0CF11E0A1B11AE1")
     struct.pack_into("<HHHHH", header, 24, 0x003E, 3, 0xFFFE, 9, 6)
@@ -151,6 +158,7 @@ def _write_cfb(path: Path, *stream_names: str) -> None:
         _directory_entry(
             "Root Entry",
             object_type=5,
+            color=root_color,
             child=1 if stream_names else 0xFFFFFFFF,
         )
     ]
@@ -170,6 +178,13 @@ def _write_cfb(path: Path, *stream_names: str) -> None:
     struct.pack_into("<I", fat_sector, 0, 0xFFFFFFFE)
     struct.pack_into("<I", fat_sector, 4, 0xFFFFFFFD)
     path.write_bytes(bytes(header) + directory_sector + bytes(fat_sector))
+
+
+def test_cfb_doc_with_red_root_entry_is_accepted(tmp_path: Path) -> None:
+    path = tmp_path / "compatible.doc"
+    _write_cfb(path, "WordDocument", root_color=0)
+
+    _preflight(path, path.name)
 
 
 class _NoDatabaseWork:
@@ -941,6 +956,38 @@ def test_complete_keeps_office_processing_out_of_save_success(
     assert db.added[0].storage_status == "available"
     assert any(event[0] == "update" and event[1] == "queued" for event in db.events)
     assert path.exists() is True
+
+
+def test_complete_media_upload_marks_the_verified_file_as_storage_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = uuid.uuid4()
+    path = tmp_path / f"{job_id.hex}.upload"
+    path.write_bytes(b"ID3\x04\x00\x00stored-audio")
+    claim = import_uploads.UploadOperationClaim(
+        job_id=job_id,
+        owner_token=f"upload:{uuid.uuid4().hex}:complete:{uuid.uuid4().hex}",
+        operation="complete",
+        staging_key=path.name,
+        file_name="现场录音.mp3",
+        size_bytes=path.stat().st_size,
+        upload_offset=path.stat().st_size,
+        library_id=uuid.uuid4(),
+        uploaded_by_user_id=uuid.uuid4(),
+        relative_path="项目甲/现场录音.mp3",
+        content_type="audio/mpeg",
+    )
+    db = _CompletionDb(job_id=job_id, staging_path=path)
+    monkeypatch.setattr(import_uploads, "keep_upload_claim_alive", _noop_claim_lease)
+
+    asyncio.run(import_uploads.complete_claimed_upload(db, claim=claim, config=_config(tmp_path)))
+
+    assert any(
+        event[0] == "update" and event[1:3] == ("succeeded", "completed")
+        for event in db.events
+    )
+    assert db.added[0].storage_status == "available"
 
 
 def test_legacy_complete_upload_uses_the_same_content_preflight(

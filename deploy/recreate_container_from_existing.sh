@@ -2,18 +2,41 @@
 # Recreate one named container on a new image without exposing its environment.
 set -euo pipefail
 
-if [[ $# -ne 3 ]]; then
-    echo "usage: $0 <existing-container> <new-image> <rollback-suffix>" >&2
+if [[ $# -ne 3 && $# -ne 4 ]]; then
+    echo "usage: $0 <existing-container> <new-image> <rollback-suffix> [override-env-file]" >&2
     exit 2
 fi
 
 container=$1
 image=$2
 suffix=$3
+override_env_file=${4:-}
 rollback_name="${container}-rollback-${suffix}"
+
+if [[ -n "$override_env_file" && ! -r "$override_env_file" ]]; then
+    echo "override environment file is not readable: $override_env_file" >&2
+    exit 1
+fi
+
+override_keys=()
+if [[ -n "$override_env_file" ]]; then
+    while IFS= read -r item || [[ -n "$item" ]]; do
+        [[ -z "$item" || "$item" == \#* ]] && continue
+        [[ "$item" == *=* ]] || {
+            echo "invalid override environment entry" >&2
+            exit 1
+        }
+        override_keys+=("${item%%=*}")
+    done < "$override_env_file"
+fi
+override_key_csv=$(IFS=,; echo "${override_keys[*]}")
 
 if ! docker inspect "$container" >/dev/null 2>&1; then
     echo "container not found: $container" >&2
+    exit 1
+fi
+if ! docker image inspect "$image" >/dev/null 2>&1; then
+    echo "replacement image not found locally: $image" >&2
     exit 1
 fi
 if docker inspect "$rollback_name" >/dev/null 2>&1; then
@@ -29,6 +52,7 @@ import sys
 source = json.load(sys.stdin)[0]
 config = source["Config"]
 host = source["HostConfig"]
+override_keys = set(filter(None, sys.argv[1].split(",")))
 
 def emit(*values):
     for value in values:
@@ -50,9 +74,18 @@ for container_port, bindings in (host.get("PortBindings") or {}).items():
         prefix = f"{host_ip}:" if host_ip else ""
         emit("--publish", f"{prefix}{host_port}:{container_port}")
 for item in config.get("Env") or []:
-    emit("--env", item)
-'
+    key = item.split("=", 1)[0]
+    if key not in override_keys:
+        emit("--env", item)
+' "$override_key_csv"
 )
+
+if [[ -n "$override_env_file" ]]; then
+    while IFS= read -r item || [[ -n "$item" ]]; do
+        [[ -z "$item" || "$item" == \#* ]] && continue
+        run_args+=("--env" "$item")
+    done < "$override_env_file"
+fi
 
 mapfile -d '' -t command < <(
     docker inspect "$container" | python3 -c '

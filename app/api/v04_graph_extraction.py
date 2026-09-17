@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import deps as deps_module
 from app.auth.backend import current_active_user
 from app.config import settings
-from app.db import get_db
+from app.db import async_session_factory, get_db
 from app.deps import require_lib
 from app.models.document import Document
 from app.models.document_revision import DocumentRevision
@@ -22,30 +22,36 @@ from app.models.library import Library
 from app.models.schema_discovery_run import SchemaDiscoveryRun
 from app.models.user import User
 from app.schemas.graph_extraction_jobs import (
+    GraphExtractionCandidateApproveAsNew,
     GraphExtractionCandidateList,
     GraphExtractionCandidateRead,
     GraphExtractionCreate,
     GraphExtractionJobList,
     GraphExtractionJobRead,
     GraphExtractionRerun,
-    GraphExtractionUploadConfiguration,
     GraphExtractionUnitList,
     GraphExtractionUnitRead,
+    GraphExtractionUploadConfiguration,
     SchemaDiscoveryRunList,
     SchemaDiscoveryRunRead,
 )
 from app.services import graph_extraction_jobs
-from app.services.graph_extraction_jobs import GraphExtractionJobError
-from app.services.graph_extraction_triggers import graph_extraction_upload_configuration
-from app.services.schema_discovery_runs import (
-    ensure_schema_discovery_run_for_revision,
-    repair_schema_discovery_run,
+from app.services.graph_candidate_manual_approval import (
+    GraphCandidateManualApprovalError,
+    approve_pending_graph_entity_candidates_as_new,
 )
+from app.services.graph_extraction_auto_publication import auto_publish_graph_extraction_job
+from app.services.graph_extraction_jobs import GraphExtractionJobError
+from app.services.graph_extraction_materializer import materialize_graph_extraction_job
+from app.services.graph_extraction_triggers import graph_extraction_upload_configuration
 from app.services.organization_authorization import (
     OrganizationAuthorizationError,
     authorize_library_management,
 )
-
+from app.services.schema_discovery_runs import (
+    ensure_schema_discovery_run_for_revision,
+    repair_schema_discovery_run,
+)
 
 router = APIRouter(
     prefix="/libraries/{slug}/v04/graph-extractions",
@@ -389,6 +395,46 @@ async def list_graph_extraction_candidates(
         limit=limit,
         offset=offset,
     )
+
+
+@router.post("/{job_id}/candidates/approve-as-new", response_model=GraphExtractionJobRead)
+async def approve_graph_extraction_candidates_as_new(
+    job_id: uuid.UUID,
+    body: GraphExtractionCandidateApproveAsNew,
+    library: Library = Depends(_require_graph_rerun_library),
+    user: User = Depends(current_active_user),
+    db: AsyncSession = Depends(get_db),
+) -> GraphExtractionJobRead:
+    try:
+        await approve_pending_graph_entity_candidates_as_new(
+            db,
+            library=library,
+            job_id=job_id,
+            candidate_ids=tuple(body.candidate_ids),
+            actor_user_id=user.id,
+        )
+        await db.commit()
+    except GraphCandidateManualApprovalError as exc:
+        await db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, exc.code) from exc
+
+    try:
+        await materialize_graph_extraction_job(
+            async_session_factory,
+            job_id=job_id,
+            allow_succeeded_reprocess=True,
+        )
+        await auto_publish_graph_extraction_job(async_session_factory, job_id=job_id)
+    except Exception as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, "graph_candidate_approval_materialization_failed") from exc
+
+    async with async_session_factory() as result_db:
+        job = await graph_extraction_jobs.get_graph_extraction_job(
+            result_db,
+            library=library,
+            job_id=job_id,
+        )
+        return GraphExtractionJobRead.model_validate(job)
 
 
 @router.post("/{job_id}/retry", response_model=GraphExtractionJobRead)

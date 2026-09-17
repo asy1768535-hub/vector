@@ -9,6 +9,10 @@ from app.models.knowledge_artifact_job import KnowledgeArtifactJob
 from app.services.knowledge_artifact_provider import (
     OPENAI_COMPATIBLE_PROVIDER_NAME,
 )
+from app.services.minimax_openai import (
+    is_minimax_openai_contract,
+    json_request_options,
+)
 from app.services.knowledge_artifacts import (
     ArtifactContractError,
     canonical_artifact_json_v1,
@@ -118,14 +122,24 @@ def validate_enqueue_scope(
 
 
 def _model_config_hash(config: Settings) -> str:
+    request_options = json_request_options(
+        base_url=config.knowledge_artifact_base_url,
+        model=config.knowledge_artifact_model,
+    )
     identity = {
-        "provider": OPENAI_COMPATIBLE_PROVIDER_NAME,
-        "base_url": config.graph_extraction_base_url,
-        "model": config.graph_extraction_model,
+        "provider": (
+            "minimax"
+            if is_minimax_openai_contract(
+                base_url=config.knowledge_artifact_base_url,
+                model=config.knowledge_artifact_model,
+            )
+            else OPENAI_COMPATIBLE_PROVIDER_NAME
+        ),
+        "base_url": config.knowledge_artifact_base_url.rstrip("/"),
+        "model": config.knowledge_artifact_model,
         "prompt_version": config.knowledge_artifact_prompt_version,
         "max_source_chars": config.knowledge_artifact_model_max_source_chars,
-        "temperature": 0,
-        "response_format": "json_object",
+        "request_options": request_options,
     }
     return hashlib.sha256(
         canonical_artifact_json_v1(identity).encode("utf-8")
@@ -194,13 +208,13 @@ def select_generation_spec(
             "security_level_denied", "Revision security level is not allowed"
         )
     if (
-        not config.graph_extraction_base_url.strip()
-        or not config.graph_extraction_model.strip()
+        not config.knowledge_artifact_base_url.strip()
+        or not config.knowledge_artifact_model.strip()
     ):
         fail_artifact_runtime(
             "provider_config_invalid", "artifact model endpoint and model are required"
         )
-    if not config.graph_extraction_api_key.get_secret_value().strip():
+    if not config.knowledge_artifact_api_key.get_secret_value().strip():
         fail_artifact_runtime(
             "provider_credential_missing", "artifact provider credential is missing"
         )
@@ -209,8 +223,15 @@ def select_generation_spec(
         contract_version=contract_version,
         extractor_version=extractor_version,
         generation_mode="model",
-        model_provider=OPENAI_COMPATIBLE_PROVIDER_NAME,
-        model_name=config.graph_extraction_model,
+        model_provider=(
+            "minimax"
+            if is_minimax_openai_contract(
+                base_url=config.knowledge_artifact_base_url,
+                model=config.knowledge_artifact_model,
+            )
+            else OPENAI_COMPATIBLE_PROVIDER_NAME
+        ),
+        model_name=config.knowledge_artifact_model,
         model_config_hash=_model_config_hash(config),
     )
 

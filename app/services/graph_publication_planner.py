@@ -33,7 +33,11 @@ from app.models.graph_publication import (
 from app.models.graph_publication_item import GraphPublicationItem
 from app.models.knowledge_relation import KnowledgeRelation
 from app.models.library import Library
-from app.models.ontology_version import ONTOLOGY_STATUS_ACTIVE, OntologyVersion
+from app.models.ontology_version import (
+    ONTOLOGY_STATUS_ACTIVE,
+    ONTOLOGY_STATUS_DISABLED,
+    OntologyVersion,
+)
 from app.models.relation_evidence import RelationEvidence
 from app.models.relation_type import RelationType
 from app.models.relation_type_constraint import RelationTypeConstraint
@@ -276,13 +280,15 @@ async def _active_ontology(
     library: Library,
     ontology_version_id: uuid.UUID | None,
     allow_explicit_draft: bool = False,
+    allow_explicit_disabled: bool = False,
 ) -> OntologyVersion:
     if ontology_version_id is not None:
         ontology = await db.get(OntologyVersion, ontology_version_id)
         if ontology is None or ontology.library_id != library.id:
             raise GraphPublicationPlanError("ontology_not_found", "ontology version not found")
         if ontology.status != ONTOLOGY_STATUS_ACTIVE and not (
-            allow_explicit_draft and ontology.status == "draft"
+            (allow_explicit_draft and ontology.status == "draft")
+            or (allow_explicit_disabled and ontology.status == ONTOLOGY_STATUS_DISABLED)
         ):
             raise GraphPublicationPlanError("ontology_not_active", "ontology version is not active")
         return ontology
@@ -684,13 +690,17 @@ async def build_graph_publication_snapshot(
     *,
     include_drafts: bool,
     allow_explicit_draft: bool = False,
+    allow_explicit_disabled: bool = False,
     enforce_item_limit: bool = True,
     projection: GraphPublicationProjection | None = None,
     config: Settings = settings,
 ) -> GraphPublicationSnapshot:
     if ontology.library_id != library.id or (
         ontology.status != ONTOLOGY_STATUS_ACTIVE
-        and not (allow_explicit_draft and ontology.status == "draft")
+        and not (
+            (allow_explicit_draft and ontology.status == "draft")
+            or (allow_explicit_disabled and ontology.status == ONTOLOGY_STATUS_DISABLED)
+        )
     ):
         raise GraphPublicationPlanError("ontology_not_active", "ontology version is not active")
 
@@ -883,6 +893,7 @@ async def plan_graph_publication(
     requested_by_user_id: uuid.UUID | None = None,
     projection: GraphPublicationProjection | None = None,
     allow_explicit_draft: bool = False,
+    allow_explicit_disabled: bool = False,
     plan_options: dict[str, Any] | None = None,
     config: Settings = settings,
 ) -> GraphPublicationPlanResult:
@@ -899,6 +910,7 @@ async def plan_graph_publication(
         library,
         ontology_version_id,
         allow_explicit_draft=allow_explicit_draft,
+        allow_explicit_disabled=allow_explicit_disabled,
     )
     if not dry_run:
         await _lock_publication_scope(db, library.id)
@@ -947,6 +959,7 @@ async def plan_graph_publication(
         ontology,
         include_drafts=include_drafts,
         allow_explicit_draft=allow_explicit_draft,
+        allow_explicit_disabled=allow_explicit_disabled,
         projection=projection,
         config=config,
     )

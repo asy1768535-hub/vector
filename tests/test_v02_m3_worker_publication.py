@@ -274,6 +274,7 @@ def test_publish_revision_after_qdrant_sets_current_only_when_latest_matches(mon
     joined_sql = "\n".join(calls).lower()
     assert "current_revision_id" in joined_sql
     assert "latest_revision_id" in joined_sql
+    assert "document_import_jobs" in joined_sql
     assert "status" in joined_sql
 
 

@@ -35,7 +35,7 @@ EXPECTED_DEFAULTS = {
     "graph_extraction_minstral_timeout_seconds": 240.0,
     "graph_extraction_minstral_max_output_tokens": 1000,
     "graph_extraction_qwen3_draft_max_output_tokens": 1000,
-    "graph_schema_discovery_max_source_chunks": 8,
+    "graph_schema_discovery_max_source_chunks": 32,
     "graph_schema_discovery_concept_inventory_enabled": False,
     "graph_schema_discovery_timeout_seconds": 300.0,
     "graph_schema_discovery_context_window_tokens": 16384,

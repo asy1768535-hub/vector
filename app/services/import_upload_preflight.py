@@ -542,7 +542,7 @@ def _reachable_cfb_stream_names(directory: bytes) -> set[str]:
     if (
         root.object_type != 5
         or root.name != "Root Entry"
-        or root.color != 1
+        or root.color not in {0, 1}
         or root.left_sibling != _NOSTREAM
         or root.right_sibling != _NOSTREAM
     ):

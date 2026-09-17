@@ -236,9 +236,9 @@ async def process_knowledge_artifact_job(
             )
         else:
             adapter = provider or OpenAICompatibleSummaryProvider(
-                base_url=config.graph_extraction_base_url,
-                model=config.graph_extraction_model,
-                api_key=config.graph_extraction_api_key.get_secret_value(),
+                base_url=config.knowledge_artifact_base_url,
+                model=config.knowledge_artifact_model,
+                api_key=config.knowledge_artifact_api_key.get_secret_value(),
                 timeout_seconds=config.knowledge_artifact_provider_timeout_seconds,
             )
             response = await call_provider_with_lease_renewal(

@@ -15,6 +15,11 @@ import {
     normalizeDocumentName, matchDocumentsForFile, createBatchReplaceItems,
     setBatchReplaceTarget, submittableBatchReplaceItems, submitBatchReplaceItems,
 } from './src/batch_replace.js';
+import {
+    importDisplayStatus,
+    importStageLabel,
+    importStageProgress,
+} from './src/folder_import.js';
 
 const source = readFileSync(new URL('./src/views/Import.js', import.meta.url), 'utf8');
 const css = readFileSync(new URL('./style.css', import.meta.url), 'utf8');
@@ -122,7 +127,7 @@ test('validateFile accepts all allowed extensions', () => {
         '.txt', '.md', '.markdown', '.rst', '.log', '.ini', '.cfg', '.conf',
         '.json', '.yaml', '.yml', '.xml', '.html', '.htm', '.csv', '.tsv',
         '.docx', '.pptx', '.xls', '.xlsx', '.pdf',
-        '.bmp', '.jpeg', '.jpg', '.png', '.tif', '.tiff', '.webp',
+        '.bmp', '.jpeg', '.jpg', '.png', '.tif', '.tiff', '.webp', '.zip',
     ]) {
         const r = validateFile(mockFile(`doc${ext}`, 1024));
         assert.equal(r.valid, true, `${ext} should be valid`);
@@ -158,7 +163,7 @@ test('validateFile accepts .doc only when the asynchronous import contract adver
 });
 
 test('validateFile rejects unknown extensions', () => {
-    for (const name of ['a.exe', 'a.zip', 'noext']) {
+    for (const name of ['a.exe', 'a.7z', 'noext']) {
         const r = validateFile(mockFile(name, 1024));
         assert.equal(r.valid, false, `${name} should be rejected`);
     }
@@ -523,10 +528,15 @@ test('file selection shows the discovered total before chunk validation and repo
         /async function addFiles\(files\) \{([\s\S]*?)\r?\n        \}\r?\n\r?\n        function onFileChange/,
     )?.[1] || '';
     const totalIndex = addFilesSource.indexOf('selectionFileTotal.value = total;');
+    const snapshotIndex = addFilesSource.indexOf('const selectedFiles = Array.from(files || []);');
     const firstYieldIndex = addFilesSource.indexOf('await yieldToBrowser();');
     const validationIndex = addFilesSource.indexOf('validateBatchChunk(chunk, validationState)');
 
     assert.ok(totalIndex >= 0, 'selected file total is stored immediately');
+    assert.ok(snapshotIndex >= 0, 'the browser FileList is snapshotted before asynchronous validation');
+    assert.ok(snapshotIndex < firstYieldIndex, 'the file snapshot survives yielding back to the browser');
+    assert.ok(addFilesSource.includes('const total = selectedFiles.length;'));
+    assert.ok(addFilesSource.includes('Array.prototype.slice.call(selectedFiles, start, start + FILE_SELECTION_CHUNK_SIZE);'));
     assert.ok(firstYieldIndex > totalIndex, 'the UI yields after storing the selected total');
     assert.ok(validationIndex > firstYieldIndex, 'chunk validation starts after the first UI render');
     assert.ok(
@@ -537,6 +547,22 @@ test('file selection shows the discovered total before chunk validation and repo
     assert.match(source, /aria-live="polite"/);
     assert.ok(source.includes('已发现 {{ selectionFileTotal }} 个文件'));
     assert.ok(source.includes('已检查 {{ selectionFilesProcessed }} / {{ selectionFileTotal }}'));
+});
+
+test('validateFile uses the server-provided video limit', () => {
+    const configuration = {
+        allowed_extensions: ['.mp4'],
+        max_file_bytes: 500 * 1024 * 1024,
+        video_max_file_bytes: 100 * 1024 * 1024,
+    };
+    assert.equal(validateFile(mockFile('meeting.mp4', 100 * 1024 * 1024), configuration).valid, true);
+    assert.equal(validateFile(mockFile('meeting.mp4', 100 * 1024 * 1024 + 1), configuration).valid, false);
+});
+
+test('file selection keeps the visible queue page in range', () => {
+    assert.match(source, /function normalizeQueuePage\(\)/);
+    assert.match(source, /queue\.value\.splice\(idx, 1\);[\s\S]*?normalizeQueuePage\(\);/);
+    assert.match(source, /async function addFiles\(files\) \{[\s\S]*?queuePage\.value = 1;/);
 });
 
 test('template uses _failType not error text for check columns', () => {
@@ -644,23 +670,28 @@ test('AI self-extraction sends graph jobs without requiring Schema activation', 
     assert.match(source, /AI 自主抽取/);
 });
 
-test('uploaded files track vectorization and graph extraction progress', () => {
-    for (const token of [
-        'attachGraphTracking',
-        'getDocumentJobProgress',
-        'pollGraphProgress',
-        'graphProgressPollPromise',
-        'graphProgressPollController',
-        '等待图谱抽取任务',
-        '知识图谱构建',
-        'graphProgressDetail',
-        'stopGraphProgressPolling();',
-    ]) assert.ok(source.includes(token) || apiSource.includes(token), `missing graph progress token: ${token}`);
-    assert.match(css, /\.import-graph-progress\s*\{/);
-    assert.match(apiSource, /documents\/jobs\/progress/);
+test('import screen reports source upload only and defers downstream work to jobs', () => {
+    assert.match(source, /label="上传进度"/);
+    assert.equal(source.includes('label="知识图谱构建"'), false);
+    assert.equal(source.includes('getDocumentJobProgress'), false);
+    assert.equal(source.includes('startImportJobsPolling();'), false);
     assert.match(documentsApiSource, /@router\.post\("\/documents\/jobs\/progress"/);
-    assert.equal(source.includes('api.listDocumentJobs('), false);
-    assert.equal(source.includes('api.listGraphExtractions('), false);
+});
+
+test('stored source remains successful when downstream graph projection fails', () => {
+    const graphFailed = {
+        status: 'failed',
+        current_stage: 'graph',
+        file_status: 'available',
+        upload_completed_at: '2026-09-13T00:00:00Z',
+        last_error: 'graph extraction failed',
+    };
+    assert.equal(importDisplayStatus(graphFailed), 'submitted');
+    assert.equal(importStageLabel(graphFailed), '文件已保存');
+    assert.equal(importStageProgress(graphFailed, 100), 100);
+    assert.equal(importDisplayStatus({
+        status: 'failed', file_status: 'failed', upload_completed_at: graphFailed.upload_completed_at,
+    }), 'failed');
 });
 
 test('failed graph construction retries the graph job instead of the completed import', () => {

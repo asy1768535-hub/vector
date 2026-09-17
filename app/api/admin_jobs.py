@@ -774,12 +774,18 @@ def _import_monitor_row(
             "stale",
             "图谱重试状态不可用",
         )
-    elif job.status == "failed" and stored_preflight is not None:
+    elif job.status == "failed" and (
+        stored_preflight is not None or str(job.file_name).lower().endswith(".zip")
+    ):
         retry_target_type = None
         retry_target_id = None
         retryable = False
         retry_capability = "unsupported"
-        retry_reason = "上传预检失败，请修正文件后重新上传"
+        retry_reason = (
+            "压缩包无法自动解压，请检查压缩包后重新上传"
+            if str(job.file_name).lower().endswith(".zip")
+            else "上传预检失败，请修正文件后重新上传"
+        )
     elif job.status == "failed":
         retryable = job.attempt_count < settings.import_worker_max_attempts
         if not retryable:

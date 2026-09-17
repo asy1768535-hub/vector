@@ -214,6 +214,22 @@ def _candidate(config: Settings, item: GraphPublicationItem) -> GraphPublication
     )
 
 
+def test_disabled_ontology_is_allowed_only_for_source_document_refresh():
+    config = _config()
+    publication, _ = _publication(config)
+    ontology = _ontology()
+    ontology.status = "disabled"
+
+    ordinary = FakeDB(query_rows=[[ontology]])
+    with pytest.raises(GraphPublicationActivationError) as exc_info:
+        asyncio.run(activation._lock_active_ontology(ordinary, publication))
+    assert exc_info.value.code == "ontology_not_active"
+
+    publication.plan_options = {"refresh_reason": "source_document_deleted"}
+    refresh = FakeDB(query_rows=[[ontology]])
+    assert asyncio.run(activation._lock_active_ontology(refresh, publication)) is ontology
+
+
 def _patch_candidate(monkeypatch, candidate: GraphPublicationSnapshot):
     async def build(*args, **kwargs):
         return candidate

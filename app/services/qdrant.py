@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Iterable
 
 import httpx
 
@@ -30,6 +30,18 @@ def _headers() -> dict[str, str]:
         h["api-key"] = settings.qdrant_api_key
     return h
 
+
+def document_id_any_filter(document_ids: Iterable[Any], payload_filter: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Add a Qdrant payload filter matching any of the supplied document IDs."""
+    ids = [str(document_id) for document_id in document_ids]
+    if not ids:
+        raise ValueError("document_ids must not be empty")
+    result = dict(payload_filter or {})
+    result["must"] = [*(result.get("must") or []), {
+        "key": "document_id",
+        "match": {"any": ids},
+    }]
+    return result
 
 def _url(path: str) -> str:
     return f"{settings.qdrant_url.rstrip('/')}{path}"

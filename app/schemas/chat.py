@@ -18,6 +18,7 @@ class ChatLibraryRead(BaseModel):
 
 class ChatMessageRequest(BaseModel):
     library_slug: str = Field(..., min_length=1)
+    folder_id: Optional[uuid.UUID] = None
     query: str = Field(..., max_length=2000)
     top_k: int = Field(default=5, ge=1, le=20)
     use_graph: bool = True

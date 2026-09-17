@@ -329,7 +329,9 @@ async def catalog_file_access(
             revision_file_id=revision_file_id,
         )
         await db.rollback()
-        adapter = build_object_storage_adapter()
+        adapter = build_object_storage_adapter(
+            provider=prepared.access.locator.provider
+        )
         require_storage_adapter_identity(adapter, prepared.access.locator)
         expires_seconds = settings.document_storage_signed_url_seconds
         signed_url = await adapter.download_url(

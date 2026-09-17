@@ -27,6 +27,7 @@ from app.config import settings
 from app.db import async_session_factory
 from app.models.chunk import Chunk
 from app.models.document import Document
+from app.models.document_import_job import DocumentImportJob
 from app.models.document_revision import DocumentRevision
 from app.models.embedding_job import EmbeddingJob
 from app.models.library import Library
@@ -345,6 +346,23 @@ async def _publish_revision_after_qdrant(
         update(EmbeddingJob)
         .where(EmbeddingJob.id == job_id)
         .values(status="done", finished_at=now, last_error=None)
+    )
+    # Source import is complete once the revision is published. Graph work is
+    # tracked independently and must not keep the upload task in processing.
+    await db.execute(
+        update(DocumentImportJob)
+        .where(
+            DocumentImportJob.embedding_job_id == job_id,
+            DocumentImportJob.status == "processing",
+        )
+        .values(
+            status="succeeded",
+            current_stage="completed",
+            worker_id=None,
+            claimed_at=None,
+            finished_at=now,
+            last_error=None,
+        )
     )
     await db.execute(
         update(Document)

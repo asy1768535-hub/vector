@@ -130,7 +130,7 @@ test('Import.js summarizes ignored files without queueing or creating upload ses
         '// ── Replace mode',
     );
     const batchBinding = addFilesSource.match(
-        /const\s*\{([^}]*)\}\s*=\s*validateBatch(?:Chunk)?\s*\(/,
+        /\(\{([^}]*)\}\s*=\s*validateBatchChunk\s*\(/,
     );
 
     assert.ok(batchBinding, 'addFiles must consume batch validation result');

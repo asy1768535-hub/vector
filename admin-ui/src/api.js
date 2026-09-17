@@ -154,7 +154,15 @@ const _docsKey = (slug, params) => `listDocuments:${slug}:${new URLSearchParams(
 export const listDocuments = (slug, params = {}, forceRefresh) => cachedRequest(_docsKey(slug, params), () => request(`/libraries/${slug}/documents?${new URLSearchParams(params).toString()}`), 15000, forceRefresh);
 export const deleteDocument = (slug, id) =>
     request(`/libraries/${slug}/documents/${id}`, { method: 'DELETE' });
+export const bulkDeleteDocuments = (slug) =>
+    request(`/libraries/${slug}/documents/bulk-delete`, { method: 'POST' });
 export const libraryStats = (slug, forceRefresh) => cachedRequest(`libraryStats:${slug}`, () => request(`/libraries/${slug}/stats`), 15000, forceRefresh);
+export const listFolders = (slug, forceRefresh) => cachedRequest(
+    `listFolders:${slug}`,
+    () => request(`/libraries/${slug}/folders`),
+    15000,
+    forceRefresh,
+);
 export const queryLibrary = (slug, data) =>
     request(`/libraries/${slug}/query`, jsonBody('POST', data));
 export const getImportConfiguration = (slug) =>
@@ -212,34 +220,27 @@ export const completeImportSession = (slug, jobId, { signal } = {}) =>
         method: 'POST',
         signal,
     });
-export const getImportJobProgress = (slug, jobIds, { signal } = {}) =>
-    request(`/libraries/${slug}/import-jobs/progress`, {
-        ...jsonBody('POST', { job_ids: jobIds }),
-        signal,
-    });
-export const getDocumentJobProgress = (slug, embeddingJobIds, { signal } = {}) =>
-    request(`/libraries/${slug}/documents/jobs/progress`, {
-        ...jsonBody('POST', { embedding_job_ids: embeddingJobIds }),
-        signal,
-    });
 export const retryImportJob = (slug, jobId) =>
     request(`/libraries/${slug}/import-jobs/${jobId}/retry`, { method: 'POST' });
-export const listPersonalImportTaskFiles = (params = {}, { signal } = {}) => {
+export const listStoredFiles = (params = {}, { signal } = {}) => {
     const query = new URLSearchParams({
         library_slug: String(params.librarySlug || ''),
-        scope: params.scope === 'all' ? 'all' : '30d',
         page: String(Number.isInteger(params.page) && params.page > 0 ? params.page : 1),
-        page_size: String(params.pageSize === 50 ? 50 : 20),
+        page_size: String(params.pageSize === 20 ? 20 : 50),
     });
     if (typeof params.path === 'string' && params.path) query.set('path', params.path);
-    return request(`/me/import-task-files?${query.toString()}`, { signal });
+    return request(`/me/stored-files?${query.toString()}`, { signal });
 };
-export const getPersonalImportTaskSummary = (scope = '30d', { signal } = {}) =>
-    request(`/me/import-task-summary?${new URLSearchParams({
-        scope: scope === 'all' ? 'all' : '30d',
-    }).toString()}`, { signal });
-export const retryPersonalImportTask = (jobId) =>
-    request(`/me/import-tasks/${jobId}/retry`, { method: 'POST' });
+export const getStoredFileDownloadUrl = (librarySlug, fileResourceId) =>
+    request(`/me/stored-files/${fileResourceId}/download?${new URLSearchParams({ library_slug: librarySlug }).toString()}`);
+export const deleteStoredFile = (librarySlug, fileResourceId) =>
+    request(`/me/stored-files/${fileResourceId}?${new URLSearchParams({ library_slug: librarySlug }).toString()}`, {
+        method: 'DELETE',
+    });
+export const deletePersonalFileFolder = (librarySlug, path) =>
+    request(`/me/files/folder?${new URLSearchParams({ library_slug: librarySlug, path }).toString()}`, {
+        method: 'DELETE',
+    });
 export const getUploadGraphExtractionConfiguration = (slug) =>
     request(`/libraries/${slug}/v04/graph-extractions/upload-configuration`);
 export const listGraphExtractions = (slug, params = {}) =>

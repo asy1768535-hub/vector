@@ -127,7 +127,10 @@ async def _check_rerank() -> str:
 
 
 async def _check_storage() -> bool:
-    if not settings.revision_file_storage_enabled:
+    if (
+        not settings.revision_file_storage_enabled
+        and settings.document_storage_provider == "local"
+    ):
         return settings.deployment_profile == "development"
     try:
         from app.services.object_storage import build_object_storage_adapter
@@ -143,8 +146,13 @@ async def _check_storage() -> bool:
             )
         await asyncio.to_thread(adapter._bucket_client.get_bucket_info)  # noqa: SLF001
         return True
-    except Exception:  # noqa: BLE001
-        log.warning("object storage readiness check failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        from app.services.object_storage_remote import classify_remote_storage_error
+
+        log.warning(
+            "object storage readiness check failed: %s",
+            classify_remote_storage_error(exc),
+        )
         return False
 
 

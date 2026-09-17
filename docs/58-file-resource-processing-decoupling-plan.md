@@ -14,14 +14,14 @@
 - route_evidence_kind: design
 - effect_class: none
 - operational_mode: planned
-- scope_authorization: blocked: 本次授权已完成 S0 + S1；S2/S3/S4 尚未授权。
-- authorization_substage: S1-file-resource-persistence
-- product_decision: not_required: S1 不改变同目录同名文件的既有上传语义，不实现覆盖/重名策略。
-- active_substage: S2-resource-backed-importer
+- scope_authorization: authorized: 已授权并完成服务器侧 S1 + 资源化处理输入；S3/S4 尚未实现。
+- authorization_substage: S2-resource-backed-importer
+- product_decision: not_required: S1/S2 不改变同目录同名文件的既有上传语义，不实现覆盖/重名策略。
+- active_substage: S3-api-permission-observability
 - result_status: partial
 - truth_writeback: complete
-- migration_state: pending
-- evidence_refs: [app/services/import_uploads.py, app/workers/importer.py, app/models/document_revision_file.py, git-diff-check, alembic-heads]
+- migration_state: 保留历史 `0076` 不改写；当前 Alembic 唯一 head 为 `0076`，本次没有新增迁移。服务器执行前仍需确认当前 revision，并按发布流程备份数据库。
+- evidence_refs: [app/services/import_uploads.py, app/services/file_resources.py, app/workers/importer.py, app/workers/doc_converter.py, upload-worker-regression, alembic-heads]
 
 ## 阶段目标与用户流程
 
@@ -237,6 +237,18 @@ Library
 3. 先灰度管理后台主上传流程走新路径，保留旧作业读取分支；记录 `storing` 时长、保存成功到处理成功的延迟和重处理成功率。
 4. 为 `POST /import-file`、MCP 等未迁移入口建立后续迁移任务；在所有入口完成迁移前，不宣布系统整体已经统一上传语义。历史上已经丢失原文件的失败作业不伪造可重试能力，应明确标记为“需重新上传”。
 
+## 网盘一期：媒体原文件优先（本地实现，待部署）
+
+用户确认先以“文件可靠保存”为目标：常见视频与音频可作为原文件上传；当转写服务未配置，或文件超过转写读取预算时，上传仍在 FileResource 校验通过后成功，导入作业以 `stored_only` 结束，不进入向量或图谱 worker。已配置且在预算内的媒体仍可沿既有转写链路生成知识资产。
+
+`GET /me/stored-files` 以 FileResource 为唯一来源返回当前用户、当前知识库中已校验的原文件，并按 `relative_path` 推导目录；它不暴露 bucket、object key、endpoint 或凭据。管理后台“我的文件”改用该接口，因此处理失败或仅保存的媒体也可见。
+
+本地已补齐原文件下载与删除：`GET /me/stored-files/{file_resource_id}/download` 在当前用户、当前知识库和 FileResource 所有权都匹配后，返回 MinIO/OSS 的短时签名 URL，过期时间沿用 `DOCUMENT_STORAGE_SIGNED_URL_SECONDS`；不支持签名 URL 的 local 存储返回受控失败。`DELETE /me/stored-files/{file_resource_id}` 仅接受尚未生成 Document、且处理已结束的原文件；它先将资源标为 `deleting`，再以 cleanup outbox 异步删除对象，避免接口进程中断后留下不可恢复的删除状态。已生成知识资产的文件继续走现有 Document 删除与清理流程。
+
+“我的文件”已支持逐个、批量和当前文件夹删除。批量删除在浏览器中逐个复用上述两条删除路径；文件夹删除复用 `DELETE /me/files/folder`，只处理当前用户、当前知识库内的文件：已生成知识资产的文件走 Document 删除，处理已经结束的纯存储文件进入 `deleting` 并异步回收 MinIO 对象。文件夹中如有仍在处理的纯存储文件，整个请求返回冲突且不删除任何文件。预览仍未实现。
+
+本地验证（2026-09-16）：资源化上传、媒体策略、归档、MinIO 配置、用户文件 API 共 162 个 Python 测试通过；“我的文件”和导入前端回归共 75 个 Node 测试通过。未使用真实 MinIO 凭据或修改服务器环境，因此真实 bucket 连通性与生产部署仍待单独验收。
+
 ## 测试、安全与影响
 
 | 场景 | 应有结果 |
@@ -267,13 +279,15 @@ Library
 
 实施完成后，本文件的阶段控制应更新为实际 migration revision、测试证据、上线范围和后续清理条件；在此之前它只是一份待执行的设计路线，不表示功能已经上线。
 
-## S0/S1 实施回写（2026-09-10）
+## 服务器侧解耦实施回写（2026-09-10）
 
-- actual_result: 已完成 S0 入口与迁移链盘点，以及 S1 `FileResource` 持久化和管理后台分块上传 Complete 接入；对象写入、可读性/大小/SHA 校验、资源记录和作业入队在同一数据库提交中收敛。
-- changed_owners: `app/models/file_resource.py`、`app/models/document_import_job.py`、`app/models/__init__.py`、`app/services/file_resources.py`、`app/services/import_uploads.py`、`app/services/revision_files.py`、`alembic/versions/0076_file_resource_persistence.py` 及对应上传/迁移测试。
-- plan_deviation: 未改 `POST /import-file`、未来 MCP 入口、`app/workers/importer.py`、解析/OCR/Chunk/Embedding/图谱处理；未实现 S2 worker 资源读取、S3 DTO/权限接口或 S4 UI。
-- entrypoint_policy: 管理后台分块上传迁移到资源化 Complete；`POST /import-file` 与未来 MCP 入口保持旧语义，并留待后续迁移。
-- fresh_evidence: `alembic heads` 返回唯一 `0076 (head)`；S0/S1 相关组合测试返回 `134 passed`；新增模型/服务/迁移测试与静态检查通过。
-- remaining_risk: 当前工作树仍有三个无关图谱文件未解决冲突；S2 完成前新作业的 worker 仍从 staging 读取，长期对象虽已保留但尚未成为 worker 的输入源；迁移文件尚未在数据库实例执行。
-- next_substage: S2-resource-backed-importer（未授权，保持不执行）。
-- git_checkpoint: 未创建提交；保留用户已有 staged/unstaged 变更及无关冲突。
+- actual_result: 已在合并后的 `codex/upload-project` 基线完成服务器侧 S1，并补上资源化处理输入边界；管理后台分块上传先创建可恢复的 `storing` FileResource，长期对象校验后转为 `available`，再将现有 DocumentImportJob 入队。新 importer 与 DOC converter 从 FileResource materialize 临时输入，旧作业继续兼容 staging。
+- changed_owners: `app/schemas/documents.py`、`app/models/file_resource.py`、`app/services/file_resources.py`、`app/services/import_uploads.py`、`app/services/object_storage_contracts.py`、`app/services/object_storage_local.py`、`app/services/object_storage_remote.py`、`app/workers/importer.py`、`app/workers/doc_converter.py` 及相关测试。
+- entrypoint_policy: 只迁移管理后台分块上传；`POST /import-file` 与未来 MCP 入口保持旧语义，未修改。
+- processing_policy: 不修改解析、OCR、Chunk、Embedding、图谱算法，不新增消息队列或存储 provider；处理临时副本在 worker 结束后清理，长期 FileResource 对象不由 staging cleanup 删除。
+- fresh_evidence: Alembic 唯一 head 为 `0076`；相关上传、资源、worker、DOC 转换、对象存储和导入回归为 `120 passed, 1 skipped`；编译与新增 import 检查通过。
+- migration_state: 保留历史 `0076` 不改写；本次没有新增迁移。服务器执行前需确认当前 Alembic revision，并按发布流程备份数据库。
+- remaining_scope: S3 的独立资源摘要/重处理 API、完整资源权限接口和 S4 前端双状态 UI 尚未实现；现有任务状态仍通过 ImportJob 投影返回 FileResource ID/状态。
+- remaining_risk: 当前本地工作树仍保留用户已有前端修改、临时文件和未处理的其他变更；本次未连接或修改服务器，也未提交/推送最新本地修改。
+- next_substage: 服务器迁移演练与 S3/S4 设计确认；未经明确授权不执行远程迁移或部署。
+- git_checkpoint: 本次修改尚未提交；保留用户已有工作树变更及临时文件。

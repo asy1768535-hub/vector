@@ -12,7 +12,6 @@ from app.schemas.knowledge_artifact import (
     SummaryPayloadV1,
 )
 
-
 _WHITESPACE = re.compile(r"\s+")
 
 
@@ -23,7 +22,8 @@ class KnowledgeArtifactGenerationError(ValueError):
 
 
 class _ModelSummaryResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
+    # Keep only the persisted summary when providers add presentation metadata.
+    model_config = ConfigDict(extra="ignore", strict=True)
 
     summary: str = Field(min_length=1, max_length=16_000)
 
@@ -98,18 +98,36 @@ def deterministic_outline(
     return OutlinePayloadV1(generation_mode="deterministic", items=items)
 
 
+def _provider_json_value(content: str) -> Any:
+    try:
+        return json.loads(content)
+    except (TypeError, json.JSONDecodeError):
+        pass
+    if not isinstance(content, str):
+        raise KnowledgeArtifactGenerationError(
+            "invalid_provider_json", "provider returned invalid JSON"
+        )
+    decoder = json.JSONDecoder()
+    for index, character in enumerate(content):
+        if character != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(content[index:])
+        except json.JSONDecodeError:
+            continue
+        return value
+    raise KnowledgeArtifactGenerationError(
+        "invalid_provider_json", "provider returned invalid JSON"
+    )
+
+
 def parse_model_summary(
     content: str,
     *,
     source_character_count: int,
     source_truncated: bool,
 ) -> SummaryPayloadV1:
-    try:
-        raw = json.loads(content)
-    except (TypeError, json.JSONDecodeError):
-        raise KnowledgeArtifactGenerationError(
-            "invalid_provider_json", "summary provider returned invalid JSON"
-        ) from None
+    raw = _provider_json_value(content)
     try:
         parsed = _ModelSummaryResponse.model_validate(raw)
         return SummaryPayloadV1(
@@ -125,12 +143,7 @@ def parse_model_summary(
 
 
 def parse_model_outline(content: str) -> OutlinePayloadV1:
-    try:
-        raw = json.loads(content)
-    except (TypeError, json.JSONDecodeError):
-        raise KnowledgeArtifactGenerationError(
-            "invalid_provider_json", "outline provider returned invalid JSON"
-        ) from None
+    raw = _provider_json_value(content)
     try:
         parsed = _ModelOutlineResponse.model_validate(raw)
         return OutlinePayloadV1(generation_mode="model", items=parsed.items)

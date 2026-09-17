@@ -429,7 +429,7 @@ def test_provider_output_is_strict_and_maps_known_and_unknown_candidates():
     assert unknown.value.code == "provider_unknown_label_key"
 
 
-def test_provider_identity_allows_deepseek_and_local_qwen_only():
+def test_provider_identity_allows_approved_models_including_minimax():
     assert classification_provider_name(_settings()) == "deepseek"
     assert classification_provider_name(
         _settings(
@@ -437,6 +437,18 @@ def test_provider_identity_allows_deepseek_and_local_qwen_only():
             classification_model="qwen3.5-9b",
         )
     ) == "openai-compatible"
+    assert classification_provider_name(
+        _settings(
+            classification_base_url="https://model.rhzy.ai/v1",
+            classification_model="qwen3.8-27b-uncensored-fp8",
+        )
+    ) == "qwen3.8"
+    assert classification_provider_name(
+        _settings(
+            classification_base_url="https://api.minimaxi.com/v1",
+            classification_model="MiniMax-M2.7-highspeed",
+        )
+    ) == "minimax"
     with pytest.raises(ClassificationRuntimeError) as denied:
         classification_provider_name(
             _settings(
@@ -460,6 +472,28 @@ def test_messages_are_bounded_structured_and_contain_no_credentials():
     assert "first primary candidate must use a selectable" in messages[0]["content"]
     assert "Do not propose new labels" in messages[0]["content"]
     assert "api_key" not in messages[1]["content"].lower()
+
+
+def test_minimax_classification_provider_uses_its_compatible_json_profile():
+    async def success(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["temperature"] == 0.01
+        assert payload["reasoning_split"] is True
+        assert "response_format" not in payload
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": '{"ok":true}'}}]},
+        )
+
+    provider = OpenAICompatibleClassificationProvider(
+        base_url="https://api.minimaxi.com/v1",
+        model="MiniMax-M2.7-highspeed",
+        api_key="test-key",
+        transport=httpx.MockTransport(success),
+    )
+    assert asyncio.run(
+        provider.generate([{"role": "user", "content": "source"}])
+    ).content == '{"ok":true}'
 
 
 def test_scope_policy_requires_every_library_and_security_gate():

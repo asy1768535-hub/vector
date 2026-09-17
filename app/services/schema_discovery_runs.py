@@ -8,6 +8,8 @@ paths or from the graph worker coordinator.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Sequence
@@ -25,6 +27,7 @@ from app.models.graph_extraction_unit import GraphExtractionUnit
 from app.models.library import Library
 from app.models.ontology_version import OntologyVersion
 from app.models.schema_discovery_run import SchemaDiscoveryRun
+from app.services import schema_lifecycle_read
 from app.services.graph_candidate_aggregation import canonical_graph_value_hash_v1
 from app.services.graph_schema_discovery import (
     DiscoveryText,
@@ -32,6 +35,8 @@ from app.services.graph_schema_discovery import (
     persist_business_schema_draft,
 )
 from app.services.schema_lifecycle_read import resolve_current_ontology
+
+log = logging.getLogger(__name__)
 
 
 def _now() -> datetime:
@@ -704,11 +709,24 @@ async def process_next_schema_discovery_run(*, session_factory, provider=None) -
                     code="schema_discovery_state_changed",
                     message="AI draft is no longer writable",
                 )
+            current = await resolve_current_ontology(
+                db,
+                library=library,
+                required=False,
+            )
+            active_bundle = (
+                await schema_lifecycle_read.load_schema_version_bundle(
+                    db, library, current.id, for_update=True
+                )
+                if current is not None
+                else None
+            )
             snapshot = await persist_business_schema_draft(
                 db,
                 library=library,
                 ontology_version=ontology_version,
                 draft=draft,
+                active_bundle=active_bundle,
             )
             snapshot_hash = canonical_graph_value_hash_v1(snapshot)
             locked_run.ontology_snapshot = snapshot
@@ -738,18 +756,8 @@ async def process_next_schema_discovery_run(*, session_factory, provider=None) -
                 from app.services.graph_extraction_jobs import build_ontology_rule_snapshot
                 from app.services.schema_lifecycle_actions import activate_schema_version
                 from app.services.schema_lifecycle_contracts import SchemaLifecycleCommand
-                from app.services.schema_lifecycle_read import (
-                    load_schema_version_bundle,
-                    schema_version_state_hash,
-                )
-
-                draft_bundle = await load_schema_version_bundle(
+                draft_bundle = await schema_lifecycle_read.load_schema_version_bundle(
                     db, library, ontology_version.id, for_update=True
-                )
-                current = await resolve_current_ontology(
-                    db,
-                    library=library,
-                    required=False,
                 )
                 active_id = current.id if current is not None else None
                 command = SchemaLifecycleCommand(
@@ -759,7 +767,9 @@ async def process_next_schema_discovery_run(*, session_factory, provider=None) -
                     action_kind="activate_version",
                     target_kind="ontology_version",
                     target_id=ontology_version.id,
-                    expected_state_hash=schema_version_state_hash(draft_bundle),
+                    expected_state_hash=schema_lifecycle_read.schema_version_state_hash(
+                        draft_bundle
+                    ),
                     idempotency_key=f"ai-discovery:{locked_run.id}",
                     payload={
                         "confirmation": "activate_schema_version",
@@ -792,3 +802,46 @@ async def process_next_schema_discovery_run(*, session_factory, provider=None) -
                     job.status = "queued"
                     job.current_stage = "preparing"
     return locked_run
+
+
+async def recover_interrupted_schema_discovery_runs(*, session_factory) -> int:
+    """Return runs abandoned by a stopped or timed-out worker to the queue."""
+
+    async with session_factory() as db, db.begin():
+        result = await db.execute(
+            update(SchemaDiscoveryRun)
+            .where(SchemaDiscoveryRun.status == "discovering")
+            .values(
+                status="queued",
+                started_at=None,
+                updated_at=_now(),
+                error_code=None,
+                error_message=None,
+            )
+        )
+    return int(result.rowcount or 0)
+
+
+async def process_next_schema_discovery_run_with_recovery(
+    *, session_factory, timeout_seconds: float
+) -> SchemaDiscoveryRun | None:
+    """Process one run without allowing interrupted work to remain hidden forever."""
+
+    recovered = await recover_interrupted_schema_discovery_runs(
+        session_factory=session_factory
+    )
+    if recovered:
+        log.warning("requeued interrupted schema discovery runs count=%s", recovered)
+    try:
+        return await asyncio.wait_for(
+            process_next_schema_discovery_run(session_factory=session_factory),
+            timeout=timeout_seconds,
+        )
+    except TimeoutError:
+        recovered = await recover_interrupted_schema_discovery_runs(
+            session_factory=session_factory
+        )
+        log.error(
+            "schema discovery run exceeded overall timeout; requeued=%s", recovered
+        )
+        return None

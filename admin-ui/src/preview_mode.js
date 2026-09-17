@@ -38,6 +38,60 @@ const PREVIEW_LIBRARY = Object.freeze({
     deleted_at: null,
 });
 
+const PREVIEW_FOLDER_ID = '23232323-2323-4232-8232-232323232323';
+const PREVIEW_DOCUMENTS = Object.freeze([
+    {
+        document_id: '24242424-2424-4242-8242-242424242424',
+        library_id: PREVIEW_LIBRARY.id,
+        title: '产品知识手册.docx',
+        document_status: 'ready',
+        revision_id: '25252525-2525-4252-8252-252525252525',
+        revision_no: 3,
+        revision_status: 'ready',
+        revision_content_hash: 'a'.repeat(64),
+        updated_at: '2026-09-12T08:00:00Z',
+        uploaded_at: '2026-09-10T08:00:00Z',
+        uploader: { display_name: '本地预览用户', username: 'preview', email: null, is_system: false },
+        can_delete: true,
+        overall_state: 'usable',
+        capabilities: {
+            source: 'ready', search: 'ready', chat: 'ready', summary: 'ready', outline: 'ready',
+            classification: 'pending_review', graph: 'ready',
+        },
+        classification: {
+            state: 'pending_review', decision_set_id: null, taxonomy_version_id: null,
+            source: 'model', labels: [], latest_run_id: null, latest_run_status: 'pending_review',
+        },
+        summary_excerpt: '介绍产品能力、部署方式和常见使用流程。',
+        graph_counts: { entities: 12, relations: 8 },
+    },
+    {
+        document_id: '26262626-2626-4262-8262-262626262626',
+        library_id: PREVIEW_LIBRARY.id,
+        title: '检索接口说明.md',
+        document_status: 'ready',
+        revision_id: '27272727-2727-4272-8272-272727272727',
+        revision_no: 1,
+        revision_status: 'ready',
+        revision_content_hash: 'b'.repeat(64),
+        updated_at: '2026-09-11T08:00:00Z',
+        uploaded_at: '2026-09-11T08:00:00Z',
+        uploader: { display_name: '本地预览用户', username: 'preview', email: null, is_system: false },
+        can_delete: true,
+        overall_state: 'partial',
+        capabilities: {
+            source: 'ready', search: 'ready', chat: 'ready', summary: 'ready', outline: 'disabled',
+            classification: 'disabled', graph: 'processing',
+        },
+        classification: {
+            state: 'unclassified', decision_set_id: null, taxonomy_version_id: null,
+            source: null, labels: [], latest_run_id: null, latest_run_status: null,
+        },
+        summary_excerpt: '检索请求参数、过滤条件和返回结果说明。',
+        graph_counts: { entities: 4, relations: 2 },
+    },
+]);
+
 let previewImportConfiguration = {
     max_file_bytes: 500 * 1024 * 1024,
     doc_max_file_bytes: 200 * 1024 * 1024,
@@ -286,6 +340,30 @@ function previewFixture(parts) {
     }
     if (method === 'GET' && path === '/chat/conversations') return { body: [] };
 
+    if (method === 'GET' && path === '/me/files') {
+        const pathValue = String(query.get('path') || '');
+        const inFolder = pathValue === '/项目资料';
+        return {
+            body: {
+                library_slug: PREVIEW_LIBRARY.slug,
+                path: pathValue,
+                folders: inFolder ? [] : [{ id: PREVIEW_FOLDER_ID, name: '项目资料', path: '/项目资料' }],
+                files: [{
+                    document_id: (inFolder ? PREVIEW_DOCUMENTS[1] : PREVIEW_DOCUMENTS[0]).document_id,
+                    file_name: inFolder ? PREVIEW_DOCUMENTS[1].title : PREVIEW_DOCUMENTS[0].title,
+                    created_at: inFolder ? PREVIEW_DOCUMENTS[1].uploaded_at : PREVIEW_DOCUMENTS[0].uploaded_at,
+                }],
+                folder_total: inFolder ? 0 : 1,
+                file_total: 1,
+                page: 1,
+                page_size: 50,
+            },
+        };
+    }
+    if (method === 'GET' && /^\/libraries\/[^/]+\/folders$/.test(path)) {
+        return { body: [{ id: PREVIEW_FOLDER_ID, name: '项目资料', path: '/项目资料' }] };
+    }
+
     if (method === 'GET' && /^\/libraries\/[^/]+\/documents$/.test(path)) {
         return { body: [] };
     }
@@ -328,7 +406,7 @@ function previewFixture(parts) {
         };
     }
     if (method === 'GET' && /^\/libraries\/[^/]+\/catalog\/documents$/.test(path)) {
-        return { body: { items: [], total: 0, next_cursor: null } };
+        return { body: { items: PREVIEW_DOCUMENTS, total: PREVIEW_DOCUMENTS.length, next_cursor: null } };
     }
     if (method === 'GET'
         && /^\/libraries\/[^/]+\/classifications\/reviews$/.test(path)) {

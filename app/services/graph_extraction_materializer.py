@@ -217,7 +217,12 @@ def _add_extracted_aliases(
         )
 
 
-async def _load_materialization_scope(db, *, job_id: uuid.UUID):
+async def _load_materialization_scope(
+    db,
+    *,
+    job_id: uuid.UUID,
+    allow_succeeded_reprocess: bool = False,
+):
     job = await db.get(GraphExtractionJob, job_id, with_for_update=True)
     if job is None:
         raise GraphExtractionMaterializationError(
@@ -225,20 +230,20 @@ async def _load_materialization_scope(db, *, job_id: uuid.UUID):
             "graph extraction Job was not found",
         )
     materialization_statistics = (job.statistics or {}).get("materialization")
-    if job.status == "succeeded" or (
+    if (not allow_succeeded_reprocess and job.status == "succeeded") or (
         job.status == "partially_succeeded" and isinstance(materialization_statistics, dict)
     ):
         return job, None, None, None, None
     if (
         job.execution_mode != "production"
         or job.trigger_type == "eval"
-        or (
+        or (not allow_succeeded_reprocess and (
             (job.status, job.current_stage)
             not in {
                 ("processing", "materializing"),
                 ("partially_succeeded", "finalizing"),
             }
-        )
+        ))
     ):
         raise GraphExtractionMaterializationError(
             "job_not_materializable",
@@ -677,10 +682,12 @@ async def _materialize_job_transaction(
     db,
     *,
     job_id: uuid.UUID,
+    allow_succeeded_reprocess: bool = False,
 ) -> GraphExtractionMaterializationResult:
     job, library, _document, _revision, _ontology = await _load_materialization_scope(
         db,
         job_id=job_id,
+        allow_succeeded_reprocess=allow_succeeded_reprocess,
     )
     if library is None:
         return GraphExtractionMaterializationResult(0, 0, 0, 0, True)
@@ -1068,11 +1075,16 @@ async def materialize_graph_extraction_job(
     session_factory,
     *,
     job_id: uuid.UUID,
+    allow_succeeded_reprocess: bool = False,
 ) -> GraphExtractionMaterializationResult:
     try:
         async with session_factory() as db:
             async with db.begin():
-                return await _materialize_job_transaction(db, job_id=job_id)
+                return await _materialize_job_transaction(
+                    db,
+                    job_id=job_id,
+                    allow_succeeded_reprocess=allow_succeeded_reprocess,
+                )
     except GraphExtractionMaterializationError as exc:
         if exc.code != "job_not_materializable":
             await _mark_materialization_failed(session_factory, job_id=job_id)

@@ -19,8 +19,9 @@ from app.services.classification_taxonomy_contracts import (
     ClassificationTaxonomyError,
     normalize_stable_key,
 )
-from app.services.graph_extraction_provider import (
-    graph_extraction_provider_name,
+from app.services.minimax_openai import (
+    is_minimax_openai_contract,
+    json_request_options,
 )
 
 
@@ -42,16 +43,27 @@ def fail_classification_runtime(code: str, message: str) -> None:
 
 
 def classification_provider_name(config: Settings = settings) -> str:
-    try:
-        return graph_extraction_provider_name(
-            base_url=config.classification_base_url,
-            model=config.classification_model,
-        )
-    except ValueError:
-        fail_classification_runtime(
-            "provider_config_invalid",
-            "classification provider identity is not approved",
-        )
+    contract = (config.classification_base_url.rstrip("/"), config.classification_model)
+    if contract in {
+        ("https://api.deepseek.com/v1", "deepseek-v4-pro"),
+        ("https://api.deepseek.com/v1", "deepseek-v4-flash"),
+    }:
+        return "deepseek"
+    if contract == ("http://10.0.10.2:8113/v1", "qwen3.5-9b"):
+        return "openai-compatible"
+    if contract in {
+        ("https://model.rhzy.ai/v1", "gemma4-31b-uncensored-bf16-256k-seq4"),
+        ("http://10.0.10.2:8114/v1", "gemma4-31b-uncensored-bf16-256k-seq4"),
+    }:
+        return "gemma4"
+    if contract == ("https://model.rhzy.ai/v1", "qwen3.8-27b-uncensored-fp8"):
+        return "qwen3.8"
+    if is_minimax_openai_contract(base_url=contract[0], model=contract[1]):
+        return "minimax"
+    fail_classification_runtime(
+        "provider_config_invalid",
+        "classification provider identity is not approved",
+    )
 
 
 
@@ -84,8 +96,10 @@ def classification_model_config_hash(config: Settings = settings) -> str:
             "model": config.classification_model,
             "prompt_version": config.classification_prompt_version,
             "max_source_chars": config.classification_model_max_source_chars,
-            "temperature": 0,
-            "response_format": "json_object",
+            "request_options": json_request_options(
+                base_url=config.classification_base_url,
+                model=config.classification_model,
+            ),
             "output_contract": "classifier-output-v1",
         }
     )

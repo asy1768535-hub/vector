@@ -16,6 +16,7 @@ venv/
 .env*
 !.env.example
 .env.bak*
+.codex_ssh_askpass.cmd
 *.bak
 .pytest_cache/
 .pytest-tmp/
@@ -75,3 +76,8 @@ storage/document_files/
 # scripts/build_bge_compare.py：bge/云对比的一次性本地工具
 /scripts/build_bge_compare.py
 .gitnexus
+
+# 本机部署覆盖层与生成物；正式部署只从受版本控制的 deploy/Dockerfile 构建。
+/.deploy_tmp/
+/.release_tmp/
+/output/

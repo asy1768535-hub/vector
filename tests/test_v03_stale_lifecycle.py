@@ -435,6 +435,11 @@ def test_cleanup_enqueue_delete_document_marks_graph_stale_before_outbox(monkeyp
     async def fake_stale(db, library, *, document_id):
         assert document_id == DOC_ID
         calls.append("graph")
+        return graph_evidence.GraphStaleLifecycleResult(
+            stale_entity_mentions=0,
+            stale_relation_evidence=0,
+            stale_relations=0,
+        )
 
     async def fake_enqueue(db, **kwargs):
         assert kwargs["document_id"] == DOC_ID
@@ -455,7 +460,7 @@ def test_cleanup_enqueue_delete_document_marks_graph_stale_before_outbox(monkeyp
 
     asyncio.run(cleanup.enqueue_delete_document(object(), _lib(), DOC_ID))
 
-    assert calls == ["graph", "purge", "outbox"]
+    assert calls == ["graph", "purge", "outbox", "outbox"]
 
 
 def test_cleanup_enqueue_delete_document_revision_marks_graph_stale_before_outbox(monkeypatch):

@@ -26,6 +26,7 @@ from app.db import get_db
 from app.deps import require_lib
 from app.models.chunk import Chunk
 from app.models.document import Document
+from app.models.folder import Folder
 from app.models.document_file import DocumentFile
 from app.models.document_revision import DocumentRevision
 from app.models.document_revision_file import DocumentRevisionFile
@@ -36,6 +37,7 @@ from app.models.library import Library
 from app.models.user import User
 from app.schemas.admin import EmbeddingJobRead
 from app.schemas.documents import (
+    BulkDeleteDocumentsResponse,
     DocumentFullSourceResponse,
     DocumentIngestRequest,
     DocumentIngestResponse,
@@ -43,6 +45,8 @@ from app.schemas.documents import (
     DocumentJobProgressRequest,
     DocumentRead,
     DocumentSourceLocationResponse,
+    ImportJobRead,
+    ImportSessionCreate,
     ImportFileResponse,
     LibraryStats,
     QueryRequest,
@@ -50,11 +54,18 @@ from app.schemas.documents import (
     QueryResponse,
 )
 from app.config import settings
-from app.services import embedding, import_parsing, ingest as ingest_service, source_enrichment
+from app.services import (
+    embedding,
+    import_parsing,
+    import_uploads,
+    ingest as ingest_service,
+    source_enrichment,
+)
 from app.services import cleanup as cleanup_service
 from app.services.metadata_guard import MetadataValidationError
 from app.services import rerank as rerank_svc
 from app.services import retrieval as retrieval_svc
+from app.services import qdrant as qdrant_svc
 from app.services.object_storage import build_object_storage_adapter
 from app.services.object_storage_contracts import ObjectStorageError
 from app.services.revision_files import (
@@ -861,7 +872,9 @@ async def download_document_file(
             try:
                 access = revision_file_access_from_row(revision_row)
                 await db.rollback()
-                adapter = build_object_storage_adapter()
+                adapter = build_object_storage_adapter(
+                    provider=access.locator.provider
+                )
                 content = await verified_revision_file_bytes(adapter, access)
             except ObjectStorageError as exc:
                 await db.rollback()
@@ -959,6 +972,50 @@ async def delete_document(
     await db.commit()
     return None
 
+
+@router.post("/documents/bulk-delete", response_model=BulkDeleteDocumentsResponse)
+async def bulk_delete_documents(
+    lib: Library = Depends(require_lib("delete")),
+    db: AsyncSession = Depends(get_db),
+) -> BulkDeleteDocumentsResponse:
+    """Soft-delete every active document in bounded batches, retaining originals."""
+    locked = await _lock_writable(db, lib)
+    deleted_count = 0
+    cleanup_task_count = 0
+    while True:
+        rows = await db.execute(
+            select(Document.id)
+            .where(Document.library_id == locked.id, Document.deleted_at.is_(None))
+            .order_by(Document.id)
+            .limit(200)
+            .with_for_update()
+        )
+        document_ids = list(rows.scalars().all())
+        if not document_ids:
+            break
+        now = datetime.now(timezone.utc)
+        await db.execute(
+            update(Document).where(Document.id.in_(document_ids)).values(
+                deleted_at=now, status="deleted", updated_at=now
+            )
+        )
+        await db.execute(
+            update(EmbeddingJob).where(
+                EmbeddingJob.library_id == locked.id,
+                EmbeddingJob.document_id.in_(document_ids),
+                EmbeddingJob.status.in_(("pending", "processing")),
+            ).values(status="superseded", finished_at=now)
+        )
+        for document_id in document_ids:
+            await cleanup_service.enqueue_delete_document(db, locked, document_id)
+        deleted_count += len(document_ids)
+        cleanup_task_count += len(document_ids)
+        await db.flush()
+    await db.commit()
+    return BulkDeleteDocumentsResponse(
+        deleted_count=deleted_count,
+        cleanup_task_count=cleanup_task_count,
+    )
 
 @router.get("/stats", response_model=LibraryStats)
 async def library_stats(
@@ -1097,6 +1154,33 @@ async def query_library(
     # 重建中/失败的库不返回半成品（#6 §9）
     if lib.index_state in ("rebuilding", "failed"):
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "library index rebuilding")
+    payload_filter = None
+    if body.folder_id is not None:
+        folder = await db.get(Folder, body.folder_id)
+        if folder is None or folder.library_id != lib.id or folder.deleted_at is not None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "folder not found")
+        folder_path = folder.path.rstrip("/")
+        folder_like_path = folder_path.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        folder_rows = await db.execute(
+            select(Folder.id).where(
+                Folder.library_id == lib.id,
+                Folder.deleted_at.is_(None),
+                (Folder.path == folder.path) | Folder.path.like(f"{folder_like_path}/%", escape="\\"),
+            )
+        )
+        folder_ids = list(folder_rows.scalars().all())
+        document_rows = await db.execute(
+            select(Document.id).where(
+                Document.library_id == lib.id,
+                Document.deleted_at.is_(None),
+                Document.folder_id.in_(folder_ids),
+            )
+        )
+        document_ids = list(document_rows.scalars().all())
+        if not document_ids:
+            return QueryResponse(results=[])
+        payload_filter = qdrant_svc.document_id_any_filter(document_ids)
+
     try:
         vector = await embedding.embed_one(
             body.query, model=lib.embedding_model, base_url=lib.embedding_base_url
@@ -1114,9 +1198,15 @@ async def query_library(
 
     try:
         # 有界 overfetch + 可见性过滤（managed 回查 PG 丢弃陈旧/越库/已删；external 跳过）
-        raw = await retrieval_svc._recall_visible(
-            db, lib, lib.qdrant_collection, vector, needed=recall_limit,
-        )
+        if payload_filter is None:
+            raw = await retrieval_svc._recall_visible(
+                db, lib, lib.qdrant_collection, vector, needed=recall_limit,
+            )
+        else:
+            raw = await retrieval_svc._recall_visible(
+                db, lib, lib.qdrant_collection, vector, needed=recall_limit,
+                payload_filter=payload_filter,
+            )
     except HTTPException:
         raise
     except Exception as exc:
@@ -1178,7 +1268,11 @@ async def query_library(
     return QueryResponse(results=results)
 
 
-@router.post("/import-file", response_model=ImportFileResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/import-file",
+    response_model=ImportFileResponse | ImportJobRead,
+    status_code=status.HTTP_201_CREATED,
+)
 async def import_file(
     file: UploadFile = File(...),
     external_id: Optional[str] = Form(default=None),
@@ -1193,8 +1287,6 @@ async def import_file(
     structured_storage = settings.revision_file_storage_enabled
     library_id = lib.id
     created_by = user.id
-    if not structured_storage:
-        await _lock_writable(db, lib)
     filename = file.filename or "imported_file"
     # #13：后缀大小写不敏感 + 白名单。未知格式直接 415，不再「当纯文本」误吞二进制。
     lower_name = filename.lower()
@@ -1207,6 +1299,58 @@ async def import_file(
 
     # #12：分块读取并在累计超限时立即 413（不先整文件入内存）。
     content = await _read_capped(file, settings.max_import_file_bytes)
+    if not content:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "File is empty")
+    if settings.document_storage_provider == "minio":
+        normalized_security = _normalize_import_scope(security_level, "security_level")
+        if visibility_scope is not None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "visibility_scope is not supported by asynchronous file import",
+            )
+        if graph_extraction_requested:
+            from app.services.graph_extraction_triggers import (
+                graph_extraction_upload_configuration,
+            )
+
+            graph_config = await graph_extraction_upload_configuration(db, lib)
+            graph_allowed = graph_config["available"] or graph_config["exploration_available"]
+            if not graph_allowed:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    {"code": "graph_extraction_unavailable", "reasons": graph_config["reasons"]},
+                )
+            if normalized_security not in graph_config["allowed_security_levels"]:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    {"code": "graph_extraction_security_level_not_allowed"},
+                )
+        try:
+            job = await import_uploads.complete_direct_upload(
+                db,
+                library=lib,
+                user=user,
+                payload=ImportSessionCreate(
+                    batch_id=uuid.uuid4(),
+                    file_name=filename,
+                    content_type=file.content_type,
+                    size_bytes=len(content),
+                    external_id=external_id,
+                    replace_document_id=replace_document_id,
+                    security_level=normalized_security,
+                    graph_extraction_requested=graph_extraction_requested,
+                ),
+                content=content,
+            )
+            return await import_uploads.job_projection(db, job)
+        except import_uploads.ImportUploadError as exc:
+            await db.rollback()
+            raise HTTPException(
+                exc.status_code,
+                {"code": exc.code, "message": str(exc)},
+            ) from exc
+    if not structured_storage:
+        await _lock_writable(db, lib)
     prepared_file = None
     if structured_storage:
         await db.rollback()

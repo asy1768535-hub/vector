@@ -165,6 +165,37 @@ class LocalObjectStorageAdapter:
         if len(content) > self._max_read_bytes:
             raise ObjectStorageError("object_too_large", "stored object exceeds the read limit")
         return content
+    async def materialize(
+        self, object_key: str, object_version: str | None, destination_path: Path
+    ) -> None:
+        if object_version is not None:
+            raise ObjectStorageError(
+                "invalid_object_version", "local storage does not use object versions"
+            )
+        await asyncio.to_thread(
+            self._materialize, object_key, destination_path
+        )
+
+    def _materialize(self, object_key: str, destination_path: Path) -> None:
+        source = self.path_for_read(object_key)
+        destination = Path(destination_path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temp_name: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=destination.parent, delete=False
+            ) as handle:
+                temp_name = handle.name
+                with source.open("rb") as source_handle:
+                    shutil.copyfileobj(source_handle, handle, length=1024 * 1024)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_name, destination)
+            temp_name = None
+        finally:
+            if temp_name is not None:
+                Path(temp_name).unlink(missing_ok=True)
+
 
     async def stat(
         self, object_key: str, object_version: str | None

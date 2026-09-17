@@ -11,8 +11,12 @@ from app.services.object_storage_remote import (
 )
 
 
-def build_object_storage_adapter(config: Settings = settings):
-    provider = config.document_storage_provider
+def build_object_storage_adapter(
+    config: Settings = settings,
+    *,
+    provider: str | None = None,
+):
+    provider = provider or config.document_storage_provider
     if provider == "local":
         root = Path(config.document_files_dir)
         if not root.is_absolute():
@@ -25,7 +29,13 @@ def build_object_storage_adapter(config: Settings = settings):
     if provider == "minio":
         from minio import Minio
 
-        parsed = urlparse(config.document_storage_endpoint_url)
+        endpoint = config.document_storage_endpoint_url.strip()
+        parsed = urlparse(endpoint)
+        if not parsed.scheme:
+            scheme = "https" if getattr(config, "minio_secure", True) else "http"
+            parsed = urlparse(f"{scheme}://{endpoint}")
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise RuntimeError("document storage endpoint is invalid")
         client = Minio(
             parsed.netloc,
             access_key=config.document_storage_access_key.get_secret_value(),

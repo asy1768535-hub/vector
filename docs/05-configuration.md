@@ -35,6 +35,28 @@
 | `QDRANT_URL` | `http://10.0.10.2:6333` | HTTP 端口 |
 | `QDRANT_API_KEY` | `""` | 可选；私有 Qdrant 用 |
 
+### 原始文件对象存储（MinIO / 本地兼容）
+
+`FileResource` 和结构化 `DocumentRevisionFile` 共用 `ObjectStorageAdapter`。新部署
+使用 MinIO 时，推荐设置 `REVISION_FILE_STORAGE_ENABLED=true`、
+`ENABLE_EVIDENCE_WRITE_PATH=true`，并安装 `pip install -e ".[object-storage]"`。原始文件
+对象只写入配置的 bucket；解析、OCR、向量和图谱仍留在现有处理链路。
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `DOCUMENT_STORAGE_PROVIDER` | `local` | `local` / `minio` / `oss`；提供 `MINIO_ENDPOINT` 且未显式设置时自动为 `minio`；禁止同时显式设置为非 `minio`，避免源文件误落本地 |
+| `DOCUMENT_STORAGE_ENDPOINT_URL` | `""` | 规范 URL；也可用 `MINIO_ENDPOINT` 填主机名，按 `MINIO_SECURE` 补全协议 |
+| `DOCUMENT_STORAGE_BUCKET` | `""` | 远端 bucket；也可用 `MINIO_BUCKET`（生产约定 `vector-database-raw`） |
+| `DOCUMENT_STORAGE_ACCESS_KEY` | `""` | 运行时凭据；也可用 `MINIO_ACCESS_KEY`，不要使用 MinIO admin |
+| `DOCUMENT_STORAGE_SECRET_KEY` | `""` | 运行时 Secret；也可用 `MINIO_SECRET_KEY`，不得提交到仓库或日志 |
+| `MINIO_SECURE` | `true` | `MINIO_ENDPOINT` 未带协议时是否使用 HTTPS |
+| `DOCUMENT_STORAGE_MAX_READ_BYTES` | `52428800` | Worker 物化/读取原始文件的上限 |
+| `DOCUMENT_STORAGE_SIGNED_URL_SECONDS` | `300` | 受控下载 URL 有效期 |
+
+兼容变量映射只在 `Settings` 内完成，业务代码始终读取 `document_storage_*`。读取和删除已有文件时按数据库记录的 `storage_provider` 选择适配器，因此切换 MinIO 后旧 local FileResource 仍可读取。已有
+`local` 记录继续按原路径读取，不做历史文件批量迁移。启动和 `/health/ready` 会检查
+远端 bucket；网络、TLS、认证或 bucket 权限异常时不会把上传标记为已保存。
+
 ### API 服务
 
 | 变量 | 默认 | 说明 |
@@ -80,7 +102,7 @@
 |---|---|
 | switch/provider | `GRAPH_EXTRACTION_ENABLED=false`; `GRAPH_EXTRACTION_AUTO_TRIGGER_ENABLED=false`; `GRAPH_EXTRACTION_BASE_URL=https://api.deepseek.com/v1`; `GRAPH_EXTRACTION_MODEL=deepseek-v4-pro`; `GRAPH_EXTRACTION_API_KEY=`; `GRAPH_EXTRACTION_TIMEOUT_SECONDS=120`; `GRAPH_EXTRACTION_TEMPERATURE=0`; `GRAPH_EXTRACTION_RESPONSE_FORMAT=json_object` |
 | helper review | New Jobs use a local helper draft followed by the frozen canonical Qwen provider review; Qwen remains the only canonical output. `GRAPH_EXTRACTION_MINSTRAL_BASE_URL=http://graph-minstral-3b:8000/v1`; `GRAPH_EXTRACTION_MINSTRAL_MODEL=graph-minstral-3b`; `GRAPH_EXTRACTION_MINSTRAL_TIMEOUT_SECONDS=120`; `GRAPH_EXTRACTION_MINSTRAL_MAX_OUTPUT_TOKENS=1000`; `GRAPH_EXTRACTION_QWEN3_DRAFT_MAX_OUTPUT_TOKENS=1000`. Libraries in `GRAPH_EXTRACTION_NUEXTRACT_REVIEW_LIBRARY_IDS=` keep the NuExtract helper with `GRAPH_EXTRACTION_NUEXTRACT_BASE_URL=http://nuextract3-gpu0:8000/v1`; `GRAPH_EXTRACTION_NUEXTRACT_MODEL=nuextract3`; `GRAPH_EXTRACTION_NUEXTRACT_TIMEOUT_SECONDS=120`; `GRAPH_EXTRACTION_NUEXTRACT_MAX_OUTPUT_TOKENS=4000`. Existing frozen Jobs remain unchanged. |
-| context/version | `GRAPH_EXTRACTION_MAX_CONTEXT_CHARS=24000`; `GRAPH_EXTRACTION_PREVIOUS_CHUNKS=1`; `GRAPH_EXTRACTION_NEXT_CHUNKS=1`; `GRAPH_SCHEMA_DISCOVERY_MAX_SOURCE_CHUNKS=8`; `GRAPH_SCHEMA_DISCOVERY_CONCEPT_INVENTORY_ENABLED=false`; `GRAPH_SCHEMA_DISCOVERY_TIMEOUT_SECONDS=300`; `GRAPH_SCHEMA_DISCOVERY_CONTEXT_WINDOW_TOKENS=16384`; `GRAPH_SCHEMA_DISCOVERY_MAX_OUTPUT_TOKENS=8000`; `GRAPH_EXTRACTION_PROMPT_VERSION=v1`; `GRAPH_EXTRACTION_EXTRACTOR_VERSION=v1`; `GRAPH_EXTRACTION_OUTPUT_PARSER_VERSION=v1`; `GRAPH_EXTRACTION_CONTEXT_POLICY_VERSION=v1`; `GRAPH_EXTRACTION_POLICY_VERSION=v1`; `GRAPH_EXTRACTION_NORMALIZATION_RULE_VERSION=normalization_v1`; `GRAPH_EXTRACTION_CONFIDENCE_POLICY_VERSION=v1` |
+| context/version | `GRAPH_EXTRACTION_MAX_CONTEXT_CHARS=24000`; `GRAPH_EXTRACTION_PREVIOUS_CHUNKS=1`; `GRAPH_EXTRACTION_NEXT_CHUNKS=1`; `GRAPH_SCHEMA_DISCOVERY_MAX_SOURCE_CHUNKS=32`; `GRAPH_SCHEMA_DISCOVERY_CONCEPT_INVENTORY_ENABLED=false`; `GRAPH_SCHEMA_DISCOVERY_TIMEOUT_SECONDS=300`; `GRAPH_SCHEMA_DISCOVERY_CONTEXT_WINDOW_TOKENS=16384`; `GRAPH_SCHEMA_DISCOVERY_MAX_OUTPUT_TOKENS=8000`; `GRAPH_EXTRACTION_PROMPT_VERSION=v1`; `GRAPH_EXTRACTION_EXTRACTOR_VERSION=v1`; `GRAPH_EXTRACTION_OUTPUT_PARSER_VERSION=v1`; `GRAPH_EXTRACTION_CONTEXT_POLICY_VERSION=v1`; `GRAPH_EXTRACTION_POLICY_VERSION=v1`; `GRAPH_EXTRACTION_NORMALIZATION_RULE_VERSION=normalization_v1`; `GRAPH_EXTRACTION_CONFIDENCE_POLICY_VERSION=v1` |
 | confidence/evidence | `GRAPH_EXTRACTION_ENTITY_MATERIALIZATION_THRESHOLD=0.85`; `GRAPH_EXTRACTION_RELATION_DRAFT_THRESHOLD=0.85`; `GRAPH_EXTRACTION_WEIGHT_MODEL=0.25`; `GRAPH_EXTRACTION_WEIGHT_EVIDENCE=0.35`; `GRAPH_EXTRACTION_WEIGHT_SCHEMA=0.25`; `GRAPH_EXTRACTION_WEIGHT_NORMALIZATION=0.15`; `GRAPH_EXTRACTION_AUTO_EVIDENCE_TYPES=direct_statement,table_cell`; `GRAPH_EXTRACTION_EVIDENCE_GROUP_POLICY=all_claims_valid` |
 | worker/lease | `GRAPH_EXTRACTION_WORKER_POLL_SECONDS=3`; `GRAPH_EXTRACTION_UNIT_LEASE_SECONDS=180`; `GRAPH_EXTRACTION_UNIT_LEASE_RENEW_SECONDS=30`; `GRAPH_EXTRACTION_WORKER_MAX_MODEL_ATTEMPTS=3` |
 | retention | `GRAPH_EXTRACTION_CONTEXT_RETENTION_DAYS=30`; `GRAPH_EXTRACTION_RAW_OUTPUT_RETENTION_DAYS=30`; `GRAPH_EXTRACTION_CANDIDATE_RETENTION_DAYS=180` |
@@ -156,6 +178,28 @@ M1 只冻结 DTO、配置和启动校验，不挂载 `/v06` 路由，也不执�
 | `IMAGE_OCR_MAX_INPUT_BYTES` | `134217728` | 独立图片解析上限（默认 128 MiB，可配置 1–500 MiB）；在读入内存和 OCR 前检查，不改变上传总额度 |
 
 OCR 在 Import Worker 中执行；同一进程内 OCR 调用串行，普通文本/Office 文件仍可并发解析。
+
+### 视频转文字检索
+
+视频原文件照常保存到 MinIO；Importer 读取该对象到短生命周期临时文件，用本机 `ffmpeg` 转成单声道 MP3，调用 FunASR 的 `POST /transcribe` 或 OpenAI 兼容的 `POST /audio/transcriptions`，只将转写文本进入已有切块、Embedding 与检索链路。转写结束后视频和音频临时副本都会删除，PG 保存的是 MinIO 定位信息和文档/检索数据，不保存视频副本。
+
+默认关闭。开启开关并配置服务地址后，上传页才会允许 `.mp4`、`.mov`、`.mkv`、`.avi`、`.webm`；选择 `openai_compatible` 时还必须配置模型名。
+
+| 变量 | 说明 |
+|---|---|
+| `VIDEO_TRANSCRIPTION_ENABLED` | `true` 开启入口 |
+| `VIDEO_TRANSCRIPTION_PROVIDER` | `funasr`（现有 `/transcribe` 纯文本响应）或 `openai_compatible`（`/audio/transcriptions`，可返回时间点） |
+| `VIDEO_TRANSCRIPTION_BASE_URL` | 转写服务根地址；按 provider 自动补 `/transcribe` 或 `/audio/transcriptions` |
+| `VIDEO_TRANSCRIPTION_MODEL` | OpenAI 兼容服务的转写模型名；FunASR 可留空 |
+| `VIDEO_TRANSCRIPTION_API_KEY` | 可选 Bearer 密钥，绝不写入 Git |
+| `VIDEO_TRANSCRIPTION_FFMPEG_BINARY` | ffmpeg 可执行文件，默认 `ffmpeg` |
+| `VIDEO_TRANSCRIPTION_TIMEOUT_SECONDS` | 调用转写服务的最长秒数，默认 1800 |
+| `VIDEO_TRANSCRIPTION_EXTRACT_TIMEOUT_SECONDS` | 视频抽音频的最长秒数，默认 1800 |
+| `VIDEO_TRANSCRIPTION_MAX_INPUT_BYTES` | 单视频上限，默认 500 MiB |
+| `VIDEO_TRANSCRIPTION_MAX_AUDIO_BYTES` | 抽取后 MP3 上限，默认 50 MiB |
+| `VIDEO_TRANSCRIPTION_MAX_TRANSCRIPT_CHARS` | 转写文本上限，默认 1000 万字符 |
+
+有效的视频上限取知识库上传上限、`VIDEO_TRANSCRIPTION_MAX_INPUT_BYTES`、`DOCUMENT_STORAGE_MAX_READ_BYTES` 三者最小值。若视频包含分段时间点，检索证据会保留起止秒数；点击原视频时可用该时间点定位播放。
 
 ### 文件夹上传吞吐
 

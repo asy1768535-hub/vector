@@ -7,8 +7,8 @@ enumerate which entity or relation names are legal.
 
 from __future__ import annotations
 
-import json
 import asyncio
+import json
 import logging
 import re
 import uuid
@@ -17,9 +17,9 @@ from typing import Any, Iterable, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from app.config import settings
 from app.models.attribute_definition import ATTRIBUTE_OWNER_ENTITY_TYPE, ATTRIBUTE_OWNER_RELATION_TYPE
 from app.models.ontology_version import OntologyVersion
-from app.config import settings
 from app.services import ontology
 from app.services.graph_extraction_provider import GraphExtractionProviderError
 from app.services.token_budget import (
@@ -28,7 +28,6 @@ from app.services.token_budget import (
     estimate_text_tokens,
     split_text_to_token_budget,
 )
-
 
 log = logging.getLogger(__name__)
 
@@ -420,7 +419,10 @@ def build_schema_discovery_messages(
 
 
 def build_schema_discovery_repair_messages(
-    previous_schemas: list[Any], validation_errors: Iterable[str]
+    previous_schemas: list[Any],
+    validation_errors: Iterable[str],
+    *,
+    texts: Iterable[DiscoveryText],
 ) -> list[dict[str, str]]:
     previous_schema: Any = (
         previous_schemas[0]
@@ -439,6 +441,7 @@ def build_schema_discovery_repair_messages(
         ),
         "validation_errors": list(validation_errors),
         "previous_schema": previous_schema,
+        "excerpts": [{"key": item.key, "text": item.text} for item in texts],
     }
     return [
         {
@@ -715,6 +718,206 @@ def _merge_attributes(rows: Iterable[SchemaDiscoveryAttribute]) -> tuple[SchemaD
     for row in rows:
         merged.setdefault(_semantic_key(row.key), row)
     return tuple(sorted(merged.values(), key=lambda row: _semantic_key(row.key)))
+
+
+@dataclass(frozen=True, slots=True)
+class SchemaDiscoveryComparison:
+    """The explicit delta between an active Schema and a new batch proposal."""
+
+    draft: BusinessSchemaDraft
+    diff: dict[str, Any]
+
+
+def _runtime_attributes(bundle: Any, *, owner_kind: str, owner_id: uuid.UUID) -> tuple[SchemaDiscoveryAttribute, ...]:
+    return tuple(
+        SchemaDiscoveryAttribute(
+            key=row.key,
+            description=row.label or row.key,
+            value_type=row.value_type,
+            required=bool(row.required),
+        )
+        for row in bundle.attributes
+        if row.owner_kind == owner_kind and row.owner_type_id == owner_id
+    )
+
+
+def _runtime_entity_row(bundle: Any, row: Any) -> SchemaDiscoveryEntityType:
+    return SchemaDiscoveryEntityType(
+        key=row.key,
+        label=row.label or row.key,
+        description=row.description or row.label or row.key,
+        attributes=list(_runtime_attributes(
+            bundle,
+            owner_kind=ATTRIBUTE_OWNER_ENTITY_TYPE,
+            owner_id=row.id,
+        )),
+    )
+
+
+def _runtime_relation_row(bundle: Any, row: Any) -> SchemaDiscoveryRelationType:
+    return SchemaDiscoveryRelationType(
+        key=row.key,
+        label=row.label or row.key,
+        description=row.description or row.label or row.key,
+        direction=row.direction,
+        attributes=list(_runtime_attributes(
+            bundle,
+            owner_kind=ATTRIBUTE_OWNER_RELATION_TYPE,
+            owner_id=row.id,
+        )),
+    )
+
+
+def _row_changed(before: Any, after: Any) -> bool:
+    return before.model_dump(mode="json", exclude={"aliases"}) != after.model_dump(
+        mode="json", exclude={"aliases"}
+    )
+
+
+def compare_and_merge_active_schema(
+    draft: BusinessSchemaDraft,
+    *,
+    active_bundle: Any | None,
+) -> SchemaDiscoveryComparison:
+    """Merge a batch proposal with the active version without destructive guessing.
+
+    A batch is evidence about its own documents, not proof that omitted types were
+    deleted from the library. Omitted active rows therefore remain in the draft and
+    are reported as ``removed_candidates`` for explicit governance review.
+    """
+    if active_bundle is None:
+        return SchemaDiscoveryComparison(
+            draft=draft,
+            diff={
+                "base_version_id": None,
+                "added": {"entity_types": [row.key for row in draft.entity_types], "relation_types": [row.key for row in draft.relation_types]},
+                "updated": {"entity_types": [], "relation_types": []},
+                "retained": {"entity_types": [], "relation_types": []},
+                "removed_candidates": {"entity_types": [], "relation_types": [], "constraints": []},
+            },
+        )
+
+    active_entities = [_runtime_entity_row(active_bundle, row) for row in active_bundle.entity_types]
+    active_relations = [_runtime_relation_row(active_bundle, row) for row in active_bundle.relation_types]
+    merged_entities = list(active_entities)
+    merged_relations = list(active_relations)
+    diff = {
+        "base_version_id": str(active_bundle.version.id),
+        "added": {"entity_types": [], "relation_types": []},
+        "updated": {"entity_types": [], "relation_types": []},
+        "retained": {"entity_types": [], "relation_types": []},
+        "removed_candidates": {"entity_types": [], "relation_types": [], "constraints": []},
+    }
+
+    seen_entity_keys: set[str] = set()
+    for incoming in draft.entity_types:
+        match_key = _find_semantic_match(
+            {_semantic_key(row.key): row for row in active_entities}, incoming
+        )
+        if match_key is None:
+            merged_entities.append(incoming)
+            diff["added"]["entity_types"].append(incoming.key)
+            continue
+        existing = next(row for row in active_entities if _semantic_key(row.key) == match_key)
+        merged = incoming.model_copy(
+            update={
+                "key": existing.key,
+                "attributes": list(_merge_attributes((*existing.attributes, *incoming.attributes))),
+            }
+        )
+        merged_entities = [row for row in merged_entities if row.key != existing.key]
+        merged_entities.append(merged)
+        seen_entity_keys.add(existing.key)
+        if _row_changed(existing, merged):
+            diff["updated"]["entity_types"].append(existing.key)
+
+    seen_relation_keys: set[str] = set()
+    for incoming in draft.relation_types:
+        match_key = _find_semantic_match(
+            {_semantic_key(row.key): row for row in active_relations}, incoming
+        )
+        if match_key is None:
+            merged_relations.append(incoming)
+            diff["added"]["relation_types"].append(incoming.key)
+            continue
+        existing = next(row for row in active_relations if _semantic_key(row.key) == match_key)
+        merged = incoming.model_copy(
+            update={
+                "key": existing.key,
+                "attributes": list(_merge_attributes((*existing.attributes, *incoming.attributes))),
+            }
+        )
+        merged_relations = [row for row in merged_relations if row.key != existing.key]
+        merged_relations.append(merged)
+        seen_relation_keys.add(existing.key)
+        if _row_changed(existing, merged):
+            diff["updated"]["relation_types"].append(existing.key)
+
+    diff["retained"]["entity_types"] = sorted(
+        row.key for row in active_entities if row.key not in seen_entity_keys
+        and row.key not in diff["updated"]["entity_types"]
+    )
+    diff["retained"]["relation_types"] = sorted(
+        row.key for row in active_relations if row.key not in seen_relation_keys
+        and row.key not in diff["updated"]["relation_types"]
+    )
+    diff["removed_candidates"]["entity_types"] = list(diff["retained"]["entity_types"])
+    diff["removed_candidates"]["relation_types"] = list(diff["retained"]["relation_types"])
+
+    entity_key_map = {_semantic_key(row.key): row.key for row in merged_entities}
+    relation_key_map = {_semantic_key(row.key): row.key for row in merged_relations}
+    constraints: dict[tuple[str, str, str], SchemaDiscoveryConstraint] = {}
+    for row in draft.constraints:
+        key = (
+            relation_key_map.get(_semantic_key(row.relation_type_key), row.relation_type_key),
+            entity_key_map.get(_semantic_key(row.source_type_key), row.source_type_key),
+            entity_key_map.get(_semantic_key(row.target_type_key), row.target_type_key),
+        )
+        constraints[key] = row.model_copy(
+            update={
+                "relation_type_key": key[0],
+                "source_type_key": key[1],
+                "target_type_key": key[2],
+            }
+        )
+    active_entity_keys = {row.id: row.key for row in active_bundle.entity_types}
+    active_relation_keys = {row.id: row.key for row in active_bundle.relation_types}
+    for row in active_bundle.constraints:
+        key = (
+            active_relation_keys.get(row.relation_type_id, ""),
+            active_entity_keys.get(row.source_entity_type_id, ""),
+            active_entity_keys.get(row.target_entity_type_id, ""),
+        )
+        if not all(key) or key in constraints:
+            continue
+        constraints[key] = SchemaDiscoveryConstraint(
+            relation_type_key=key[0],
+            source_type_key=key[1],
+            target_type_key=key[2],
+            cardinality=row.cardinality,
+        )
+        diff["removed_candidates"]["constraints"].append({
+            "relation_type_key": key[0],
+            "source_type_key": key[1],
+            "target_type_key": key[2],
+        })
+
+    merged_trace = dict(draft.trace or {})
+    merged_trace["schema_comparison"] = diff
+    merged_draft = BusinessSchemaDraft(
+        entity_types=tuple(sorted(merged_entities, key=lambda row: _semantic_key(row.key))),
+        relation_types=tuple(sorted(merged_relations, key=lambda row: _semantic_key(row.key))),
+        constraints=tuple(sorted(constraints.values(), key=lambda row: (
+            _semantic_key(row.relation_type_key),
+            _semantic_key(row.source_type_key),
+            _semantic_key(row.target_type_key),
+        ))),
+        source_hash=draft.source_hash,
+        concept_inventory=draft.concept_inventory,
+        trace=merged_trace,
+        confirmed=draft.confirmed,
+    )
+    return SchemaDiscoveryComparison(draft=merged_draft, diff=diff)
 
 
 def merge_schema_discovery_payloads(
@@ -1146,6 +1349,7 @@ async def discover_business_schema(
     repair_messages = build_schema_discovery_repair_messages(
         previous_schemas,
         validation_errors,
+        texts=source_texts,
     )
     previous_schema_tokens = estimate_schema_tokens(
         previous_schemas[0]
@@ -1219,7 +1423,10 @@ async def discover_business_schema(
             confirmed=refined.confirmed,
         )
     except ValueError as exc:
-        raise ValueError("schema discovery repair response failed validation") from exc
+        raise ValueError(
+            "schema discovery repair response failed validation: "
+            f"{_desensitized_validation_error(exc)}"
+        ) from exc
 
 
 async def _call_discovery_provider_with_retry(
@@ -1268,11 +1475,20 @@ def validate_business_schema_draft(draft: BusinessSchemaDraft) -> None:
             raise ValueError("AI Schema discovery returned a constraint with an unknown reference")
 
 
-async def persist_business_schema_draft(db, *, library, ontology_version: OntologyVersion, draft: BusinessSchemaDraft) -> dict[str, Any]:
+async def persist_business_schema_draft(
+    db,
+    *,
+    library,
+    ontology_version: OntologyVersion,
+    draft: BusinessSchemaDraft,
+    active_bundle: Any | None = None,
+) -> dict[str, Any]:
     """Persist a discovered draft as runtime rows, preserving its unconfirmed state."""
 
     if ontology_version.status != "draft":
         raise ValueError("AI Schema draft can only be written to a draft ontology version")
+    comparison = compare_and_merge_active_schema(draft, active_bundle=active_bundle)
+    draft = comparison.draft
     validate_business_schema_draft(draft)
     snapshot = schema_draft_to_snapshot(draft, ontology_version_id=ontology_version.id)
     entity_rows = {}

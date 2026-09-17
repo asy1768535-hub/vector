@@ -62,7 +62,12 @@ class LibraryStats(BaseModel):
 class QueryRequest(BaseModel):
     query: str = Field(..., min_length=1, description="检索词")
     limit: int = Field(default=5, ge=1, le=20, description="最大返回条数，限制在 1-20")
+    folder_id: uuid.UUID | None = Field(default=None, description="限定文件夹及其子文件夹")
 
+
+class BulkDeleteDocumentsResponse(BaseModel):
+    deleted_count: int = Field(ge=0)
+    cleanup_task_count: int = Field(ge=0)
 
 class QueryResultItem(BaseModel):
     text: str = Field(..., description="分片正文")
@@ -145,6 +150,7 @@ class ImportConfigurationRead(BaseModel):
     max_configurable_files_per_selection: int = Field(gt=0)
     upload_concurrency: int = Field(gt=0)
     doc_max_file_bytes: int = Field(gt=0)
+    video_max_file_bytes: int | None = Field(default=None, gt=0)
     allowed_extensions: list[str] = Field(min_length=1)
 
 
@@ -179,6 +185,8 @@ class ImportJobRead(BaseModel):
     file_name: str
     relative_path: str | None
     size_bytes: int
+    file_resource_id: uuid.UUID | None = None
+    file_status: Literal["storing", "available", "storage_failed", "deleting", "deleted"] | None = None
     upload_offset: int
     status: Literal[
         "uploading",
@@ -302,6 +310,13 @@ class PersonalFileRead(BaseModel):
     created_at: datetime
 
 
+class PersonalFileFolderDeleteResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    deleted_count: int = Field(ge=0)
+    folder_deleted: bool
+
+
 class PersonalFilePageRead(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -313,6 +328,83 @@ class PersonalFilePageRead(BaseModel):
     file_total: int = Field(ge=0)
     page: int = Field(ge=1)
     page_size: Literal[20, 50]
+
+
+class StoredFileFolderRead(BaseModel):
+    """A directory inferred from durable file-resource paths."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=255)
+    path: str = Field(min_length=1, max_length=2048)
+    file_total: int = Field(ge=0)
+
+
+class StoredFileRead(BaseModel):
+    """A safe net-disk projection; storage locator and credentials stay private."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    file_resource_id: uuid.UUID
+    document_id: uuid.UUID | None = None
+    file_name: str = Field(min_length=1, max_length=512)
+    relative_path: str | None = Field(default=None, max_length=2048)
+    content_type: str | None = Field(default=None, max_length=255)
+    size_bytes: int = Field(ge=0)
+    storage_status: Literal["available"]
+    processing_status: Literal[
+        "uploading",
+        "queued",
+        "processing",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "superseded",
+    ]
+    processing_stage: Literal[
+        "uploading",
+        "queued",
+        "converting",
+        "conversion_ready",
+        "validating",
+        "parsing",
+        "chunking",
+        "embedding",
+        "graph",
+        "completed",
+    ]
+    result_operation: str | None = Field(default=None, max_length=32)
+    created_at: datetime
+
+
+class StoredFilePageRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    library_slug: str = Field(min_length=1, max_length=128)
+    path: str = Field(max_length=2048)
+    folders: list[StoredFileFolderRead] = Field(max_length=50)
+    files: list[StoredFileRead] = Field(max_length=50)
+    folder_total: int = Field(ge=0)
+    file_total: int = Field(ge=0)
+    page: int = Field(ge=1)
+    page_size: Literal[20, 50]
+
+
+class StoredFileDownloadRead(BaseModel):
+    """A short-lived, authorized original-file download URL."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: str = Field(min_length=1, max_length=4096)
+    expires_in_seconds: int = Field(ge=30, le=3600)
+
+
+class StoredFileDeleteRead(BaseModel):
+    """Deletion is asynchronous so provider failures remain retryable."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["deleting"]
 
 
 class PersonalImportTaskSummaryRead(BaseModel):

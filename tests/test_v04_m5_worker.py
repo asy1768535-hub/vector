@@ -6,7 +6,7 @@ import uuid
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pydantic import SecretStr
@@ -15,6 +15,11 @@ from sqlalchemy.exc import DBAPIError
 
 from app.models.graph_extraction_job import GraphExtractionJob
 from app.schemas.graph_extraction import GraphExtractionPayload
+from app.services.graph_candidate_aggregation import canonical_graph_value_hash_v1
+from app.services.graph_extraction_prompt import (
+    graph_extraction_prompt_hash,
+    graph_extraction_prompt_version,
+)
 from app.services.graph_extraction_provider import (
     GraphExtractionProviderError,
     ProviderResponse,
@@ -27,6 +32,7 @@ from app.services.graph_extraction_worker import (
     _center_only_prompt,
     _configured_draft_pool_provider,
     _configured_provider,
+    _prepare_routed_draft_pool_request,
     _validate_center_only_evidence,
     claim_graph_extraction_unit,
     lock_live_graph_extraction_claim,
@@ -36,12 +42,6 @@ from app.services.graph_extraction_worker import (
     renew_graph_extraction_unit_lease,
     run_graph_extraction_worker,
 )
-from app.services.graph_candidate_aggregation import canonical_graph_value_hash_v1
-from app.services.graph_extraction_prompt import (
-    graph_extraction_prompt_hash,
-    graph_extraction_prompt_version,
-)
-
 
 NOW = datetime(2026, 7, 14, 8, 0, 0, tzinfo=timezone.utc)
 UNIT_ID = uuid.UUID("10000000-0000-0000-0000-000000000001")
@@ -814,6 +814,100 @@ def test_draft_pool_configures_minstral_with_strict_graph_json_schema():
         "entities",
         "relations",
     ]
+
+
+def test_draft_pool_routes_schema_and_expands_qwen_output_without_mutating_snapshot():
+    prepared = replace(
+        _prepared(),
+        context_text='{"chunks":[{"context_ref":"c0","text":"条例"}]}',
+        ontology_snapshot={
+            "entity_types": [
+                {"id": str(uuid.uuid4()), "key": f"type_{index}", "label": f"类型{index}"}
+                for index in range(4)
+            ],
+            "relation_types": [],
+            "relation_constraints": [],
+        },
+    )
+    provider = MagicMock()
+    provider.with_output_budget.return_value = MagicMock()
+
+    configured, routed, messages = _prepare_routed_draft_pool_request(
+        prepared,
+        provider_name="qwen3-draft-4b",
+        provider=provider,
+    )
+
+    provider.with_output_budget.assert_called_once_with(3_000)
+    assert configured is provider.with_output_budget.return_value
+    assert len(prepared.ontology_snapshot["entity_types"]) == 4
+    assert len(routed["entity_types"]) == 3
+    assert "frozen_ontology" in messages[1]["content"]
+
+
+def test_draft_pool_invalid_draft_falls_back_to_direct_review_model():
+    prepared = replace(_prepared())
+    prepared.model_config_snapshot["extraction_profile"] = "draft_pool_review"
+    attempt = SimpleNamespace(id=uuid.uuid4())
+    draft_provider = AsyncMock()
+    draft_provider.extract.return_value = _provider_response("not-json")
+    review_provider = AsyncMock()
+    review_provider.extract.return_value = _provider_response(
+        '{"entities":[],"relations":[]}'
+    )
+    routed_messages = [{"role": "user", "content": "routed graph prompt"}]
+    sessions = _SessionFactory()
+
+    with (
+        patch(
+            "app.services.graph_extraction_worker._prepare_graph_extraction_unit",
+            new=AsyncMock(return_value=prepared),
+        ),
+        patch(
+            "app.services.graph_extraction_worker._preflight_provider_call",
+            new=AsyncMock(),
+        ),
+        patch(
+            "app.services.graph_extraction_worker._configured_draft_pool_provider",
+            return_value=("minstral3b", draft_provider),
+        ),
+        patch(
+            "app.services.graph_extraction_worker._prepare_routed_draft_pool_request",
+            return_value=(draft_provider, prepared.ontology_snapshot, routed_messages),
+        ),
+        patch(
+            "app.services.graph_extraction_worker.create_pending_attempt",
+            new=AsyncMock(return_value=attempt),
+        ),
+        patch(
+            "app.services.graph_extraction_worker.finalize_attempt",
+            new=AsyncMock(return_value=True),
+        ) as finalize,
+        patch(
+            "app.services.graph_extraction_worker._persist_candidate_result",
+            new=AsyncMock(return_value=True),
+        ) as persist,
+    ):
+        result = asyncio.run(
+            process_graph_extraction_unit(
+                sessions,
+                unit_id=UNIT_ID,
+                claim_token=CLAIM_TOKEN,
+                provider=review_provider,
+                lease_seconds=180,
+                renew_seconds=30,
+                max_attempts=3,
+            )
+        )
+
+    assert result.outcome == "succeeded"
+    draft_provider.extract.assert_awaited_once_with(routed_messages)
+    review_provider.extract.assert_awaited_once_with(routed_messages)
+    assert finalize.await_args.kwargs["completion"].parsed_response == {
+        "entities": [],
+        "relations": [],
+    }
+    persist.assert_awaited_once()
 
 
 def test_retry_replays_first_valid_unit_payload_without_provider_call():

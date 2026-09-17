@@ -32,6 +32,8 @@ from app.config import settings
 from app.db import async_session_factory, get_db
 from app.deps import load_active_library
 from app.models.chat_history import ChatConversation
+from app.models.document import Document
+from app.models.folder import Folder
 from app.models.library import Library
 from app.models.user import User
 from app.schemas.chat import (
@@ -43,14 +45,19 @@ from app.schemas.chat import (
     ChatMessageResponse,
     ChatSource,
 )
-from app.schemas.dify import DifyRetrievalRequest, RetrievalSetting
+from app.schemas.dify import (
+    DifyRetrievalRequest,
+    MetadataConditionGroup,
+    MetadataConditionItem,
+    RetrievalSetting,
+)
 from app.services import chat_answer, chat_graph_augmentation, chat_history
-from app.services.retrieval import run_retrieval
 from app.services.organization_authorization import (
     OrganizationAuthorizationError,
     authorize_library,
     list_accessible_libraries,
 )
+from app.services.retrieval import run_retrieval
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -179,6 +186,39 @@ async def _retrieve_for_chat(body: ChatMessageRequest, user: User, db: AsyncSess
             raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden")
     if lib.index_state in ("rebuilding", "failed"):
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "library index rebuilding")
+    metadata_condition = None
+    if body.folder_id is not None:
+        folder = await db.get(Folder, body.folder_id)
+        if folder is None or folder.library_id != lib.id or folder.deleted_at is not None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "folder not found")
+        folder_path = folder.path.rstrip("/")
+        escaped_path = folder_path.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        folder_rows = await db.execute(
+            select(Folder.id).where(
+                Folder.library_id == lib.id,
+                Folder.deleted_at.is_(None),
+                (Folder.path == folder.path)
+                | Folder.path.like(f"{escaped_path}/%", escape="\\"),
+            )
+        )
+        folder_ids = list(folder_rows.scalars().all())
+        document_rows = await db.execute(
+            select(Document.id).where(
+                Document.library_id == lib.id,
+                Document.deleted_at.is_(None),
+                Document.folder_id.in_(folder_ids),
+            )
+        )
+        document_ids = [str(value) for value in document_rows.scalars().all()]
+        if not document_ids:
+            return lib, [], None
+        metadata_condition = MetadataConditionGroup(
+            conditions=[MetadataConditionItem(
+                name=["document_id"],
+                comparison_operator="in",
+                value=document_ids,
+            )]
+        )
     try:
         retr = await run_retrieval(
             collection=lib.qdrant_collection,
@@ -187,6 +227,7 @@ async def _retrieve_for_chat(body: ChatMessageRequest, user: User, db: AsyncSess
             request=DifyRetrievalRequest(
                 knowledge_id=lib.slug, query=_retrieval_query(body.query),
                 retrieval_setting=RetrievalSetting(top_k=body.top_k),
+                metadata_condition=metadata_condition,
             ),
             source_config=lib.source_config,
             rerank_enabled=lib.rerank_enabled,
@@ -194,7 +235,7 @@ async def _retrieve_for_chat(body: ChatMessageRequest, user: User, db: AsyncSess
             db=db,
             library=lib,
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.exception("chat retrieval failed: slug=%s", lib.slug)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "retrieval failed") from exc
     return lib, retr.records, retr.retrieval_debug

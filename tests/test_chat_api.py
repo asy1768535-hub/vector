@@ -15,6 +15,7 @@ from app.auth.backend import current_active_user
 from app.db import get_db
 from app.main import app
 from app.models.library import Library
+from app.models.folder import Folder
 from app.models.user import User
 from app.schemas.dify import DifyRecord, DifyRetrievalResponse
 from app.services.chat_answer import ChatAnswer
@@ -278,6 +279,46 @@ def test_messages_calls_retrieval_and_returns_sources():
     retr.assert_awaited_once()                   # 确实复用了检索
     # 越权防护：collection 由库推导，不接受用户传入
     assert retr.await_args.kwargs["collection"] == "lib_medical"
+
+
+def test_messages_folder_filter_limits_retrieval_documents():
+    folder_id = uuid.uuid4()
+    document_id = uuid.uuid4()
+    folder = Folder(
+        id=folder_id,
+        library_id=mock_library.id,
+        name="合同",
+        path="/合同",
+        deleted_at=None,
+    )
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=folder)
+    folder_result = MagicMock()
+    folder_result.scalars.return_value.all.return_value = [folder_id]
+    document_result = MagicMock()
+    document_result.scalars.return_value.all.return_value = [document_id]
+    db.execute = AsyncMock(side_effect=[folder_result, document_result])
+    _override(mock_user, db)
+    records = [_rec("片段A", doc=str(document_id))]
+    patches, retr, _gen = _patch_pipeline(records)
+    for patcher in patches:
+        patcher.start()
+    try:
+        response = TestClient(app).post(
+            "/chat/messages",
+            json={
+                "library_slug": "medical",
+                "folder_id": str(folder_id),
+                "query": "合同内容",
+            },
+        )
+    finally:
+        for patcher in reversed(patches):
+            patcher.stop()
+    assert response.status_code == 200
+    condition = retr.await_args.kwargs["request"].metadata_condition
+    assert condition.conditions[0].name == ["document_id"]
+    assert condition.conditions[0].value == [str(document_id)]
 
 
 def test_messages_no_records_returns_no_evidence_without_llm():

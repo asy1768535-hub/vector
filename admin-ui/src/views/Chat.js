@@ -69,6 +69,9 @@ export default {
     setup() {
         const libs = ref([]);
         const currentSlug = ref(null);
+        const folders = ref([]);
+        const folderId = ref('');
+        const folderLoading = ref(false);
         const conversations = ref([]);
         const currentConvId = ref(null);
         const messages = ref([]);
@@ -141,7 +144,23 @@ export default {
                     ? preferred
                     : (libs.value[0]?.slug || null);
                 saveChatLibrary(currentSlug.value);
+                await loadFolders(forceRefresh);
             } catch (e) { ElMessage.error(e.message); }
+        }
+
+        async function loadFolders(forceRefresh = false) {
+            folders.value = [];
+            folderId.value = '';
+            if (!currentSlug.value) return;
+            folderLoading.value = true;
+            try {
+                const result = await api.listFolders(currentSlug.value, forceRefresh);
+                folders.value = Array.isArray(result) ? result : [];
+            } catch (e) {
+                ElMessage.warning(e.message || '文件夹列表加载失败');
+            } finally {
+                folderLoading.value = false;
+            }
         }
 
         async function loadConversations() {
@@ -178,9 +197,18 @@ export default {
             _cleanupStream();
             closeAndInvalidateSourceDialog();
             closeAndInvalidateCitationGraph();
+            folderId.value = '';
+            graphAssist.value = true;
+            void loadFolders();
             currentConvId.value = null;
             messages.value = [];
             hasEarlierMessages.value = false;
+        }
+
+        function onFolderChange() {
+            closeAndInvalidateCitationGraph();
+            graphAssist.value = !folderId.value;
+            newChat();
         }
 
         function newChat() {
@@ -575,6 +603,7 @@ export default {
                 use_graph: graphAssist.value,
                 show_debug: false,
             };
+            if (folderId.value) payload.folder_id = folderId.value;
             if (currentConvId.value) payload.conversation_id = currentConvId.value;
             try {
                 await api.streamChatMessage(payload, {
@@ -645,10 +674,10 @@ export default {
         });
 
         return {
-            libs, currentSlug, conversations, convsForLib, currentConvId, messages, input,
+            libs, currentSlug, folders, folderId, folderLoading, conversations, convsForLib, currentConvId, messages, input,
             loadingEarlierMessages, hasEarlierMessages,
             loading, chatDisabled, streamRef, mobileHistoryOpen, topK, graphAssist,
-            onLibChange, newChat, selectConversation, loadEarlierMessages, archiveConv, deleteConv, send, copyAnswer,
+            onLibChange, onFolderChange, newChat, selectConversation, loadEarlierMessages, archiveConv, deleteConv, send, copyAnswer,
             copySourceText, openCitationChunk, handleCitationClick, handleCitationKeydown,
             openDocDetail, loadLibs, chatWelcome, recalledChunkDialog, sourceLocationDialog,
             citationGraphDialog, openCitationGraph, closeAndInvalidateCitationGraph,
@@ -709,6 +738,13 @@ export default {
                     <el-select v-model="currentSlug" placeholder="选择知识库" size="default"
                                class="chat-library-select" @change="onLibChange">
                         <el-option v-for="l in libs" :key="l.slug" :label="l.name" :value="l.slug" />
+                    </el-select>
+                    <span class="chat-toolbar-label">文件夹</span>
+                    <el-select v-model="folderId" placeholder="全部文件" clearable filterable
+                               :loading="folderLoading" class="chat-library-select"
+                               @change="onFolderChange">
+                        <el-option v-for="folder in folders" :key="folder.id"
+                                   :label="folder.path || folder.name" :value="folder.id" />
                     </el-select>
                     <el-button class="chat-refresh-btn app-refresh-button" text @click="loadLibs(true)">
                       <span class="app-refresh-icon" aria-hidden="true"></span>刷新

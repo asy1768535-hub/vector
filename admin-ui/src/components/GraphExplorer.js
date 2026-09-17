@@ -67,7 +67,10 @@ function projectPanoramaError(error) {
         };
     }
     if (error?.panoramaKind === 'publication_unavailable') {
-        return graphErrorProjection({ status: 503 });
+        return {
+            kind: 'publication_unavailable',
+            message: '图谱正在根据源文档变更自动清理并刷新，请稍后重试。',
+        };
     }
     if (error?.panoramaKind === 'publication_changed') {
         return graphErrorProjection({ status: 409 });

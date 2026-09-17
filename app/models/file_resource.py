@@ -118,7 +118,7 @@ class FileResource(Base):
         String(32), nullable=False, default="content_hash", server_default="content_hash"
     )
     storage_status: Mapped[str] = mapped_column(
-        String(32), nullable=False, default="available", server_default="available"
+        String(32), nullable=False, default="storing", server_default="storing"
     )
     storage_verified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

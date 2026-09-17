@@ -4,7 +4,7 @@ import asyncio
 import uuid
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -134,6 +134,218 @@ def test_personal_files_api_lists_only_the_selected_library_directory():
     )
 
 
+def test_stored_files_api_lists_saved_media_before_knowledge_processing():
+    user = SimpleNamespace(id=uuid.uuid4(), is_active=True, is_superuser=False)
+    library = SimpleNamespace(id=uuid.uuid4(), slug="legal", name="法务资料")
+    folder = SimpleNamespace(name="项目甲", path="/项目甲", file_total=1)
+    stored = SimpleNamespace(
+        file_resource_id=uuid.uuid4(),
+        document_id=None,
+        file_name="现场录音.mp3",
+        relative_path="项目甲/现场录音.mp3",
+        content_type="audio/mpeg",
+        size_bytes=2048,
+        storage_status="available",
+        processing_status="succeeded",
+        processing_stage="completed",
+        result_operation="stored_only",
+        created_at=NOW,
+    )
+    page = SimpleNamespace(
+        path="",
+        folders=(folder,),
+        files=(stored,),
+        folder_total=1,
+        file_total=1,
+        page=1,
+        page_size=50,
+    )
+
+    async def override_user():
+        return user
+
+    async def override_db():
+        return SimpleNamespace()
+
+    list_stored = AsyncMock(return_value=page)
+    app.dependency_overrides[current_active_user] = override_user
+    app.dependency_overrides[get_db] = override_db
+    try:
+        with (
+            patch.object(me, "_personal_task_libraries", new=AsyncMock(return_value={library.id: library})),
+            patch.object(import_uploads, "list_stored_files", new=list_stored, create=True),
+        ):
+            response = TestClient(app).get("/me/stored-files?library_slug=legal")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200, response.text
+    assert response.json()["files"] == [{
+        "file_resource_id": str(stored.file_resource_id),
+        "document_id": None,
+        "file_name": "现场录音.mp3",
+        "relative_path": "项目甲/现场录音.mp3",
+        "content_type": "audio/mpeg",
+        "size_bytes": 2048,
+        "storage_status": "available",
+        "processing_status": "succeeded",
+        "processing_stage": "completed",
+        "result_operation": "stored_only",
+        "created_at": NOW.isoformat().replace("+00:00", "Z"),
+    }]
+    list_stored.assert_awaited_once_with(
+        SimpleNamespace(),
+        user_id=user.id,
+        library_id=library.id,
+        path="",
+        page=1,
+        page_size=50,
+    )
+
+
+def test_stored_file_download_api_returns_a_short_lived_url_for_the_owner():
+    user = SimpleNamespace(id=uuid.uuid4(), is_active=True, is_superuser=False)
+    library = SimpleNamespace(id=uuid.uuid4(), slug="legal", name="法务资料")
+    resource_id = uuid.uuid4()
+    signed_url = AsyncMock(return_value="https://minio.example.test/download?signature=redacted")
+
+    async def override_user():
+        return user
+
+    async def override_db():
+        return SimpleNamespace()
+
+    app.dependency_overrides[current_active_user] = override_user
+    app.dependency_overrides[get_db] = override_db
+    try:
+        with (
+            patch.object(me, "_personal_task_libraries", new=AsyncMock(return_value={library.id: library})),
+            patch.object(
+                import_uploads,
+                "owned_stored_file_download_url",
+                new=signed_url,
+                create=True,
+            ),
+        ):
+            response = TestClient(app).get(
+                f"/me/stored-files/{resource_id}/download?library_slug=legal"
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "url": "https://minio.example.test/download?signature=redacted",
+        "expires_in_seconds": 300,
+    }
+    signed_url.assert_awaited_once_with(
+        SimpleNamespace(),
+        user_id=user.id,
+        library_id=library.id,
+        file_resource_id=resource_id,
+    )
+
+
+def test_stored_only_file_delete_api_queues_owner_scoped_deletion():
+    user = SimpleNamespace(id=uuid.uuid4(), is_active=True, is_superuser=False)
+    library = SimpleNamespace(id=uuid.uuid4(), slug="legal", name="法务资料")
+    resource_id = uuid.uuid4()
+    request_delete = AsyncMock()
+    db = AsyncMock()
+
+    async def override_user():
+        return user
+
+    async def override_db():
+        return db
+
+    app.dependency_overrides[current_active_user] = override_user
+    app.dependency_overrides[get_db] = override_db
+    try:
+        with (
+            patch.object(me, "_personal_task_libraries", new=AsyncMock(return_value={library.id: library})),
+            patch.object(
+                import_uploads,
+                "request_owned_stored_file_delete",
+                new=request_delete,
+                create=True,
+            ),
+        ):
+            response = TestClient(app).delete(
+                f"/me/stored-files/{resource_id}?library_slug=legal"
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 202, response.text
+    assert response.json() == {"status": "deleting"}
+    request_delete.assert_awaited_once_with(
+        db,
+        user_id=user.id,
+        library=library,
+        file_resource_id=resource_id,
+    )
+    db.commit.assert_awaited_once()
+
+
+def test_stored_only_file_delete_fences_the_resource_and_enqueues_cleanup():
+    user_id = uuid.uuid4()
+    library = SimpleNamespace(id=uuid.uuid4(), qdrant_collection="legal")
+    resource = SimpleNamespace(id=uuid.uuid4(), storage_status="available")
+    job = SimpleNamespace(document_id=None, status="succeeded")
+    owned = AsyncMock(return_value=(job, resource))
+    enqueue = AsyncMock()
+
+    async def run():
+        with (
+            patch.object(import_uploads, "_owned_stored_file", new=owned),
+            patch.object(import_uploads.cleanup_service, "enqueue_delete_file_resource", new=enqueue),
+        ):
+            await import_uploads.request_owned_stored_file_delete(
+                SimpleNamespace(),
+                user_id=user_id,
+                library=library,
+                file_resource_id=resource.id,
+            )
+
+    asyncio.run(run())
+
+    assert resource.storage_status == "deleting"
+    owned.assert_awaited_once_with(
+        ANY,
+        user_id=user_id,
+        library_id=library.id,
+        file_resource_id=resource.id,
+        for_update=True,
+    )
+    enqueue.assert_awaited_once_with(ANY, library, resource.id)
+
+
+@pytest.mark.parametrize("job", [
+    SimpleNamespace(document_id=uuid.uuid4(), status="succeeded"),
+    SimpleNamespace(document_id=None, status="processing"),
+])
+def test_stored_file_delete_rejects_processed_or_active_files(job):
+    resource = SimpleNamespace(id=uuid.uuid4(), storage_status="available")
+
+    async def run():
+        with patch.object(
+            import_uploads,
+            "_owned_stored_file",
+            new=AsyncMock(return_value=(job, resource)),
+        ):
+            await import_uploads.request_owned_stored_file_delete(
+                SimpleNamespace(),
+                user_id=uuid.uuid4(),
+                library=SimpleNamespace(id=uuid.uuid4(), qdrant_collection="legal"),
+                file_resource_id=resource.id,
+            )
+
+    with pytest.raises(import_uploads.ImportUploadError):
+        asyncio.run(run())
+    assert resource.storage_status == "available"
+
+
 def test_personal_files_api_rejects_a_library_without_upload_permission():
     user = SimpleNamespace(id=uuid.uuid4(), is_active=True, is_superuser=False)
     list_files = AsyncMock()
@@ -162,6 +374,45 @@ def test_personal_files_api_rejects_a_library_without_upload_permission():
 
     assert response.status_code == 404
     list_files.assert_not_awaited()
+
+
+def test_personal_file_folder_delete_is_scoped_to_the_current_user_and_library():
+    user = SimpleNamespace(id=uuid.uuid4(), is_active=True, is_superuser=False)
+    library = SimpleNamespace(id=uuid.uuid4(), slug="legal", name="法务资料")
+    delete_folder = AsyncMock(return_value=(3, True))
+    lock_library = AsyncMock(return_value=library)
+
+    async def override_user():
+        return user
+
+    db = AsyncMock()
+
+    async def override_db():
+        return db
+
+    app.dependency_overrides[current_active_user] = override_user
+    app.dependency_overrides[get_db] = override_db
+    try:
+        with (
+            patch.object(me, "_personal_task_libraries", new=AsyncMock(return_value={library.id: library})),
+            patch.object(me, "_lock_writable", new=lock_library, create=True),
+            patch.object(import_uploads, "delete_personal_file_folder", new=delete_folder, create=True),
+        ):
+            response = TestClient(app).delete(
+                "/me/files/folder?library_slug=legal&path=/项目甲"
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"deleted_count": 3, "folder_deleted": True}
+    lock_library.assert_awaited_once()
+    delete_folder.assert_awaited_once_with(
+        db,
+        user_id=user.id,
+        library=library,
+        path="/项目甲",
+    )
 
 
 def test_personal_files_api_requires_login():
@@ -378,6 +629,259 @@ def test_personal_files_service_bounds_the_selected_directory_and_owner():
     assert db.statements[2]._offset_clause.value == 20
     assert db.statements[4]._limit_clause.value == 15
     assert db.statements[4]._offset_clause.value == 0
+
+
+def test_stored_files_service_scopes_resources_to_the_uploading_user():
+    user_id = uuid.uuid4()
+    library_id = uuid.uuid4()
+    resource = SimpleNamespace(
+        id=uuid.uuid4(),
+        file_name="现场录音.mp3",
+        relative_path="项目甲/现场录音.mp3",
+        content_type="audio/mpeg",
+        size_bytes=2048,
+        storage_status="available",
+        created_at=NOW,
+    )
+    job = SimpleNamespace(
+        document_id=None,
+        status="succeeded",
+        current_stage="completed",
+        result_operation="stored_only",
+    )
+
+    class Result:
+        def __init__(self, *, scalar=None, rows=()):
+            self.scalar = scalar
+            self.rows = list(rows)
+
+        def scalar_one(self):
+            return self.scalar
+
+        def all(self):
+            return self.rows
+
+    class Db:
+        def __init__(self):
+            self.statements = []
+            self.results = iter([
+                Result(scalar=1),
+                Result(rows=[("项目甲", 1)]),
+                Result(scalar=1),
+                Result(rows=[(job, resource)]),
+            ])
+
+        async def execute(self, statement):
+            self.statements.append(statement)
+            return next(self.results)
+
+    db = Db()
+    page = asyncio.run(
+        import_uploads.list_stored_files(
+            db,
+            user_id=user_id,
+            library_id=library_id,
+            path="",
+            page=1,
+            page_size=50,
+        )
+    )
+
+    assert page.files[0].file_resource_id == resource.id
+    assert page.files[0].document_id is None
+    sql = "\n".join(str(statement).lower() for statement in db.statements)
+    assert "file_resources.uploaded_by_user_id" in sql
+    assert "document_import_jobs.requested_by_user_id" in sql
+
+
+def test_delete_personal_file_folder_tombstones_only_owned_documents():
+    user_id = uuid.uuid4()
+    library = SimpleNamespace(id=uuid.uuid4(), qdrant_collection="personal-files")
+    root = SimpleNamespace(id=uuid.uuid4(), path="/项目甲")
+    child = SimpleNamespace(id=uuid.uuid4(), path="/项目甲/合同")
+    document_ids = [uuid.uuid4(), uuid.uuid4()]
+
+    class Result:
+        def __init__(self, *, scalar=None, rows=()):
+            self.scalar = scalar
+            self.rows = list(rows)
+
+        def scalar_one_or_none(self):
+            return self.scalar
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return self.rows
+
+        def first(self):
+            return self.scalar
+
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[
+        Result(rows=[root, child]),
+        Result(rows=[]),
+        Result(rows=document_ids),
+        Result(),
+        Result(),
+        Result(),
+        Result(),
+    ])
+    cleanup = AsyncMock()
+
+    async def run():
+        with patch("app.services.import_uploads.cleanup_service.enqueue_delete_document", new=cleanup):
+            return await import_uploads.delete_personal_file_folder(
+                db,
+                user_id=user_id,
+                library=library,
+                path="/项目甲",
+            )
+
+    deleted_count, folder_deleted = asyncio.run(run())
+
+    assert deleted_count == 2
+    assert folder_deleted is True
+    assert cleanup.await_count == 2
+    assert [call.args[2] for call in cleanup.await_args_list] == document_ids
+    assert db.execute.await_count == 7
+    document_sql = str(db.execute.await_args_list[2].args[0]).lower()
+    folder_sql = str(db.execute.await_args_list[6].args[0]).lower()
+    assert "documents.created_by" in document_sql
+    assert "documents.folder_id in" in document_sql
+    assert "folders.id in" in folder_sql
+
+
+def test_delete_personal_file_folder_keeps_shared_folder_rows():
+    user_id = uuid.uuid4()
+    library = SimpleNamespace(id=uuid.uuid4(), qdrant_collection="personal-files")
+    root = SimpleNamespace(id=uuid.uuid4(), path="/项目甲")
+    document_id = uuid.uuid4()
+
+    class Result:
+        def __init__(self, *, scalar=None, rows=()):
+            self.scalar = scalar
+            self.rows = list(rows)
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return self.rows
+
+        def first(self):
+            return self.scalar
+
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[
+        Result(rows=[root]),
+        Result(rows=[]),
+        Result(rows=[document_id]),
+        Result(),
+        Result(),
+        Result(scalar=uuid.uuid4()),
+    ])
+    cleanup = AsyncMock()
+
+    async def run():
+        with patch("app.services.import_uploads.cleanup_service.enqueue_delete_document", new=cleanup):
+            return await import_uploads.delete_personal_file_folder(
+                db,
+                user_id=user_id,
+                library=library,
+                path="/项目甲",
+            )
+
+    deleted_count, folder_deleted = asyncio.run(run())
+
+    assert deleted_count == 1
+    assert folder_deleted is False
+    assert cleanup.await_count == 1
+    assert db.execute.await_count == 6
+
+
+def test_delete_personal_file_folder_deletes_storage_only_resources_without_folder_rows():
+    user_id = uuid.uuid4()
+    library = SimpleNamespace(id=uuid.uuid4(), qdrant_collection="personal-files")
+    resource = SimpleNamespace(id=uuid.uuid4(), storage_status="available")
+    job = SimpleNamespace(document_id=None, status="succeeded")
+
+    class Result:
+        def __init__(self, *, rows=()):
+            self.rows = list(rows)
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return self.rows
+
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[
+        Result(rows=[]),
+        Result(rows=[(job, resource)]),
+    ])
+    cleanup = AsyncMock()
+
+    async def run():
+        with patch("app.services.import_uploads.cleanup_service.enqueue_delete_file_resource", new=cleanup):
+            return await import_uploads.delete_personal_file_folder(
+                db,
+                user_id=user_id,
+                library=library,
+                path="/项目甲",
+            )
+
+    deleted_count, folder_deleted = asyncio.run(run())
+
+    assert (deleted_count, folder_deleted) == (1, True)
+    assert resource.storage_status == "deleting"
+    cleanup.assert_awaited_once_with(db, library, resource.id)
+    resource_sql = str(db.execute.await_args_list[1].args[0]).lower()
+    assert "document_import_jobs.requested_by_user_id" in resource_sql
+    assert "file_resources.uploaded_by_user_id" in resource_sql
+
+
+def test_delete_personal_file_folder_rejects_processing_storage_only_resource():
+    user_id = uuid.uuid4()
+    library = SimpleNamespace(id=uuid.uuid4(), qdrant_collection="personal-files")
+    resource = SimpleNamespace(id=uuid.uuid4(), storage_status="available")
+    job = SimpleNamespace(document_id=None, status="processing")
+
+    class Result:
+        def __init__(self, *, rows=()):
+            self.rows = list(rows)
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return self.rows
+
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[
+        Result(rows=[]),
+        Result(rows=[(job, resource)]),
+    ])
+    cleanup = AsyncMock()
+
+    async def run():
+        with patch("app.services.import_uploads.cleanup_service.enqueue_delete_file_resource", new=cleanup):
+            with pytest.raises(import_uploads.ImportUploadError) as exc_info:
+                await import_uploads.delete_personal_file_folder(
+                    db,
+                    user_id=user_id,
+                    library=library,
+                    path="/项目甲",
+                )
+        return exc_info.value
+
+    error = asyncio.run(run())
+
+    assert error.code == "stored_file_processing_active"
+    assert resource.storage_status == "available"
+    cleanup.assert_not_awaited()
 
 
 def test_personal_task_file_service_keeps_all_states_in_the_selected_owner_directory():
@@ -695,4 +1199,3 @@ def test_document_delete_policy_allows_only_owner_or_existing_delete_permission(
 
     monkeypatch.setattr(documents, "has_permission", lambda *_args: True)
     assert documents.can_delete_document(other_user, library, owned) is True
-

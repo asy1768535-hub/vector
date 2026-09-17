@@ -121,6 +121,11 @@ test('keeps directory requests independent from panorama failures and fences sta
     assert.ok(browser.includes('暂无可浏览的实体'));
 });
 
+test('explains that a degraded publication is being refreshed automatically', () => {
+    assert.ok(explorer.includes("图谱正在根据源文档变更自动清理并刷新，请稍后重试。"));
+    assert.ok(explorer.includes("kind: 'publication_unavailable'"));
+});
+
 test('bounds full panorama loading before fetching Publication items', () => {
     for (const token of [
         'PANORAMA_ENTITY_LIMIT',

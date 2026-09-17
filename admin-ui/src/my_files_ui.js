@@ -1,20 +1,12 @@
 export function myFilesBreadcrumbs(path = '') {
     const parts = String(path || '').split('/').filter(Boolean);
     return [
-        { name: '我的任务', path: '' },
+        { name: '我的文件', path: '' },
         ...parts.map((name, index) => ({
             name,
             path: `/${parts.slice(0, index + 1).join('/')}`,
         })),
     ];
-}
-
-export function myFilesExpandedFolderPaths(path = '') {
-    return myFilesBreadcrumbs(path).slice(1).map((item) => item.path);
-}
-
-export function myFilesAncestorPaths(path = '') {
-    return myFilesBreadcrumbs(path).slice(0, -1).map((item) => item.path);
 }
 
 export function selectableUploadLibraries(permissionRows = [], adminLibraries = null) {
@@ -39,4 +31,3 @@ export function myFilesPageCount(folderTotal, fileTotal, pageSize) {
     const size = Number(pageSize) > 0 ? Number(pageSize) : 50;
     return Math.max(1, Math.ceil(((Number(folderTotal) || 0) + (Number(fileTotal) || 0)) / size));
 }
-

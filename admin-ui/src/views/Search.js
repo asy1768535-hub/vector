@@ -36,6 +36,10 @@ export default {
         const route = useRoute();
         const router = useRouter();
         const libs = ref([]);
+        const folders = ref([]);
+        const folderId = ref('');
+        const folderLoading = ref(false);
+        const folderError = ref('');
         const slug = ref(null);
         const query = ref(String(route.query.q || route.query.query || ''));
         const requestedSlug = String(route.query.library || route.query.slug
@@ -57,6 +61,7 @@ export default {
         const searchError = ref('');
         const libsRequestFence = createRequestFence();
         const faqRequestFence = createRequestFence();
+        const folderRequestFence = createRequestFence();
         const searchRequestFence = createRequestFence();
 
         async function loadFaqs() {
@@ -85,6 +90,29 @@ export default {
             query.value = q;
             handleSearch();
         }
+        async function loadFolders(forceRefresh = false) {
+            const requestToken = folderRequestFence.begin();
+            const requestedSlug = slug.value;
+            folders.value = [];
+            folderError.value = '';
+            folderId.value = '';
+            if (!requestedSlug) {
+                folderLoading.value = false;
+                return;
+            }
+            folderLoading.value = true;
+            try {
+                const result = await api.listFolders(requestedSlug, forceRefresh);
+                if (!folderRequestFence.isCurrent(requestToken)) return;
+                folders.value = Array.isArray(result) ? result : [];
+            } catch (e) {
+                if (!folderRequestFence.isCurrent(requestToken)) return;
+                folderError.value = e.message || '文件夹列表加载失败，请重试';
+            } finally {
+                if (folderRequestFence.isCurrent(requestToken)) folderLoading.value = false;
+            }
+        }
+
 
         async function loadLibs(forceRefresh = false) {
             const requestToken = libsRequestFence.begin();
@@ -122,11 +150,13 @@ export default {
         async function handleSearch() {
             if (loading.value) return;
             if (!slug.value) { ElMessage.warning('请先选择一个库'); return; }
+            if (folderError.value) { ElMessage.warning('文件夹列表加载失败，请先重试'); return; }
             const q = (query.value || '').trim();
             if (!q) { ElMessage.warning('请输入搜索关键词'); return; }
             const requestToken = searchRequestFence.begin();
             const requestedSlug = slug.value;
             const requestedLimit = limit.value;
+            const requestedFolderId = folderId.value;
             searchStarted.value = true;
             loading.value = true;
             hasSearched.value = true;
@@ -134,7 +164,9 @@ export default {
             elapsed.value = 0;
             const t0 = performance.now();
             try {
-                const resp = await api.queryLibrary(requestedSlug, { query: q, limit: requestedLimit });
+                const payload = { query: q, limit: requestedLimit };
+                if (requestedFolderId) payload.folder_id = requestedFolderId;
+                const resp = await api.queryLibrary(requestedSlug, payload);
                 if (!searchRequestFence.isCurrent(requestToken)) return;
                 elapsed.value = ((performance.now() - t0) / 1000);
                 results.value = (resp.results || []).map((r) => {
@@ -158,6 +190,8 @@ export default {
         function resetSearch() {
             query.value = '';
             limit.value = 5;
+            folderId.value = '';
+            folderError.value = '';
             results.value = [];
             hasSearched.value = false;
             elapsed.value = 0;
@@ -202,6 +236,9 @@ export default {
         }));
 
         watch(slug, () => {
+            folderId.value = '';
+            folderError.value = '';
+            folders.value = [];
             searchRequestFence.begin();
             results.value = [];
             hasSearched.value = false;
@@ -209,14 +246,15 @@ export default {
             searchStarted.value = false;
             searchResolved.value = false;
             searchError.value = '';
+            loadFolders();
             loadFaqs();
         });
         onMounted(loadLibs);
 
         return {
-            libs, slug, query, limit, results, loading, faqs, hasSearched, elapsed,
+            libs, folders, folderId, folderError, folderLoading, slug, query, limit, results, loading, faqs, hasSearched, elapsed,
             libsLoading, libsError, faqLoading, faqError, searchError, searchReadState,
-            loadLibs, handleSearch, resetSearch, pickFaq, openDocDetail, exportCSV, searchEmpty,
+            loadLibs, loadFolders, handleSearch, resetSearch, pickFaq, openDocDetail, exportCSV, searchEmpty,
             formatScore, scoreType, documentTypeIcon, documentDisplayName, resultDocInfo,
             resultSourceLabel,
         };
@@ -231,6 +269,14 @@ export default {
                     <el-select v-model="slug" placeholder="选择知识库" class="search-lib-select">
                         <el-option v-for="l in libs" :key="l.slug"
                                    :label="l.name + ' (' + l.slug + ')'" :value="l.slug" />
+                    </el-select>
+                </el-form-item>
+                <el-form-item label="文件夹">
+                    <el-select v-model="folderId" clearable filterable
+                               placeholder="全部文件夹" class="search-lib-select"
+                               :loading="folderLoading" :disabled="!slug || !!folderError">
+                        <el-option v-for="folder in folders" :key="folder.id"
+                                   :label="folder.path" :value="folder.id" />
                     </el-select>
                 </el-form-item>
                 <el-form-item label="关键词">
@@ -252,6 +298,8 @@ export default {
                     <el-button link type="primary" :loading="libsLoading" @click="loadLibs(true)">重试</el-button>
                 </template>
             </el-alert>
+            <el-alert v-if="folderError" type="warning" :closable="false" show-icon
+                      title="文件夹列表加载失败" :description="folderError" class="search-read-alert" />
         </section>
 
         <!-- Card 2: FAQ -->

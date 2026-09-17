@@ -7,30 +7,35 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+
+from app.models.ontology_version import OntologyVersion
+from app.services.graph_extraction_batch_eval import (
+    GraphExtractionBatchInput,
+    build_batched_graph_extraction_messages,
+    estimate_graph_extraction_request_tokens,
+    plan_graph_extraction_batches,
+)
+from app.services.graph_extraction_provider import ProviderResponse
 from app.services.graph_schema_discovery import (
+    BusinessSchemaDraft,
     ConceptInventoryItem,
     ConceptInventoryRelationHint,
     DiscoveryText,
+    SchemaDiscoveryEntityType,
+    SchemaDiscoveryPayload,
     _merge_concept_inventory,
     build_schema_discovery_messages,
+    compare_and_merge_active_schema,
     discover_business_schema,
     merge_schema_discovery_payloads,
     plan_schema_discovery_batches,
     schema_draft_to_snapshot,
 )
-from app.services.graph_extraction_batch_eval import (
-    GraphExtractionBatchInput,
-    estimate_graph_extraction_request_tokens,
-    build_batched_graph_extraction_messages,
-    plan_graph_extraction_batches,
-)
-from app.services.graph_extraction_provider import ProviderResponse
-from app.services.token_budget import estimate_text_tokens
 from app.services.schema_discovery_runs import (
     _ready_batch_revisions,
     _sample_discovery_texts,
 )
-
+from app.services.token_budget import estimate_text_tokens
 
 DISCOVERY_RESPONSE = {
     "entity_types": [
@@ -67,6 +72,60 @@ DISCOVERY_RESPONSE = {
 }
 
 
+def test_interrupted_schema_discovery_runs_are_requeued():
+    from app.services.schema_discovery_runs import (
+        recover_interrupted_schema_discovery_runs,
+    )
+
+    result = SimpleNamespace(rowcount=2)
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        def begin(self):
+            return self
+
+        execute = AsyncMock(return_value=result)
+
+    session = Session()
+
+    recovered = asyncio.run(
+        recover_interrupted_schema_discovery_runs(session_factory=lambda: session)
+    )
+
+    assert recovered == 2
+    assert session.execute.await_count == 1
+
+
+def test_schema_discovery_timeout_requeues_interrupted_run(monkeypatch):
+    from app.services import schema_discovery_runs as service
+
+    processor = AsyncMock()
+    recover = AsyncMock(return_value=1)
+
+    async def timeout(_awaitable, *, timeout):
+        _awaitable.close()
+        assert timeout == 123
+        raise TimeoutError
+
+    monkeypatch.setattr(service, "process_next_schema_discovery_run", processor)
+    monkeypatch.setattr(service, "recover_interrupted_schema_discovery_runs", recover)
+    monkeypatch.setattr(service.asyncio, "wait_for", timeout)
+
+    result = asyncio.run(
+        service.process_next_schema_discovery_run_with_recovery(
+            session_factory=object(), timeout_seconds=123
+        )
+    )
+
+    assert result is None
+    assert recover.await_count == 2
+
+
 def test_batch_revision_query_excludes_failed_and_cancelled_imports():
     class EmptyScalars:
         def scalars(self):
@@ -94,6 +153,104 @@ def test_batch_revision_query_excludes_failed_and_cancelled_imports():
             batch_id=uuid.uuid4(),
         )
     ) == []
+
+
+def test_batch_schema_comparison_retains_omitted_active_types_and_reports_delta():
+    active_version_id = uuid.uuid4()
+    customer_id = uuid.uuid4()
+    legacy_id = uuid.uuid4()
+    relation_id = uuid.uuid4()
+    active = SimpleNamespace(
+        version=SimpleNamespace(id=active_version_id),
+        entity_types=(
+            SimpleNamespace(id=customer_id, key="customer", label="客户", description="旧描述"),
+            SimpleNamespace(id=legacy_id, key="legacy_asset", label="旧资产", description="旧类型"),
+        ),
+        relation_types=(
+            SimpleNamespace(id=relation_id, key="owns", label="拥有", description="拥有关系", direction="directed"),
+        ),
+        attributes=(),
+        constraints=(),
+    )
+    proposal = merge_schema_discovery_payloads(
+        [SchemaDiscoveryPayload.model_validate({
+            "entity_types": [
+                {"key": "customer", "label": "客户主体", "description": "新描述"},
+                {"key": "invoice", "label": "发票", "description": "发票类型"},
+            ],
+            "relation_types": [{
+                "key": "owns", "label": "持有", "description": "更新后的拥有关系",
+            }],
+            "constraints": [],
+        })],
+        source_hash="d" * 64,
+    )
+
+    comparison = compare_and_merge_active_schema(proposal, active_bundle=active)
+
+    assert {row.key for row in comparison.draft.entity_types} == {
+        "customer", "invoice", "legacy_asset",
+    }
+    assert comparison.draft.entity_types[0].key == "customer"
+    assert comparison.diff["added"]["entity_types"] == ["invoice"]
+    assert comparison.diff["updated"]["entity_types"] == ["customer"]
+    assert comparison.diff["retained"]["entity_types"] == ["legacy_asset"]
+    assert comparison.diff["removed_candidates"]["entity_types"] == ["legacy_asset"]
+
+
+def test_persist_schema_draft_writes_the_merged_active_schema():
+    from app.services.graph_schema_discovery import persist_business_schema_draft
+
+    active = SimpleNamespace(
+        version=SimpleNamespace(id=uuid.uuid4()),
+        entity_types=(
+            SimpleNamespace(id=uuid.uuid4(), key="customer", label="客户", description="旧描述"),
+            SimpleNamespace(id=uuid.uuid4(), key="legacy_asset", label="旧资产", description="旧类型"),
+        ),
+        relation_types=(),
+        attributes=(),
+        constraints=(),
+    )
+    draft = BusinessSchemaDraft(
+        entity_types=(
+            SchemaDiscoveryEntityType(key="customer", label="客户主体", description="新描述"),
+            SchemaDiscoveryEntityType(key="invoice", label="发票", description="发票类型"),
+        ),
+        relation_types=(),
+        constraints=(),
+        source_hash="e" * 64,
+    )
+    entity_create = AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4()))
+    relation_create = AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4()))
+    attribute_create = AsyncMock()
+    constraint_create = AsyncMock()
+    db = SimpleNamespace(flush=AsyncMock())
+    ontology_version = SimpleNamespace(id=uuid.uuid4(), status="draft")
+    library = SimpleNamespace(id=uuid.uuid4())
+
+    with (
+        patch("app.services.graph_schema_discovery.ontology.create_entity_type", new=entity_create),
+        patch("app.services.graph_schema_discovery.ontology.create_relation_type", new=relation_create),
+        patch("app.services.graph_schema_discovery.ontology.create_attribute_definition", new=attribute_create),
+        patch(
+            "app.services.graph_schema_discovery.ontology.create_relation_type_constraint",
+            new=constraint_create,
+        ),
+    ):
+        snapshot = asyncio.run(
+            persist_business_schema_draft(
+                db,
+                library=library,
+                ontology_version=ontology_version,
+                draft=draft,
+                active_bundle=active,
+            )
+        )
+
+    written_keys = [call.kwargs["key"] for call in entity_create.await_args_list]
+    assert written_keys == ["customer", "invoice", "legacy_asset"]
+    assert {row["key"] for row in snapshot["entity_types"]} == set(written_keys)
+    db.flush.assert_awaited_once()
 
 
 class DeterministicDiscoveryProvider:
@@ -581,6 +738,88 @@ def test_discovery_repairs_unknown_references_once_with_complete_schema_request(
     assert len(draft.constraints) == 1
 
 
+def test_discovery_repair_reuses_source_excerpts_after_empty_schema():
+    texts = [
+        DiscoveryText("d1", "A site contains an inverter."),
+        DiscoveryText("d2", "The inverter reports to the monitoring platform."),
+    ]
+
+    class RepairProvider:
+        def __init__(self) -> None:
+            self.messages = []
+
+        async def extract(self, messages):
+            self.messages.append(messages)
+            payload = json.loads(messages[1]["content"])
+            content = (
+                {}
+                if len(self.messages) == 1
+                else (
+                    DISCOVERY_RESPONSE
+                    if payload.get("excerpts")
+                    == [{"key": item.key, "text": item.text} for item in texts]
+                    else {}
+                )
+            )
+            return ProviderResponse(
+                content=json.dumps(content),
+                provider_request_id=None,
+                raw_response="{}",
+                request_payload_hash="0" * 64,
+                input_token_count=None,
+                output_token_count=None,
+                latency_ms=0,
+                finish_reason="stop",
+            )
+
+    provider = RepairProvider()
+    draft = asyncio.run(
+        discover_business_schema(
+            texts,
+            provider=provider,
+            source_hash="e" * 64,
+            context_window_tokens=4096,
+            max_output_tokens=1024,
+        )
+    )
+
+    assert len(provider.messages) == 2
+    repair_payload = json.loads(provider.messages[1][1]["content"])
+    assert repair_payload["excerpts"] == [
+        {"key": item.key, "text": item.text} for item in texts
+    ]
+    assert len(draft.constraints) == 1
+
+
+def test_discovery_repair_error_keeps_empty_schema_reason():
+    class EmptySchemaProvider:
+        async def extract(self, _messages):
+            return ProviderResponse(
+                content="{}",
+                provider_request_id=None,
+                raw_response="{}",
+                request_payload_hash="0" * 64,
+                input_token_count=None,
+                output_token_count=None,
+                latency_ms=0,
+                finish_reason="stop",
+            )
+
+    with pytest.raises(
+        ValueError,
+        match="schema discovery repair response failed validation: AI Schema discovery returned an empty Schema",
+    ):
+        asyncio.run(
+            discover_business_schema(
+                [DiscoveryText("d1", "A site contains an inverter.")],
+                provider=EmptySchemaProvider(),
+                source_hash="e" * 64,
+                context_window_tokens=4096,
+                max_output_tokens=1024,
+            )
+        )
+
+
 def test_repair_budget_accounts_for_complete_previous_schema():
     invalid = {
         **DISCOVERY_RESPONSE,
@@ -746,10 +985,10 @@ def test_schema_snapshot_sorts_relation_constraints_by_ids():
 
 
 def test_one_discovery_run_binds_six_waiting_jobs_to_one_snapshot():
-    from app.services.graph_candidate_aggregation import canonical_graph_value_hash_v1
     from app.models.library import Library
     from app.models.ontology_version import OntologyVersion
     from app.models.schema_discovery_run import SchemaDiscoveryRun
+    from app.services.graph_candidate_aggregation import canonical_graph_value_hash_v1
     from app.services.schema_discovery_runs import process_next_schema_discovery_run
 
     library_id = uuid.uuid4()

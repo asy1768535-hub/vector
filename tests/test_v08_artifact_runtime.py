@@ -179,8 +179,8 @@ def test_runtime_config_defaults_and_fail_closed_validation():
         {
             "knowledge_artifact_runtime_enabled": True,
             "knowledge_artifact_external_model_enabled": True,
-            "graph_extraction_api_key": SecretStr("key"),
-            "graph_extraction_base_url": "",
+            "knowledge_artifact_api_key": SecretStr("key"),
+            "knowledge_artifact_base_url": "",
         },
         {"knowledge_artifact_provider_timeout_seconds": float("nan")},
         {"knowledge_artifact_worker_poll_seconds": float("inf")},
@@ -297,7 +297,7 @@ def test_generation_policy_enforces_library_type_and_model_egress_gates():
         _env_file=None,
         knowledge_artifact_runtime_enabled=True,
         knowledge_artifact_external_model_enabled=True,
-        graph_extraction_api_key=SecretStr("key"),
+        knowledge_artifact_api_key=SecretStr("key"),
     )
     library = _library()
     document_id = uuid.uuid4()
@@ -493,6 +493,60 @@ def test_model_summary_provider_has_no_raw_response_field_and_sanitizes_errors()
     assert "private body" not in str(exc_info.value)
 
 
+@pytest.mark.parametrize(
+    ("base_url", "model"),
+    [
+        ("https://api.minimaxi.com/v1", "MiniMax-M2.7-highspeed"),
+        ("https://model.rhzy.ai/v1", "MiniMax-M2.7"),
+    ],
+)
+def test_minimax_summary_provider_uses_its_compatible_json_profile(base_url, model):
+    from app.services.knowledge_artifact_provider import OpenAICompatibleSummaryProvider
+
+    def success(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["temperature"] == 0.01
+        assert body["reasoning_split"] is True
+        assert "response_format" not in body
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": '{"summary":"Model result"}'}}]},
+        )
+
+    provider = OpenAICompatibleSummaryProvider(
+        base_url=base_url,
+        model=model,
+        api_key="test-key",
+        transport=httpx.MockTransport(success),
+    )
+    assert asyncio.run(
+        provider.generate([{"role": "user", "content": "source"}])
+    ).content == '{"summary":"Model result"}'
+
+
+def test_rhzy_qwen_summary_provider_uses_prompt_driven_json():
+    from app.services.knowledge_artifact_provider import OpenAICompatibleSummaryProvider
+
+    def success(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["temperature"] == 0
+        assert "response_format" not in body
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": '{"summary":"Model result"}'}}]},
+        )
+
+    provider = OpenAICompatibleSummaryProvider(
+        base_url="https://model.rhzy.ai/v1",
+        model="qwen3.8-27b-uncensored-fp8",
+        api_key="test-key",
+        transport=httpx.MockTransport(success),
+    )
+    assert asyncio.run(
+        provider.generate([{"role": "user", "content": "source"}])
+    ).content == '{"summary":"Model result"}'
+
+
 def test_model_outline_parser_and_prompt_require_real_hierarchy():
     from app.services.knowledge_artifact_generation import (
         KnowledgeArtifactGenerationError,
@@ -514,7 +568,7 @@ def test_model_outline_parser_and_prompt_require_real_hierarchy():
             '{"items":[{"level":2,"title":"Scope","path":["Wrong"]}]}'
         )
 
-def test_model_summary_parser_rejects_unknown_invalid_and_oversized_output():
+def test_model_summary_parser_keeps_summary_and_rejects_invalid_or_oversized_output():
     from app.services.knowledge_artifact_generation import (
         KnowledgeArtifactGenerationError,
         parse_model_summary,
@@ -529,10 +583,16 @@ def test_model_summary_parser_rejects_unknown_invalid_and_oversized_output():
     assert payload.generation_mode == "model"
     assert payload.truncated is True
 
+    provider_metadata = parse_model_summary(
+        '{"summary":"Model result","key_points":["extra"]}',
+        source_character_count=10_000,
+        source_truncated=False,
+    )
+    assert provider_metadata.summary == "Model result"
+
     for content in (
         "not-json",
         "[]",
-        '{"summary":"ok","extra":true}',
         json.dumps({"summary": "x" * 16_001}),
     ):
         with pytest.raises(KnowledgeArtifactGenerationError) as exc_info:
@@ -545,6 +605,24 @@ def test_model_summary_parser_rejects_unknown_invalid_and_oversized_output():
             "invalid_provider_json",
             "invalid_provider_payload",
         }
+
+
+def test_model_parsers_recover_a_json_object_from_qwen_wrapping():
+    from app.services.knowledge_artifact_generation import (
+        parse_model_outline,
+        parse_model_summary,
+    )
+
+    summary = parse_model_summary(
+        '{"{"summary":"Model result"}',
+        source_character_count=12,
+        source_truncated=False,
+    )
+    assert summary.summary == "Model result"
+    outline = parse_model_outline(
+        '```json\n{"items":[{"level":1,"title":"Overview","path":["Overview"]}]}\n```'
+    )
+    assert outline.items[0].title == "Overview"
 
 
 def test_worker_entrypoint_uses_dedicated_heartbeat_and_runtime(monkeypatch):
@@ -646,7 +724,7 @@ def test_enqueue_is_idempotent_for_the_same_revision_and_contract():
         _env_file=None,
         knowledge_artifact_runtime_enabled=True,
         knowledge_artifact_external_model_enabled=True,
-        graph_extraction_api_key=SecretStr("key"),
+        knowledge_artifact_api_key=SecretStr("key"),
     )
     library = _library()
     document_id = uuid.uuid4()
@@ -699,7 +777,7 @@ def _queued_job(*, attempt_count=0):
         extractor_version="summary-extractor-v1",
         generation_mode="model",
         model_provider="openai-compatible",
-        model_name=config.graph_extraction_model,
+        model_name=config.knowledge_artifact_model,
         model_config_hash=_model_config_hash(config),
         trigger_type="manual",
     )
@@ -850,7 +928,7 @@ def test_publish_is_claim_and_revision_fenced_and_stales_previous_current():
                 _env_file=None,
                 knowledge_artifact_runtime_enabled=True,
                 knowledge_artifact_external_model_enabled=True,
-                graph_extraction_api_key=SecretStr("key"),
+                knowledge_artifact_api_key=SecretStr("key"),
             ),
         )
     )
@@ -1201,7 +1279,7 @@ def test_retry_creates_a_linked_generation_without_overwriting_source():
                 _env_file=None,
                 knowledge_artifact_runtime_enabled=True,
                 knowledge_artifact_external_model_enabled=True,
-                graph_extraction_api_key=SecretStr("key"),
+                knowledge_artifact_api_key=SecretStr("key"),
             ),
         )
     )
@@ -1245,8 +1323,8 @@ def test_retry_rejects_a_job_whose_generation_identity_is_no_longer_current():
                 config=Settings(
                     _env_file=None,
                     knowledge_artifact_runtime_enabled=True,
-                knowledge_artifact_external_model_enabled=True,
-                graph_extraction_api_key=SecretStr("key"),
+                    knowledge_artifact_external_model_enabled=True,
+                    knowledge_artifact_api_key=SecretStr("key"),
                     knowledge_artifact_summary_extractor_version="summary-extractor-v2",
                 ),
             )

@@ -48,10 +48,6 @@ from app.services.graph_extraction_parser import (
     GraphExtractionParseError,
     parse_graph_extraction_output,
 )
-from app.services.graph_extraction_rate_limit import (
-    call_graph_extraction_provider,
-    graph_extraction_provider_gate_snapshot,
-)
 from app.services.graph_extraction_prompt import (
     build_graph_extraction_messages,
     graph_extraction_prompt_hash,
@@ -59,16 +55,20 @@ from app.services.graph_extraction_prompt import (
 )
 from app.services.graph_extraction_provider import (
     GRAPH_DRAFT_RESPONSE_FORMAT,
-    GraphExtractionProviderError,
     MINSTRAL_BASE_URL,
     MINSTRAL_MODEL_NAME,
     MINSTRAL_PROVIDER_NAME,
     NUEXTRACT_BASE_URL,
     NUEXTRACT_MODEL_NAME,
+    QWEN3_DRAFT_PROVIDER_NAME,
+    GraphExtractionProviderError,
     NuExtractGraphDraftExtractor,
     OpenAICompatibleGraphExtractor,
-    QWEN3_DRAFT_PROVIDER_NAME,
     graph_extraction_provider_name,
+)
+from app.services.graph_extraction_rate_limit import (
+    call_graph_extraction_provider,
+    graph_extraction_provider_gate_snapshot,
 )
 from app.services.graph_extraction_review import (
     DRAFT_POOL_REVIEW_AUDIT_VERSION,
@@ -84,8 +84,13 @@ from app.services.graph_extraction_review import (
 )
 from app.services.shadow_rollout import resolve_library_shadow_extraction
 
-
 UnitTerminalStatus = Literal["succeeded", "failed", "cancelled"]
+
+# The private draft-pool containers enforce a 10,240-token context.  Their
+# frozen jobs may have been created with the larger final-review window, so a
+# bounded routed schema is required before either draft call.
+_DRAFT_POOL_MAX_ENTITY_TYPES = 3
+_QWEN3_DRAFT_MAX_OUTPUT_TOKENS = 3_000
 
 
 def shadow_enabled_library_sql_predicate():
@@ -962,6 +967,37 @@ def _configured_draft_pool_provider(prepared: PreparedGraphExtractionUnit):
     )
 
 
+def _prepare_routed_draft_pool_request(
+    prepared: PreparedGraphExtractionUnit,
+    *,
+    provider_name: str,
+    provider,
+):
+    """Bound a private draft request without changing the frozen job schema.
+
+    The complete frozen ontology remains on ``prepared`` for candidate
+    validation and materialization.  Only the local draft/review prompt sees
+    the deterministic context-matched subset.
+    """
+
+    from app.services.graph_extraction_batch_eval import route_ontology_for_extraction
+
+    routed_ontology = route_ontology_for_extraction(
+        prepared.ontology_snapshot,
+        context_text=prepared.context_text,
+        enabled=True,
+        max_entity_types=_DRAFT_POOL_MAX_ENTITY_TYPES,
+    )
+    messages = build_graph_extraction_messages(
+        context_text=prepared.context_text,
+        ontology_snapshot=routed_ontology,
+        center_only=prepared.center_only,
+    )
+    if provider_name == QWEN3_DRAFT_PROVIDER_NAME:
+        provider = provider.with_output_budget(_QWEN3_DRAFT_MAX_OUTPUT_TOKENS)
+    return provider, routed_ontology, messages
+
+
 async def _refresh_graph_extraction_job_state(
     db,
     *,
@@ -1383,8 +1419,19 @@ async def process_graph_extraction_unit(
         }:
             is_minstral = extraction_profile == "minstral_review"
             is_pool = extraction_profile == "draft_pool_review"
+            draft_ontology = prepared.ontology_snapshot
+            draft_messages = prepared.messages
             if is_pool:
                 draft_provider_name, draft_provider = _configured_draft_pool_provider(prepared)
+                (
+                    draft_provider,
+                    draft_ontology,
+                    draft_messages,
+                ) = _prepare_routed_draft_pool_request(
+                    prepared,
+                    provider_name=draft_provider_name,
+                    provider=draft_provider,
+                )
             elif is_minstral:
                 draft_provider_name = MINSTRAL_PROVIDER_NAME
                 draft_provider = _configured_minstral_provider(prepared)
@@ -1398,7 +1445,7 @@ async def process_graph_extraction_unit(
                 lease_seconds=lease_seconds,
                 renew_seconds=renew_seconds,
                 messages=(
-                    prepared.messages
+                    draft_messages
                     if is_minstral or is_pool
                     else build_nuextract_messages(prepared.context_text)
                 ),
@@ -1409,58 +1456,70 @@ async def process_graph_extraction_unit(
             try:
                 draft = parse_nuextract_draft(draft_response.content)
             except ValueError as exc:
-                raise GraphExtractionProviderError(
-                    "http_error",
-                    "NuExtract returned an invalid structured draft",
-                    latency_ms=draft_response.latency_ms,
-                ) from exc
-            review_response, lease_lost = await _call_provider_with_lease_renewal(
-                session_factory,
-                provider=active_provider,
-                prepared=prepared,
-                lease_seconds=lease_seconds,
-                renew_seconds=renew_seconds,
-                messages=(
-                    build_draft_pool_qwen_review_messages(
-                        context_text=prepared.context_text,
-                        ontology_snapshot=prepared.ontology_snapshot,
-                        draft_provider=draft_provider_name,
-                        draft=draft,
-                        center_only=prepared.center_only,
-                    )
-                    if is_pool
-                    else build_minstral_qwen_review_messages(
-                        context_text=prepared.context_text,
-                        ontology_snapshot=prepared.ontology_snapshot,
-                        minstral_draft=draft,
-                        center_only=prepared.center_only,
-                    )
-                    if is_minstral
-                    else build_qwen_review_messages(
-                        context_text=prepared.context_text,
-                        ontology_snapshot=prepared.ontology_snapshot,
-                        nuextract_draft=draft,
-                        center_only=prepared.center_only,
-                    )
-                ),
-                concurrency=settings.graph_extraction_review_max_concurrency,
-                gate_key="review",
-            )
-            response = assemble_reviewed_response(
-                draft_response=draft_response,
-                draft=draft,
-                review_response=review_response,
-                payload=GraphExtractionPayload(),
-                audit_version=(
-                    DRAFT_POOL_REVIEW_AUDIT_VERSION
-                    if is_pool
-                    else (
-                        MINSTRAL_REVIEW_AUDIT_VERSION
+                if not is_pool:
+                    raise GraphExtractionProviderError(
+                        "http_error",
+                        "NuExtract returned an invalid structured draft",
+                        latency_ms=draft_response.latency_ms,
+                    ) from exc
+                response, lease_lost = await _call_provider_with_lease_renewal(
+                    session_factory,
+                    provider=active_provider,
+                    prepared=prepared,
+                    lease_seconds=lease_seconds,
+                    renew_seconds=renew_seconds,
+                    messages=draft_messages,
+                    concurrency=settings.graph_extraction_review_max_concurrency,
+                    gate_key="review",
+                )
+            else:
+                review_response, lease_lost = await _call_provider_with_lease_renewal(
+                    session_factory,
+                    provider=active_provider,
+                    prepared=prepared,
+                    lease_seconds=lease_seconds,
+                    renew_seconds=renew_seconds,
+                    messages=(
+                        build_draft_pool_qwen_review_messages(
+                            context_text=prepared.context_text,
+                            ontology_snapshot=draft_ontology,
+                            draft_provider=draft_provider_name,
+                            draft=draft,
+                            center_only=prepared.center_only,
+                        )
+                        if is_pool
+                        else build_minstral_qwen_review_messages(
+                            context_text=prepared.context_text,
+                            ontology_snapshot=prepared.ontology_snapshot,
+                            minstral_draft=draft,
+                            center_only=prepared.center_only,
+                        )
                         if is_minstral
-                        else NUEXTRACT_REVIEW_AUDIT_VERSION
-                    )
-                ),
-            ).response
+                        else build_qwen_review_messages(
+                            context_text=prepared.context_text,
+                            ontology_snapshot=prepared.ontology_snapshot,
+                            nuextract_draft=draft,
+                            center_only=prepared.center_only,
+                        )
+                    ),
+                    concurrency=settings.graph_extraction_review_max_concurrency,
+                    gate_key="review",
+                )
+                response = assemble_reviewed_response(
+                    draft_response=draft_response,
+                    draft=draft,
+                    review_response=review_response,
+                    payload=GraphExtractionPayload(),
+                    audit_version=(
+                        DRAFT_POOL_REVIEW_AUDIT_VERSION
+                        if is_pool
+                        else (
+                            MINSTRAL_REVIEW_AUDIT_VERSION
+                            if is_minstral
+                            else NUEXTRACT_REVIEW_AUDIT_VERSION
+                        )
+                    ),
+                ).response
         else:
             response, lease_lost = await _call_provider_with_lease_renewal(
                 session_factory,
@@ -1601,10 +1660,13 @@ async def run_graph_extraction_worker(
     metadata.setdefault("schema_discovery_runs", 0)
     while True:
         if maintenance_enabled and session_factory is async_session_factory:
-            from app.services.schema_discovery_runs import process_next_schema_discovery_run
+            from app.services.schema_discovery_runs import (
+                process_next_schema_discovery_run_with_recovery,
+            )
 
-            discovery_run = await process_next_schema_discovery_run(
+            discovery_run = await process_next_schema_discovery_run_with_recovery(
                 session_factory=session_factory,
+                timeout_seconds=settings.graph_schema_discovery_run_timeout_seconds,
             )
             if discovery_run is not None:
                 metadata["schema_discovery_runs"] += 1

@@ -16,6 +16,7 @@ from app.models.evidence_unit import EvidenceUnit
 from app.models.document_revision_file import DocumentRevisionFile
 from app.models.graph_publication import (
     GRAPH_PUBLICATION_SOURCE_COORDINATED_PURGE,
+    GRAPH_PUBLICATION_SOURCE_MANUAL_PLAN,
     GRAPH_PUBLICATION_SOURCE_ROLLBACK,
     GRAPH_PUBLICATION_STATUS_ACTIVE,
     GRAPH_PUBLICATION_STATUS_ACTIVATING,
@@ -35,7 +36,11 @@ from app.models.graph_publication_item import (
 )
 from app.models.knowledge_relation import KnowledgeRelation
 from app.models.library import Library
-from app.models.ontology_version import ONTOLOGY_STATUS_ACTIVE, OntologyVersion
+from app.models.ontology_version import (
+    ONTOLOGY_STATUS_ACTIVE,
+    ONTOLOGY_STATUS_DISABLED,
+    OntologyVersion,
+)
 from app.models.schema_discovery_run import SchemaDiscoveryRun
 from app.models.graph_extraction_job import GraphExtractionJob
 from app.models.relation_evidence import RelationEvidence
@@ -205,10 +210,21 @@ async def _lock_active_ontology(
                 and run.ontology_version_id == publication.ontology_version_id
                 and job_id is not None
             )
+    allow_disabled_refresh = (
+        publication.source_mode == GRAPH_PUBLICATION_SOURCE_MANUAL_PLAN
+        and publication.parent_publication_id is not None
+        and options.get("refresh_reason") == "source_document_deleted"
+    )
     if (
         ontology is None
         or ontology.library_id != publication.library_id
-        or (ontology.status != ONTOLOGY_STATUS_ACTIVE and not (explicit_draft and ontology.status == "draft"))
+        or (
+            ontology.status != ONTOLOGY_STATUS_ACTIVE
+            and not (
+                (explicit_draft and ontology.status == "draft")
+                or (allow_disabled_refresh and ontology.status == ONTOLOGY_STATUS_DISABLED)
+            )
+        )
     ):
         raise GraphPublicationActivationError("ontology_not_active", "ontology version is not active")
     return ontology
@@ -642,6 +658,13 @@ async def _activate_locked(
 
     ontology = await _lock_active_ontology(db, publication)
     allow_explicit_draft = ontology.status == "draft"
+    allow_explicit_disabled = (
+        ontology.status == ONTOLOGY_STATUS_DISABLED
+        and publication.source_mode == GRAPH_PUBLICATION_SOURCE_MANUAL_PLAN
+        and publication.parent_publication_id is not None
+        and (publication.plan_options or {}).get("refresh_reason")
+        == "source_document_deleted"
+    )
     previous = await _lock_current_publication(
         db,
         library_id=publication.library_id,
@@ -685,6 +708,7 @@ async def _activate_locked(
         ontology,
         include_drafts=publication.include_drafts,
         allow_explicit_draft=allow_explicit_draft,
+        allow_explicit_disabled=allow_explicit_disabled,
         projection=projection,
         config=config,
     )

@@ -3,10 +3,10 @@ from __future__ import annotations
 import io
 from pathlib import Path
 
-from alembic import command
 from alembic.config import Config
 from sqlalchemy import CheckConstraint, ForeignKeyConstraint, Index, UniqueConstraint
 
+from alembic import command
 from app.models.fact_foundation import (
     FactAssertion,
     FactResolutionDecision,
@@ -16,7 +16,6 @@ from app.models.fact_foundation import (
 )
 from app.models.knowledge_relation import KnowledgeRelation
 from app.models.relation_evidence import RelationEvidence
-
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "alembic" / "versions" / "0066_p2_2_fact_foundation.py"
@@ -88,6 +87,9 @@ def test_assertion_and_decision_status_and_nullable_source_contracts():
 
     assert assertion.c.knowledge_relation_id.nullable is True
     assert assertion.c.asserted_value.nullable is True
+    assert assertion.c.asserted_value.type.none_as_null is True
+    assert assertion.c.valid_time.type.none_as_null is True
+    assert assertion.c.effective_time.type.none_as_null is True
     assert {"polarity", "modality", "status"} <= {name.removeprefix("ck_fact_assertions_") for name in _check_names(assertion)}
     assert _fk(assertion, "fk_fact_assertions_knowledge_relation").ondelete == "SET NULL"
     assert _fk(assertion, "fk_fact_assertions_logical_fact").ondelete == "RESTRICT"
@@ -99,6 +101,10 @@ def test_assertion_and_decision_status_and_nullable_source_contracts():
     assert _fk(decision, "fk_fact_resolution_decisions_candidate").ondelete == "SET NULL"
     assert _fk(decision, "fk_fact_resolution_decisions_raw_claim").ondelete == "SET NULL"
     assert _fk(decision, "fk_fact_resolution_decisions_assertion").ondelete == "SET NULL"
+
+
+def test_logical_fact_entity_object_uses_sql_null_for_absent_literal_value():
+    assert LogicalFact.__table__.c.object_value.type.none_as_null is True
 
 
 def test_0069_keeps_fact_resolution_decision_uniqueness_current_only():

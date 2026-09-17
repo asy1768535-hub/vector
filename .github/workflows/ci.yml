@@ -28,7 +28,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install (with dev + ocr extras)
-        run: pip install -c .github/constraints-v07-release.txt -e ".[dev,ocr]"
+        run: pip install -c .github/constraints-v07-release.txt -e ".[dev,ocr,object-storage]"
       - name: Ruff
         run: ruff check app tests scripts
       - name: Admin UI standalone Node tests
@@ -83,7 +83,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install (with dev + ocr extras)
-        run: pip install -c .github/constraints-v07-release.txt -e ".[dev,ocr]"
+        run: pip install -c .github/constraints-v07-release.txt -e ".[dev,ocr,object-storage]"
       - name: Alembic migration verification
         run: |
           alembic heads

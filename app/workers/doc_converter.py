@@ -5,8 +5,10 @@ import asyncio
 import logging
 import os
 import socket
+import tempfile
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,9 +16,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.db import async_session_factory
 from app.models.document_import_job import DocumentImportJob
+from app.models.file_resource import FileResource
+from app.services import file_resources
 from app.services.doc_conversion import convert_doc
 from app.services.import_uploads import staging_path
-
+from app.services.object_storage import build_object_storage_adapter
 
 logging.basicConfig(
     level=logging.INFO,
@@ -131,18 +135,47 @@ async def _mark_failed(job_id: uuid.UUID, worker_id: str, error: Exception) -> N
 
 
 async def _process_claimed_job(job_id: uuid.UUID, worker_id: str) -> None:
-    async with async_session_factory() as read_db:
-        job = await read_db.get(DocumentImportJob, job_id)
-        if (
-            job is None
-            or job.status != "processing"
-            or job.current_stage != "converting"
-            or job.worker_id != worker_id
-        ):
-            return
-        source = staging_path(job.staging_key)
-        staging_key = job.staging_key
-    artifact = await asyncio.to_thread(convert_doc, source, staging_key)
+    resource_source: Path | None = None
+    try:
+        async with async_session_factory() as read_db:
+            job = await read_db.get(DocumentImportJob, job_id)
+            if (
+                job is None
+                or job.status != "processing"
+                or job.current_stage != "converting"
+                or job.worker_id != worker_id
+            ):
+                return
+            file_resource_id = getattr(job, "file_resource_id", None)
+            if file_resource_id is None:
+                source = staging_path(job.staging_key)
+            else:
+                resource = await read_db.get(FileResource, file_resource_id)
+                if (
+                    resource is None
+                    or resource.library_id != job.library_id
+                    or resource.storage_status != "available"
+                ):
+                    raise RuntimeError("file resource is unavailable")
+                descriptor, temporary_name = tempfile.mkstemp(
+                    prefix=".doc-resource-",
+                    suffix=".doc",
+                )
+                os.close(descriptor)
+                resource_source = Path(temporary_name)
+                await file_resources.materialize_file_resource(
+                    adapter=build_object_storage_adapter(
+                        provider=resource.storage_provider
+                    ),
+                    resource=resource,
+                    destination_path=resource_source,
+                )
+                source = resource_source
+            staging_key = job.staging_key
+        artifact = await asyncio.to_thread(convert_doc, source, staging_key)
+    finally:
+        if resource_source is not None:
+            resource_source.unlink(missing_ok=True)
 
     async with async_session_factory() as db:
         job = (

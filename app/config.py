@@ -15,7 +15,6 @@ from urllib.parse import urlparse
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 BASE_DIR = Path(__file__).resolve().parent.parent
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _ENTITY_LINKING_POLICY_FIELDS = {
@@ -213,8 +212,33 @@ class Settings(BaseSettings):
     import_upload_claim_stale_seconds: int = Field(default=300, ge=30, le=3600)
     import_upload_retry_after_seconds: int = Field(default=2, ge=1, le=60)
 
+    # ---- 视频转文字（OpenAI 兼容 /audio/transcriptions；默认关闭）----
+    video_transcription_enabled: bool = False
+    video_transcription_provider: str = "funasr"
+    video_transcription_base_url: str = ""
+    video_transcription_model: str = ""
+    video_transcription_api_key: SecretStr = SecretStr("")
+    video_transcription_timeout_seconds: int = Field(default=1800, ge=30, le=7200)
+    video_transcription_ffmpeg_binary: str = "ffmpeg"
+    video_transcription_extract_timeout_seconds: int = Field(default=1800, ge=30, le=7200)
+    video_transcription_max_input_bytes: int = Field(
+        default=500 * 1024 * 1024,
+        ge=1024 * 1024,
+        le=50 * 1024**3,
+    )
+    video_transcription_max_audio_bytes: int = Field(
+        default=50 * 1024 * 1024,
+        ge=1024 * 1024,
+        le=2 * 1024**3,
+    )
+    video_transcription_max_transcript_chars: int = Field(
+        default=10_000_000,
+        ge=1_000,
+        le=50_000_000,
+    )
+
     @model_validator(mode="after")
-    def validate_import_upload_inflight_limits(self) -> "Settings":
+    def validate_import_upload_inflight_limits(self) -> Settings:
         if self.import_upload_user_inflight_limit > self.import_upload_global_inflight_limit:
             raise ValueError("per-user upload limit cannot exceed the global upload limit")
         if (
@@ -261,6 +285,9 @@ class Settings(BaseSettings):
     revision_file_storage_enabled: bool = False
     document_storage_provider: str = "local"
     document_storage_endpoint_ref: str = "primary"
+    # DOCUMENT_STORAGE_* is the canonical application configuration.  The
+    # separate MINIO_* fields below are mapped here in one validator so an
+    # empty DOCUMENT_STORAGE_* placeholder cannot mask an operator value.
     document_storage_endpoint_url: str = ""
     document_storage_bucket: str = ""
     document_storage_access_key: SecretStr = SecretStr("")
@@ -268,6 +295,59 @@ class Settings(BaseSettings):
     document_storage_region: str = ""
     document_storage_max_read_bytes: int = 500 * 1024 * 1024
     document_storage_signed_url_seconds: int = 300
+    minio_endpoint: str = Field(default="", validation_alias="MINIO_ENDPOINT")
+    minio_access_key: SecretStr = Field(
+        default=SecretStr(""), validation_alias="MINIO_ACCESS_KEY"
+    )
+    minio_secret_key: SecretStr = Field(
+        default=SecretStr(""), validation_alias="MINIO_SECRET_KEY"
+    )
+    minio_bucket: str = Field(default="", validation_alias="MINIO_BUCKET")
+    minio_secure: bool = Field(
+        default=True,
+        validation_alias="MINIO_SECURE",
+    )
+
+    @model_validator(mode="after")
+    def apply_minio_environment_compatibility(self) -> Settings:
+        """Normalize the operator-facing MINIO_* variables.
+
+        The existing DOCUMENT_STORAGE_* names remain authoritative when they
+        are explicitly supplied.  If an endpoint is supplied without a
+        provider, treating it as MinIO is the only useful interpretation and
+        keeps the legacy local default unchanged for empty configurations.
+        MinIO's common host-only endpoint form is normalized to a URL before
+        startup validation and client construction.
+        """
+        minio_endpoint = self.minio_endpoint.strip()
+        if minio_endpoint:
+            if (
+                "document_storage_provider" in self.model_fields_set
+                and self.document_storage_provider != "minio"
+            ):
+                raise ValueError(
+                    "MINIO_ENDPOINT cannot be combined with a non-minio "
+                    "DOCUMENT_STORAGE_PROVIDER"
+                )
+            if not self.document_storage_endpoint_url.strip():
+                self.document_storage_endpoint_url = minio_endpoint
+            if not self.document_storage_bucket.strip() and self.minio_bucket.strip():
+                self.document_storage_bucket = self.minio_bucket.strip()
+            if not self.document_storage_access_key.get_secret_value().strip():
+                self.document_storage_access_key = self.minio_access_key
+            if not self.document_storage_secret_key.get_secret_value().strip():
+                self.document_storage_secret_key = self.minio_secret_key
+        endpoint = self.document_storage_endpoint_url.strip()
+        if not endpoint:
+            return self
+        if "document_storage_provider" not in self.model_fields_set:
+            self.document_storage_provider = "minio"
+        if self.document_storage_provider == "minio":
+            parsed = urlparse(endpoint)
+            if not parsed.scheme:
+                scheme = "https" if self.minio_secure else "http"
+                self.document_storage_endpoint_url = f"{scheme}://{endpoint}"
+        return self
     revision_retention_enabled: bool = False
     revision_retention_batch_size: int = 50
     revision_retention_impact_evidence_sample: int = 20
@@ -411,9 +491,12 @@ class Settings(BaseSettings):
     graph_extraction_qwen3_draft_model: str = "graph-qwen3-4b"
     graph_extraction_qwen3_draft_timeout_seconds: float = 240.0
     graph_extraction_qwen3_draft_max_output_tokens: int = 1_000
-    graph_schema_discovery_max_source_chunks: int = 8
+    graph_schema_discovery_max_source_chunks: int = 32
     graph_schema_discovery_concept_inventory_enabled: bool = False
     graph_schema_discovery_timeout_seconds: float = 300.0
+    graph_schema_discovery_run_timeout_seconds: float = Field(
+        default=3_600.0, ge=60.0, le=86_400.0
+    )
     graph_schema_discovery_context_window_tokens: int = 16_384
     graph_schema_discovery_max_output_tokens: int = 8_000
 
@@ -749,10 +832,15 @@ def validate_knowledge_artifact_startup(config: Settings) -> None:
         raise RuntimeError("[security] knowledge artifact versions must be nonblank and bounded")
     if not config.knowledge_artifact_external_model_enabled:
         return
-    if not config.graph_extraction_base_url.strip() or not config.graph_extraction_model.strip():
+    if not (
+        config.knowledge_artifact_base_url.strip()
+        and config.knowledge_artifact_model.strip()
+    ):
         raise RuntimeError("[security] knowledge artifact model endpoint and model are required")
-    if not config.graph_extraction_api_key.get_secret_value().strip():
-        raise RuntimeError("[security] GRAPH_EXTRACTION_API_KEY is required for Summary generation")
+    if not config.knowledge_artifact_api_key.get_secret_value().strip():
+        raise RuntimeError(
+            "[security] KNOWLEDGE_ARTIFACT_API_KEY is required for Summary generation"
+        )
 
 
 def validate_classification_runtime_startup(config: Settings) -> None:
@@ -799,14 +887,26 @@ def validate_classification_runtime_startup(config: Settings) -> None:
         raise RuntimeError("[security] classification versions must be nonblank and bounded")
     if not config.classification_external_model_enabled:
         return
-    provider_contract = (config.classification_base_url, config.classification_model)
-    if provider_contract not in {
+    provider_contract = (
+        config.classification_base_url.rstrip("/"),
+        config.classification_model,
+    )
+    approved_contracts = {
         ("https://api.deepseek.com/v1", "deepseek-v4-pro"),
         ("https://api.deepseek.com/v1", "deepseek-v4-flash"),
         ("http://10.0.10.2:8113/v1", "qwen3.5-9b"),
         ("https://model.rhzy.ai/v1", "gemma4-31b-uncensored-bf16-256k-seq4"),
         ("http://10.0.10.2:8114/v1", "gemma4-31b-uncensored-bf16-256k-seq4"),
-    }:
+        ("https://model.rhzy.ai/v1", "qwen3.8-27b-uncensored-fp8"),
+    }
+    from app.services.minimax_openai import is_minimax_openai_contract
+
+    if (
+        provider_contract not in approved_contracts
+        and not is_minimax_openai_contract(
+            base_url=provider_contract[0], model=provider_contract[1]
+        )
+    ):
         raise RuntimeError("[security] classification requires an approved provider identity")
     if not config.classification_api_key.get_secret_value().strip():
         raise RuntimeError("[security] CLASSIFICATION_API_KEY is required for classification")

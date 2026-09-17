@@ -1567,6 +1567,9 @@ async def materialize_resolved_graph_relation_fact(
             status="active",
         )
         db.add(logical_fact)
+        # The assertion is linked by id rather than an ORM relationship.  Flush the
+        # new parent before later evidence lookups can trigger an autoflush.
+        await db.flush()
         logical_outcome = "CREATE"
     else:
         logical_outcome = "REUSE"

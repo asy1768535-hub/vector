@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import csv
 import copy
+import csv
 import hashlib
 import io
 import json
@@ -12,7 +12,7 @@ from pathlib import Path
 
 from app.config import settings
 from app.models.library import Library
-from app.services import docx_extract, pdf_extract, splitter, xlsx_extract
+from app.services import docx_extract, pdf_extract, splitter, video_transcription, xlsx_extract
 from app.services.import_uploads import IMAGE_IMPORT_EXTENSIONS
 from app.services.parser_units import (
     build_ocr_parser_units,
@@ -22,6 +22,7 @@ from app.services.parser_units import (
     parser_provenance,
     text_range,
 )
+from app.services.video_transcription import AUDIO_IMPORT_EXTENSIONS, VIDEO_IMPORT_EXTENSIONS
 
 
 @dataclass(frozen=True, slots=True)
@@ -596,6 +597,62 @@ def _parse_json(path: Path, library: Library) -> ParsedImport:
     return _structured_text(text, library, source_type="json", segments=[segment])
 
 
+def _parse_video(path: Path, library: Library, *, file_name: str) -> ParsedImport:
+    transcript = video_transcription.transcribe_video(path, file_name=file_name)
+    normalized_text = "\n".join(segment.text for segment in transcript.segments) or transcript.text
+    segments: list[dict] = []
+    offset = 0
+    for ordinal, transcript_segment in enumerate(transcript.segments):
+        text = transcript_segment.text
+        location = {
+            "type": "video",
+            "start_seconds": transcript_segment.start_seconds,
+            "end_seconds": transcript_segment.end_seconds,
+        }
+        parser = parser_provenance("video-asr", "v1", {"source_kind": "video"})
+        segments.append({
+            "kind": "prose",
+            "text": text,
+            "source_kind": "video",
+            "ordinal": ordinal,
+            "unit_key": f"video:segment:{ordinal}",
+            "parser": parser,
+            "location": location,
+            "parser_unit": build_parser_unit(
+                source_kind="video",
+                unit_kind="timestamp",
+                ordinal=ordinal,
+                unit_key=f"video:segment:{ordinal}",
+                parser=parser,
+                location=location,
+                source={
+                    "timestamp": {
+                        "start_seconds": transcript_segment.start_seconds,
+                        "end_seconds": transcript_segment.end_seconds,
+                    }
+                },
+                source_text=normalized_text,
+                source_start=offset,
+                source_end=offset + len(text),
+            ),
+        })
+        offset += len(text) + 1
+    if not segments:
+        return _structured_text(normalized_text, library, source_type="video")
+    return _structured_text(
+        normalized_text,
+        library,
+        source_type="video",
+        segments=segments,
+    )
+
+
+def _parse_audio(path: Path, library: Library, *, file_name: str) -> ParsedImport:
+    transcript = video_transcription.transcribe_audio(path, file_name=file_name)
+    normalized_text = "\n".join(segment.text for segment in transcript.segments) or transcript.text
+    return _structured_text(normalized_text, library, source_type="audio")
+
+
 def parse_import_file(
     path: Path,
     library: Library,
@@ -603,6 +660,10 @@ def parse_import_file(
     file_name: str | None = None,
 ) -> ParsedImport:
     suffix = Path(file_name).suffix.lower() if file_name else path.suffix.lower()
+    if suffix in VIDEO_IMPORT_EXTENSIONS:
+        return _parse_video(path, library, file_name=file_name or path.name)
+    if suffix in AUDIO_IMPORT_EXTENSIONS:
+        return _parse_audio(path, library, file_name=file_name or path.name)
     if suffix in IMAGE_IMPORT_EXTENSIONS:
         return _parse_image(path, library, file_name=file_name)
     if suffix == ".pdf":

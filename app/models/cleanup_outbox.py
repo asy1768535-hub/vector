@@ -23,6 +23,8 @@ EVENT_DELETE_DOCUMENT_BEFORE_REVISION = "delete_document_before_revision"  # 更
 EVENT_DELETE_DOCUMENT_REVISION = "delete_document_revision"       # 删指定 document_revision_id points
 EVENT_DELETE_UNPUBLISHED_REVISION_POINTS = "delete_unpublished_revision_points"  # 删未发布 revision points
 EVENT_DELETE_COLLECTION = "delete_collection"                     # 删库：删整个 collection
+EVENT_DELETE_FILE_RESOURCES = "delete_file_resources"             # 删文档：删对应原始文件对象
+EVENT_REFRESH_GRAPH_PUBLICATION = "refresh_graph_publication"      # 删文档后：仅用现有图谱记录刷新画布快照
 
 
 class CleanupOutbox(Base):

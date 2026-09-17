@@ -218,6 +218,21 @@ export default {
             } catch (e) { ElMessage.error(e.message || String(e)); }
         }
 
+        async function bulkDeleteDocuments(row) {
+            try {
+                await ElMessageBox.confirm(
+                    `确认删除知识库 ${row.slug} 内的全部文件？\n\n仅删除库内文档记录，原始文件会保留；删除后文档不可用于检索，向量和图谱清理将异步执行。此操作不删除知识库。`,
+                    '删除库内全部文件',
+                    { type: 'warning', confirmButtonText: '确认删除全部文件', cancelButtonText: '取消' },
+                );
+            } catch (_) { return; }
+            try {
+                const result = await api.bulkDeleteDocuments(row.slug);
+                ElMessage.success(`已删除 ${result.deleted_count || 0} 个文件，向量清理将异步完成`);
+                await load(true);
+            } catch (e) { ElMessage.error(e.message || String(e)); }
+        }
+
         async function del(row) {
             try { await ElMessageBox.confirm(`软删除库 ${row.slug}? Qdrant collection 也会异步清理。`, '确认', { type: 'warning' }); }
             catch (_) { return; }
@@ -252,7 +267,7 @@ export default {
 
         return { libs, loading, librariesResolved, librariesError, librariesReadState, showDeleted, create, edit, stats, pagedLibraries, detailOpen, selectedLibrary, schemaModeDisplay,
             keyword, statusFilter, retrievalFilter, page, pageSize, resetFilters, openDetail,
-            load, openCreate, submitCreate, openEdit, submitEdit, rebuild, del, testEmbedding,
+            load, openCreate, submitCreate, openEdit, submitEdit, rebuild, del, bulkDeleteDocuments, testEmbedding,
             onCreateNameInput, onCreateSlugInput,
             dataEmpty, srcSummary, sourceDisplay, libraryStatus, toggleLabel, embedDisplay,
             faqMgr, loadFaq, openFaq, addFaq, saveFaq, removeFaq };
@@ -335,9 +350,9 @@ export default {
                   <el-button link size="small" @click.stop="openDetail(row)">详情</el-button>
                   <el-button link size="small" :disabled="!!row.deleted_at" @click.stop="openEdit(row)">编辑</el-button>
                   <el-button link size="small" :disabled="!!row.deleted_at" @click.stop="openFaq(row)">常用问题</el-button>
-                  <el-dropdown trigger="click" :disabled="!!row.deleted_at" @command="(cmd) => { if (cmd==='test') testEmbedding(row); if (cmd==='rebuild') rebuild(row); if (cmd==='delete') del(row); }">
+                  <el-dropdown trigger="click" :disabled="!!row.deleted_at" @command="(cmd) => { if (cmd==='test') testEmbedding(row); if (cmd==='rebuild') rebuild(row); if (cmd==='bulk-delete') bulkDeleteDocuments(row); if (cmd==='delete') del(row); }">
                     <el-button link size="small" @click.stop>更多<el-icon><local-icon icon="mdi:chevron-down"></local-icon></el-icon></el-button>
-                    <template #dropdown><el-dropdown-menu><el-dropdown-item command="test">测试 Embedding</el-dropdown-item><el-dropdown-item command="rebuild">重建 Collection</el-dropdown-item><el-dropdown-item command="delete">软删除</el-dropdown-item></el-dropdown-menu></template>
+                    <template #dropdown><el-dropdown-menu><el-dropdown-item command="test">测试 Embedding</el-dropdown-item><el-dropdown-item command="rebuild">重建 Collection</el-dropdown-item><el-dropdown-item command="bulk-delete">删除库内全部文件</el-dropdown-item><el-dropdown-item command="delete">软删除知识库</el-dropdown-item></el-dropdown-menu></template>
                   </el-dropdown>
                 </div>
               </template>
