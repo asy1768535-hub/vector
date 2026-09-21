@@ -125,6 +125,8 @@ export const rebuildLibraryCollection = (slug) =>
     request(`/admin/libraries/${slug}/rebuild-collection`, { method: 'POST' });
 export const testLibraryEmbedding = (slug) =>
     request(`/admin/libraries/${slug}/test-embedding`, { method: 'POST' });
+export const verifyLibraryEmbedding = (slug) =>
+    request(`/admin/libraries/${slug}/verify-embedding-profile`, { method: 'POST' });
 
 // ── Admin: Library FAQ（常用问题） ───────────────────────────
 // options.includeInactive=true 时附带停用项（仅 admin/superuser 生效）
@@ -230,6 +232,37 @@ export const listStoredFiles = (params = {}, { signal } = {}) => {
     });
     if (typeof params.path === 'string' && params.path) query.set('path', params.path);
     return request(`/me/stored-files?${query.toString()}`, { signal });
+};
+export const listFailedImportTaskFiles = (params = {}, { signal } = {}) => {
+    const query = new URLSearchParams({
+        library_slug: String(params.librarySlug || ''),
+        scope: 'all',
+        failed_only: 'true',
+        page: String(Number.isInteger(params.page) && params.page > 0 ? params.page : 1),
+        page_size: String(params.pageSize === 20 ? 20 : 50),
+    });
+    if (typeof params.path === 'string' && params.path) query.set('path', params.path);
+    return request(`/me/import-task-files?${query.toString()}`, { signal });
+};
+export const retryPersonalImportTask = (jobId) =>
+    request(`/me/import-tasks/${jobId}/retry`, { method: 'POST' });
+export const listPersonalImportTasks = (params = {}, { signal } = {}) => {
+    const query = new URLSearchParams({
+        scope: params.scope === '30d' ? '30d' : 'all',
+        limit: String(params.limit || 50),
+    });
+    if (params.cursor) query.set('cursor', String(params.cursor));
+    if (params.page) query.set('page', String(params.page));
+    if (params.librarySlug) query.set('library_slug', String(params.librarySlug));
+    if (params.status && params.status !== 'all') query.set('status', String(params.status));
+    return request(`/me/import-tasks?${query.toString()}`, { signal });
+};
+export const getPersonalImportTaskSummary = (params = {}, { signal } = {}) => {
+    const options = typeof params === 'string' ? { scope: params } : params;
+    const query = new URLSearchParams({ scope: options.scope === '30d' ? '30d' : 'all' });
+    if (options.librarySlug) query.set('library_slug', String(options.librarySlug));
+    if (options.status && options.status !== 'all') query.set('status', String(options.status));
+    return request(`/me/import-task-summary?${query.toString()}`, { signal });
 };
 export const getStoredFileDownloadUrl = (librarySlug, fileResourceId) =>
     request(`/me/stored-files/${fileResourceId}/download?${new URLSearchParams({ library_slug: librarySlug }).toString()}`);
@@ -613,10 +646,10 @@ export const listMonitoredTasks = (params = {}, forceRefresh) => cachedRequest(
     8000,
     forceRefresh,
 );
-export const retryMonitoredTasks = (items) => request('/admin/jobs/monitor/retry', {
-    method: 'POST',
-    body: JSON.stringify({ items }),
-});
+export const retryMonitoredTasks = (items) => request(
+    '/admin/jobs/monitor/retry',
+    jsonBody('POST', { items }),
+);
 export const monitoredTaskStats = (forceRefresh) => cachedRequest(
     'monitoredTaskStats',
     () => request('/admin/jobs/monitor/stats'),

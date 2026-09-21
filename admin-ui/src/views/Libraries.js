@@ -211,10 +211,17 @@ export default {
 
         async function testEmbedding(row) {
             try {
-                const r = await api.testLibraryEmbedding(row.slug);
-                if (r.ok && r.message === 'ok') ElMessage.success(`「${row.slug}」embedding 正常：${r.embedding_model} / ${r.dim}维`);
-                else if (r.ok) ElMessage.warning(`「${row.slug}」可达但有问题：${r.message}`);
-                else ElMessageBox.alert(r.message, `「${row.slug}」embedding 测试失败`, { type: 'error' });
+                const result = await api.testLibraryEmbedding(row.slug);
+                if (result.ok && result.message === 'ok') ElMessage.success(`「${row.slug}」embedding 正常：${result.embedding_model} / ${result.dim}维`);
+                else if (result.ok) ElMessage.warning(`「${row.slug}」可达但有问题：${result.message}`);
+                else ElMessageBox.alert(result.message, `「${row.slug}」embedding 测试失败`, { type: 'error' });
+            } catch (e) { ElMessage.error(e.message || String(e)); }
+        }
+
+        async function verifyEmbedding(row) {
+            try {
+                const result = await api.verifyLibraryEmbedding(row.slug);
+                ElMessage.success(`「${row.slug}」Embedding 兼容性验证完成：${result.model} / ${result.dimension}维`);
             } catch (e) { ElMessage.error(e.message || String(e)); }
         }
 
@@ -267,7 +274,7 @@ export default {
 
         return { libs, loading, librariesResolved, librariesError, librariesReadState, showDeleted, create, edit, stats, pagedLibraries, detailOpen, selectedLibrary, schemaModeDisplay,
             keyword, statusFilter, retrievalFilter, page, pageSize, resetFilters, openDetail,
-            load, openCreate, submitCreate, openEdit, submitEdit, rebuild, del, bulkDeleteDocuments, testEmbedding,
+            load, openCreate, submitCreate, openEdit, submitEdit, rebuild, del, bulkDeleteDocuments, testEmbedding, verifyEmbedding,
             onCreateNameInput, onCreateSlugInput,
             dataEmpty, srcSummary, sourceDisplay, libraryStatus, toggleLabel, embedDisplay,
             faqMgr, loadFaq, openFaq, addFaq, saveFaq, removeFaq };
@@ -350,9 +357,9 @@ export default {
                   <el-button link size="small" @click.stop="openDetail(row)">详情</el-button>
                   <el-button link size="small" :disabled="!!row.deleted_at" @click.stop="openEdit(row)">编辑</el-button>
                   <el-button link size="small" :disabled="!!row.deleted_at" @click.stop="openFaq(row)">常用问题</el-button>
-                  <el-dropdown trigger="click" :disabled="!!row.deleted_at" @command="(cmd) => { if (cmd==='test') testEmbedding(row); if (cmd==='rebuild') rebuild(row); if (cmd==='bulk-delete') bulkDeleteDocuments(row); if (cmd==='delete') del(row); }">
+                  <el-dropdown trigger="click" :disabled="!!row.deleted_at" @command="(cmd) => { if (cmd==='test') testEmbedding(row); if (cmd==='verify-embedding') verifyEmbedding(row); if (cmd==='rebuild') rebuild(row); if (cmd==='bulk-delete') bulkDeleteDocuments(row); if (cmd==='delete') del(row); }">
                     <el-button link size="small" @click.stop>更多<el-icon><local-icon icon="mdi:chevron-down"></local-icon></el-icon></el-button>
-                    <template #dropdown><el-dropdown-menu><el-dropdown-item command="test">测试 Embedding</el-dropdown-item><el-dropdown-item command="rebuild">重建 Collection</el-dropdown-item><el-dropdown-item command="bulk-delete">删除库内全部文件</el-dropdown-item><el-dropdown-item command="delete">软删除知识库</el-dropdown-item></el-dropdown-menu></template>
+                    <template #dropdown><el-dropdown-menu><el-dropdown-item command="test">测试 Embedding</el-dropdown-item><el-dropdown-item command="verify-embedding">验证 Embedding 兼容性</el-dropdown-item><el-dropdown-item command="rebuild">重建 Collection</el-dropdown-item><el-dropdown-item command="bulk-delete">删除库内全部文件</el-dropdown-item><el-dropdown-item command="delete">软删除知识库</el-dropdown-item></el-dropdown-menu></template>
                   </el-dropdown>
                 </div>
               </template>

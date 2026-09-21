@@ -70,12 +70,23 @@ test('libraryStatus and srcSummary are safe', () => {
 test('Libraries keeps all existing APIs and confirmations', () => {
     for (const name of [
         'listLibraries', 'createLibrary', 'updateLibrary', 'deleteLibrary',
-        'rebuildLibraryCollection', 'testLibraryEmbedding', 'listLibraryFaqs',
+        'rebuildLibraryCollection', 'testLibraryEmbedding', 'verifyLibraryEmbedding', 'listLibraryFaqs',
         'createLibraryFaq', 'updateLibraryFaq', 'deleteLibraryFaq',
     ]) assert.match(source, new RegExp(`api\\.${name}\\b`));
     assert.match(source, /ElMessageBox\.confirm/);
 });
 
+test('Embedding health check and compatibility verification remain separate actions', () => {
+    assert.match(apiSource, /export const testLibraryEmbedding = \(slug\) =>\s*request\(`\/admin\/libraries\/\$\{slug\}\/test-embedding`, \{ method: 'POST' \}\);/);
+    assert.match(apiSource, /export const verifyLibraryEmbedding = \(slug\) =>\s*request\(`\/admin\/libraries\/\$\{slug\}\/verify-embedding-profile`, \{ method: 'POST' \}\);/);
+    assert.match(source, /api\.testLibraryEmbedding\(row\.slug\)/);
+    assert.match(source, /api\.verifyLibraryEmbedding\(row\.slug\)/);
+    assert.match(source, /cmd==='test'\) testEmbedding\(row\)/);
+    assert.match(source, /cmd==='verify-embedding'\) verifyEmbedding\(row\)/);
+    assert.match(source, /command="test">测试 Embedding/);
+    assert.match(source, /command="verify-embedding">验证 Embedding 兼容性/);
+    assert.match(source, /bulkDeleteDocuments, testEmbedding, verifyEmbedding,/);
+});
 test('workspace uses only approved real fields and actions', () => {
     for (const fake of ['document_count', 'updated_at', 'rerank_model']) {
         assert.doesNotMatch(source, new RegExp(`\\b${fake}\\b`));
