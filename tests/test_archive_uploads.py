@@ -12,17 +12,35 @@ from app.services import import_uploads
 from app.workers import importer
 
 
+class _Scalars:
+    def __init__(self, value=None):
+        self.value = value
+
+    def first(self):
+        return self.value
+
+    def all(self):
+        return [self.value] if self.value is not None else []
+
+
 class _Result:
     def __init__(self, value=None):
         self.value = value
 
     def scalar_one_or_none(self):
-        return self.value
+        return getattr(self.value, "id", self.value)
 
+    def scalars(self):
+        return _Scalars(self.value)
+
+    def first(self):
+        return None
 
 class _ArchiveDb:
     def __init__(self, parent, library):
         self.execute_calls = []
+        self.flush_count = 0
+        self.pending_resources = {}
         self.rows = {
             (import_uploads.DocumentImportJob, parent.id): parent,
             (import_uploads.Library, library.id): library,
@@ -32,6 +50,9 @@ class _ArchiveDb:
         return self.rows.get((model, row_id))
 
     def add(self, row):
+        if isinstance(row, import_uploads.FileResource):
+            self.pending_resources[row.id] = row
+            return
         if isinstance(row, import_uploads.DocumentImportJob) and row.status is None:
             row.status = "uploading"
             row.current_stage = "uploading"
@@ -39,10 +60,24 @@ class _ArchiveDb:
 
     async def execute(self, _statement):
         self.execute_calls.append(_statement)
-        return _Result(self.rows[next(iter(self.rows))].id)
+        if "file_resources" in str(_statement):
+            return _Result(None)
+        job = next(
+            (row for (model, _), row in self.rows.items() if model is import_uploads.DocumentImportJob),
+            None,
+        )
+        return _Result(job)
+    async def flush(self):
+        self.flush_count += 1
+        for resource_id, resource in self.pending_resources.items():
+            self.rows[(import_uploads.FileResource, resource_id)] = resource
+        self.pending_resources.clear()
 
     async def commit(self):
-        return None
+        for (model, _row_id), row in self.rows.items():
+            resource_id = getattr(row, "file_resource_id", None)
+            if model is import_uploads.DocumentImportJob and resource_id is not None:
+                assert (import_uploads.FileResource, resource_id) in self.rows
 
     async def rollback(self):
         return None
@@ -82,7 +117,7 @@ def test_archive_folder_name_is_visible_without_exposing_zip_as_a_document():
     assert ".zip" in import_uploads.ALLOWED_IMPORT_EXTENSIONS
 
 
-def test_archive_entry_plan_keeps_supported_files_and_skips_unknown_types():
+def test_archive_entry_plan_keeps_safe_unknown_files_for_metadata_indexing():
     supported = zipfile.ZipInfo("docs/report.pdf")
     supported.file_size = 20
     supported.compress_size = 10
@@ -101,9 +136,10 @@ def test_archive_entry_plan_keeps_supported_files_and_skips_unknown_types():
     )
 
     assert [(item[1], item[2]) for item in planned] == [
-        ("report.pdf", "bundle [ZIP]/docs/report.pdf")
+        ("report.pdf", "bundle [ZIP]/docs/report.pdf"),
+        ("run.exe", "bundle [ZIP]/tools/run.exe"),
     ]
-    assert skipped == ["tools/run.exe", "__MACOSX/._report.pdf"]
+    assert skipped == ["__MACOSX/._report.pdf"]
 
 
 @pytest.mark.parametrize("unsafe", ["encrypted", "symlink"])
@@ -148,7 +184,7 @@ def test_zip_expansion_creates_normal_child_jobs_with_saved_sources(
     archive_path = tmp_path / "bundle.zip"
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("docs/readme.txt", "hello archive")
-        archive.writestr("tools/run.exe", b"ignored")
+        archive.writestr("tools/run.exe", b"stored-only archive entry")
 
     async def store_resource(*, resource, **_kwargs):
         locator = SimpleNamespace(
@@ -205,13 +241,30 @@ def test_zip_expansion_creates_normal_child_jobs_with_saved_sources(
             import_uploads.resource_id_for_upload_context(child_id),
         )
     )
-    assert count == 1
+    metadata_only_id = import_uploads._archive_child_job_id(
+        parent_id, "bundle [ZIP]/tools/run.exe"
+    )
+    metadata_only = asyncio.run(db.get(import_uploads.DocumentImportJob, metadata_only_id))
+    metadata_only_resource = asyncio.run(
+        db.get(
+            import_uploads.FileResource,
+            import_uploads.resource_id_for_upload_context(metadata_only_id),
+        )
+    )
+    assert count == 2
     assert child.relative_path == "bundle [ZIP]/docs/readme.txt"
     assert child.status == "uploading"
     assert child.graph_extraction_requested is True
     assert child.security_level == "internal"
     assert resource.storage_status == "available"
     assert resource.relative_path == child.relative_path
+    assert metadata_only.relative_path == "bundle [ZIP]/tools/run.exe"
+    assert metadata_only.status == "succeeded"
+    assert metadata_only.current_stage == "completed"
+    assert metadata_only.result_operation == "stored_only"
+    assert metadata_only.graph_extraction_requested is False
+    assert metadata_only_resource.storage_status == "available"
+    assert db.flush_count == 2
     activate_values = db.execute_calls[-2].compile().params
     parent_values = db.execute_calls[-1].compile().params
     assert activate_values["status"] == "queued"
@@ -232,8 +285,14 @@ def test_zip_completion_only_saves_and_queues_parent(
         archive.writestr("readme.txt", "hello")
     parent = SimpleNamespace(
         id=parent_id,
+        library_id=library_id,
         security_level="internal",
         graph_extraction_requested=True,
+        status="uploading",
+        worker_id="upload:test:complete:token",
+        upload_offset=archive_path.stat().st_size,
+        relative_path=None,
+        external_id=None,
     )
     library = SimpleNamespace(id=library_id, deleted_at=None)
     db = _ArchiveDb(parent, library)
@@ -264,7 +323,17 @@ def test_zip_completion_only_saves_and_queues_parent(
             etag="etag",
             immutability_mode="content_hash",
         )
-        return SimpleNamespace(locator=locator, verified_at=datetime.now(timezone.utc))
+        return SimpleNamespace(
+            library_id=resource.library_id,
+            upload_context_id=resource.id,
+            file_name=resource.file_name,
+            content_type=resource.content_type,
+            relative_path=resource.relative_path,
+            size_bytes=resource.size_bytes,
+            sha256=resource.sha256,
+            locator=locator,
+            verified_at=datetime.now(timezone.utc),
+        )
 
     monkeypatch.setattr(import_uploads, "keep_upload_claim_alive", _claim_lease)
     monkeypatch.setattr(import_uploads, "build_object_storage_adapter", lambda _config: adapter)

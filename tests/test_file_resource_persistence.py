@@ -221,6 +221,12 @@ class _Result:
     def scalar_one_or_none(self):
         return self.value
 
+    def scalars(self):
+        return self
+
+    def first(self):
+        return self.value
+
 
 class _CommitFailureDb:
     def __init__(self, job_id: uuid.UUID) -> None:
@@ -228,11 +234,26 @@ class _CommitFailureDb:
         self.added = []
         self.commits = 0
         self.rollbacks = 0
+        self.select_values = [
+            SimpleNamespace(
+                id=job_id,
+                sha256=None,
+                replace_document_id=None,
+                library_id=uuid.uuid4(),
+                relative_path=None,
+                external_id=None,
+                security_level=None,
+                graph_extraction_requested=False,
+            ),
+            None,
+        ]
 
     def add(self, value) -> None:
         self.added.append(value)
 
     async def execute(self, _statement):
+        if getattr(_statement, "is_select", False):
+            return _Result(self.select_values.pop(0))
         return _Result(self.job_id)
 
     async def commit(self):

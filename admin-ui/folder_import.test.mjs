@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
     createImportBatchId,
     createImportBatchIds,
+    createImportSessionForFile,
     DEFAULT_IMPORT_CONFIGURATION,
     IMPORT_PROFILE_DAILY,
     IMPORT_PROFILE_INITIAL,
@@ -19,10 +20,23 @@ import {
 
 test('folder files preserve their webkit relative path', () => {
     assert.equal(
-        relativePathForFile({ webkitRelativePath: '项目甲/合同/主合同.pdf' }),
+        relativePathForFile({
+            name: '主合同.pdf',
+            webkitRelativePath: '项目甲/合同/主合同.pdf',
+        }),
         '项目甲/合同/主合同.pdf',
     );
     assert.equal(relativePathForFile({ webkitRelativePath: '' }), null);
+});
+
+test('folder paths use the actual file name when the browser path disagrees', () => {
+    assert.equal(
+        relativePathForFile({
+            name: '实际名称.pdf',
+            webkitRelativePath: '项目甲/合同/浏览器路径名称.pdf',
+        }),
+        '项目甲/合同/实际名称.pdf',
+    );
 });
 
 test('upload configuration keeps daily defaults, admin maximums, and legacy formats', () => {
@@ -45,8 +59,11 @@ test('upload configuration keeps daily defaults, admin maximums, and legacy form
     assert.equal(DEFAULT_IMPORT_CONFIGURATION.upload_concurrency, 1);
 });
 
-test('supported format display is generated from server configuration', () => {
-    const configuration = { allowed_extensions: ['.TXT', '.pptx', '.html'] };
+test('supported format display is generated from restricted server configuration', () => {
+    const configuration = {
+        allowed_extensions: ['.TXT', '.pptx', '.html'],
+        accept_all_file_types: false,
+    };
     assert.equal(supportedExtensionsAccept(configuration), '.txt,.pptx,.html');
     assert.equal(supportedExtensionsLabel(configuration), 'txt、pptx、html');
 });
@@ -163,6 +180,35 @@ test('upload progress reports source bytes only', () => {
     assert.equal(importStageProgress({ current_stage: 'converting' }, 100), 100);
     assert.equal(importStageProgress({ current_stage: 'graph' }, 100), 100);
     assert.equal(importStageProgress({ current_stage: 'completed' }, 100), 100);
+});
+
+test('session creation errors retain the exact selected file context', async () => {
+    const failure = Object.assign(new Error('请求内容不符合要求'), {
+        status: 422,
+        body: { detail: [{ loc: ['body', 'size_bytes'], type: 'greater_than' }] },
+    });
+    const file = {
+        name: '错误文件.txt',
+        type: 'text/plain',
+        size: 12,
+        lastModified: 10,
+        webkitRelativePath: '市场营销部/错误文件.txt',
+    };
+
+    await assert.rejects(
+        createImportSessionForFile({
+            api: { async createImportSession() { throw failure; } },
+            slug: 'finance',
+            file,
+            batchId: 'batch-1',
+        }),
+        (error) => {
+            assert.equal(error, failure);
+            assert.equal(error.uploadFileName, '错误文件.txt');
+            assert.equal(error.uploadRelativePath, '市场营销部/错误文件.txt');
+            return true;
+        },
+    );
 });
 
 test('upload labels describe source receipt', () => {

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import dataclasses
 import io
 import struct
 import uuid
@@ -845,11 +846,30 @@ class _CompletionDb:
         self.pending_stage = None
         self.pending_error = None
         self.added = []
+        self.statements = []
+        self._select_values = [
+            SimpleNamespace(
+                id=job_id,
+                status="uploading",
+                sha256=None,
+                replace_document_id=None,
+                library_id=uuid.uuid4(),
+                relative_path=None,
+                external_id=None,
+                security_level=None,
+                graph_extraction_requested=False,
+            ),
+            None,
+            None,
+        ]
 
     def add(self, value) -> None:
         self.added.append(value)
 
     async def execute(self, statement):
+        if getattr(statement, "is_select", False):
+            return _SelectResult(self._select_values.pop(0))
+        self.statements.append(statement)
         status = _updated_value(statement, "status")
         current_stage = _updated_value(statement, "current_stage")
         last_error = _updated_value(statement, "last_error")
@@ -895,6 +915,70 @@ class _CompletionDb:
         self.events.append(
             ("rollback", None, None, None, self.staging_path.exists())
         )
+
+    async def merge(self, value):
+        return value
+
+    async def flush(self) -> None:
+        return None
+
+
+class _SelectResult:
+    def __init__(self, value) -> None:
+        self.value = value
+
+    def scalars(self):
+        return self
+
+    def first(self):
+        return self.value
+
+
+class _DuplicateCompletionDb(_CompletionDb):
+    def __init__(self, *, current_job, duplicate_row, stored_file=None, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._select_values = [current_job, stored_file, duplicate_row]
+
+    async def execute(self, statement):
+        if getattr(statement, "is_select", False):
+            return _SelectResult(self._select_values.pop(0))
+        return await super().execute(statement)
+
+
+class _MissingResourceCompletionDb(_CompletionDb):
+    """Simulate a committed resource row disappearing before the job link."""
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.resource_ids: set[uuid.UUID] = set()
+        self.merged_resource_ids: set[uuid.UUID] = set()
+        self.discarded_initial_resource = False
+
+    async def execute(self, statement):
+        if getattr(statement, "is_insert", False):
+            resource_id = statement.compile().params.get("id")
+            if resource_id is not None:
+                self.resource_ids.add(resource_id)
+        resource_id = _updated_value(statement, "file_resource_id")
+        if resource_id is not None and resource_id not in self.resource_ids:
+            raise RuntimeError("file resource row is missing")
+        return await super().execute(statement)
+
+    async def commit(self) -> None:
+        await super().commit()
+        if not self.discarded_initial_resource:
+            initial_ids = {
+                row.id for row in self.added if isinstance(row, import_uploads.FileResource)
+            }
+            if initial_ids:
+                self.resource_ids.difference_update(initial_ids)
+                self.discarded_initial_resource = True
+
+    async def merge(self, value):
+        return value
+
+    async def flush(self) -> None:
+        return None
 
 
 class _NoopLease:
@@ -956,6 +1040,202 @@ def test_complete_keeps_office_processing_out_of_save_success(
     assert db.added[0].storage_status == "available"
     assert any(event[0] == "update" and event[1] == "queued" for event in db.events)
     assert path.exists() is True
+
+
+def test_complete_restores_missing_file_resource_before_linking_task(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing durable-file row must not make a completed upload fail."""
+
+    claim = _complete_claim(tmp_path)
+    path = tmp_path / claim.staging_key
+    _write_cfb(path, "EncryptionInfo", "EncryptedPackage")
+    db = _MissingResourceCompletionDb(job_id=claim.job_id, staging_path=path)
+    monkeypatch.setattr(import_uploads, "keep_upload_claim_alive", _noop_claim_lease)
+
+    digest = asyncio.run(
+        import_uploads.complete_claimed_upload(
+            db,
+            claim=claim,
+            config=_config(tmp_path),
+        )
+    )
+
+    assert len(digest) == 64
+    assert db.resource_ids == {db.added[0].id}
+    assert any(
+        _updated_value(statement, "file_resource_id") == db.added[0].id
+        for statement in db.statements
+    )
+
+
+def test_complete_preserves_a_signature_rejected_file_before_marking_it_failed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = uuid.uuid4()
+    claim = import_uploads.UploadOperationClaim(
+        job_id=job_id,
+        owner_token=f"upload:{uuid.uuid4().hex}:complete:{uuid.uuid4().hex}",
+        operation="complete",
+        staging_key=f"{job_id.hex}.upload",
+        file_name="wrong.docx",
+        size_bytes=0,
+        upload_offset=0,
+        library_id=uuid.uuid4(),
+        uploaded_by_user_id=uuid.uuid4(),
+        relative_path="folder/wrong.docx",
+        content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    path = tmp_path / claim.staging_key
+    _write_ooxml(path, "[Content_Types].xml", "xl/workbook.xml")
+    claim = dataclasses.replace(
+        claim,
+        size_bytes=path.stat().st_size,
+        upload_offset=path.stat().st_size,
+    )
+    db = _CompletionDb(job_id=claim.job_id, staging_path=path)
+    monkeypatch.setattr(import_uploads, "keep_upload_claim_alive", _noop_claim_lease)
+
+    with pytest.raises(import_uploads.ImportUploadError) as exc_info:
+        asyncio.run(
+            import_uploads.complete_claimed_upload(
+                db,
+                claim=claim,
+                config=_config(tmp_path),
+            )
+        )
+
+    assert exc_info.value.code == "file_signature_mismatch"
+    assert len(db.added) == 1
+    assert db.added[0].storage_status == "available"
+    assert any(
+        event[0] == "update" and event[1:3] == ("failed", "completed")
+        for event in db.events
+    )
+    assert any(
+        _updated_value(statement, "file_resource_id") == db.added[0].id
+        for statement in db.statements
+    )
+
+
+def test_complete_skips_duplicate_before_creating_a_file_resource(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claim = _complete_claim(tmp_path)
+    claim = dataclasses.replace(
+        claim,
+        file_name="duplicate.txt",
+        relative_path="folder/duplicate.txt",
+        content_type="text/plain",
+    )
+    path = tmp_path / claim.staging_key
+    path.write_bytes(b"already imported")
+    claim = dataclasses.replace(
+        claim,
+        size_bytes=path.stat().st_size,
+        upload_offset=path.stat().st_size,
+    )
+    current_job = SimpleNamespace(
+        id=claim.job_id,
+        status="uploading",
+        sha256=None,
+        replace_document_id=None,
+        library_id=claim.library_id,
+        relative_path=claim.relative_path,
+        external_id=None,
+        security_level=None,
+        graph_extraction_requested=False,
+        worker_id=claim.owner_token,
+        upload_offset=claim.upload_offset,
+    )
+    previous_job = SimpleNamespace(document_revision_id=None)
+    document = SimpleNamespace(
+        id=uuid.uuid4(),
+        current_revision_id=None,
+        latest_revision_id=None,
+        security_level=None,
+    )
+    db = _DuplicateCompletionDb(
+        job_id=claim.job_id,
+        staging_path=path,
+        current_job=current_job,
+        duplicate_row=(previous_job, document),
+    )
+    monkeypatch.setattr(import_uploads, "keep_upload_claim_alive", _noop_claim_lease)
+
+    digest = asyncio.run(
+        import_uploads.complete_claimed_upload(db, claim=claim, config=_config(tmp_path))
+    )
+
+    assert len(digest) == 64
+    assert db.added == []
+    assert path.exists() is False
+    assert any(
+        event[0] == "update" and event[1:3] == ("succeeded", "completed")
+        for event in db.events
+    )
+    assert any(
+        _updated_value(statement, "result_operation") == "unchanged"
+        for statement in db.statements
+    )
+
+
+def test_complete_skips_same_source_in_library_before_storage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claim = _complete_claim(tmp_path)
+    claim = dataclasses.replace(
+        claim,
+        file_name="same-content.txt",
+        relative_path="another-folder/same-content.txt",
+        content_type="text/plain",
+    )
+    path = tmp_path / claim.staging_key
+    path.write_bytes(b"same bytes in another folder")
+    claim = dataclasses.replace(
+        claim,
+        size_bytes=path.stat().st_size,
+        upload_offset=path.stat().st_size,
+    )
+    current_job = SimpleNamespace(
+        id=claim.job_id,
+        status="uploading",
+        sha256=None,
+        replace_document_id=None,
+        library_id=claim.library_id,
+        relative_path=claim.relative_path,
+        external_id=None,
+        security_level=None,
+        graph_extraction_requested=False,
+        worker_id=claim.owner_token,
+        upload_offset=claim.upload_offset,
+    )
+    stored_file = SimpleNamespace(id=uuid.uuid4())
+    db = _DuplicateCompletionDb(
+        job_id=claim.job_id,
+        staging_path=path,
+        current_job=current_job,
+        stored_file=stored_file,
+        duplicate_row=None,
+    )
+    monkeypatch.setattr(import_uploads, "keep_upload_claim_alive", _noop_claim_lease)
+
+    digest = asyncio.run(
+        import_uploads.complete_claimed_upload(db, claim=claim, config=_config(tmp_path))
+    )
+
+    assert len(digest) == 64
+    assert db.added == []
+    assert path.exists() is False
+    assert any(
+        _updated_value(statement, "result_operation") == "duplicate_source"
+        and _updated_value(statement, "file_resource_id") is None
+        for statement in db.statements
+    )
 
 
 def test_complete_media_upload_marks_the_verified_file_as_storage_only(

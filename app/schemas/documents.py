@@ -151,6 +151,7 @@ class ImportConfigurationRead(BaseModel):
     upload_concurrency: int = Field(gt=0)
     doc_max_file_bytes: int = Field(gt=0)
     video_max_file_bytes: int | None = Field(default=None, gt=0)
+    accept_all_file_types: bool = False
     allowed_extensions: list[str] = Field(min_length=1)
 
 
@@ -259,6 +260,7 @@ class PersonalImportTaskRead(BaseModel):
         "graph",
         "completed",
     ]
+    result_operation: str | None = Field(default=None, max_length=32)
     created_at: datetime
     finished_at: datetime | None = None
     failure_message: str | None = Field(default=None, max_length=255)

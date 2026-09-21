@@ -926,29 +926,6 @@ export default {
             let attemptedCount = 0;
             try {
                 const batchIds = createImportBatchIds(items);
-                if (graphJobRequested.value && !onlyFailed) {
-                    await runConcurrent(
-                        items,
-                        uploadConfiguration,
-                        async (it) => {
-                            if (!it.file) return;
-                            it._uploadResumeState = it._uploadResumeState || {};
-                            await createImportSessionForFile({
-                                api,
-                                slug: targetSlug,
-                                file: it.file,
-                                batchId: batchIds.get(it),
-                                options: {
-                                    ...uploadOptions,
-                                    externalId: uploadExternalId,
-                                },
-                                resumeState: it._uploadResumeState,
-                                signal: uploadController.signal,
-                            });
-                        },
-                        (it) => queue.value.includes(it),
-                    );
-                }
                 attemptedCount = await runConcurrent(
                     items,
                     uploadConfiguration,
@@ -982,7 +959,7 @@ export default {
                                 }
                                 const retried = await api.retryImportJob(targetSlug, it.importJobId);
                                 it.importJob = retried;
-                                setQueueItemStatus(it, retried?.result_operation === 'unchanged' ? 'skipped' : 'submitted');
+                                setQueueItemStatus(it, ['unchanged', 'duplicate_source'].includes(retried?.result_operation) ? 'skipped' : 'submitted');
                                 it.stageLabel = importStageLabel(retried);
                                 it.progress = 100;
                                 return;
@@ -1018,7 +995,7 @@ export default {
                             it.importJob = job;
                             // completeImportSession resolves only after the original
                             // bytes are accepted; background stages are tracked in My Tasks.
-                            const sourceStatus = job?.result_operation === 'unchanged' ? 'skipped' : 'submitted';
+                            const sourceStatus = ['unchanged', 'duplicate_source'].includes(job?.result_operation) ? 'skipped' : 'submitted';
                             setQueueItemStatus(it, sourceStatus);
                             it.stageLabel = importStageLabel(job);
                             it.progress = importStageProgress(job, 100);

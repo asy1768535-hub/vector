@@ -21,6 +21,7 @@ from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
 from sqlalchemy import and_, case, exists, func, or_, select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -37,6 +38,7 @@ from app.models.user import User
 from app.schemas.documents import ImportSessionCreate
 from app.services import cleanup as cleanup_service
 from app.services.file_resources import (
+    build_file_resource,
     build_storing_file_resource,
     file_resource_download_url,
     resource_id_for_upload_context,
@@ -92,7 +94,6 @@ ALLOWED_IMPORT_EXTENSIONS = (
     ".zip",
     *MEDIA_IMPORT_EXTENSIONS,
 )
-ARCHIVE_CHILD_EXTENSIONS = frozenset(ALLOWED_IMPORT_EXTENSIONS) - {".zip"}
 ARCHIVE_MAX_ENTRIES = 1000
 ARCHIVE_MAX_UNCOMPRESSED_BYTES = 2 * 1024**3
 ARCHIVE_MAX_COMPRESSION_RATIO = 1000
@@ -124,6 +125,13 @@ _UPLOAD_PREFLIGHT_CODES = frozenset(UPLOAD_PREFLIGHT_CODES)
 _OFFICE_SUGGESTED_EXTENSIONS = frozenset({".doc", ".docx", ".xls", ".xlsx", ".pptx"})
 _PERSONAL_TASK_SCOPES = frozenset({"30d", "all"})
 _PERSONAL_TASK_PAGE_LIMITS = frozenset({20, 50})
+_PERSONAL_TASK_STATUS_FILTERS = {
+    "all": (),
+    "pending": ("uploading", "queued"),
+    "processing": ("processing",),
+    "succeeded": ("succeeded",),
+    "failed": ("failed",),
+}
 _PERSONAL_TASK_CURSOR_VERSION = "personal-import-task-v1"
 _PERSONAL_TASK_CURSOR_MAX_LENGTH = 512
 _PERSONAL_FILE_PAGE_SIZES = frozenset({20, 50})
@@ -184,7 +192,7 @@ def _validated_archive_entries(
     archive_folder: str,
     max_files: int,
     max_file_bytes: int,
-    allowed_extensions: frozenset[str] = ARCHIVE_CHILD_EXTENSIONS,
+    allowed_extensions: frozenset[str] | None = None,
     video_max_file_bytes: int | None = None,
 ) -> tuple[list[tuple[zipfile.ZipInfo, str, str]], list[str]]:
     if len(infos) > ARCHIVE_MAX_ENTRIES:
@@ -237,7 +245,7 @@ def _validated_archive_entries(
             continue
         if (
             path_key in seen_paths
-            or suffix not in allowed_extensions
+            or (allowed_extensions is not None and suffix not in allowed_extensions)
             or file_size <= 0
             or file_size > max_file_bytes
             or (
@@ -561,6 +569,7 @@ def import_configuration(
         "upload_concurrency": config.import_upload_file_concurrency,
         "doc_max_file_bytes": config.doc_conversion_max_bytes,
         "video_max_file_bytes": video_max_file_bytes,
+        "accept_all_file_types": True,
         "allowed_extensions": allowed_extensions,
     }
 
@@ -586,6 +595,25 @@ def media_processing_required(
     if suffix in AUDIO_IMPORT_EXTENSIONS:
         max_bytes = min(max_bytes, config.video_transcription_max_audio_bytes)
     return size_bytes <= max_bytes
+
+
+def import_processing_required(
+    file_name: str,
+    size_bytes: int,
+    config: Settings = settings,
+) -> bool:
+    """Whether a saved file should enter processing after its original is saved."""
+    if import_metadata_only(file_name):
+        return False
+    suffix = Path(file_name).suffix.lower()
+    if suffix in MEDIA_IMPORT_EXTENSIONS:
+        return media_processing_required(file_name, size_bytes, config)
+    return True
+
+
+def import_metadata_only(file_name: str) -> bool:
+    """Whether processing creates a safe description instead of reading file contents."""
+    return Path(file_name).suffix.lower() not in ALLOWED_IMPORT_EXTENSIONS
 
 
 def normalize_relative_path(relative_path: str | None, file_name: str) -> str | None:
@@ -725,6 +753,8 @@ async def _persist_archive_child(
             )
         child.security_level = parent.security_level
         child.graph_extraction_requested = parent.graph_extraction_requested
+        if import_metadata_only(child.file_name):
+            child.graph_extraction_requested = False
         db.add(child)
         await db.commit()
 
@@ -754,6 +784,7 @@ async def _persist_archive_child(
                 resource_id=resource_id,
             )
             db.add(resource)
+            await db.flush()
         elif resource.storage_status != "available":
             resource.storage_status = "storing"
             resource.storage_error_code = None
@@ -785,10 +816,7 @@ async def _persist_archive_child(
         child.worker_id = None
         child.claimed_at = None
         child.last_error = None
-        if (
-            Path(child.file_name).suffix.lower() in MEDIA_IMPORT_EXTENSIONS
-            and not media_processing_required(child.file_name, child.size_bytes, config)
-        ):
+        if not import_processing_required(child.file_name, child.size_bytes, config):
             child.status = "succeeded"
             child.current_stage = "completed"
             child.result_operation = "stored_only"
@@ -841,7 +869,6 @@ async def _expand_zip_upload(
             status_code=409,
         )
     max_file_bytes, max_files = effective_import_limits(library, config)
-    archive_extensions = ARCHIVE_CHILD_EXTENSIONS
     archive_batch_id = _archive_batch_id(claim.job_id)
     await db.execute(
         update(DocumentImportJob)
@@ -864,7 +891,7 @@ async def _expand_zip_upload(
             archive_folder=archive_folder_name(claim.file_name),
             max_files=max_files,
             max_file_bytes=max_file_bytes,
-            allowed_extensions=archive_extensions,
+            allowed_extensions=None,
         )
         if not planned:
             raise ImportUploadError(
@@ -942,7 +969,7 @@ def _validate_payload(
             status_code=400,
         )
     suffix = Path(payload.file_name).suffix.lower()
-    if suffix not in ALLOWED_IMPORT_EXTENSIONS:
+    if payload.replace_document_id is not None and suffix not in ALLOWED_IMPORT_EXTENSIONS:
         raise ImportUploadError(
             "unsupported_file_type",
             f"unsupported file type: {suffix or '(none)'}",
@@ -1321,6 +1348,17 @@ def _validate_personal_task_limit(limit: int) -> None:
             "personal task limit is invalid",
             status_code=422,
         )
+
+
+def _personal_task_status_values(status_filter: str) -> tuple[str, ...]:
+    values = _PERSONAL_TASK_STATUS_FILTERS.get(status_filter)
+    if values is None:
+        raise ImportUploadError(
+            "personal_task_status_invalid",
+            "personal task status filter is invalid",
+            status_code=422,
+        )
+    return values
 
 
 def normalize_personal_file_path(path: str | None) -> str:
@@ -1870,6 +1908,7 @@ async def list_personal_import_task_files(
     path: str | None,
     page: int,
     page_size: int,
+    failed_only: bool = False,
     now: datetime | None = None,
 ) -> PersonalImportTaskFilePage:
     if (
@@ -1896,6 +1935,8 @@ async def list_personal_import_task_files(
     ]
     if cutoff is not None:
         conditions.append(DocumentImportJob.created_at >= cutoff)
+    if failed_only:
+        conditions.append(DocumentImportJob.status == "failed")
     if normalized_path:
         prefix = normalized_path.lstrip("/") + "/"
         conditions.append(func.substr(task_path, 1, len(prefix)) == prefix)
@@ -2106,9 +2147,24 @@ async def list_personal_import_tasks(
     scope: str,
     limit: int,
     cursor_value: str | None = None,
+    page: int | None = None,
+    status_filter: str = "all",
     now: datetime | None = None,
 ) -> PersonalImportTaskPage:
     _validate_personal_task_limit(limit)
+    status_values = _personal_task_status_values(status_filter)
+    if page is not None and (isinstance(page, bool) or not 1 <= page <= 10_000):
+        raise ImportUploadError(
+            "personal_task_page_invalid",
+            "personal task page is invalid",
+            status_code=422,
+        )
+    if page is not None and cursor_value is not None:
+        raise ImportUploadError(
+            "personal_task_page_cursor_conflict",
+            "personal task page and cursor cannot be combined",
+            status_code=422,
+        )
     cutoff = _personal_task_scope_cutoff(scope, now=now)
     cursor = decode_personal_import_task_cursor(cursor_value, scope=scope)
     if not library_ids:
@@ -2119,6 +2175,21 @@ async def list_personal_import_tasks(
     )
     if cutoff is not None:
         stmt = stmt.where(DocumentImportJob.created_at >= cutoff)
+    if status_values:
+        stmt = stmt.where(DocumentImportJob.status.in_(status_values))
+    if page is not None:
+        rows = list(
+            (
+                await db.execute(
+                    stmt.order_by(DocumentImportJob.created_at.desc(), DocumentImportJob.id.desc())
+                    .offset((page - 1) * limit)
+                    .limit(limit)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return PersonalImportTaskPage(tuple(rows), None)
     if cursor is not None:
         stmt = stmt.where(
             or_(
@@ -2155,6 +2226,7 @@ def _personal_task_summary_statement(
     user_id: uuid.UUID,
     library_ids: set[uuid.UUID] | frozenset[uuid.UUID],
     cutoff: datetime | None,
+    status_filter: str,
 ):
     ranked_graphs = (
         select(
@@ -2297,6 +2369,8 @@ def _personal_task_summary_statement(
     )
     if cutoff is not None:
         statement = statement.where(DocumentImportJob.created_at >= cutoff)
+    if status_filter != "all":
+        statement = statement.where(effective_status == status_filter)
     projection = statement.subquery("personal_task_status_projection")
     return select(projection.c.status, func.count().label("count")).group_by(
         projection.c.status
@@ -2309,9 +2383,11 @@ async def personal_import_task_summary(
     user_id: uuid.UUID,
     library_ids: set[uuid.UUID] | frozenset[uuid.UUID],
     scope: str,
+    status_filter: str = "all",
     now: datetime | None = None,
 ) -> dict[str, int]:
     cutoff = _personal_task_scope_cutoff(scope, now=now)
+    _personal_task_status_values(status_filter)
     result = {
         "total": 0,
         "pending": 0,
@@ -2326,6 +2402,7 @@ async def personal_import_task_summary(
             user_id=user_id,
             library_ids=library_ids,
             cutoff=cutoff,
+            status_filter=status_filter,
         )
     )
     for status, count in rows.all():
@@ -2883,15 +2960,6 @@ async def complete_claimed_upload(
             office_rejection = inspect_office_upload(
                 path, claim.file_name, handle=handle
             )
-            if (
-                office_rejection is not None
-                and office_rejection.code != "encrypted_office_file"
-            ):
-                preflight_completed_upload(
-                    path,
-                    claim.file_name,
-                    handle=handle,
-                )
             sha256 = await _to_thread_before_cancellation(
                 _sha256_handle,
                 handle,
@@ -2901,6 +2969,20 @@ async def complete_claimed_upload(
 
             _unlock_file(handle)
             locked = False
+            if await skip_duplicate_upload_before_storage(
+                db,
+                claim=claim,
+                sha256=sha256,
+                lease=lease,
+            ):
+                handle.close()
+                if not await remove_staging_file(claim.staging_key, config):
+                    log.warning(
+                        "failed to remove duplicate import staging file key=%s",
+                        claim.staging_key,
+                    )
+                return sha256
+
             if claim.library_id is None or claim.uploaded_by_user_id is None:
                 raise ValueError("complete claim is missing resource identity")
 
@@ -2966,23 +3048,146 @@ async def complete_claimed_upload(
             resource.storage_verified_at = prepared.verified_at
             resource.storage_error_code = None
 
-            await lease.stop_renewal()
-            lease.ensure_current()
-            stored_only = (
-                Path(claim.file_name).suffix.lower() in MEDIA_IMPORT_EXTENSIONS
-                and not media_processing_required(
-                    claim.file_name, claim.size_bytes, config
+            # Store the final, verified resource in the same transaction that
+            # links it to the import job.  The initial ``storing`` record is
+            # intentionally committed before writing to object storage, but a
+            # missing record must not turn a successfully stored original into
+            # a foreign-key failure at the task-link step.
+            resource = build_file_resource(
+                prepared,
+                library_id=claim.library_id,
+                uploaded_by_user_id=claim.uploaded_by_user_id,
+                file_name=claim.file_name,
+                relative_path=claim.relative_path,
+                resource_id=resource_id,
+            )
+            resource_values = {
+                "id": resource.id,
+                "library_id": resource.library_id,
+                "uploaded_by_user_id": resource.uploaded_by_user_id,
+                "file_name": resource.file_name,
+                "relative_path": resource.relative_path,
+                "content_type": resource.content_type,
+                "size_bytes": resource.size_bytes,
+                "sha256": resource.sha256,
+                "storage_path": resource.storage_path,
+                "storage_provider": resource.storage_provider,
+                "endpoint_ref": resource.endpoint_ref,
+                "bucket": resource.bucket,
+                "object_key": resource.object_key,
+                "object_version": resource.object_version,
+                "etag": resource.etag,
+                "immutability_mode": resource.immutability_mode,
+                "storage_status": resource.storage_status,
+                "storage_verified_at": resource.storage_verified_at,
+                "storage_error_code": resource.storage_error_code,
+            }
+            await db.execute(
+                pg_insert(FileResource)
+                .values(**resource_values)
+                .on_conflict_do_update(
+                    index_elements=(FileResource.id,),
+                    set_={
+                        **{
+                            key: value
+                            for key, value in resource_values.items()
+                            if key != "id"
+                        },
+                        "updated_at": func.now(),
+                    },
                 )
             )
-            completion_values = {
+            await db.flush()
+
+            resource_link_values = {
                 "sha256": sha256,
                 "file_resource_id": resource.id,
+            }
+            result = await db.execute(
+                update(DocumentImportJob)
+                .where(
+                    DocumentImportJob.id == claim.job_id,
+                    DocumentImportJob.status == "uploading",
+                    DocumentImportJob.worker_id == claim.owner_token,
+                    DocumentImportJob.upload_offset == claim.size_bytes,
+                )
+                .values(**resource_link_values)
+                .returning(DocumentImportJob.id)
+            )
+            if result.scalar_one_or_none() is None:
+                await db.rollback()
+                raise ImportUploadError(
+                    "upload_claim_lost",
+                    "upload ownership was lost; retry from the committed offset",
+                    status_code=409,
+                    upload_offset=claim.upload_offset,
+                    retry_after_seconds=config.import_upload_retry_after_seconds,
+                )
+            await db.commit()
+
+            if (
+                office_rejection is not None
+                and office_rejection.code != "encrypted_office_file"
+            ):
+                try:
+                    preflight_completed_upload(
+                        path,
+                        claim.file_name,
+                        handle=handle,
+                    )
+                except ImportUploadError as exc:
+                    await lease.stop_renewal()
+                    lease.ensure_current()
+                    result = await db.execute(
+                        update(DocumentImportJob)
+                        .where(
+                            DocumentImportJob.id == claim.job_id,
+                            DocumentImportJob.status == "uploading",
+                            DocumentImportJob.worker_id == claim.owner_token,
+                            DocumentImportJob.upload_offset == claim.size_bytes,
+                        )
+                        .values(
+                            **resource_link_values,
+                            status="failed",
+                            current_stage="completed",
+                            upload_completed_at=datetime.now(timezone.utc),
+                            worker_id=None,
+                            claimed_at=None,
+                            finished_at=datetime.now(timezone.utc),
+                            last_error=_encode_upload_preflight_error(
+                                exc,
+                                cleanup_state="cleanup_pending",
+                            ),
+                        )
+                        .returning(DocumentImportJob.id)
+                    )
+                    if result.scalar_one_or_none() is None:
+                        await db.rollback()
+                        raise ImportUploadError(
+                            "upload_claim_lost",
+                            "upload ownership was lost; retry from the committed offset",
+                            status_code=409,
+                            upload_offset=claim.upload_offset,
+                            retry_after_seconds=config.import_upload_retry_after_seconds,
+                        ) from exc
+                    await db.commit()
+                    raise
+
+            await lease.stop_renewal()
+            lease.ensure_current()
+            stored_only = not import_processing_required(
+                claim.file_name, claim.size_bytes, config
+            )
+            completion_values = {
+                **resource_link_values,
                 "status": "succeeded" if stored_only else "queued",
                 "current_stage": "completed" if stored_only else "queued",
                 "upload_completed_at": datetime.now(timezone.utc),
                 "worker_id": None,
                 "claimed_at": None,
             }
+            if import_metadata_only(claim.file_name):
+                completion_values["graph_extraction_requested"] = False
             if stored_only:
                 completion_values.update(
                     result_operation="stored_only",
@@ -3125,6 +3330,203 @@ async def remove_staging_file(
     return True
 
 
+async def _duplicate_upload_target(
+    db: AsyncSession,
+    *,
+    job: DocumentImportJob,
+) -> tuple[DocumentImportJob, Document] | None:
+    source_path = source_path_for_job(job)
+    stmt = (
+        select(DocumentImportJob, Document)
+        .join(Document, Document.id == DocumentImportJob.document_id)
+        .where(
+            DocumentImportJob.id != job.id,
+            DocumentImportJob.library_id == job.library_id,
+            DocumentImportJob.sha256 == job.sha256,
+            DocumentImportJob.status == "succeeded",
+            DocumentImportJob.document_id.is_not(None),
+            or_(
+                DocumentImportJob.document_revision_id == Document.current_revision_id,
+                and_(
+                    DocumentImportJob.document_revision_id.is_(None),
+                    Document.current_revision_id.is_(None),
+                ),
+            ),
+            Document.deleted_at.is_(None),
+        )
+        .order_by(DocumentImportJob.created_at.desc())
+        .limit(1)
+    )
+    if source_path is not None:
+        # Folder uploads retain their normalized path as document identity.
+        stmt = stmt.where(Document.source_path == source_path)
+    elif job.external_id is not None:
+        stmt = stmt.where(Document.external_id == job.external_id)
+    else:
+        stmt = stmt.where(
+            Document.source_path.is_(None),
+            Document.external_id.is_(None),
+        )
+
+    row = (await db.execute(stmt)).first()
+    if row is None:
+        return None
+
+    previous_job, document = row
+    if (
+        job.security_level is not None
+        and job.security_level != getattr(document, "security_level", None)
+    ):
+        return None
+    if getattr(job, "graph_extraction_requested", False):
+        revision_id = (
+            previous_job.document_revision_id
+            or document.latest_revision_id
+            or document.current_revision_id
+        )
+        if revision_id is None:
+            return None
+        graph_job = await _latest_graph_job(db, revision_id=revision_id)
+        if graph_job is None or graph_job.status != "succeeded":
+            return None
+    return previous_job, document
+
+
+async def _duplicate_file_resource_target(
+    db: AsyncSession,
+    *,
+    library_id: uuid.UUID,
+    sha256: str,
+) -> FileResource | None:
+    """Find an already verified original with identical bytes in one library."""
+    return (
+        await db.execute(
+            select(FileResource)
+            .where(
+                FileResource.library_id == library_id,
+                FileResource.sha256 == sha256,
+                FileResource.storage_status == "available",
+            )
+            .order_by(FileResource.created_at.desc(), FileResource.id.desc())
+            .limit(1)
+        )
+    ).scalars().first()
+
+
+async def skip_duplicate_upload_before_storage(
+    db: AsyncSession,
+    *,
+    claim: UploadOperationClaim,
+    sha256: str,
+    lease: UploadClaimLease,
+) -> bool:
+    """Finish a duplicate at upload completion before persisting another raw file."""
+    job = (
+        await db.execute(
+            select(DocumentImportJob).where(
+                DocumentImportJob.id == claim.job_id,
+                DocumentImportJob.status == "uploading",
+                DocumentImportJob.worker_id == claim.owner_token,
+                DocumentImportJob.upload_offset == claim.size_bytes,
+            )
+        )
+    ).scalars().first()
+    if job is None:
+        raise ImportUploadError(
+            "upload_claim_lost",
+            "upload ownership was lost; retry from the committed offset",
+            status_code=409,
+            upload_offset=claim.upload_offset,
+        )
+    job.sha256 = sha256
+    stored_file = await _duplicate_file_resource_target(
+        db,
+        library_id=job.library_id,
+        sha256=sha256,
+    )
+    if stored_file is not None:
+        await lease.stop_renewal()
+        lease.ensure_current()
+        result = await db.execute(
+            update(DocumentImportJob)
+            .where(
+                DocumentImportJob.id == claim.job_id,
+                DocumentImportJob.status == "uploading",
+                DocumentImportJob.worker_id == claim.owner_token,
+                DocumentImportJob.upload_offset == claim.size_bytes,
+            )
+            .values(
+                sha256=sha256,
+                status="succeeded",
+                current_stage="completed",
+                result_operation="duplicate_source",
+                embedding_job_id=None,
+                upload_completed_at=datetime.now(timezone.utc),
+                worker_id=None,
+                claimed_at=None,
+                finished_at=datetime.now(timezone.utc),
+                last_error=None,
+            )
+            .returning(DocumentImportJob.id)
+        )
+        if result.scalar_one_or_none() is None:
+            await db.rollback()
+            raise ImportUploadError(
+                "upload_claim_lost",
+                "upload ownership was lost; retry from the committed offset",
+                status_code=409,
+                upload_offset=claim.upload_offset,
+            )
+        await db.commit()
+        return True
+
+    target = await _duplicate_upload_target(db, job=job)
+    if target is None:
+        return False
+
+    previous_job, document = target
+    await lease.stop_renewal()
+    lease.ensure_current()
+    result = await db.execute(
+        update(DocumentImportJob)
+        .where(
+            DocumentImportJob.id == claim.job_id,
+            DocumentImportJob.status == "uploading",
+            DocumentImportJob.worker_id == claim.owner_token,
+            DocumentImportJob.upload_offset == claim.size_bytes,
+        )
+        .values(
+            sha256=sha256,
+            status="succeeded",
+            current_stage="completed",
+            result_operation="unchanged",
+            document_id=document.id,
+            document_revision_id=(
+                previous_job.document_revision_id
+                or document.latest_revision_id
+                or document.current_revision_id
+            ),
+            embedding_job_id=None,
+            upload_completed_at=datetime.now(timezone.utc),
+            worker_id=None,
+            claimed_at=None,
+            finished_at=datetime.now(timezone.utc),
+            last_error=None,
+        )
+        .returning(DocumentImportJob.id)
+    )
+    if result.scalar_one_or_none() is None:
+        await db.rollback()
+        raise ImportUploadError(
+            "upload_claim_lost",
+            "upload ownership was lost; retry from the committed offset",
+            status_code=409,
+            upload_offset=claim.upload_offset,
+        )
+    await db.commit()
+    return True
+
+
 async def skip_duplicate_upload(
     db: AsyncSession,
     *,
@@ -3158,66 +3560,11 @@ async def skip_duplicate_upload(
     ):
         return False
 
-    source_path = source_path_for_job(job)
-    stmt = (
-        select(DocumentImportJob, Document)
-        .join(Document, Document.id == DocumentImportJob.document_id)
-        .where(
-            DocumentImportJob.id != job.id,
-            DocumentImportJob.library_id == job.library_id,
-            DocumentImportJob.sha256 == job.sha256,
-            DocumentImportJob.status == "succeeded",
-            DocumentImportJob.document_id.is_not(None),
-            or_(
-                DocumentImportJob.document_revision_id == Document.current_revision_id,
-                and_(
-                    DocumentImportJob.document_revision_id.is_(None),
-                    Document.current_revision_id.is_(None),
-                ),
-            ),
-            Document.deleted_at.is_(None),
-        )
-        .order_by(DocumentImportJob.created_at.desc())
-        .limit(1)
-    )
-    if source_path is not None:
-        # Folder uploads use the normalized relative path as the document
-        # identity.  A changed file at the same path must still be imported.
-        stmt = stmt.where(Document.source_path == source_path)
-    elif job.external_id is not None:
-        stmt = stmt.where(Document.external_id == job.external_id)
-    else:
-        # Match the existing text-ingest identity for single-file sessions
-        # without an external id, while not collapsing folder identities.
-        stmt = stmt.where(
-            Document.source_path.is_(None),
-            Document.external_id.is_(None),
-        )
-
-    row = (await db.execute(stmt)).first()
-    if row is None:
+    target = await _duplicate_upload_target(db, job=job)
+    if target is None:
         return False
 
-    previous_job, document = row
-    if (
-        job.security_level is not None
-        and job.security_level != getattr(document, "security_level", None)
-    ):
-        return False
-    if getattr(job, "graph_extraction_requested", False):
-        revision_id = (
-            previous_job.document_revision_id
-            or document.latest_revision_id
-            or document.current_revision_id
-        )
-        if revision_id is None:
-            return False
-        graph_job = await _latest_graph_job(db, revision_id=revision_id)
-        if graph_job is None or graph_job.status != "succeeded":
-            # Raw-file equality is not enough when this upload also promises a
-            # graph.  Do not hide a missing, failed, or partial graph behind
-            # an "unchanged" import result.
-            return False
+    previous_job, document = target
     job.status = "succeeded"
     job.current_stage = "completed"
     job.result_operation = "unchanged"
@@ -3613,6 +3960,16 @@ async def personal_task_projections(
 
 _PERSONAL_FAILURE_MESSAGES = (
     (
+        ("archive_has_no_supported_files", "压缩包内没有可导入的支持格式文件"),
+        "压缩包内没有可导入的支持格式文件",
+        "请确认包内包含支持格式的文档后重新上传",
+    ),
+    (
+        ("invalid_archive", "压缩包损坏或不是有效 zip 文件"),
+        "压缩包损坏或不是有效 ZIP 文件",
+        "请重新压缩文件后再上传",
+    ),
+    (
         ("file_too_large", "size exceeds", "too large"),
         "文件超过知识库允许的大小",
         "压缩或拆分后重新上传",
@@ -3703,6 +4060,8 @@ def personal_task_projection(
         else "import",
         "status": status,
         "stage": stage,
+        "result_operation": projection.get("result_operation")
+        or getattr(job, "result_operation", None),
         "created_at": projection.get("created_at") or job.created_at,
         "finished_at": projection.get("finished_at"),
         "failure_message": failure_message,

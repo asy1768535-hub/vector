@@ -6,6 +6,7 @@ export const DEFAULT_IMPORT_CONFIGURATION = Object.freeze({
     max_configurable_files_per_selection: 100_000,
     upload_concurrency: 1,
     doc_max_file_bytes: 200 * 1024 * 1024,
+    accept_all_file_types: true,
     allowed_extensions: [
         '.txt', '.md', '.markdown', '.rst', '.log', '.ini', '.cfg', '.conf',
         '.json', '.yaml', '.yml', '.xml', '.html', '.htm', '.csv', '.tsv',
@@ -96,16 +97,30 @@ function normalizedExtensions(configuration = DEFAULT_IMPORT_CONFIGURATION) {
 }
 
 export function supportedExtensionsAccept(configuration) {
+    if (configuration?.accept_all_file_types !== false) return '';
     return normalizedExtensions(configuration).join(',');
 }
 
 export function supportedExtensionsLabel(configuration) {
+    if (configuration?.accept_all_file_types !== false) {
+        return '所有格式（可识别文档解析正文，其他文件生成可检索说明）';
+    }
     return normalizedExtensions(configuration).map((value) => value.slice(1)).join('、');
 }
 
 export function relativePathForFile(file) {
     const path = String(file?.webkitRelativePath || '').replace(/\\/g, '/').trim();
-    return path || null;
+    if (!path) return null;
+
+    // Browsers occasionally report a folder path whose final segment uses a
+    // different filename normalization than File.name.  The server correctly
+    // rejects that mismatch; retain the selected folders but make the path
+    // identify the file object that will actually be uploaded.
+    const fileName = String(file?.name || '').replace(/\\/g, '/').split('/').pop();
+    if (!fileName) return path;
+    const parts = path.split('/');
+    parts[parts.length - 1] = fileName;
+    return parts.join('/');
 }
 
 export function createImportBatchId(
@@ -167,10 +182,18 @@ export async function createImportSessionForFile({
     };
     let session = resumeState.session;
     if (!session) {
-        session = await withUploadRetries(
-            () => api.createImportSession(stableSlug, sessionPayload, { signal }),
-            signal,
-        );
+        try {
+            session = await withUploadRetries(
+                () => api.createImportSession(stableSlug, sessionPayload, { signal }),
+                signal,
+            );
+        } catch (error) {
+            if (error && typeof error === 'object') {
+                error.uploadFileName = file.name;
+                error.uploadRelativePath = sessionPayload.relative_path || file.name;
+            }
+            throw error;
+        }
         resumeState.session = session;
     }
     return session;

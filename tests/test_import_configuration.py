@@ -38,6 +38,7 @@ def test_import_configuration_defaults_remain_daily_limits() -> None:
     assert result["doc_max_file_bytes"] == DOC_FILE_BYTES
     assert result["max_configurable_file_bytes"] == INITIAL_IMPORT_FILE_BYTES
     assert result["max_configurable_files_per_selection"] == INITIAL_IMPORT_FILE_COUNT
+    assert result["accept_all_file_types"] is True
     assert {
         ".cfg",
         ".conf",
@@ -91,6 +92,23 @@ def test_doc_replacement_stays_on_the_legacy_rejection_path() -> None:
     with pytest.raises(import_uploads.ImportUploadError) as exc_info:
         import_uploads._validate_payload(payload, _settings())
     assert exc_info.value.code == "doc_replacement_unsupported"
+
+
+def test_unknown_file_types_are_saved_without_entering_the_parser() -> None:
+    payload = ImportSessionCreate(
+        batch_id=uuid.uuid4(),
+        file_name="desktop-client.exe",
+        size_bytes=1024,
+    )
+
+    assert import_uploads._validate_payload(payload, _settings()) is None
+    assert (
+        import_uploads.import_processing_required(
+            payload.file_name, payload.size_bytes, _settings()
+        )
+        is False
+    )
+    assert import_uploads.import_metadata_only(payload.file_name) is True
 
 
 def test_library_import_configuration_overrides_defaults() -> None:

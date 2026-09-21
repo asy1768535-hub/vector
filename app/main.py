@@ -14,7 +14,9 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, Request, WebSocket
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.types import Scope
@@ -92,6 +94,42 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger(__name__)
+_IMPORT_SESSION_VALIDATION_FIELDS = frozenset({
+    "batch_id", "file_name", "relative_path", "content_type", "size_bytes",
+    "last_modified_millis", "external_id", "replace_document_id",
+    "security_level", "graph_extraction_requested",
+})
+
+
+def _is_import_session_request(path: str) -> bool:
+    parts = path.strip("/").split("/")
+    return (
+        len(parts) == 3
+        and parts[0] == "libraries"
+        and bool(parts[1])
+        and parts[2] == "import-sessions"
+    )
+
+
+async def handle_request_validation_error(
+    request: Request,
+    exc: RequestValidationError,
+):
+    """Keep FastAPI's 422 response while logging safe upload diagnostics."""
+    if _is_import_session_request(request.url.path):
+        safe_errors = []
+        for error in exc.errors():
+            location = error.get("loc", ())
+            field = location[1] if len(location) > 1 and location[0] == "body" else None
+            safe_errors.append({
+                "field": f"body.{field}" if field in _IMPORT_SESSION_VALIDATION_FIELDS else "body.unknown_field",
+                "type": str(error.get("type") or "validation_error"),
+            })
+        log.warning(
+            "import_session_validation_failed validation=%s",
+            safe_errors,
+        )
+    return await request_validation_exception_handler(request, exc)
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -335,6 +373,10 @@ def create_app() -> FastAPI:
         description="Multi-tenant vector DB with Dify-compatible retrieval API.",
         debug=settings.app_debug,
         lifespan=lifespan,
+    )
+    app.add_exception_handler(
+        RequestValidationError,
+        handle_request_validation_error,
     )
 
     app.include_router(health_router, tags=["health"])

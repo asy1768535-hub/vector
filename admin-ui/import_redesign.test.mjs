@@ -135,7 +135,7 @@ test('validateFile accepts all allowed extensions', () => {
 });
 
 test('validateFile rejects legacy .doc with save-as message', () => {
-    const r = validateFile(mockFile('old.doc', 1024));
+    const r = validateFile(mockFile('old.doc', 1024), { accept_all_file_types: false });
     assert.equal(r.valid, false);
     assert.ok(r.reason.includes('.docx'), 'reason mentions .docx');
 });
@@ -145,27 +145,33 @@ test('validateFile accepts legacy .xls through the bounded xlrd parser', () => {
     assert.equal(r.valid, true);
 });
 
-test('graph batches create all upload sessions before file transfer', () => {
+test('graph batches create each session as its file begins transfer', () => {
     const queueBatch = source.indexOf('const batchIds = createImportBatchIds(items);');
-    const sessionPreparation = source.indexOf('createImportSessionForFile({', queueBatch);
-    const contentUpload = source.indexOf('attemptedCount = await runConcurrent(', sessionPreparation + 1);
+    const obsoletePreparation = source.indexOf(
+        'if (graphJobRequested.value && !onlyFailed)',
+        queueBatch,
+    );
+    const contentUpload = source.indexOf('attemptedCount = await runConcurrent(', queueBatch);
+    const fileTransfer = source.indexOf('uploadFileInChunks({', contentUpload);
     assert.ok(queueBatch >= 0, 'upload queue assigns batch IDs before transfer');
-    assert.ok(sessionPreparation >= 0, 'graph batch upload prepares sessions');
-    assert.ok(contentUpload > sessionPreparation, 'file transfer waits for session preparation');
+    assert.equal(obsoletePreparation, -1, 'graph batches do not pre-create every session');
+    assert.ok(contentUpload > queueBatch, 'queue starts upload workers after assigning batch IDs');
+    assert.ok(fileTransfer > contentUpload, 'each worker creates its session immediately before transfer');
 });
 
 test('validateFile accepts .doc only when the asynchronous import contract advertises it', () => {
     const r = validateFile(mockFile('old.doc', 1024), {
         allowed_extensions: [...ALLOWED_EXTENSIONS, '.doc'],
+        accept_all_file_types: false,
         max_file_bytes: MAX_FILE_SIZE,
     });
     assert.equal(r.valid, true);
 });
 
-test('validateFile rejects unknown extensions', () => {
+test('validateFile accepts unknown extensions for searchable metadata uploads', () => {
     for (const name of ['a.exe', 'a.7z', 'noext']) {
         const r = validateFile(mockFile(name, 1024));
-        assert.equal(r.valid, false, `${name} should be rejected`);
+        assert.equal(r.valid, true, `${name} should be saved and described`);
     }
 });
 
@@ -181,8 +187,9 @@ test('validateFile accepts files at or under 500 MB', () => {
 });
 
 test('validateFile returns failType for classification', () => {
-    assert.equal(validateFile(mockFile('old.doc', 100)).failType, 'format');
-    assert.equal(validateFile(mockFile('bad.exe', 100)).failType, 'format');
+    const restricted = { accept_all_file_types: false };
+    assert.equal(validateFile(mockFile('old.doc', 100), restricted).failType, 'format');
+    assert.equal(validateFile(mockFile('bad.exe', 100), restricted).failType, 'format');
     assert.equal(validateFile(mockFile('big.pdf', MAX_FILE_SIZE + 1)).failType, 'size');
     assert.equal(validateFile(mockFile('ok.pdf', 100)).failType, undefined);
 });
@@ -209,7 +216,7 @@ test('validateBatch puts duplicates in separate array (not invalid)', () => {
 
 test('validateBatch puts format/size errors in invalid array', () => {
     const files = [mockFile('bad.exe', 100), mockFile('big.pdf', MAX_FILE_SIZE + 1)];
-    const { accepted, duplicates, invalid } = validateBatch(files, []);
+    const { accepted, duplicates, invalid } = validateBatch(files, [], { accept_all_file_types: false });
     assert.equal(accepted.length, 0);
     assert.equal(duplicates.length, 0);
     assert.equal(invalid.length, 2);
@@ -231,7 +238,9 @@ test('validateBatch mixes accepted, duplicates, and invalid in one batch', () =>
     const f2 = mockFile('bad.exe', 100, 2);
     const f3 = mockFile('a.pdf', 100, 1); // same as f1
     const f4 = mockFile('ok.txt', 200, 4);
-    const { accepted, duplicates, invalid } = validateBatch([f1, f2, f3, f4], []);
+    const { accepted, duplicates, invalid } = validateBatch(
+        [f1, f2, f3, f4], [], { accept_all_file_types: false },
+    );
     assert.equal(accepted.length, 2, 'f1 and f4 accepted');
     assert.equal(duplicates.length, 1, 'f3 is duplicate of f1');
     assert.equal(invalid.length, 1, 'f2 is invalid format');
@@ -461,7 +470,10 @@ test('template includes drag-and-drop bindings', () => {
 });
 
 test('chunked batch validation preserves duplicate and selection-limit semantics', () => {
-    const state = createBatchValidationState([], { max_files_per_selection: 2 });
+    const state = createBatchValidationState([], {
+        max_files_per_selection: 2,
+        accept_all_file_types: false,
+    });
     const first = validateBatchChunk([
         mockFile('a.pdf', 100, 1),
         mockFile('bad.exe', 100, 2),

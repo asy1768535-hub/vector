@@ -214,15 +214,15 @@ export function validateFile(file, configuration = null) {
         ? new Set(configuration.allowed_extensions)
         : ALLOWED_EXTENSIONS;
     const maxFileBytes = configuration?.max_file_bytes || MAX_FILE_SIZE;
+    const acceptsAllFileTypes = configuration?.accept_all_file_types !== false;
 
-    // Legacy DOC is accepted only by the asynchronous import contract. Replace
-    // paths call this helper without that dynamic configuration and stay blocked.
-    if (LEGACY_SAVE_AS[ext] && !allowedExtensions.has(ext)) {
+    // A restricted library may keep legacy Office files on its explicit allowlist.
+    if (LEGACY_SAVE_AS[ext] && !allowedExtensions.has(ext) && !acceptsAllFileTypes) {
         return { valid: false, reason: LEGACY_SAVE_AS[ext], failType: 'format' };
     }
 
     // 2) Extension not allowed
-    if (!allowedExtensions.has(ext)) {
+    if (!acceptsAllFileTypes && !allowedExtensions.has(ext)) {
         return { valid: false, reason: `不支持的文件格式 ${ext || '(无后缀)'}`, failType: 'format' };
     }
 

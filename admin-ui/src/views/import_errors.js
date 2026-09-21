@@ -3,7 +3,7 @@
 // 约定：
 //   - 409 是「冲突」（内容重复 / 外部系统管理库 / 其它冲突），不是「重建」；重建是 503。
 //   - 任何分支都不得把英文码、数组 detail（[object Object]）原样抛给用户。
-export function humanizeError(e) {
+function humanizeErrorReason(e) {
     const detail = e && typeof e.message === 'string' ? e.message : '';
     const status = e && e.status;
 
@@ -43,9 +43,52 @@ export function humanizeError(e) {
                     return '暂不支持该文件类型';
             }
         }
-        case 422: return '文件或参数不符合要求，请检查后重试';
+        case 422: {
+            const code = e?.body?.detail?.code;
+            if (code === 'relative_path_mismatch') {
+                return '所选文件夹路径与文件名不一致，请重新选择原始文件夹';
+            }
+            if (code === 'invalid_relative_path') {
+                return '所选文件夹路径无效，请重新选择原始文件夹';
+            }
+            const validation = Array.isArray(e?.body?.detail)
+                ? e.body.detail[0]
+                : null;
+            const field = Array.isArray(validation?.loc)
+                ? validation.loc.at(-1)
+                : null;
+            if (field === 'batch_id') {
+                return '上传批次已失效，请刷新页面后重新选择文件';
+            }
+            if (field === 'file_name') {
+                return '文件名为空或过长，请重命名后重试';
+            }
+            if (field === 'relative_path') {
+                return '文件夹路径无效或过长，请缩短目录层级后重试';
+            }
+            if (field === 'size_bytes') {
+                return '文件大小参数无效，请重新选择文件后重试';
+            }
+            if (field === 'last_modified_millis') {
+                return '文件修改时间参数无效，请重新选择文件后重试';
+            }
+            // api.js has already translated FastAPI validation errors into a
+            // safe Chinese field message.  Preserve that information for
+            // fields added by a newer API instead of hiding it behind the
+            // generic 422 fallback.
+            if (/[一-鿿]/.test(detail)) return detail;
+            return '文件或参数不符合要求，请检查后重试';
+        }
         case 503: return '服务暂不可用，请稍后重试';
         // 兜底：英文/数组等不安全 detail 不外显，统一通用文案。
         default:  return /[一-鿿]/.test(detail) ? detail : '上传失败，请稍后重试';
     }
+}
+
+export function humanizeError(e) {
+    const reason = humanizeErrorReason(e);
+    const selectedPath = typeof e?.uploadRelativePath === 'string' && e.uploadRelativePath.trim()
+        ? e.uploadRelativePath.trim()
+        : (typeof e?.uploadFileName === 'string' ? e.uploadFileName.trim() : '');
+    return selectedPath ? `${selectedPath}：${reason}` : reason;
 }
