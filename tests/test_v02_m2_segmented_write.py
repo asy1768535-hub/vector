@@ -21,6 +21,11 @@ from app.services import ingest
 from app.services import import_parsing
 from app.services import revision_files
 from app.services.parser_units import build_parser_unit, parser_provenance
+from app.services.pdf_coverage import (
+    PDF_COVERAGE_UNIT_KEY,
+    attach_pdf_coverage_unit,
+    create_pdf_coverage_report,
+)
 from app.services.import_parsing import ParsedImport
 from app.workers import importer
 
@@ -465,6 +470,64 @@ def test_structured_block_content_preserves_bounded_parser_payload(monkeypatch):
     assert structural["segment_caption"] == "Data"
     assert "rows" not in structural
     assert len(json.dumps(cell_block.content, ensure_ascii=False).encode("utf-8")) <= 8192
+
+
+def test_pdf_coverage_round_trips_as_non_text_structural_block(monkeypatch):
+    monkeypatch.setattr(settings, "enable_evidence_write_path", True)
+    parser = parser_provenance("fixture-pdf", "v1")
+    root = build_parser_unit(
+        source_kind="pdf",
+        unit_kind="section",
+        ordinal=0,
+        unit_key="pdf:page:1",
+        parser=parser,
+        source={"page": {"start": 1, "end": 1}},
+        source_text="body",
+        source_start=0,
+        source_end=4,
+    )
+    segments = [{
+        "kind": "prose",
+        "text": "body",
+        "parser_unit": root,
+        "structured_units": [],
+    }]
+    report = create_pdf_coverage_report(
+        status="partial",
+        total_pages=1,
+        processed_pages=[1],
+        unprocessed_visual_pages=[1],
+        skipped_visual_block_count=1,
+        reasons=["visual_content_not_ingested"],
+    )
+    attach_pdf_coverage_unit(segments, report)
+    added: list[object] = []
+
+    asyncio.run(ingest.ingest_text(
+        db=_db(added),
+        library=_library(),
+        text="body",
+        title="partial.pdf",
+        external_id=None,
+        metadata=None,
+        splitter="text",
+        created_by=None,
+        chunks=[{"text": "body", "source_start": 0, "source_end": 4}],
+        segments=segments,
+        file_name="partial.pdf",
+        raw_file_sha256=RAW_HASH,
+        document_revision_file_id=FILE_ID,
+    ))
+
+    coverage = next(
+        row for row in added
+        if isinstance(row, DocumentBlock)
+        and row.content["parser_unit"].get("unit_key") == PDF_COVERAGE_UNIT_KEY
+    )
+    assert coverage.block_kind == "structured_unit"
+    assert coverage.text == ""
+    assert coverage.content["parser_unit"]["value"] == report
+    assert len([row for row in added if isinstance(row, Chunk)]) == 1
 
 
 def test_json_pointer_blocks_keep_bounded_value_and_auditable_text(monkeypatch, tmp_path):

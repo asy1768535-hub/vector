@@ -12,7 +12,16 @@ from pathlib import Path
 
 from app.config import settings
 from app.models.library import Library
-from app.services import docx_extract, pdf_extract, splitter, video_transcription, xlsx_extract
+from app.services import (
+    docx_extract,
+    mineru_pdf,
+    pdf_extract,
+    pdf_preflight,
+    pdf_routing,
+    splitter,
+    video_transcription,
+    xlsx_extract,
+)
 from app.services.import_uploads import IMAGE_IMPORT_EXTENSIONS
 from app.services.parser_units import (
     build_ocr_parser_units,
@@ -653,6 +662,76 @@ def _parse_audio(path: Path, library: Library, *, file_name: str) -> ParsedImpor
     return _structured_text(normalized_text, library, source_type="audio")
 
 
+def mineru_pdf_enabled(library: Library) -> bool:
+    """Return whether the fail-closed MinerU rollout selects this library."""
+    allowlist = {
+        slug.strip()
+        for slug in settings.mineru_pdf_library_slugs.split(",")
+        if slug.strip()
+    }
+    return bool(settings.mineru_pdf_base_url.strip() and library.slug in allowlist)
+
+
+def build_pdf_import_source(
+    data: bytes | Path,
+    library: Library,
+    *,
+    structured_ocr: bool = True,
+) -> dict:
+    """Select one PDF parser identically for every import entry point."""
+    mineru_authorized = mineru_pdf_enabled(library)
+    preflight = pdf_preflight.preflight_pdf(
+        data,
+        min_text_chars=settings.pdf_ocr_min_text_chars,
+    )
+    routing = pdf_routing.choose_pdf_route(
+        preflight,
+        mineru_authorized=mineru_authorized,
+    )
+    if routing["selection"] == "mineru":
+        source = mineru_pdf.parse_pdf_remote(
+            data,
+            base_url=settings.mineru_pdf_base_url,
+            expected_version=settings.mineru_pdf_expected_version,
+            timeout_seconds=settings.mineru_pdf_timeout_seconds,
+            max_response_bytes=settings.mineru_pdf_max_response_bytes,
+            chunk_size=library.chunk_size,
+            chunk_overlap=library.chunk_overlap,
+            total_pages=preflight.get("total_pages"),
+        )
+    else:
+        from app.services import ocr as ocr_service
+
+        ocr_enabled = (
+            library.ocr_enabled
+            if library.ocr_enabled is not None
+            else settings.ocr_enabled
+        )
+        if ocr_enabled and ocr_service.is_available():
+            ocr_callback = (
+                ocr_service.ocr_image_blocks if structured_ocr else ocr_service.ocr_image
+            )
+        else:
+            ocr_callback = None
+        source = pdf_extract.build_pdf_source(
+            data,
+            chunk_size=library.chunk_size,
+            chunk_overlap=library.chunk_overlap,
+            ocr_enabled=bool(ocr_enabled),
+            ocr=ocr_callback,
+            min_text_chars=settings.pdf_ocr_min_text_chars,
+            render_dpi=settings.pdf_ocr_render_dpi,
+            max_ocr_pages=settings.pdf_ocr_max_pages,
+            preflight_report=preflight,
+        )
+
+    segments = source.get("segments")
+    if not isinstance(segments, list):
+        raise ValueError("PDF parser returned invalid segments")
+    source["routing"] = pdf_routing.attach_pdf_routing_unit(segments, routing)
+    return source
+
+
 def parse_import_file(
     path: Path,
     library: Library,
@@ -667,29 +746,13 @@ def parse_import_file(
     if suffix in IMAGE_IMPORT_EXTENSIONS:
         return _parse_image(path, library, file_name=file_name)
     if suffix == ".pdf":
-        from app.services import ocr as ocr_service
-
-        ocr_enabled = (
-            library.ocr_enabled
-            if library.ocr_enabled is not None
-            else settings.ocr_enabled
+        source = build_pdf_import_source(path, library)
+        return ParsedImport(
+            source["normalized_text"],
+            source["chunks"],
+            "text",
+            source.get("segments", []),
         )
-        ocr_callback = (
-            ocr_service.ocr_image_blocks
-            if ocr_enabled and ocr_service.is_available()
-            else None
-        )
-        source = pdf_extract.build_pdf_source(
-            path,
-            chunk_size=library.chunk_size,
-            chunk_overlap=library.chunk_overlap,
-            ocr_enabled=bool(ocr_enabled),
-            ocr=ocr_callback,
-            min_text_chars=settings.pdf_ocr_min_text_chars,
-            render_dpi=settings.pdf_ocr_render_dpi,
-            max_ocr_pages=settings.pdf_ocr_max_pages,
-        )
-        return ParsedImport(source["normalized_text"], source["chunks"], "text", source.get("segments", []))
     if suffix == ".docx":
         from app.services import ocr as ocr_service
 
@@ -757,4 +820,16 @@ def parse_import_file(
         ".yml",
     }:
         return _structured_text(_read_text(path), library, source_type="text")
-    raise ValueError(f"unsupported file type: {suffix or '(none)'}")
+    source_name = file_name or path.name
+    display_suffix = suffix or "无后缀"
+    return _structured_text(
+        "\n".join(
+            (
+                f"文件名：{source_name}",
+                f"文件格式：{display_suffix}",
+                "文件说明：该文件已安全保存为原文件；当前系统不解析其正文，可在“我的文件”中下载。",
+            )
+        ),
+        library,
+        source_type="file_metadata",
+    )

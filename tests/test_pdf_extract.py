@@ -18,6 +18,7 @@ from app.services.pdf_extract import (
     build_pdf_source,
     extract_pdf_text,
 )
+from app.services.evidence_write_path import validate_parser_segments
 
 
 def _fake_reader(page_texts):
@@ -122,6 +123,27 @@ def test_build_pdf_source_records_page_locations(patch_reader, render_spy):
         ) == chunk["text"]
 
 
+
+def test_complete_preflight_promotes_full_native_coverage(patch_reader, render_spy):
+    patch_reader(["第一页是完整的文字层内容", "第二页是完整的文字层内容"])
+
+    source = build_pdf_source(
+        b"x",
+        chunk_size=80,
+        chunk_overlap=0,
+        preflight_report={
+            "status": "complete",
+            "page_count_known": True,
+            "total_pages": 2,
+        },
+        **_kw(ocr_enabled=False, min_text_chars=1),
+    )
+
+    assert render_spy == []
+    assert source["coverage"]["status"] == "complete"
+    assert source["coverage"]["total_pages"] == 2
+    assert source["coverage"]["processed_pages"] == [1, 2]
+    assert source["coverage"]["unprocessed_visual_pages"] == []
 def test_scanned_page_uses_ocr_when_enabled(patch_reader, render_spy):
     patch_reader([""])                 # 单张图片页（无文字层）
     out = extract_pdf_text(b"x", **_kw(ocr_enabled=True, ocr=lambda b: "扫描识别出的文字"))
@@ -173,6 +195,16 @@ def test_native_visual_page_without_image_regions_is_marked_unparsed(monkeypatch
     assert {chunk["location"]["extraction_mode"] for chunk in source["chunks"]} == {
         "native_visual_unparsed"
     }
+    assert source["coverage"] == {
+        "contract_version": "pdf-coverage-v1",
+        "status": "partial",
+        "total_pages": 1,
+        "processed_pages": [1],
+        "unprocessed_visual_pages": [1],
+        "skipped_visual_block_count": 1,
+        "reasons": ["visual_content_without_ocr"],
+    }
+    validate_parser_segments(source["segments"])
 
 
 def test_broken_images_getter_keeps_pure_text_native(monkeypatch, render_spy):
@@ -208,6 +240,79 @@ def test_broken_images_getter_keeps_pure_text_native(monkeypatch, render_spy):
     assert ocr_calls == []
     assert {chunk["location"]["extraction_mode"] for chunk in source["chunks"]} == {"native"}
     assert source["segments"][0]["quality"]["visual_content_unparsed"] is False
+    assert source["coverage"]["status"] == "unknown"
+    assert source["coverage"]["processed_pages"] == [1]
+    assert source["coverage"]["unprocessed_visual_pages"] == []
+
+
+def test_text_plus_unread_visual_page_reports_partial(monkeypatch, render_spy):
+    pages = [
+        types.SimpleNamespace(
+            extract_text=lambda: "native text with enough characters for the fast path",
+            images=[],
+        ),
+        types.SimpleNamespace(extract_text=lambda: "", images=[object()]),
+    ]
+    monkeypatch.setattr(
+        pdf_extract,
+        "_open_reader",
+        lambda _data: types.SimpleNamespace(pages=pages),
+    )
+
+    source = build_pdf_source(
+        b"x", chunk_size=80, chunk_overlap=0, **_kw(ocr_enabled=False)
+    )
+
+    assert render_spy == []
+    assert source["coverage"]["status"] == "partial"
+    assert source["coverage"]["total_pages"] == 2
+    assert source["coverage"]["processed_pages"] == [1]
+    assert source["coverage"]["unprocessed_visual_pages"] == [2]
+
+
+def test_ocr_callback_error_is_sanitized(patch_reader, render_spy):
+    patch_reader([""])
+
+    def fail(_data):
+        raise RuntimeError("secret provider /private/path")
+
+    with pytest.raises(PdfExtractError, match="PDF OCR") as exc_info:
+        extract_pdf_text(b"x", **_kw(ocr_enabled=True, ocr=fail))
+    assert "secret" not in str(exc_info.value)
+    assert "/private/path" not in str(exc_info.value)
+
+
+def test_pdf_normalized_text_budget_is_cumulative(monkeypatch, patch_reader, render_spy):
+    monkeypatch.setattr(pdf_extract, "PDF_MAX_NORMALIZED_TEXT_CHARS", 10)
+    patch_reader(["abcdef", "ghijkl"])
+    with pytest.raises(PdfResourceLimitError, match="normalized text"):
+        extract_pdf_text(b"x", **_kw(min_text_chars=1))
+
+
+def test_pdf_ocr_block_budget_is_cumulative(monkeypatch):
+    monkeypatch.setattr(pdf_extract, "PDF_MAX_OCR_BLOCKS_TOTAL", 1)
+    page = types.SimpleNamespace(
+        extract_text=lambda: "native text with enough characters",
+        images=[types.SimpleNamespace(data=b"image")],
+    )
+    monkeypatch.setattr(
+        pdf_extract,
+        "_open_reader",
+        lambda _data: types.SimpleNamespace(pages=[page]),
+    )
+    blocks = [
+        {"text": "one", "bbox": [0, 0, 1, 1]},
+        {"text": "two", "bbox": [0, 1, 1, 2]},
+    ]
+    monkeypatch.setattr(
+        pdf_extract,
+        "ocr_result_text_and_blocks",
+        lambda _value: pytest.fail("OCR output must be rejected before normalization"),
+    )
+    with pytest.raises(PdfResourceLimitError, match="OCR blocks"):
+        extract_pdf_text(b"x", **_kw(ocr_enabled=True, ocr=lambda _data: blocks))
+
+
 
 
 def test_mixed_pdf_keeps_text_and_ocr_in_page_order(patch_reader, render_spy):
@@ -266,6 +371,26 @@ def test_short_text_page_kept_even_if_ocr_returns_empty(patch_reader, render_spy
     out = extract_pdf_text(b"x", **_kw(ocr_enabled=True, ocr=lambda b: ""))
     assert render_spy == [0]            # 仍会尝试 OCR（页面可能含图）
     assert "审批通过" in out             # OCR 为空也保留原短文字
+
+
+def test_short_text_with_visual_page_and_empty_ocr_is_partial(monkeypatch, render_spy):
+    page = types.SimpleNamespace(
+        extract_text=lambda: "审批通过",
+        images=[object()],
+    )
+    monkeypatch.setattr(
+        pdf_extract, "_open_reader",
+        lambda _data: types.SimpleNamespace(pages=[page]),
+    )
+
+    source = build_pdf_source(
+        b"x", chunk_size=80, chunk_overlap=0,
+        **_kw(ocr_enabled=True, ocr=lambda _data: ""),
+    )
+    assert render_spy == [0]
+    assert "审批通过" in source["normalized_text"]
+    assert source["coverage"]["status"] == "partial"
+    assert source["coverage"]["unprocessed_visual_pages"] == [1]
 
 
 def test_short_text_merges_with_ocr_result(patch_reader, render_spy):
@@ -408,7 +533,80 @@ def test_embedded_image_bytes_limit_is_enforced(monkeypatch):
     )
 
     with pytest.raises(PdfResourceLimitError, match="embedded image bytes"):
-        extract_pdf_text(b"x", **_kw())
+        extract_pdf_text(b"x", **_kw(ocr_enabled=True, ocr=lambda _data: "unused"))
+
+
+def test_embedded_image_size_hint_rejects_before_data_access(monkeypatch):
+    class Image:
+        encoded_size = 4
+
+        @property
+        def data(self):
+            raise AssertionError("image data must not be decoded before budget check")
+
+    monkeypatch.setattr(pdf_extract, "PDF_MAX_EMBEDDED_IMAGE_BYTES", 3)
+    page = types.SimpleNamespace(
+        extract_text=lambda: "native text with enough characters",
+        images=[Image()],
+    )
+    monkeypatch.setattr(
+        pdf_extract,
+        "_open_reader",
+        lambda _data: types.SimpleNamespace(pages=[page]),
+    )
+
+    with pytest.raises(PdfResourceLimitError, match="embedded image bytes"):
+        extract_pdf_text(b"x", **_kw(ocr_enabled=True, ocr=lambda _data: "unused"))
+
+
+def test_partially_recognized_embedded_images_mark_page_unparsed(monkeypatch):
+    page = types.SimpleNamespace(
+        extract_text=lambda: "native text with enough characters",
+        images=[
+            types.SimpleNamespace(data=b"recognized"),
+            types.SimpleNamespace(data=b"empty"),
+        ],
+    )
+    monkeypatch.setattr(
+        pdf_extract,
+        "_open_reader",
+        lambda _data: types.SimpleNamespace(pages=[page]),
+    )
+
+    source = build_pdf_source(
+        b"x",
+        chunk_size=200,
+        chunk_overlap=0,
+        **_kw(
+            ocr_enabled=True,
+            ocr=lambda data: "recognized image text" if data == b"recognized" else "",
+        ),
+    )
+
+    assert "recognized image text" in source["normalized_text"]
+    assert source["segments"][0]["location"]["extraction_mode"] == "native_visual_unparsed"
+    assert source["coverage"]["status"] == "partial"
+    assert source["coverage"]["unprocessed_visual_pages"] == [1]
+
+
+def test_embedded_image_bytes_are_not_decoded_when_ocr_is_disabled(monkeypatch):
+    class Image:
+        @property
+        def data(self):
+            raise AssertionError("image bytes must not be decoded")
+
+    page = types.SimpleNamespace(
+        extract_text=lambda: "native text with enough characters",
+        images=[Image()],
+    )
+    monkeypatch.setattr(
+        pdf_extract,
+        "_open_reader",
+        lambda _data: types.SimpleNamespace(pages=[page]),
+    )
+
+    result = extract_pdf_text(b"x", **_kw(ocr_enabled=False))
+    assert "native text" in result
 
 
 def test_render_pixel_limit_rejects_before_render(monkeypatch):
@@ -499,3 +697,132 @@ def test_pdf_resource_limits_allow_normal_page_and_image_path(monkeypatch):
 
     assert image_ocr_calls == [b"embedded image"]
     assert "image text" in result
+
+
+def test_positive_image_size_rejects_booleans_and_non_positives():
+    assert pdf_extract._positive_image_size(True) is None
+    assert pdf_extract._positive_image_size(False) is None
+    assert pdf_extract._positive_image_size(0) is None
+    assert pdf_extract._positive_image_size(-10) is None
+    assert pdf_extract._positive_image_size(100) == 100
+    assert pdf_extract._positive_image_size("100") == 100
+    assert pdf_extract._positive_image_size(types.SimpleNamespace(get_object=lambda: True)) is None
+
+
+def test_adaptive_render_dpi_selection():
+    small_img = types.SimpleNamespace(
+        indirect_reference=types.SimpleNamespace(
+            get_object=lambda: {"/Width": 195, "/Height": 102}
+        )
+    )
+    page_small = types.SimpleNamespace(images=[small_img])
+    assert pdf_extract._resolve_page_render_dpi(page_small, 200) == 72
+
+    large_img = types.SimpleNamespace(
+        indirect_reference=types.SimpleNamespace(
+            get_object=lambda: {"/Width": 1700, "/Height": 2178}
+        )
+    )
+    page_large = types.SimpleNamespace(images=[large_img])
+    assert pdf_extract._resolve_page_render_dpi(page_large, 200) == 200
+
+    page_mixed = types.SimpleNamespace(images=[small_img, large_img])
+    assert pdf_extract._resolve_page_render_dpi(page_mixed, 200) == 200
+
+    page_no_img = types.SimpleNamespace(images=[])
+    assert pdf_extract._resolve_page_render_dpi(page_no_img, 200) == 200
+
+    assert pdf_extract._resolve_page_render_dpi(page_small, 60) == 60
+    assert pdf_extract._resolve_page_render_dpi(page_small, 72) == 72
+
+    page_corrupt = types.SimpleNamespace(images=[types.SimpleNamespace()])
+    assert pdf_extract._resolve_page_render_dpi(page_corrupt, 200) == 200
+
+    # Dual-constraint: 350x200 (70k px <= 80k px) resolves to 72
+    img_350x200 = types.SimpleNamespace(
+        indirect_reference=types.SimpleNamespace(
+            get_object=lambda: {"/Width": 350, "/Height": 200}
+        )
+    )
+    assert pdf_extract._resolve_page_render_dpi(types.SimpleNamespace(images=[img_350x200]), 200) == 72
+
+    # Dual-constraint: 350x350 (122.5k px > 80k px) falls back to configured DPI
+    img_350x350 = types.SimpleNamespace(
+        indirect_reference=types.SimpleNamespace(
+            get_object=lambda: {"/Width": 350, "/Height": 350}
+        )
+    )
+    assert pdf_extract._resolve_page_render_dpi(types.SimpleNamespace(images=[img_350x350]), 200) == 200
+
+    # Dimension threshold: 351x100 (351 > 350) falls back to configured DPI
+    img_351x100 = types.SimpleNamespace(
+        indirect_reference=types.SimpleNamespace(
+            get_object=lambda: {"/Width": 351, "/Height": 100}
+        )
+    )
+    assert pdf_extract._resolve_page_render_dpi(types.SimpleNamespace(images=[img_351x100]), 200) == 200
+
+    # Boolean dimensions fallback to configured DPI
+    bool_img = types.SimpleNamespace(
+        indirect_reference=types.SimpleNamespace(
+            get_object=lambda: {"/Width": True, "/Height": 100}
+        )
+    )
+    assert pdf_extract._resolve_page_render_dpi(types.SimpleNamespace(images=[bool_img]), 200) == 200
+
+    # Embedded image count exceeding limit falls back to configured DPI
+    too_many_imgs = [small_img] * (pdf_extract.PDF_MAX_EMBEDDED_IMAGES_PER_PAGE + 1)
+    assert pdf_extract._resolve_page_render_dpi(types.SimpleNamespace(images=too_many_imgs), 200) == 200
+
+    # Non-positive / invalid configured_dpi passes through without silent coercion to 72
+    assert pdf_extract._resolve_page_render_dpi(page_small, 0) == 0
+    assert pdf_extract._resolve_page_render_dpi(page_small, -10) == -10
+    assert pdf_extract._resolve_page_render_dpi(page_small, True) is True
+
+
+def test_render_dpi_budget_rejects_non_positive_and_invalid(monkeypatch):
+    page = types.SimpleNamespace(
+        extract_text=lambda: "",
+        images=[],
+        mediabox=types.SimpleNamespace(width=595, height=842),
+    )
+    monkeypatch.setattr(
+        pdf_extract,
+        "_open_reader",
+        lambda _data: types.SimpleNamespace(pages=[page]),
+    )
+    for bad_dpi in (0, -10, True):
+        with pytest.raises(PdfResourceLimitError, match="rendered pixels"):
+            extract_pdf_text(
+                b"x",
+                **_kw(ocr_enabled=True, ocr=lambda _data: "text", render_dpi=bad_dpi),
+            )
+
+def test_adaptive_render_dpi_calls_render_with_resolved_dpi(monkeypatch):
+    small_img = types.SimpleNamespace(
+        indirect_reference=types.SimpleNamespace(
+            get_object=lambda: {"/Width": 195, "/Height": 102}
+        )
+    )
+    page = types.SimpleNamespace(
+        extract_text=lambda: "",
+        images=[small_img],
+        mediabox=types.SimpleNamespace(width=595, height=842),
+    )
+    monkeypatch.setattr(
+        pdf_extract,
+        "_open_reader",
+        lambda _data: types.SimpleNamespace(pages=[page]),
+    )
+    rendered_dpis = []
+    monkeypatch.setattr(
+        pdf_extract,
+        "_render_page_png",
+        lambda _data, _idx, dpi: rendered_dpis.append(dpi) or b"fake_png",
+    )
+    res = extract_pdf_text(
+        b"x",
+        **_kw(ocr_enabled=True, ocr=lambda _data: "recognized text", render_dpi=200),
+    )
+    assert rendered_dpis == [72]
+    assert "recognized text" in res

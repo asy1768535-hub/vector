@@ -28,7 +28,8 @@ from app.models.document_revision import DocumentRevision
 from app.models.embedding_job import EmbeddingJob
 from app.api.documents import _persist_graph_extraction_request
 from app.schemas.documents import QueryRequest
-from app.services import ingest as ingest_service
+from app.services import import_parsing, ingest as ingest_service
+from app.services.parser_units import build_parser_unit, parser_provenance
 
 
 # Mock user and library
@@ -839,14 +840,32 @@ def test_import_doc_rejected(client):
     assert resp.status_code == status.HTTP_415_UNSUPPORTED_MEDIA_TYPE
 
 
+def _test_pdf_segment(text="pdf text"):
+    root = build_parser_unit(
+        source_kind="pdf",
+        unit_kind="section",
+        ordinal=0,
+        unit_key="pdf:test:section:0",
+        parser=parser_provenance("test-pdf", "1"),
+        source={"page": {"start": 1, "end": 1}},
+    )
+    root["text"] = text
+    return {
+        "kind": "prose",
+        "text": text,
+        "parser_unit": root,
+        "structured_units": [],
+    }
+
 # ── docs/23：PDF 文字层 / 扫描页 OCR 接入上传 ─────────────────────────────────
 from app.services.pdf_extract import PdfExtractError, PdfOcrUnavailableError  # noqa: E402
 
 
 @patch("app.services.ingest.ingest_text", new_callable=AsyncMock)
 @patch("app.services.pdf_extract.build_pdf_source")
-def test_import_text_pdf_ocr_off_ingests(mock_extract, mock_ingest, client):
+def test_import_text_pdf_ocr_off_ingests(mock_extract, mock_ingest, client, monkeypatch):
     """OCR 关 + 文字 PDF：提取出的带页码正文照常入库，splitter=text，ocr_enabled=False。"""
+    expected_segments = [_test_pdf_segment("【第 1 页】\n文字版PDF内容")]
     mock_extract.return_value = {
         "normalized_text": "【第 1 页】\n文字版PDF内容",
         "chunks": [{
@@ -855,11 +874,20 @@ def test_import_text_pdf_ocr_off_ingests(mock_extract, mock_ingest, client):
             "source_end": 16,
             "location": {"type": "page", "page": 1},
         }],
+        "segments": expected_segments,
     }
     doc = MagicMock()
     doc.id = uuid.uuid4()
     doc.status = "pending"
     mock_ingest.return_value = (doc, MagicMock(id=uuid.uuid4()), 1, False)
+
+    to_thread_calls = []
+
+    async def run_in_thread(function, *args, **kwargs):
+        to_thread_calls.append((function, args, kwargs))
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr("app.api.documents.asyncio.to_thread", run_in_thread)
 
     resp = client.post(
         "/libraries/testlib/import-file",
@@ -870,6 +898,9 @@ def test_import_text_pdf_ocr_off_ingests(mock_extract, mock_ingest, client):
     assert kw["text"] == "【第 1 页】\n文字版PDF内容"
     assert kw["splitter"] == "text"
     assert kw["chunks"][0]["location"] == {"type": "page", "page": 1}
+    assert kw["segments"] is expected_segments
+    assert to_thread_calls[0][0] is import_parsing.build_pdf_import_source
+    assert to_thread_calls[0][2] == {}
     assert mock_extract.call_args.kwargs["ocr_enabled"] is False   # 库未开 + 全局默认关
 
 
@@ -890,17 +921,18 @@ def test_import_scanned_pdf_ocr_off_returns_enable_hint(mock_extract, client):
 @patch("app.services.ingest.ingest_text", new_callable=AsyncMock)
 @patch("app.services.pdf_extract.build_pdf_source")
 def test_import_pdf_ocr_on_passes_flag_and_params(mock_extract, mock_ingest, client, monkeypatch):
-    """库开 ocr_enabled：把库级开关、ocr_image 回调与三个 pdf_ocr_* 参数传给服务。"""
+    """库开 ocr_enabled：同步入口使用结构化 OCR 回调和统一 PDF 参数。"""
     monkeypatch.setattr(mock_library, "ocr_enabled", True)
     sentinel = object()
     monkeypatch.setattr("app.services.ocr.is_available", lambda: True)
-    monkeypatch.setattr("app.services.ocr.ocr_image", sentinel)
+    monkeypatch.setattr("app.services.ocr.ocr_image_blocks", sentinel)
     monkeypatch.setattr(settings, "pdf_ocr_min_text_chars", 20)
     monkeypatch.setattr(settings, "pdf_ocr_render_dpi", 200)
     monkeypatch.setattr(settings, "pdf_ocr_max_pages", 50)
     mock_extract.return_value = {
         "normalized_text": "【第 1 页】\nx",
         "chunks": [{"text": "【第 1 页】\nx", "source_start": 0, "source_end": 9, "location": {"type": "page", "page": 1}}],
+        "segments": [_test_pdf_segment("【第 1 页】\nx")],
     }
     doc = MagicMock()
     doc.id = uuid.uuid4()

@@ -105,6 +105,63 @@ const PROCESSING_ERROR_LABELS = {
     stage_failed: '该阶段处理失败',
 };
 
+const PARSING_COVERAGE_LABELS = {
+    complete: '完整识别',
+    partial: '部分识别',
+    unknown: '覆盖未知',
+};
+
+const PARSING_COVERAGE_TAGS = {
+    complete: 'success',
+    partial: 'warning',
+    unknown: 'info',
+};
+
+const PARSING_COVERAGE_REASON_LABELS = {
+    visual_content_not_ingested: '图片或图形内容未进入检索',
+    visual_content_without_ocr: '页面含未识别的视觉内容',
+};
+
+export function isPdfCatalogFile(file) {
+    const contentType = String(file?.content_type || '').split(';', 1)[0].trim().toLowerCase();
+    if (contentType) return contentType === 'application/pdf';
+    return String(file?.file_name || '').trim().toLowerCase().endsWith('.pdf');
+}
+
+
+export function parsingCoverageLabel(value) {
+    return PARSING_COVERAGE_LABELS[value] || PARSING_COVERAGE_LABELS.unknown;
+}
+
+export function parsingCoverageTag(value) {
+    return PARSING_COVERAGE_TAGS[value] || PARSING_COVERAGE_TAGS.unknown;
+}
+
+export function parsingCoverageMessage(coverage) {
+    const status = coverage?.status;
+    if (!coverage || !Object.hasOwn(PARSING_COVERAGE_LABELS, status) || status === 'unknown') {
+        const pages = Array.isArray(coverage?.processed_pages) ? coverage.processed_pages : [];
+        return status === 'unknown' && pages.length
+            ? `已处理页：${pages.join('、')}；其余范围无法确认`
+            : '当前版本没有可核验的解析覆盖记录';
+    }
+    if (coverage.status === 'complete') {
+        return Number.isInteger(coverage.total_pages)
+            ? `已处理全部 ${coverage.total_pages} 页`
+            : '已处理全部可确认内容';
+    }
+    const details = [];
+    const pages = Array.isArray(coverage.unprocessed_visual_pages)
+        ? coverage.unprocessed_visual_pages : [];
+    if (pages.length) details.push(`视觉未覆盖页：${pages.join('、')}`);
+    const skipped = Number(coverage.skipped_visual_block_count);
+    if (Number.isInteger(skipped) && skipped > 0) details.push(`跳过视觉块：${skipped}`);
+    for (const reason of coverage.reasons || []) {
+        const label = PARSING_COVERAGE_REASON_LABELS[reason];
+        if (label && !details.includes(label)) details.push(label);
+    }
+    return details.join('；') || '部分内容未被解析，请结合源文件核对';
+}
 export function catalogOverallLabel(value) {
     return OVERALL_LABELS[value] || '未知';
 }

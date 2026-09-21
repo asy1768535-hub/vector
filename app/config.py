@@ -162,6 +162,16 @@ class Settings(BaseSettings):
     pdf_ocr_render_dpi: int = 200
     # 单份 PDF 最多 OCR 多少页（只统计真正进 OCR 的页）；超过即 400 快速失败，不继续渲染
     pdf_ocr_max_pages: int = 50
+    # ---- MinerU 3.4.4 PDF 增强解析（base URL + library slug 白名单双重启用）----
+    mineru_pdf_base_url: str = ""
+    mineru_pdf_expected_version: str = "3.4.4"
+    mineru_pdf_timeout_seconds: float = Field(default=300.0, ge=1.0, le=3600.0)
+    mineru_pdf_max_response_bytes: int = Field(
+        default=64 * 1024 * 1024,
+        ge=1024,
+        le=512 * 1024 * 1024,
+    )
+    mineru_pdf_library_slugs: str = ""
 
     # ---- docx 表格感知切块（默认关，按库 docx_table_aware 覆盖）----
     # 关：docx 走扁平正文切分（散文为主的库实测更优）；开：每个表格单独成块带表头/章节上下文，

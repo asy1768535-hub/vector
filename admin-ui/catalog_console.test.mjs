@@ -10,6 +10,10 @@ import {
     catalogOverallTag,
     collectCatalogLabels,
     formatCatalogConfidence,
+    isPdfCatalogFile,
+    parsingCoverageLabel,
+    parsingCoverageMessage,
+    parsingCoverageTag,
     processingErrorKind,
     processingErrorLabel,
     processingResponseMatches,
@@ -428,6 +432,45 @@ test('document detail shows content directly and only surfaces processing failur
     assert.ok(!view.includes('<h3>知识能力</h3>'));
     assert.ok(!view.includes('<h3>文档处理</h3>'));
     assert.ok(!view.includes('catalog-capability-grid'));
+});
+
+test('PDF coverage distinguishes partial content from processing status', () => {
+    assert.equal(parsingCoverageLabel('complete'), '完整识别');
+    assert.equal(parsingCoverageLabel('partial'), '部分识别');
+    assert.equal(parsingCoverageLabel('unknown'), '覆盖未知');
+    assert.equal(parsingCoverageLabel('unexpected'), '覆盖未知');
+    assert.equal(isPdfCatalogFile({ content_type: 'application/pdf', file_name: 'source.bin' }), true);
+    assert.equal(isPdfCatalogFile({ content_type: 'APPLICATION/PDF; charset=binary' }), true);
+    assert.equal(isPdfCatalogFile({ content_type: null, file_name: 'scan.PDF' }), true);
+    assert.equal(isPdfCatalogFile({ content_type: 'text/plain', file_name: 'fake.pdf' }), false);
+    assert.equal(isPdfCatalogFile({ content_type: 'text/plain', file_name: 'notes.txt' }), false);
+    assert.equal(isPdfCatalogFile(null), false);
+    assert.equal(parsingCoverageTag('partial'), 'warning');
+    assert.equal(parsingCoverageTag('unexpected'), 'info');
+    assert.equal(parsingCoverageMessage(null), '当前版本没有可核验的解析覆盖记录');
+    assert.equal(parsingCoverageMessage({ status: 'unknown', processed_pages: [2] }),
+        '已处理页：2；其余范围无法确认');
+    assert.equal(parsingCoverageMessage({ status: 'unexpected', processed_pages: [2] }),
+        '当前版本没有可核验的解析覆盖记录');
+    assert.equal(parsingCoverageMessage({ status: 'complete', total_pages: 2 }), '已处理全部 2 页');
+    assert.equal(parsingCoverageMessage({
+        status: 'partial', unprocessed_visual_pages: [1, 3],
+        skipped_visual_block_count: 2,
+        reasons: ['visual_content_not_ingested', 'private_provider_trace'],
+    }), '视觉未覆盖页：1、3；跳过视觉块：2；图片或图形内容未进入检索');
+    assert.match(view, /detail\.data\.parsing_coverage\?\.status \|\| 'unknown'/);
+    assert.match(view, /parsingCoverageMessage\(detail\.data\.parsing_coverage\)/);
+    assert.match(view, /v-if="isPdfCatalogFile\(detail\.data\.file\)"/);
+    assert.match(css, /\.catalog-parsing-coverage\s*\{/);
+});
+
+test('knowledge catalog template keeps balanced structural tags', () => {
+    const template = view.slice(view.indexOf('template: `'), view.lastIndexOf('`'));
+    for (const tag of ['div', 'section', 'template']) {
+        const openings = (template.match(new RegExp(`<${tag}(?:\\s|>)`, 'g')) || []).length;
+        const closings = (template.match(new RegExp(`</${tag}>`, 'g')) || []).length;
+        assert.equal(openings, closings, `unbalanced ${tag} tags`);
+    }
 });
 
 test('full source API sends bounded window parameters', async () => {

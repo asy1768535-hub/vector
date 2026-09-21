@@ -552,3 +552,16 @@ def test_parse_import_file_uses_structured_ocr_callback_without_changing_chunks(
     assert result.chunks
     assert all("parser_unit" not in chunk for chunk in result.chunks)
     assert result.segments[0]["quality"]["ocr_blocks"][0]["confidence"] == 0.7
+
+
+def test_unknown_file_type_generates_searchable_metadata_without_reading_binary(tmp_path):
+    binary = tmp_path / "desktop-client.exe"
+    binary.write_bytes(b"\x00\xffnot text")
+
+    result = parse_import_file(binary, _library(), file_name="tools/desktop-client.exe")
+
+    assert result.segments[0]["source_kind"] == "file_metadata"
+    assert "文件名：tools/desktop-client.exe" in result.normalized_text
+    assert "文件格式：.exe" in result.normalized_text
+    assert "不解析其正文" in result.normalized_text
+    assert result.chunks

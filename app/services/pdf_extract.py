@@ -14,12 +14,16 @@ from __future__ import annotations
 import io
 import logging
 import math
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
 import pypdf
 
+from app.services.pdf_coverage import (
+    attach_pdf_coverage_unit,
+    create_pdf_coverage_report,
+)
 from app.services.parser_units import (
     build_ocr_parser_units,
     build_parser_unit,
@@ -37,6 +41,11 @@ PDF_MAX_EMBEDDED_IMAGES = 512
 PDF_MAX_EMBEDDED_IMAGE_BYTES = 64 * 1024 * 1024
 PDF_MAX_RENDER_PIXELS = 25_000_000
 PDF_MAX_RENDERED_PNG_BYTES = 16 * 1024 * 1024
+PDF_MAX_NORMALIZED_TEXT_CHARS = 10_000_000
+PDF_MAX_OCR_BLOCKS_TOTAL = 50_000
+PDF_LOW_RES_IMAGE_MAX_DIMENSION = 350
+PDF_LOW_RES_IMAGE_MAX_PIXELS = 80_000
+PDF_LOW_RES_RENDER_DPI = 72
 
 
 class PdfExtractError(ValueError):
@@ -80,8 +89,35 @@ def _resource_limit(kind: str) -> None:
         "page_dimensions": "PDF resource limit exceeded: page dimensions",
         "render_pixels": "PDF resource limit exceeded: rendered pixels",
         "rendered_png_bytes": "PDF resource limit exceeded: rendered image bytes",
+        "normalized_text": "PDF resource limit exceeded: normalized text",
+        "ocr_blocks": "PDF resource limit exceeded: OCR blocks",
     }
     raise PdfResourceLimitError(messages.get(kind, "PDF resource limit exceeded"))
+
+def _validate_ocr_output_budget(
+    value: object,
+    *,
+    remaining_chars: int,
+    remaining_blocks: int,
+) -> None:
+    if isinstance(value, str):
+        if len(value) > remaining_chars:
+            _resource_limit("normalized_text")
+        return
+    if not isinstance(value, list):
+        return
+    if len(value) > remaining_blocks:
+        _resource_limit("ocr_blocks")
+    text_chars = 0
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        text = item.get("text")
+        if isinstance(text, str):
+            text_chars += len(text)
+            if text_chars > remaining_chars:
+                _resource_limit("normalized_text")
+
 
 
 def _page_dimensions_points(page: object) -> tuple[float, float] | None:
@@ -109,7 +145,7 @@ def _check_render_budget(
         or not math.isfinite(dpi)
         or dpi <= 0
     ):
-        _resource_limit("page_dimensions")
+        _resource_limit("render_pixels")
     try:
         width_points, height_points = page_dimensions
     except (TypeError, ValueError):
@@ -128,7 +164,7 @@ def _check_render_budget(
     try:
         width_pixels = math.ceil(width_points * dpi / 72.0)
         height_pixels = math.ceil(height_points * dpi / 72.0)
-    except (OverflowError, ValueError):
+    except (OverflowError, ValueError, TypeError):
         _resource_limit("render_pixels")
     if (
         width_pixels <= 0
@@ -214,6 +250,103 @@ def _page_images(page: object) -> Iterable[Any]:
     return images
 
 
+def _positive_image_size(value: object) -> int | None:
+    try:
+        if hasattr(value, "get_object"):
+            value = value.get_object()
+        if isinstance(value, bool):
+            return None
+        size = int(value)  # type: ignore[arg-type]
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return None
+    return size if size > 0 else None
+
+
+def _embedded_image_size_hint(image: object) -> int | None:
+    for attribute in ("encoded_size", "stream_length", "data_length"):
+        try:
+            size = _positive_image_size(getattr(image, attribute, None))
+        except Exception:  # noqa: BLE001 - optional metadata must not block extraction
+            size = None
+        if size is not None:
+            return size
+    try:
+        reference = getattr(image, "indirect_reference", None)
+        stream = reference.get_object() if reference is not None else None
+        if stream is None:
+            return None
+        size = _positive_image_size(stream.get("/Length"))
+        if size is not None:
+            return size
+        raw_data = getattr(stream, "_data", None)
+        return len(raw_data) if isinstance(raw_data, bytes) and raw_data else None
+    except Exception:  # noqa: BLE001 - malformed stream metadata falls back to actual bytes
+        return None
+
+def _embedded_image_dimensions(image: object) -> tuple[int, int] | None:
+    try:
+        reference = getattr(image, "indirect_reference", None)
+        stream = reference.get_object() if reference is not None else None
+        if stream is None and hasattr(image, "get"):
+            stream = image
+        if stream is None:
+            return None
+        width = _positive_image_size(stream.get("/Width"))
+        height = _positive_image_size(stream.get("/Height"))
+        if width is not None and height is not None:
+            return width, height
+    except Exception:  # noqa: BLE001 - malformed image metadata falls back safely
+        return None
+    return None
+
+
+def _resolve_page_render_dpi(page: object, configured_dpi: int) -> int:
+    if (
+        not isinstance(configured_dpi, (int, float))
+        or isinstance(configured_dpi, bool)
+        or not math.isfinite(configured_dpi)
+        or configured_dpi <= PDF_LOW_RES_RENDER_DPI
+    ):
+        return int(configured_dpi) if (
+            isinstance(configured_dpi, (int, float))
+            and not isinstance(configured_dpi, bool)
+            and math.isfinite(configured_dpi)
+        ) else configured_dpi  # type: ignore[return-value]
+
+    try:
+        images = _page_images(page)
+        iterator = iter(images)
+    except Exception:  # noqa: BLE001 - page image access failures fall back to configured DPI
+        return int(configured_dpi)
+
+    seen_images = 0
+    while True:
+        try:
+            image = next(iterator)
+        except StopIteration:
+            break
+        except Exception:  # noqa: BLE001 - malformed resources fall back safely
+            return int(configured_dpi)
+        seen_images += 1
+        if seen_images > PDF_MAX_EMBEDDED_IMAGES_PER_PAGE:
+            return int(configured_dpi)
+        dims = _embedded_image_dimensions(image)
+        if dims is None:
+            return int(configured_dpi)
+        width, height = dims
+        if (
+            width > PDF_LOW_RES_IMAGE_MAX_DIMENSION
+            or height > PDF_LOW_RES_IMAGE_MAX_DIMENSION
+            or (width * height) > PDF_LOW_RES_IMAGE_MAX_PIXELS
+        ):
+            return int(configured_dpi)
+
+    if seen_images == 0:
+        return int(configured_dpi)
+
+    return PDF_LOW_RES_RENDER_DPI
+
+
 def _scan_embedded_images(
     images: Iterable[Any],
     totals: list[int],
@@ -238,6 +371,14 @@ def _scan_embedded_images(
         if totals[0] >= PDF_MAX_EMBEDDED_IMAGES:
             _resource_limit("embedded_image_count")
         totals[0] += 1
+        if on_image is None:
+            continue
+        size_hint = _embedded_image_size_hint(image)
+        if (
+            size_hint is not None
+            and size_hint > PDF_MAX_EMBEDDED_IMAGE_BYTES - totals[1]
+        ):
+            _resource_limit("embedded_image_bytes")
         try:
             image_data = getattr(image, "data", None)
         except Exception:  # noqa: BLE001 - malformed image resources do not block text extraction
@@ -247,8 +388,7 @@ def _scan_embedded_images(
         if len(image_data) > PDF_MAX_EMBEDDED_IMAGE_BYTES - totals[1]:
             _resource_limit("embedded_image_bytes")
         totals[1] += len(image_data)
-        if on_image is not None:
-            on_image(image_data)
+        on_image(image_data)
 
 
 def _reader_page_items(reader: object) -> object:
@@ -313,7 +453,8 @@ def _extract_pdf_parts(
     min_text_chars: int,
     render_dpi: int,
     max_ocr_pages: int,
-) -> str:
+    coverage_state: dict[str, Any] | None = None,
+) -> list[tuple[int, str, str, list[dict[str, Any]]]]:
     try:
         reader = _open_reader(data)
         page_items = _reader_page_items(reader)
@@ -325,21 +466,44 @@ def _extract_pdf_parts(
     parts: list[tuple[int, str, str, list[dict[str, Any]]]] = []
     ocr_pages_used = 0
     image_totals = [0, 0]
+    text_chars = 0
+    block_count = 0
+    visited_pages = 0
+    unprocessed_visual_pages: list[int] = []
+
+    def append_part(index: int, value: str, mode: str, blocks: list[dict[str, Any]]) -> None:
+        nonlocal text_chars, block_count
+        text_chars += len(value)
+        block_count += len(blocks)
+        if text_chars > PDF_MAX_NORMALIZED_TEXT_CHARS:
+            _resource_limit("normalized_text")
+        if block_count > PDF_MAX_OCR_BLOCKS_TOTAL:
+            _resource_limit("ocr_blocks")
+        parts.append((index, value, mode, blocks))
+        if mode == "native_visual_unparsed":
+            unprocessed_visual_pages.append(index + 1)
+
 
     for idx, page in page_items:
+        visited_pages = idx + 1
         try:
             text = (page.extract_text() or "").replace("\x00", "").strip()
         except Exception:  # noqa: BLE001  单页抽取失败按图片页处理，不连累整份
             text = ""
 
+        if len(text) > PDF_MAX_NORMALIZED_TEXT_CHARS - text_chars:
+            _resource_limit("normalized_text")
         meaningful_chars = _meaningful_char_count(text)
         image_values = _page_images(page)
         image_texts: list[str] = []
         ocr_blocks: list[dict[str, Any]] = []
         embedded_ocr_started = False
+        embedded_images_attempted = 0
+        embedded_images_with_text = 0
 
         def ocr_embedded_image(image_data: bytes) -> None:
             nonlocal embedded_ocr_started, ocr_pages_used
+            nonlocal embedded_images_attempted, embedded_images_with_text
             if not embedded_ocr_started:
                 if ocr_pages_used >= max_ocr_pages:
                     raise PdfExtractError(
@@ -347,11 +511,30 @@ def _extract_pdf_parts(
                     )
                 ocr_pages_used += 1
                 embedded_ocr_started = True
-            value, blocks = ocr_result_text_and_blocks(ocr(image_data))  # type: ignore[misc]
+            embedded_images_attempted += 1
+            try:
+                raw_result = ocr(image_data)  # type: ignore[misc]
+                _validate_ocr_output_budget(
+                    raw_result,
+                    remaining_chars=(
+                        PDF_MAX_NORMALIZED_TEXT_CHARS
+                        - text_chars
+                        - sum(map(len, image_texts))
+                    ),
+                    remaining_blocks=(
+                        PDF_MAX_OCR_BLOCKS_TOTAL - block_count - len(ocr_blocks)
+                    ),
+                )
+                value, blocks = ocr_result_text_and_blocks(raw_result)
+            except PdfResourceLimitError:
+                raise
+            except Exception:  # noqa: BLE001 - provider details must not enter job errors
+                raise PdfExtractError("PDF OCR 识别失败") from None
             value = value.replace("\x00", "")
             if value and _meaningful_char_count(value) > 0:
                 image_texts.append(value)
                 ocr_blocks.extend(blocks)
+                embedded_images_with_text += 1
 
         should_try_embedded_ocr = (
             meaningful_chars >= min_text_chars
@@ -367,22 +550,24 @@ def _extract_pdf_parts(
             page,
             embedded_image_count=image_count,
         )
+        embedded_images_fully_covered = (
+            embedded_ocr_started
+            and embedded_images_attempted == image_count
+            and embedded_images_with_text == image_count
+        )
 
         if meaningful_chars >= min_text_chars:
             if not has_visual_content:
-                parts.append((idx, text, "native", []))
+                append_part(idx, text, "native", [])
                 continue
-            if not embedded_ocr_started:
-                parts.append((idx, text, "native_visual_unparsed", []))
+            if not embedded_images_fully_covered:
+                append_part(idx, "\n".join([text, *image_texts]), "native_visual_unparsed", ocr_blocks)
                 continue
             merged = "\n".join([text, *image_texts])
-            parts.append(
-                (
-                    idx,
-                    merged,
-                    "mixed" if image_texts else "native_visual_unparsed",
-                    ocr_blocks,
-                )
+            append_part(
+                idx, merged,
+                "mixed" if image_texts else "native_visual_unparsed",
+                ocr_blocks,
             )
             continue
 
@@ -390,7 +575,9 @@ def _extract_pdf_parts(
         if not ocr_enabled:
             if text:  # 保留已有短文字；纯空白/图片页才跳过
                 mode = "native_visual_unparsed" if has_visual_content else "native_short"
-                parts.append((idx, text, mode, []))
+                append_part(idx, text, mode, [])
+            elif has_visual_content:
+                unprocessed_visual_pages.append(idx + 1)
             continue
         if ocr is None:
             raise PdfOcrUnavailableError(
@@ -402,26 +589,48 @@ def _extract_pdf_parts(
             )
 
         page_dimensions = _page_dimensions_points(page)
+        effective_render_dpi = _resolve_page_render_dpi(page, render_dpi)
         if page_dimensions is not None:
-            _check_render_budget(page_dimensions, render_dpi)
-        png = _render_page_png(data, idx, render_dpi)
+            _check_render_budget(page_dimensions, effective_render_dpi)
+        png = _render_page_png(data, idx, effective_render_dpi)
         ocr_pages_used += 1
-        ocr_text, ocr_blocks = ocr_result_text_and_blocks(ocr(png))
+        try:
+            raw_result = ocr(png)
+            _validate_ocr_output_budget(
+                raw_result,
+                remaining_chars=PDF_MAX_NORMALIZED_TEXT_CHARS - text_chars - len(text),
+                remaining_blocks=PDF_MAX_OCR_BLOCKS_TOTAL - block_count,
+            )
+            ocr_text, ocr_blocks = ocr_result_text_and_blocks(raw_result)
+        except PdfResourceLimitError:
+            raise
+        except Exception:  # noqa: BLE001 - provider details must not enter job errors
+            raise PdfExtractError("PDF OCR 识别失败") from None
         ocr_text = ocr_text.replace("\x00", "")
-        del png  # 立即释放该页 PNG 引用
+        del png
         # 合并原短文字与 OCR 结果；OCR 为空也保留原文字，不让短文字页丢内容
         merged = "\n".join(
             t for t in (text, ocr_text) if _meaningful_char_count(t) > 0
         )
         if merged:
-            mode = "mixed" if text else "ocr"
-            parts.append((idx, merged, mode, ocr_blocks))
+            mode = (
+                "mixed" if text and _meaningful_char_count(ocr_text) > 0
+                else "native_visual_unparsed" if text and has_visual_content
+                else "native_short" if text
+                else "ocr"
+            )
+            append_part(idx, merged, mode, ocr_blocks)
+        elif has_visual_content:
+            unprocessed_visual_pages.append(idx + 1)
 
     if not parts:
         if ocr_enabled:
             raise PdfExtractError("PDF OCR 后仍无可识别文本")
         raise PdfExtractError("PDF 无可提取文本；如为扫描件，请在知识库开启图片 OCR")
 
+    if coverage_state is not None:
+        coverage_state["total_pages"] = visited_pages or None
+        coverage_state["unprocessed_visual_pages"] = sorted(set(unprocessed_visual_pages))
     return parts
 
 
@@ -462,9 +671,27 @@ def build_pdf_source(
     min_text_chars: int,
     render_dpi: int,
     max_ocr_pages: int,
+    preflight_report: Mapping[str, Any] | None = None,
 ) -> dict:
     from app.services.splitter import split_structured_text
 
+    coverage_state: dict[str, Any] = {}
+    preflight_total_pages = (
+        preflight_report.get("total_pages")
+        if isinstance(preflight_report, Mapping)
+        else None
+    )
+    has_complete_preflight = (
+        isinstance(preflight_report, Mapping)
+        and preflight_report.get("status") == "complete"
+        and preflight_report.get("page_count_known") is True
+        and isinstance(preflight_total_pages, int)
+        and not isinstance(preflight_total_pages, bool)
+        and preflight_total_pages >= 1
+    )
+    if has_complete_preflight:
+        coverage_state["preflight_complete"] = True
+        coverage_state["preflight_total_pages"] = preflight_total_pages
     parts = _extract_pdf_parts(
         data,
         ocr_enabled=ocr_enabled,
@@ -472,11 +699,22 @@ def build_pdf_source(
         min_text_chars=min_text_chars,
         render_dpi=render_dpi,
         max_ocr_pages=max_ocr_pages,
+        coverage_state=coverage_state,
     )
-    text_parts: list[str] = []
+    rendered_segments = [
+        f"【第 {page_index + 1} 页】\n{page_text}"
+        for page_index, page_text, _mode, _blocks in parts
+    ]
+    normalized_text = "\n\n".join(rendered_segments)
+    base_offsets: list[int] = []
+    cursor = 0
+    for index, segment_text in enumerate(rendered_segments):
+        if index:
+            cursor += 2
+        base_offsets.append(cursor)
+        cursor += len(segment_text)
     chunks: list[dict] = []
     segments: list[dict] = []
-    cursor = 0
     parser = parser_provenance(
         "pypdf",
         "v1",
@@ -486,16 +724,12 @@ def build_pdf_source(
             "max_ocr_pages": max_ocr_pages,
         },
     )
-    for page_index, page_text, extraction_mode, ocr_blocks in parts:
-        segment = f"【第 {page_index + 1} 页】\n{page_text}"
-        if text_parts:
-            text_parts.append("\n\n")
-            cursor += 2
-        base_offset = cursor
-        text_parts.append(segment)
-        cursor += len(segment)
+    for (
+        (page_index, page_text, extraction_mode, ocr_blocks),
+        segment,
+        base_offset,
+    ) in zip(parts, rendered_segments, base_offsets, strict=True):
         text_offset = base_offset + len(segment) - len(page_text)
-        normalized_text = "".join(text_parts)
         parser_extraction_mode = (
             "unparsed" if extraction_mode == "native_visual_unparsed"
             else "native" if extraction_mode == "native_short"
@@ -583,4 +817,38 @@ def build_pdf_source(
                     for source_range in chunk["source_ranges"]
                 ]
             chunks.append(output_chunk)
-    return {"normalized_text": "".join(text_parts), "chunks": chunks, "segments": segments}
+    processed_pages = [page_index + 1 for page_index, *_rest in parts]
+    preflight_total_pages = coverage_state.get("preflight_total_pages")
+    total_pages = (
+        preflight_total_pages
+        if coverage_state.get("preflight_complete")
+        else coverage_state.get("total_pages")
+    )
+    unprocessed_visual_pages = coverage_state.get("unprocessed_visual_pages") or []
+    if unprocessed_visual_pages:
+        coverage_status = "partial"
+    elif (
+        coverage_state.get("preflight_complete")
+        and isinstance(total_pages, int)
+        and processed_pages == list(range(1, total_pages + 1))
+    ):
+        coverage_status = "complete"
+    else:
+        coverage_status = "unknown"
+    coverage = create_pdf_coverage_report(
+        status=coverage_status,
+        total_pages=total_pages,
+        processed_pages=processed_pages,
+        unprocessed_visual_pages=unprocessed_visual_pages,
+        skipped_visual_block_count=len(unprocessed_visual_pages),
+        reasons=(
+            ["visual_content_without_ocr"] if unprocessed_visual_pages else []
+        ),
+    )
+    attach_pdf_coverage_unit(segments, coverage)
+    return {
+        "normalized_text": normalized_text,
+        "chunks": chunks,
+        "segments": segments,
+        "coverage": coverage,
+    }
