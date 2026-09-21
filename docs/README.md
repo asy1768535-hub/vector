@@ -1,10 +1,23 @@
 # 文档索引
 
-## 当前真相与历史记录
+## 新会话最小入口
 
-截至 **2026-08-29**，当前代码真相是：`pyproject.toml` package version 为 `0.1.0`；代码迁移 head 为 **`0062`**。向量摄入/检索是核心，代码还包含按 feature gate 或 rollout 控制的图谱、分类、知识产物、Evidence/claim shadow、公开 API/MCP 与组织能力。
+后续 Codex、Pi 或维护者依次阅读：
 
-部署、架构、worker、schema、测试和内部试运行的当前说明以根目录 README 及 [02](./02-architecture.md)、[11](./11-worker.md)、[14](./14-database-schema.md)、[15](./15-deployment.md)、[16](./16-testing.md)、[22](./22-internal-pilot-checklist.md) 为准。下方“版本说明”中的 `v0.x`、`M*`、旧 head 和旧测试数字是历史设计/验收记录，保留其原始时点，不是当前 package version 或部署 head。
+1. 根目录 [`AGENTS.md`](../AGENTS.md)；
+2. [`AGENT_README.md`](./AGENT_README.md)（当前续接基线）；
+3. [`current-architecture.md`](./current-architecture.md)（当前系统结构和 owner）；
+4. [`decisions.md`](./decisions.md)（有效决策索引）；
+5. 当前活跃 PDF 任务的[路线图](./roadmap/pdf-understanding-improvement-plan-20260918.zh-CN.md)与本机 [Trellis 任务](../.trellis/tasks/09-20-deterministic-pdf-parsing/)；
+6. 验收使用 [`quality/verification-matrix.md`](./quality/verification-matrix.md)，转交使用 [`handoffs/README.md`](./handoffs/README.md)。
+
+`docs/` 是可提交开发真源根。历史计划不移动、不覆盖；它们只在有日期和实施回写时作为当时证据。当前 checkout、迁移、测试和目标环境实时输出始终优先。
+
+维护文档时先查看 [`documentation-status.md`](./documentation-status.md)：它标明哪些页面是当前入口、哪些只能作历史/专题参考，以及何时必须重新验证。
+
+## 历史时间点快照与分组索引
+
+以下段落保留 **2026-08-29** 的索引快照，不是当前运行或迁移事实：`pyproject.toml` package version 当时为 `0.1.0`；迁移 head 当时记录为 **`0062`**。部署、架构、worker、schema、测试和内部试运行的当前入口已迁至上方最小入口；下方 `v0.x`、`M*`、旧 head 和旧测试数字均仅代表历史设计/验收时点。
 
 当前 `docs/` 下共有 **64 个 Markdown 文件**（根目录 48 个、子目录 16 个；命令：`Get-ChildItem docs -File -Recurse -Filter *.md`，核对日期 2026-08-17）。本页是分组索引，不再使用旧的“24 篇”数量描述。
 
@@ -115,7 +128,6 @@
 | 10 | [检索接口](./10-retrieval-api.md) | Dify external knowledge base spec |
 | 11 | [Worker](./11-worker.md) | Embedding / Cleanup / Importer 及按能力启用的 worker |
 | 12 | [管理后台 UI](./12-admin-ui.md) | 零构建 Vue 3 SPA |
-| 48 | [前端按钮功能清单](./48-frontend-button-function-inventory.md) | 按页面按钮核对功能、权限和真实 API |
 
 ## 参考资料
 

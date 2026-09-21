@@ -1,5 +1,7 @@
 # Vector Knowledge Base
 
+> **智能体/维护续接入口**：请先阅读 [`docs/AGENT_README.md`](./docs/AGENT_README.md)。它记录了 2026-09-17 基于本地代码、迁移、规划与测试的核对结果；若本 README 的历史“当前”描述与代码冲突，以该说明及实时命令输出为准。
+
 面向公司内部的**向量知识检索底座**：可靠地摄入文档、做权限受控的检索，并以 **Dify 外部知识库兼容**的统一接口供上层系统（Dify / FastGPT / 办公系统 / Agent）调用。
 
 > **当前真相（核对日期：2026-08-29）**：`pyproject.toml` 的 package version 是 `0.1.0`；代码迁移 head 是 **`0062`**。参考部署数据库在 2026-08-12 的 `alembic current` 为 `0060`，不能代表当前目标环境。文档中的 `v0.x`、`M*` 等是阶段/设计标签，不是 package version。部署到目标数据库时仍应执行 `alembic heads` 与 `alembic current`，以目标环境输出为准。
