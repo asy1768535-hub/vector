@@ -19,6 +19,7 @@ from app.models.classification_decision import (
 from app.models.classification_job import DocumentClassificationJob
 from app.models.classification_taxonomy import ClassificationLabel
 from app.models.document import Document
+from app.models.document_block import DocumentBlock
 from app.models.document_revision import DocumentRevision
 from app.models.document_revision_file import DocumentRevisionFile
 from app.models.entity import Entity
@@ -49,6 +50,7 @@ from app.schemas.knowledge_catalog import (
     CatalogEvidenceLocatorRead,
     CatalogGraphCountsRead,
     CatalogGraphRead,
+    CatalogParsingCoverageRead,
     CatalogOutlineRead,
     CatalogRelationKnowledgeUnitRead,
     CatalogRevisionFileRead,
@@ -71,6 +73,10 @@ from app.services.knowledge_catalog_contracts import (
     project_catalog_capabilities,
 )
 from app.services.revision_files import RevisionFileAccess, revision_file_access_from_row
+from app.services.pdf_coverage import (
+    PDF_COVERAGE_UNIT_KEY,
+    pdf_coverage_from_document_blocks,
+)
 from app.services.object_storage_contracts import ObjectStorageError
 
 
@@ -1693,6 +1699,33 @@ async def _document_graph(
         raise KnowledgeCatalogError("catalog_invariant_failed") from exc
 
 
+async def _current_parsing_coverage(
+    db,
+    *,
+    library_id: uuid.UUID,
+    document_id: uuid.UUID,
+    revision_id: uuid.UUID,
+) -> CatalogParsingCoverageRead:
+    rows = (
+        await db.execute(
+            select(DocumentBlock.content)
+            .where(
+                DocumentBlock.library_id == library_id,
+                DocumentBlock.document_id == document_id,
+                DocumentBlock.document_revision_id == revision_id,
+                DocumentBlock.block_kind == "structured_unit",
+                DocumentBlock.content["parser_unit"]["unit_key"].astext
+                == PDF_COVERAGE_UNIT_KEY,
+            )
+            .limit(2)
+        )
+    ).scalars().all()
+    report = pdf_coverage_from_document_blocks(
+        {"content": content} for content in rows
+    ) if len(rows) <= 1 else pdf_coverage_from_document_blocks(())
+    return CatalogParsingCoverageRead.model_validate(report)
+
+
 async def get_catalog_document_detail(
     db,
     *,
@@ -1743,6 +1776,12 @@ async def get_catalog_document_detail(
         summary=_summary_read(artifacts.get("summary")),
         outline=_outline_read(artifacts.get("outline")),
         graph=graph,
+        parsing_coverage=await _current_parsing_coverage(
+            db,
+            library_id=library.id,
+            document_id=document_id,
+            revision_id=current.revision.id,
+        ),
     )
 
 

@@ -23,6 +23,10 @@ import {
     formatCatalogBytes,
     formatCatalogConfidence,
     formatCatalogTime,
+    isPdfCatalogFile,
+    parsingCoverageLabel,
+    parsingCoverageMessage,
+    parsingCoverageTag,
     processingErrorKind,
     processingErrorLabel,
     processingResponseMatches,
@@ -1149,6 +1153,7 @@ export default {
             catalogPageLabel, catalogTitlePath, shortCatalogId,
             processingStageLabel, processingStageRetryable,
             processingStatusLabel, processingStatusTag, processingErrorLabel,
+            isPdfCatalogFile, parsingCoverageLabel, parsingCoverageMessage, parsingCoverageTag,
             reviewProposalLabel, reviewReasonLabel, reviewRoleLabel, formatReviewConfidence,
             dataEmpty, serviceError,
         };
@@ -1381,6 +1386,13 @@ export default {
               <div v-if="detail.data.file"><dt>源文件</dt><dd :title="detail.data.file.file_name">{{ detail.data.file.file_name }}</dd></div>
               <div v-if="detail.data.file"><dt>文件大小</dt><dd>{{ formatCatalogBytes(detail.data.file.size_bytes) }}</dd></div>
             </dl>
+            <div v-if="isPdfCatalogFile(detail.data.file)" class="catalog-parsing-coverage"
+                 :class="'is-' + (detail.data.parsing_coverage?.status || 'unknown')">
+              <el-tag :type="parsingCoverageTag(detail.data.parsing_coverage?.status)" size="small">
+                {{ parsingCoverageLabel(detail.data.parsing_coverage?.status) }}
+              </el-tag>
+              <span>{{ parsingCoverageMessage(detail.data.parsing_coverage) }}</span>
+            </div>
           </section>
 
           <section v-if="canManageProcessing && (processing.errorKind || processing.retryError || processingIssues.length)"

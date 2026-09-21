@@ -188,12 +188,32 @@ class CatalogGraphRead(StrictBaseModel):
         return self
 
 
+class CatalogParsingCoverageRead(StrictBaseModel):
+    contract_version: Literal["pdf-coverage-v1"] = "pdf-coverage-v1"
+    status: Literal["complete", "partial", "unknown"] = "unknown"
+    total_pages: int | None = Field(default=None, strict=True, ge=1, le=1_000_000)
+    processed_pages: list[int] = Field(default_factory=list, max_length=5000)
+    unprocessed_visual_pages: list[int] = Field(default_factory=list, max_length=5000)
+    skipped_visual_block_count: int = Field(default=0, strict=True, ge=0, le=5000)
+    reasons: list[Literal["visual_content_without_ocr", "visual_content_not_ingested"]] = Field(
+        default_factory=list, max_length=8
+    )
+
+    @model_validator(mode="after")
+    def validate_coverage(self):
+        from app.services.pdf_coverage import validate_pdf_coverage_report
+
+        validate_pdf_coverage_report(self.model_dump())
+        return self
+
+
 class CatalogDocumentDetailRead(CatalogDocumentListItemRead):
     contract_version: Literal["catalog-document-detail-v1"] = "catalog-document-detail-v1"
     file: CatalogRevisionFileRead | None
     summary: CatalogSummaryRead | None
     outline: CatalogOutlineRead | None
     graph: CatalogGraphRead
+    parsing_coverage: CatalogParsingCoverageRead = Field(default_factory=CatalogParsingCoverageRead)
 
 
 class CatalogEvidenceFactRefRead(StrictBaseModel):

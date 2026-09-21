@@ -24,6 +24,7 @@ from app.schemas.knowledge_catalog import (
 )
 from app.schemas.storage import StorageLocatorV1
 from app.services import knowledge_catalog as service
+from app.services.pdf_coverage import PDF_COVERAGE_UNIT_KEY, create_pdf_coverage_report
 from app.services.knowledge_catalog_contracts import (
     CatalogDocumentCursor,
     CatalogDocumentQuery,
@@ -337,6 +338,60 @@ def test_document_graph_projects_only_supported_current_fact(monkeypatch):
     assert graph.counts.entities == 1 and graph.counts.relations == 0
     assert graph.entities[0].evidence[0].evidence_id == evidence_id
     assert graph.entities[0].publication_id == publication_id
+
+
+def test_current_parsing_coverage_is_revision_bounded_and_fails_closed():
+    library = _library()
+    document, revision = _current(library)
+    report = create_pdf_coverage_report(
+        status="partial",
+        total_pages=3,
+        processed_pages=[1, 2, 3],
+        unprocessed_visual_pages=[2],
+        skipped_visual_block_count=2,
+        reasons=["visual_content_not_ingested"],
+    )
+    content = {
+        "parser_unit": {
+            "unit_key": PDF_COVERAGE_UNIT_KEY,
+            "unit_kind": "structured_unit",
+            "source_kind": "pdf",
+            "value": report,
+        }
+    }
+    db = _DB(_Result(rows=(content,)))
+
+    projected = asyncio.run(service._current_parsing_coverage(
+        db,
+        library_id=library.id,
+        document_id=document.id,
+        revision_id=revision.id,
+    ))
+
+    assert projected.status == "partial"
+    assert projected.unprocessed_visual_pages == [2]
+    statement = str(db.statements[0].compile(
+        dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True},
+    )).lower()
+    assert f"document_blocks.library_id = '{library.id}'" in statement
+    assert f"document_blocks.document_id = '{document.id}'" in statement
+    assert f"document_blocks.document_revision_id = '{revision.id}'" in statement
+    assert "limit 2" in statement
+
+    malformed = _DB(_Result(rows=({"parser_unit": {
+        "unit_key": PDF_COVERAGE_UNIT_KEY,
+        "unit_kind": "structured_unit",
+        "source_kind": "pdf",
+        "value": {"private_provider_trace": "secret"},
+    }},)))
+    unknown = asyncio.run(service._current_parsing_coverage(
+        malformed,
+        library_id=library.id,
+        document_id=document.id,
+        revision_id=revision.id,
+    ))
+    assert unknown.status == "unknown"
+    assert "secret" not in unknown.model_dump_json()
 
 
 def test_prepare_file_access_requires_exact_current_available_revision():
