@@ -9,6 +9,7 @@ import {
     queueHealthRows, formatQueueAge, formatQueueRate, formatQueueThroughput,
     monitorListParams,
 } from './src/jobs_ui.js';
+import { retryMonitoredTasks } from './src/api.js';
 
 const src = readFileSync(new URL('./src/views/Jobs.js', import.meta.url), 'utf8');
 const uiSrc = readFileSync(new URL('./src/jobs_ui.js', import.meta.url), 'utf8');
@@ -125,6 +126,31 @@ test('stale detail closes after filters, pages, or refresh', () => {
     assert.ok(src.includes('page.value = 1'));
 });
 
+test('batch retry sends JSON with its content type', async () => {
+    const priorFetch = globalThis.fetch;
+    let request;
+    globalThis.fetch = async (url, options) => {
+        request = { url: String(url), options };
+        return new Response(JSON.stringify({ results: [] }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+        });
+    };
+    try {
+        await retryMonitoredTasks([
+            { task_type: 'import', job_id: 'job-1', observed_generation: 0 },
+        ]);
+    } finally {
+        globalThis.fetch = priorFetch;
+    }
+    assert.equal(request.url, '/admin/jobs/monitor/retry');
+    assert.equal(request.options.method, 'POST');
+    assert.equal(request.options.headers['Content-Type'], 'application/json');
+    assert.deepEqual(JSON.parse(request.options.body), {
+        items: [{ task_type: 'import', job_id: 'job-1', observed_generation: 0 }],
+    });
+});
+
 test('task refresh is single-flight, visibility-aware, and active-only', () => {
     assert.ok(src.includes('let refreshInFlight = null'));
     assert.ok(src.includes('let statsInFlight = null'));
@@ -174,9 +200,12 @@ test('truncation threshold matches request limit and stats show all terminal sta
 test('table layout keeps long values bounded and operation column scroll-safe', () => {
     assert.ok(src.includes('jobs-library-name'));
     assert.ok(src.includes(':title="libraryName(libs, row.library_id)"'));
+    assert.ok(src.includes('label="文件夹"'));
+    assert.ok(src.includes('row.folder_path'));
     assert.ok(src.includes(':title="jobErrorText(row)"'));
     assert.ok(!src.includes('fixed="right"'));
-    assert.match(css, /\.jobs-table-shell \.el-table\s*\{[^}]*min-width:1500px/s);
+    assert.match(css, /\.jobs-table-shell \.el-table\s*\{[^}]*min-width:1660px/s);
+    assert.match(css, /\.jobs-folder-path\s*\{[^}]*text-overflow:ellipsis/s);
     assert.match(css, /\.jobs-table-actions\s*\{[^}]*display:flex/s);
     assert.match(css, /\.jobs-retry-unavailable\s*\{[^}]*white-space:normal/s);
     assert.ok(!css.includes('.jobs-retry-unavailable { color:var(--app-text-muted); font-size:12px; white-space:nowrap; }'));

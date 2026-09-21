@@ -27,7 +27,9 @@ from app.auth.backend import current_superuser
 from app.config import settings
 from app.db import get_db
 from app.models.document_import_job import DocumentImportJob
+from app.models.document import Document
 from app.models.embedding_job import EmbeddingJob
+from app.models.folder import Folder
 from app.models.graph_extraction_job import GraphExtractionJob
 from app.models.user import User
 
@@ -240,6 +242,31 @@ def test_monitor_maps_graph_waiting_schema_to_pending_for_closed_stats():
     assert row.raw_status == "waiting_schema"
 
 
+def test_monitor_rows_expose_the_document_folder_path():
+    import_job, embedding_job, graph_job = _monitor_pipeline_jobs("waiting_schema")
+
+    import_row = _import_monitor_row(
+        import_job,
+        embedding_job=embedding_job,
+        graph_job=graph_job,
+        folder_path="/财务部/2025",
+    )
+    embedding_row = _embedding_monitor_row(
+        embedding_job,
+        title="sample.docx",
+        folder_path="/财务部/2025",
+    )
+    graph_row = _graph_monitor_row(
+        graph_job,
+        title="sample.docx",
+        folder_path="/财务部/2025",
+    )
+
+    assert import_row.folder_path == "/财务部/2025"
+    assert embedding_row.folder_path == "/财务部/2025"
+    assert graph_row.folder_path == "/财务部/2025"
+
+
 def test_monitor_import_tracks_graph_extraction_until_it_finishes():
     import_job, embedding_job, graph_job = _monitor_pipeline_jobs("processing")
     processing = _import_monitor_row(
@@ -349,6 +376,18 @@ async def test_monitor_import_loads_only_latest_lightweight_production_graphs():
     import_job.status = "failed"
     import_job.current_stage = "validating"
     import_job.embedding_job_id = None
+    folder = Folder(
+        id=uuid.uuid4(),
+        library_id=import_job.library_id,
+        name="2025",
+        path="/财务部/2025",
+    )
+    document = Document(
+        id=import_job.document_id,
+        library_id=import_job.library_id,
+        folder_id=folder.id,
+        content_hash="a" * 64,
+    )
 
     def scalar_result(rows):
         result = MagicMock()
@@ -360,6 +399,8 @@ async def test_monitor_import_loads_only_latest_lightweight_production_graphs():
         side_effect=[
             scalar_result([import_job]),
             scalar_result([]),
+            scalar_result([document]),
+            scalar_result([folder]),
             scalar_result([]),
         ]
     )
@@ -371,6 +412,7 @@ async def test_monitor_import_loads_only_latest_lightweight_production_graphs():
     )
 
     assert len(rows) == 1
+    assert rows[0].folder_path == "/财务部/2025"
     related_graph_stmt = db.execute.await_args_list[1].args[0]
     related_graph_sql = str(
         related_graph_stmt.compile(

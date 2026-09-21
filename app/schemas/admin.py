@@ -578,6 +578,7 @@ class TaskMonitorRead(BaseModel):
     title: Optional[str] = None
     library_id: uuid.UUID
     document_id: Optional[uuid.UUID] = None
+    folder_path: Optional[str] = None
     document_revision: Optional[int] = None
     document_revision_id: Optional[uuid.UUID] = None
     status: str

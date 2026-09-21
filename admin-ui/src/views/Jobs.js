@@ -463,6 +463,9 @@ export default {
             <el-table-column label="知识库" min-width="140">
               <template #default="{row}"><span class="jobs-library-name" :title="libraryName(libs, row.library_id)">{{ libraryName(libs, row.library_id) }}</span></template>
             </el-table-column>
+            <el-table-column label="文件夹" min-width="160">
+              <template #default="{row}"><span class="jobs-folder-path" :title="row.folder_path || '根目录'">{{ row.folder_path || '根目录' }}</span></template>
+            </el-table-column>
             <el-table-column label="状态" width="130" align="center">
               <template #default="{row}">
                 <local-icon v-if="STATUS_ICON[row.status]" :icon="STATUS_ICON[row.status]" class="jobs-status-icon" />

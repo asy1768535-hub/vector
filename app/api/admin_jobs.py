@@ -19,6 +19,7 @@ from app.models.document import Document
 from app.models.document_import_job import DocumentImportJob
 from app.models.document_revision import DocumentRevision
 from app.models.embedding_job import EmbeddingJob
+from app.models.folder import Folder
 from app.models.graph_extraction_job import GraphExtractionJob
 from app.models.graph_extraction_unit import GraphExtractionUnit
 from app.models.graph_publication import GraphPublication
@@ -528,6 +529,7 @@ def _embedding_monitor_row(
     job: EmbeddingJob,
     *,
     title: Optional[str] = None,
+    folder_path: Optional[str] = None,
 ) -> TaskMonitorRead:
     normalized = _EMBEDDING_STATUS.get(job.status, job.status)
     retryable = job.status == "pending" or (
@@ -544,6 +546,7 @@ def _embedding_monitor_row(
         title=title,
         library_id=job.library_id,
         document_id=job.document_id,
+        folder_path=folder_path,
         document_revision=job.document_revision,
         document_revision_id=job.document_revision_id,
         status=normalized,
@@ -569,6 +572,7 @@ def _graph_monitor_row(
     job: GraphExtractionJob,
     *,
     title: Optional[str] = None,
+    folder_path: Optional[str] = None,
     revision_no: Optional[int] = None,
     publication_status: Optional[str] = None,
     latest_production: bool = False,
@@ -617,6 +621,7 @@ def _graph_monitor_row(
         title=title,
         library_id=job.library_id,
         document_id=job.document_id,
+        folder_path=folder_path,
         document_revision=revision_no,
         document_revision_id=job.document_revision_id,
         status=normalized_status,
@@ -692,6 +697,7 @@ def _import_monitor_row(
     embedding_job: Optional[EmbeddingJob] = None,
     graph_job: Optional[GraphExtractionJob] = None,
     revision_no: Optional[int] = None,
+    folder_path: Optional[str] = None,
     graph_retry_state: Optional[tuple[bool, str, str]] = None,
 ) -> TaskMonitorRead:
     status_value = _IMPORT_STATUS.get(job.status, job.status)
@@ -798,6 +804,7 @@ def _import_monitor_row(
         title=job.relative_path or job.file_name,
         library_id=job.library_id,
         document_id=job.document_id,
+        folder_path=folder_path or import_uploads.folder_path_for_job(job),
         document_revision=revision_no,
         document_revision_id=job.document_revision_id,
         status=status_value,
@@ -990,11 +997,31 @@ async def _load_monitor_tasks(
         ).all()
         retryable_graph_ids = {row[0] for row in retryable_units}
 
-    document_ids = {job.document_id for job in [*embedding_jobs, *graph_jobs] if job.document_id is not None}
+    document_ids = {
+        job.document_id
+        for job in [*import_jobs, *embedding_jobs, *graph_jobs]
+        if job.document_id is not None
+    }
     documents_by_id: dict[uuid.UUID, Document] = {}
     if document_ids:
         documents = (await db.execute(select(Document).where(Document.id.in_(document_ids)))).scalars().all()
         documents_by_id = {document.id: document for document in documents}
+
+    folder_ids = {
+        document.folder_id
+        for document in documents_by_id.values()
+        if document.folder_id is not None
+    }
+    folders_by_id: dict[uuid.UUID, Folder] = {}
+    if folder_ids:
+        folders = (await db.execute(select(Folder).where(Folder.id.in_(folder_ids)))).scalars().all()
+        folders_by_id = {folder.id: folder for folder in folders}
+
+    def folder_path_for(document: Document | None) -> str | None:
+        if document is None or document.folder_id is None:
+            return None
+        folder = folders_by_id.get(document.folder_id)
+        return folder.path if folder is not None and folder.deleted_at is None else None
 
     revision_ids = {
         job.document_revision_id
@@ -1013,12 +1040,14 @@ async def _load_monitor_tasks(
     rows: list[TaskMonitorRead] = []
     for job in import_jobs:
         revision = revisions_by_id.get(job.document_revision_id)
+        document = documents_by_id.get(job.document_id)
         rows.append(
             _import_monitor_row(
                 job,
                 embedding_job=embeddings_by_id.get(job.embedding_job_id),
                 graph_job=latest_graph_by_revision.get(job.document_revision_id),
                 revision_no=revision.revision_no if revision else None,
+                folder_path=folder_path_for(document),
                 graph_retry_state=(
                     _graph_retry_state(
                         latest_graph_by_revision[job.document_revision_id],
@@ -1035,7 +1064,13 @@ async def _load_monitor_tasks(
         )
     for job in embedding_jobs:
         document = documents_by_id.get(job.document_id)
-        rows.append(_embedding_monitor_row(job, title=document.title if document else None))
+        rows.append(
+            _embedding_monitor_row(
+                job,
+                title=document.title if document else None,
+                folder_path=folder_path_for(document),
+            )
+        )
     for job in graph_jobs:
         document = documents_by_id.get(job.document_id)
         revision = revisions_by_id.get(job.document_revision_id)
@@ -1043,6 +1078,7 @@ async def _load_monitor_tasks(
             _graph_monitor_row(
                 job,
                 title=document.title if document else None,
+                folder_path=folder_path_for(document),
                 revision_no=revision.revision_no if revision else None,
                 publication_status=_graph_publication_status(
                     job,
