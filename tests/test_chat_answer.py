@@ -119,6 +119,12 @@ def test_success_returns_answer_and_used_records():
     assert len(res.used_records) == 1
 
 
+def test_success_removes_model_thinking_block():
+    with _patch(content="<think>这里是模型推理，不应返回。</think>根据 [1] 可知答案。"):
+        res = _gen([_rec("c1", "正文")])
+    assert res.answer == "根据 [1] 可知答案。"
+
+
 def test_timeout_raises_chat_error():
     with _patch(exc=httpx.TimeoutException("timeout")):
         with pytest.raises(C.ChatError):
@@ -200,6 +206,11 @@ def _delta(s):
 def test_stream_yields_content_deltas():
     lines = [_delta("农"), _delta("民工"), "data: [DONE]"]
     assert _collect_stream(lines=lines) == ["农", "民工"]
+
+
+def test_stream_removes_thinking_block_when_tags_cross_deltas():
+    lines = [_delta("<thi"), _delta("nk>推理"), _delta("</th"), _delta("ink>答案"), "data: [DONE]"]
+    assert _collect_stream(lines=lines) == ["答案"]
 
 
 def test_stream_skips_heartbeat_and_non_content():

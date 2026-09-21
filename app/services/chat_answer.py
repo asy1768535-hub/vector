@@ -35,12 +35,62 @@ class ChatError(RuntimeError):
 
 CHAT_OUTPUT_MAX_CHARS = 131_072
 CHAT_OUTPUT_LIMIT_EXCEEDED = "chat_output_limit_exceeded"
+_THINK_OPEN = "<think>"
+_THINK_CLOSE = "</think>"
 
 
 @dataclass
 class ChatAnswer:
     answer: str
     used_records: list          # 实际进入上下文（截断后）的 records，用于回显 sources
+
+
+def _tag_prefix_suffix(value: str, tag: str) -> str:
+    lowered = value.lower()
+    for size in range(min(len(value), len(tag) - 1), 0, -1):
+        if lowered.endswith(tag[:size]):
+            return value[-size:]
+    return ""
+
+
+class _ThinkingBlockFilter:
+    """移除模型错误写入 content 的 <think> 块，并支持标签跨流式增量。"""
+
+    def __init__(self) -> None:
+        self._pending = ""
+        self._in_thinking = False
+
+    def feed(self, value: str) -> str:
+        self._pending += value
+        output: list[str] = []
+        while self._pending:
+            lowered = self._pending.lower()
+            tag = _THINK_CLOSE if self._in_thinking else _THINK_OPEN
+            position = lowered.find(tag)
+            if position >= 0:
+                if not self._in_thinking:
+                    output.append(self._pending[:position])
+                self._pending = self._pending[position + len(tag):]
+                self._in_thinking = not self._in_thinking
+                continue
+            suffix = _tag_prefix_suffix(self._pending, tag)
+            stable = self._pending[:-len(suffix)] if suffix else self._pending
+            if not self._in_thinking:
+                output.append(stable)
+            self._pending = suffix
+            break
+        return "".join(output)
+
+    def finish(self) -> str:
+        if self._in_thinking:
+            return ""
+        value, self._pending = self._pending, ""
+        return value
+
+
+def _without_thinking_blocks(value: str) -> str:
+    filter_ = _ThinkingBlockFilter()
+    return (filter_.feed(value) + filter_.finish()).strip()
 
 
 def _endpoint(base_url: str) -> str:
@@ -146,7 +196,10 @@ async def generate_answer(
         raise ChatError(f"chat 模型调用失败：{type(exc).__name__}") from exc
     except (KeyError, IndexError, TypeError, ValueError) as exc:
         raise ChatError("chat 模型返回结构异常") from exc
-    if not isinstance(answer, str) or not answer.strip():
+    if not isinstance(answer, str):
+        raise ChatError("chat 模型返回空答案")
+    answer = _without_thinking_blocks(answer)
+    if not answer:
         raise ChatError("chat 模型返回空答案")
     log.info("chat_answer: model=%s ctx=%dchars sources=%d -> %dchars",
              model, len(context), len(used), len(answer))
@@ -181,6 +234,7 @@ async def stream_answer(
         payload["chat_template_kwargs"] = {"enable_thinking": False}
     headers = _headers(api_key)
     output_length = 0
+    thinking_filter = _ThinkingBlockFilter()
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
             async with client.stream(
@@ -207,7 +261,12 @@ async def stream_answer(
                         output_length += len(delta)
                         if output_length > CHAT_OUTPUT_MAX_CHARS:
                             raise ChatError(CHAT_OUTPUT_LIMIT_EXCEEDED)
-                        yield delta
+                        visible = thinking_filter.feed(delta)
+                        if visible:
+                            yield visible
+        visible = thinking_filter.finish()
+        if visible:
+            yield visible
     except httpx.TimeoutException as exc:
         raise ChatError("chat 模型调用超时") from exc
     except httpx.HTTPError as exc:
