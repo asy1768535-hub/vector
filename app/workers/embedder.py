@@ -225,10 +225,19 @@ async def _claim_jobs(db: AsyncSession, worker_id: str, limit: int) -> list[Embe
     raw_sql = text(
         """
         WITH picked AS (
-            SELECT id FROM embedding_jobs
-            WHERE status = 'pending'
-              AND attempt_count < :max_attempts
-            ORDER BY created_at
+            SELECT j.id
+            FROM embedding_jobs j
+            JOIN documents d ON d.id = j.document_id
+            WHERE j.status = 'pending'
+              AND j.attempt_count < :max_attempts
+              AND (
+                NOT :exclude_pdf
+                OR (
+                    LOWER(COALESCE(d.source_path, '')) NOT LIKE '%.pdf'
+                    AND LOWER(COALESCE(d.title, '')) NOT LIKE '%.pdf'
+                )
+              )
+            ORDER BY j.created_at
             FOR UPDATE SKIP LOCKED
             LIMIT :limit
         )
@@ -244,7 +253,13 @@ async def _claim_jobs(db: AsyncSession, worker_id: str, limit: int) -> list[Embe
     )
     result = await db.execute(
         raw_sql,
-        {"limit": limit, "worker_id": worker_id, "max_attempts": settings.embed_worker_max_attempts},
+        {
+            "limit": limit,
+            "worker_id": worker_id,
+            "max_attempts": settings.embed_worker_max_attempts,
+            "exclude_pdf": os.getenv("WORKER_EXCLUDE_PDF", "").strip().lower()
+            in {"1", "true", "yes", "on"},
+        },
     )
     ids = [row[0] for row in result.all()]
     if not ids:

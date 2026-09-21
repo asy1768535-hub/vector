@@ -524,6 +524,7 @@ async def _ingest_or_upsert(
                 new_text=doc_data["text"], title=doc_data["title"],
                 metadata=doc_data["metadata"], splitter=doc_data["splitter"],
                 force=management_changed, chunks=doc_data.get("chunks"),
+                segments=doc_data.get("segments"),
             )
             if changed:
                 await _upsert_document_source(db, existing.id, existing.current_revision, doc_data.get("source"))
@@ -543,6 +544,7 @@ async def _ingest_or_upsert(
         visibility_scope=doc_data.get("visibility_scope"),
         security_level=doc_data.get("security_level"),
         chunks=doc_data.get("chunks"),
+        segments=doc_data.get("segments"),
     )
     if not was_existing:
         await _upsert_document_source(db, doc.id, doc.current_revision, doc_data.get("source"))
@@ -582,6 +584,7 @@ async def _replace_document(db: AsyncSession, lib: Library, target_id: uuid.UUID
             new_text=doc_data["text"], title=doc_data["title"],
             metadata=meta, splitter=doc_data["splitter"],
             force=True, chunks=doc_data.get("chunks"),
+            segments=doc_data.get("segments"),
         )
         await _upsert_document_source(db, target.id, target.current_revision, doc_data.get("source"))
     except IntegrityError as exc:
@@ -1482,26 +1485,13 @@ async def import_file(
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid CSV format: {str(e)}")
 
     elif suffix == ".pdf":
-        # PDF：文字层优先；图片/扫描页在库级 ocr_enabled 开启时逐页渲染 + OCR（见 docs/23）。
-        # 文字版行为不变；OCR 默认关，关闭时纯扫描件给出"去开启 OCR"的明确 400。
-        from app.services import ocr as ocr_svc
-        from app.services import pdf_extract
-
-        eff_ocr = lib.ocr_enabled if lib.ocr_enabled is not None else settings.ocr_enabled
-        ocr_cb = ocr_svc.ocr_image if (eff_ocr and ocr_svc.is_available()) else None
         try:
-            source = pdf_extract.build_pdf_source(
+            source = await asyncio.to_thread(
+                import_parsing.build_pdf_import_source,
                 content,
-                chunk_size=lib.chunk_size,
-                chunk_overlap=lib.chunk_overlap,
-                ocr_enabled=bool(eff_ocr),
-                ocr=ocr_cb,
-                min_text_chars=settings.pdf_ocr_min_text_chars,
-                render_dpi=settings.pdf_ocr_render_dpi,
-                max_ocr_pages=settings.pdf_ocr_max_pages,
+                lib,
             )
-        except pdf_extract.PdfExtractError as exc:
-            # 含 PdfOcrUnavailableError（需 OCR 但依赖缺）——消息已是用户可读的提示
+        except ValueError as exc:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
         documents_to_ingest.append({
             "text": source["normalized_text"],
@@ -1510,6 +1500,7 @@ async def import_file(
             "metadata": None,
             "splitter": "text",
             "chunks": source["chunks"],
+            "segments": source.get("segments", []),
             "source": _source_data(source["normalized_text"], filename, suffix),
         })
 
@@ -1541,6 +1532,7 @@ async def import_file(
                 documents_to_ingest.append({
                     "text": text, "title": filename, "external_id": None,
                     "metadata": None, "splitter": "docx", "chunks": source["chunks"],
+                    "segments": source.get("segments", []),
                     "source": _source_data(source["normalized_text"], filename, suffix),
                 })
             else:
@@ -1570,6 +1562,7 @@ async def import_file(
             documents_to_ingest.append({
                 "text": text, "title": filename, "external_id": None,
                 "metadata": None, "splitter": "docx", "chunks": chunks,
+                "segments": source.get("segments", []),
                 "source": _source_data(source["normalized_text"], filename, suffix),
             })
         except HTTPException:

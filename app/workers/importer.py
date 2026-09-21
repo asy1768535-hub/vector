@@ -63,6 +63,7 @@ _last_staging_cleanup_monotonic: float | None = None
 
 @dataclass(frozen=True, slots=True)
 class _ParserLibrarySnapshot:
+    slug: str
     chunk_size: int
     chunk_overlap: int
     ocr_enabled: bool | None
@@ -180,6 +181,10 @@ async def _claim_jobs(
                     LOWER(file_name) NOT LIKE '%.doc'
                     OR conversion_sha256 IS NOT NULL
                   )
+                  AND (
+                    NOT :exclude_pdf
+                    OR LOWER(file_name) NOT LIKE '%.pdf'
+                  )
                 ORDER BY created_at
                 FOR UPDATE SKIP LOCKED
                 LIMIT :limit
@@ -197,6 +202,8 @@ async def _claim_jobs(
             "max_attempts": settings.import_worker_max_attempts,
             "limit": limit,
             "worker_id": worker_id,
+            "exclude_pdf": os.getenv("WORKER_EXCLUDE_PDF", "").strip().lower()
+            in {"1", "true", "yes", "on"},
         },
     )
     await db.commit()
@@ -567,6 +574,7 @@ async def _process_claimed_job(job_id: uuid.UUID) -> None:
                 conversion_sha256=getattr(job, "conversion_sha256", None),
                 converter_version=getattr(job, "converter_version", None),
                 parser_library=_ParserLibrarySnapshot(
+                    slug=str(getattr(library, "slug", "") or ""),
                     chunk_size=library.chunk_size,
                     chunk_overlap=library.chunk_overlap,
                     ocr_enabled=library.ocr_enabled,
