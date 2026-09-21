@@ -8,6 +8,7 @@ export const APP_PATHS = Object.freeze({
     documents: '/knowledge-assets/documents',
     catalog: '/knowledge-assets/catalog',
     myFiles: '/knowledge-assets/my-files',
+    myTasks: '/knowledge-assets/my-tasks',
     importData: '/knowledge-assets/import',
     knowledgeGovernance: '/knowledge-governance',
     knowledgeGraph: '/knowledge-governance/graph',
@@ -73,7 +74,11 @@ export const DOMAIN_TABS = Object.freeze({
             access: 'catalog', icon: 'mdi:bookshelf',
         },
         {
-            key: 'myFiles', label: '我的任务', path: APP_PATHS.myFiles,
+            key: 'myFiles', label: '我的文件', path: APP_PATHS.myFiles,
+            access: 'myFiles', icon: 'sidebar:document',
+        },
+        {
+            key: 'myTasks', label: '我的任务', path: APP_PATHS.myTasks,
             access: 'myFiles', icon: 'sidebar:task',
         },
         {
@@ -256,8 +261,10 @@ export function sidebarItems(domain, access) {
                 icon: 'sidebar:document',
             });
         }
-        const myFilesItem = DOMAIN_TABS.knowledgeAssets.find((item) => item.key === 'myFiles');
-        if (access?.myFiles && myFilesItem) items.push(myFilesItem);
+        for (const key of ['myFiles', 'myTasks']) {
+            const personalItem = DOMAIN_TABS.knowledgeAssets.find((item) => item.key === key);
+            if (access?.myFiles && personalItem) items.push(personalItem);
+        }
         const importItem = DOMAIN_TABS.knowledgeAssets.find((item) => item.key === 'import');
         if (access?.import && importItem) items.push(importItem);
         return items;
@@ -316,7 +323,7 @@ export function defaultRouteForAccess(access) {
 export function domainTabTarget(path, currentQuery = {}) {
     const target = { path };
     if (!path.startsWith(`${APP_PATHS.knowledgeAssets}/`)) return target;
-    if (path === APP_PATHS.myFiles) return target;
+    if (path === APP_PATHS.myFiles || path === APP_PATHS.myTasks) return target;
 
     const library = String(currentQuery.library || currentQuery.slug || '');
     if (!library) return target;

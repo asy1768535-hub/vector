@@ -40,7 +40,15 @@ test('my files loads saved files by library and folder', () => {
     assert.match(view, /path:\s*selectedPath\.value/);
     assert.match(view, /page:\s*currentPage\.value/);
     assert.match(view, /document:\s*file\.document_id/);
-    assert.doesNotMatch(view, /listPersonalImportTaskFiles|personalTaskSummary|retryPersonalTask/);
+});
+
+test('my files stays focused on saved originals and folder navigation', () => {
+    const view = readFileSync(new URL('./views/MyFiles.js', import.meta.url), 'utf8');
+
+    assert.doesNotMatch(view, /异常文件/);
+    assert.doesNotMatch(view, /api\.listFailedImportTaskFiles/);
+    assert.doesNotMatch(view, /api\.retryPersonalImportTask/);
+    assert.doesNotMatch(view, /failedMode/);
 });
 
 test('my files preserves its folder as the document-detail return target', () => {

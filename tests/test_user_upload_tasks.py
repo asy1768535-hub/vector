@@ -51,6 +51,159 @@ def test_personal_task_list_accepts_explicit_numeric_page_size():
     assert response.json() == {"items": [], "next_cursor": None}
 
 
+def test_personal_task_list_applies_the_selected_library_status_and_page():
+    user = SimpleNamespace(id=uuid.uuid4(), is_active=True, is_superuser=False)
+    library = SimpleNamespace(id=uuid.uuid4(), slug="legal", name="法务资料")
+    list_tasks = AsyncMock(return_value=SimpleNamespace(jobs=(), next_cursor=None))
+
+    async def override_user():
+        return user
+
+    async def override_db():
+        return SimpleNamespace()
+
+    app.dependency_overrides[current_active_user] = override_user
+    app.dependency_overrides[get_db] = override_db
+    try:
+        with (
+            patch.object(me, "_personal_task_libraries", new=AsyncMock(return_value={library.id: library})),
+            patch.object(import_uploads, "list_personal_import_tasks", new=list_tasks),
+            patch.object(import_uploads, "personal_task_projections", new=AsyncMock(return_value=[])),
+        ):
+            response = TestClient(app).get(
+                "/me/import-tasks?scope=all&limit=50&page=2&library_slug=legal&status=failed"
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200, response.text
+    list_tasks.assert_awaited_once_with(
+        ANY,
+        user_id=user.id,
+        library_ids={library.id},
+        scope="all",
+        limit=50,
+        cursor_value=None,
+        page=2,
+        status_filter="failed",
+    )
+
+
+def test_personal_task_list_rejects_an_unavailable_library_filter():
+    user = SimpleNamespace(id=uuid.uuid4(), is_active=True, is_superuser=False)
+    list_tasks = AsyncMock(return_value=SimpleNamespace(jobs=(), next_cursor=None))
+
+    async def override_user():
+        return user
+
+    async def override_db():
+        return SimpleNamespace()
+
+    app.dependency_overrides[current_active_user] = override_user
+    app.dependency_overrides[get_db] = override_db
+    try:
+        with (
+            patch.object(me, "_personal_task_libraries", new=AsyncMock(return_value={})),
+            patch.object(import_uploads, "list_personal_import_tasks", new=list_tasks),
+        ):
+            response = TestClient(app).get("/me/import-tasks?library_slug=private")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 404
+    list_tasks.assert_not_awaited()
+
+
+def test_personal_task_summary_applies_the_selected_library_and_status():
+    user = SimpleNamespace(id=uuid.uuid4(), is_active=True, is_superuser=False)
+    library = SimpleNamespace(id=uuid.uuid4(), slug="legal", name="法务资料")
+    summary = AsyncMock(return_value={
+        "total": 3,
+        "pending": 0,
+        "processing": 0,
+        "succeeded": 0,
+        "failed": 3,
+    })
+
+    async def override_user():
+        return user
+
+    async def override_db():
+        return SimpleNamespace()
+
+    app.dependency_overrides[current_active_user] = override_user
+    app.dependency_overrides[get_db] = override_db
+    try:
+        with (
+            patch.object(me, "_personal_task_libraries", new=AsyncMock(return_value={library.id: library})),
+            patch.object(import_uploads, "personal_import_task_summary", new=summary),
+        ):
+            response = TestClient(app).get(
+                "/me/import-task-summary?scope=all&library_slug=legal&status=failed"
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200, response.text
+    summary.assert_awaited_once_with(
+        ANY,
+        user_id=user.id,
+        library_ids={library.id},
+        scope="all",
+        status_filter="failed",
+    )
+
+
+def test_personal_retry_refreshes_the_mutated_task_before_building_the_response():
+    user = SimpleNamespace(id=uuid.uuid4(), is_active=True, is_superuser=False)
+    library = SimpleNamespace(id=uuid.uuid4(), slug="legal", name="法务资料")
+    job = SimpleNamespace(
+        id=uuid.uuid4(),
+        library_id=library.id,
+        requested_by_user_id=user.id,
+        replace_document_id=None,
+        document_id=None,
+        file_name="失败文件.pdf",
+        relative_path="失败文件.pdf",
+        created_at=NOW,
+    )
+    db = AsyncMock()
+
+    async def override_user():
+        return user
+
+    async def override_db():
+        return db
+
+    retry = AsyncMock()
+    projections = AsyncMock(return_value=[{
+        "status": "queued",
+        "current_stage": "queued",
+        "retry_target_type": None,
+        "created_at": NOW,
+        "finished_at": None,
+    }])
+    app.dependency_overrides[current_active_user] = override_user
+    app.dependency_overrides[get_db] = override_db
+    try:
+        with (
+            patch.object(me, "_personal_task_libraries", new=AsyncMock(return_value={library.id: library})),
+            patch.object(import_uploads, "get_personal_import_task", new=AsyncMock(return_value=job)),
+            patch.object(import_uploads, "retry_personal_import_task", new=retry),
+            patch.object(import_uploads, "personal_task_projections", new=projections),
+        ):
+            response = TestClient(app).post(f"/me/import-tasks/{job.id}/retry")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "queued"
+    retry.assert_awaited_once_with(db, job=job)
+    db.refresh.assert_awaited_once_with(job)
+    projections.assert_awaited_once_with(db, [job])
+    db.commit.assert_awaited_once()
+
+
 def test_personal_files_api_lists_only_the_selected_library_directory():
     user = SimpleNamespace(id=uuid.uuid4(), is_active=True, is_superuser=False)
     library = SimpleNamespace(id=uuid.uuid4(), slug="legal", name="法务资料")
@@ -453,8 +606,8 @@ def test_personal_task_files_api_combines_directories_with_safe_task_details():
 
     list_task_files = AsyncMock(return_value=page)
     projections = AsyncMock(return_value=[{
-        "status": "processing",
-        "current_stage": "embedding",
+        "status": "failed",
+        "current_stage": "parsing",
         "created_at": NOW,
         "finished_at": None,
     }])
@@ -480,7 +633,7 @@ def test_personal_task_files_api_combines_directories_with_safe_task_details():
             ),
         ):
             response = TestClient(app).get(
-                "/me/import-task-files?library_slug=legal&scope=30d&page=1&page_size=20"
+                "/me/import-task-files?library_slug=legal&scope=30d&failed_only=true&page=1&page_size=20"
             )
     finally:
         app.dependency_overrides.clear()
@@ -491,8 +644,8 @@ def test_personal_task_files_api_combines_directories_with_safe_task_details():
     assert body["path"] == ""
     assert body["folders"] == [{"name": "项目甲", "path": "/项目甲", "file_total": 2}]
     assert body["items"][0]["file_name"] == "根目录说明.md"
-    assert body["items"][0]["status"] == "processing"
-    assert body["items"][0]["stage"] == "embedding"
+    assert body["items"][0]["status"] == "failed"
+    assert body["items"][0]["stage"] == "parsing"
     assert body["folder_total"] == 1
     assert body["file_total"] == 1
     list_task_files.assert_awaited_once_with(
@@ -503,6 +656,7 @@ def test_personal_task_files_api_combines_directories_with_safe_task_details():
         path="",
         page=1,
         page_size=20,
+        failed_only=True,
     )
 
 
@@ -962,6 +1116,24 @@ def test_personal_task_file_service_keeps_all_states_in_the_selected_owner_direc
         if isinstance(value, str)
     }
 
+    failed_only_db = Db()
+    failed_only_page = asyncio.run(
+        import_uploads.list_personal_import_task_files(
+            failed_only_db,
+            user_id=user_id,
+            library_id=library_id,
+            scope="all",
+            path="/项目甲",
+            page=1,
+            page_size=20,
+            failed_only=True,
+        )
+    )
+
+    assert failed_only_page.jobs == (failed, processing)
+    for statement in failed_only_db.statements:
+        assert "document_import_jobs.status" in str(statement.whereclause).lower()
+
 
 def _import_job(*, requested_by_user_id: uuid.UUID | None = None):
     return SimpleNamespace(
@@ -977,6 +1149,7 @@ def _import_job(*, requested_by_user_id: uuid.UUID | None = None):
 
 def test_personal_task_projection_hides_worker_error_and_exposes_chinese_retry_state():
     job = _import_job()
+    job.result_operation = "duplicate_source"
     result = import_uploads.personal_task_projection(
         job,
         library_name="合规资料",
@@ -999,9 +1172,33 @@ def test_personal_task_projection_hides_worker_error_and_exposes_chinese_retry_s
     assert result["failure_action"] == "稍后重试任务"
     assert result["can_retry"] is True
     assert result["operation_type"] == "import"
+    assert result["result_operation"] == "duplicate_source"
     assert "last_error" not in result
     assert "secret-value" not in str(result)
     assert "token=" not in str(result)
+
+
+def test_personal_task_projection_explains_zip_without_importable_files():
+    job = _import_job()
+    job.file_name = "资料包.zip"
+    result = import_uploads.personal_task_projection(
+        job,
+        library_name="合规资料",
+        library_slug="compliance",
+        projection={
+            "status": "failed",
+            "current_stage": "validating",
+            "retry_target_type": None,
+            "retry_target_id": None,
+            "last_error": "压缩包内没有可导入的支持格式文件",
+            "created_at": NOW,
+            "finished_at": NOW,
+        },
+    )
+
+    assert result["failure_message"] == "压缩包内没有可导入的支持格式文件"
+    assert result["failure_action"] == "请确认包内包含支持格式的文档后重新上传"
+    assert result["can_retry"] is False
 
 
 def test_personal_task_lookup_rejects_a_job_owned_by_another_user():

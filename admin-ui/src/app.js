@@ -41,6 +41,7 @@ import Chat from './views/Chat.js';
 import ChatLogs from './views/ChatLogs.js';
 import Import from './views/Import.js';
 import MyFiles from './views/MyFiles.js';
+import MyTasks from './views/MyTasks.js';
 import ApiKeys from './views/ApiKeys.js';
 import Jobs from './views/Jobs.js';
 import RuntimeStatus from './views/RuntimeStatus.js';
@@ -151,6 +152,16 @@ const routes = [
                     {
                         path: 'my-files',
                         component: MyFiles,
+                        meta: {
+                            domain: 'knowledgeAssets',
+                            domainTitle: '知识资产',
+                            title: '我的文件',
+                            perm: 'insert',
+                        },
+                    },
+                    {
+                        path: 'my-tasks',
+                        component: MyTasks,
                         meta: {
                             domain: 'knowledgeAssets',
                             domainTitle: '知识资产',

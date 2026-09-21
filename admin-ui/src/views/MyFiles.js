@@ -146,6 +146,13 @@ export default {
             loadFiles();
         }
 
+        function openStoredRoot() {
+            selectedPath.value = '';
+            currentPage.value = 1;
+            selectedFileResourceIds.value = new Set();
+            loadFiles();
+        }
+
         function openBreadcrumb(item) {
             if (item.path === selectedPath.value) return;
             selectedPath.value = item.path;
@@ -350,6 +357,7 @@ export default {
             openFile,
             openReplace,
             openFolder,
+            openStoredRoot,
             pageData,
             pageSize: PAGE_SIZE,
             paginationTotal,
@@ -368,7 +376,7 @@ export default {
         <header class="my-files-header">
             <div>
                 <h2>我的文件</h2>
-                <p>选择知识库后按文件夹查看已验证保存的原文件；知识处理失败不会影响文件保存。</p>
+                <p>选择知识库后按文件夹查看和管理已保存的原文件。</p>
             </div>
             <div class="my-files-actions">
                 <el-select v-model="selectedLibrarySlug" class="my-files-library-select"
@@ -403,7 +411,7 @@ export default {
             <aside class="my-files-tree" aria-label="我的文件夹">
                 <button type="button" class="my-files-tree-item is-root"
                         :class="{ 'is-active': !selectedPath }"
-                        @click="openBreadcrumb({ path: '' })">
+                        @click="openStoredRoot">
                     <span>我的文件</span>
                 </button>
                 <button v-for="folder in rootFolders" :key="folder.path" type="button"

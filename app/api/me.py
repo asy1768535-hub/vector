@@ -53,6 +53,22 @@ async def _personal_task_libraries(
     return {library.id: library for library in libraries}
 
 
+def _selected_personal_task_library_ids(
+    libraries_by_id: dict,
+    *,
+    library_slug: str | None,
+) -> set[uuid.UUID]:
+    if not library_slug:
+        return set(libraries_by_id)
+    library = next(
+        (item for item in libraries_by_id.values() if item.slug == library_slug),
+        None,
+    )
+    if library is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "知识库不存在或无上传权限")
+    return {library.id}
+
+
 def _personal_task_read(
     job,
     *,
@@ -380,18 +396,30 @@ async def list_my_import_tasks(
     scope: Literal["30d", "all"] = Query(default="30d"),
     limit: int = Query(default=20),
     cursor: str | None = Query(default=None, min_length=1, max_length=512),
+    page: int | None = Query(default=None, ge=1, le=10_000),
+    library_slug: str | None = Query(default=None, min_length=1, max_length=128),
+    status_filter: Literal["all", "pending", "processing", "succeeded", "failed"] = Query(
+        default="all",
+        alias="status",
+    ),
     user: User = Depends(current_active_user),
     db: AsyncSession = Depends(get_db),
 ) -> PersonalImportTaskPageRead:
     libraries_by_id = await _personal_task_libraries(db, user=user)
+    library_ids = _selected_personal_task_library_ids(
+        libraries_by_id,
+        library_slug=library_slug,
+    )
     try:
         page = await import_uploads.list_personal_import_tasks(
             db,
             user_id=user.id,
-            library_ids=set(libraries_by_id),
+            library_ids=library_ids,
             scope=scope,
             limit=limit,
             cursor_value=cursor,
+            page=page,
+            status_filter=status_filter,
         )
         projections = await import_uploads.personal_task_projections(db, page.jobs)
     except import_uploads.ImportUploadError as exc:
@@ -416,6 +444,7 @@ async def list_my_import_task_files(
     path: str = Query(default="", max_length=2048),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20),
+    failed_only: bool = Query(default=False),
     user: User = Depends(current_active_user),
     db: AsyncSession = Depends(get_db),
 ) -> PersonalImportTaskFilePageRead:
@@ -438,6 +467,7 @@ async def list_my_import_task_files(
             path=path,
             page=page,
             page_size=page_size,
+            failed_only=failed_only,
         )
         projections = await import_uploads.personal_task_projections(db, result.jobs)
     except import_uploads.ImportUploadError as exc:
@@ -467,16 +497,26 @@ async def list_my_import_task_files(
 @router.get("/import-task-summary", response_model=PersonalImportTaskSummaryRead)
 async def my_import_task_summary(
     scope: Literal["30d", "all"] = Query(default="30d"),
+    library_slug: str | None = Query(default=None, min_length=1, max_length=128),
+    status_filter: Literal["all", "pending", "processing", "succeeded", "failed"] = Query(
+        default="all",
+        alias="status",
+    ),
     user: User = Depends(current_active_user),
     db: AsyncSession = Depends(get_db),
 ) -> PersonalImportTaskSummaryRead:
     libraries_by_id = await _personal_task_libraries(db, user=user)
+    library_ids = _selected_personal_task_library_ids(
+        libraries_by_id,
+        library_slug=library_slug,
+    )
     try:
         summary = await import_uploads.personal_import_task_summary(
             db,
             user_id=user.id,
-            library_ids=set(libraries_by_id),
+            library_ids=library_ids,
             scope=scope,
+            status_filter=status_filter,
         )
     except import_uploads.ImportUploadError as exc:
         _raise_personal_task_error(exc)
@@ -506,6 +546,7 @@ async def retry_my_import_task(
                 status_code=404,
             )
         await import_uploads.retry_personal_import_task(db, job=job)
+        await db.refresh(job)
         projection = (await import_uploads.personal_task_projections(db, [job]))[0]
         response = _personal_task_read(job, library=library, projection=projection)
         await db.commit()
