@@ -3,10 +3,12 @@ from __future__ import annotations
 import base64
 import binascii
 import uuid
-from collections.abc import Awaitable
-from typing import Literal, TypeVar
+from collections.abc import Awaitable, Callable
+from typing import Literal, TypeVar, cast
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.auth.provider import TokenVerifier
+from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp.exceptions import ResourceError, ToolError
 from pydantic import BaseModel
 
@@ -98,11 +100,20 @@ def _resource_uuid(value: str) -> uuid.UUID:
 
 
 def create_mcp_server(
-    client: PublicV1Client,
+    client: PublicV1Client | None = None,
     *,
+    client_factory: Callable[[], PublicV1Client] | None = None,
+    token_verifier: TokenVerifier | None = None,
+    auth: AuthSettings | None = None,
     upload_enabled: bool = False,
     max_upload_bytes: int = 10 * 1024 * 1024,
 ) -> FastMCP:
+    if (client is None) == (client_factory is None):
+        raise ValueError("provide exactly one MCP client or request client factory")
+
+    def current_client() -> PublicV1Client:
+        return client_factory() if client_factory is not None else cast(PublicV1Client, client)
+
     instructions = (
         "Read authorized knowledge libraries through the stable public v1 "
         "contracts. Select an explicit Library scope or a saved scope for "
@@ -110,25 +121,27 @@ def create_mcp_server(
     )
     if upload_enabled:
         instructions += (
-            " Upload files only to Libraries where the configured service "
-            "credential has insert permission."
+            " Upload files only to Libraries where the calling user "
+            "has insert permission."
         )
     server = FastMCP(
         name="Vector Knowledge",
         instructions=instructions,
         stateless_http=True,
         json_response=True,
+        token_verifier=token_verifier,
+        auth=auth,
     )
 
     @server.tool()
     async def list_libraries() -> PublicLibrariesResponse:
-        """List knowledge libraries visible to the configured credential."""
-        return await _tool_result(client.list_libraries())
+        """List knowledge libraries visible to the calling user."""
+        return await _tool_result(current_client().list_libraries())
 
     @server.tool()
     async def list_permissions() -> list[PermissionMatrixRow]:
-        """List Library actions granted to the configured service credential."""
-        return await _tool_result(client.list_permissions())
+        """List Library actions granted to the calling user."""
+        return await _tool_result(current_client().list_permissions())
 
     @server.tool()
     async def validate_scope(
@@ -137,7 +150,7 @@ def create_mcp_server(
     ) -> PublicScopeValidationResponse:
         """Validate one bounded Library scope and its channel compatibility."""
         return await _tool_result(
-            client.validate_scope(scope=scope, channels=list(channels))
+            current_client().validate_scope(scope=scope, channels=list(channels))
         )
 
     @server.tool()
@@ -146,7 +159,7 @@ def create_mcp_server(
         document_id: uuid.UUID,
     ) -> PublicDocumentResponse:
         """Read one authorized document and current Revision metadata."""
-        return await _tool_result(client.get_document(library_slug, document_id))
+        return await _tool_result(current_client().get_document(library_slug, document_id))
 
     @server.tool()
     async def get_entity(
@@ -154,7 +167,7 @@ def create_mcp_server(
         entity_id: uuid.UUID,
     ) -> PublicEntityResponse:
         """Read one Library-scoped entity with bounded Evidence links."""
-        return await _tool_result(client.get_entity(library_slug, entity_id))
+        return await _tool_result(current_client().get_entity(library_slug, entity_id))
 
     @server.tool()
     async def get_relation(
@@ -162,7 +175,7 @@ def create_mcp_server(
         relation_id: uuid.UUID,
     ) -> PublicRelationResponse:
         """Read one Library-scoped relation with bounded Evidence links."""
-        return await _tool_result(client.get_relation(library_slug, relation_id))
+        return await _tool_result(current_client().get_relation(library_slug, relation_id))
 
     @server.tool()
     async def get_evidence(
@@ -170,28 +183,28 @@ def create_mcp_server(
         evidence_id: uuid.UUID,
     ) -> PublicEvidenceResponse:
         """Read one Evidence record and its authorized source locator."""
-        return await _tool_result(client.get_evidence(library_slug, evidence_id))
+        return await _tool_result(current_client().get_evidence(library_slug, evidence_id))
 
     @server.tool()
     async def search_entities(
         request: PublicEntitySearchRequest,
     ) -> PublicEntitySearchResponse:
         """Search entities in one explicit or saved authorized scope."""
-        return await _tool_result(client.search_entities(request))
+        return await _tool_result(current_client().search_entities(request))
 
     @server.tool()
     async def search_relations(
         request: PublicRelationSearchRequest,
     ) -> PublicRelationSearchResponse:
         """Search relations in one explicit or saved authorized scope."""
-        return await _tool_result(client.search_relations(request))
+        return await _tool_result(current_client().search_relations(request))
 
     @server.tool()
     async def retrieve(
         request: PublicRetrievalRequest,
     ) -> PublicRetrievalResponse:
         """Retrieve bounded source chunks and published graph context."""
-        return await _tool_result(client.retrieve(request))
+        return await _tool_result(current_client().retrieve(request))
 
     @server.tool()
     async def search_knowledge(
@@ -208,14 +221,14 @@ def create_mcp_server(
             candidate_k=min(100, max(top_k, top_k * 2)),
             score_threshold=score_threshold,
         )
-        return await _tool_result(client.retrieve(request))
+        return await _tool_result(current_client().retrieve(request))
 
     @server.tool()
     async def answer(
         request: PublicAnswerRequest,
     ) -> PublicAnswerResponse:
         """Generate one grounded answer with bounded sources and graph context."""
-        return await _tool_result(client.answer(request))
+        return await _tool_result(current_client().answer(request))
 
     if upload_enabled:
 
@@ -235,7 +248,7 @@ def create_mcp_server(
             except MCPAdapterError as exc:
                 raise ToolError(str(exc)) from None
             return await _tool_result(
-                client.upload_file(
+                current_client().upload_file(
                     library_slug,
                     filename,
                     content,
@@ -245,8 +258,8 @@ def create_mcp_server(
 
     @server.resource("vector-kb://libraries")
     async def libraries_resource() -> str:
-        """List libraries visible to the configured credential."""
-        return await _resource_result(client.list_libraries())
+        """List libraries visible to the calling user."""
+        return await _resource_result(current_client().list_libraries())
 
     @server.resource(
         "vector-kb://libraries/{slug}/documents/{document_id}",
@@ -255,7 +268,7 @@ def create_mcp_server(
     async def document_resource(slug: str, document_id: str) -> str:
         """Read an authorized document resource."""
         return await _resource_result(
-            client.get_document(slug, _resource_uuid(document_id))
+            current_client().get_document(slug, _resource_uuid(document_id))
         )
 
     @server.resource(
@@ -264,7 +277,7 @@ def create_mcp_server(
     )
     async def entity_resource(slug: str, entity_id: str) -> str:
         """Read an authorized entity resource."""
-        return await _resource_result(client.get_entity(slug, _resource_uuid(entity_id)))
+        return await _resource_result(current_client().get_entity(slug, _resource_uuid(entity_id)))
 
     @server.resource(
         "vector-kb://libraries/{slug}/relations/{relation_id}",
@@ -273,7 +286,7 @@ def create_mcp_server(
     async def relation_resource(slug: str, relation_id: str) -> str:
         """Read an authorized relation resource."""
         return await _resource_result(
-            client.get_relation(slug, _resource_uuid(relation_id))
+            current_client().get_relation(slug, _resource_uuid(relation_id))
         )
 
     @server.resource(
@@ -283,7 +296,7 @@ def create_mcp_server(
     async def evidence_resource(slug: str, evidence_id: str) -> str:
         """Read an authorized Evidence resource."""
         return await _resource_result(
-            client.get_evidence(slug, _resource_uuid(evidence_id))
+            current_client().get_evidence(slug, _resource_uuid(evidence_id))
         )
 
     return server

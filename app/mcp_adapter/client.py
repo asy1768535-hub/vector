@@ -64,15 +64,18 @@ class PublicV1Client:
         self,
         settings: MCPAdapterSettings,
         http_client: httpx.AsyncClient | None = None,
+        *,
+        api_key: str | None = None,
     ) -> None:
         base_url = str(settings.base_url).rstrip("/")
         self._service_base_url = base_url.removesuffix("/api/v1")
         self._base_url = (
             base_url if base_url.endswith("/api/v1") else f"{base_url}/api/v1"
         )
-        self._authorization = (
-            f"Bearer {settings.api_key.get_secret_value().strip()}"
-        )
+        credential = api_key if api_key is not None else settings.api_key.get_secret_value()
+        if not credential.strip():
+            raise ValueError("an API key is required for the public API client")
+        self._authorization = f"Bearer {credential.strip()}"
         self._timeout = settings.timeout_seconds
         self._http_client = http_client or httpx.AsyncClient()
         self._owns_http_client = http_client is None
