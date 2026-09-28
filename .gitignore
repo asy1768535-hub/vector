@@ -81,3 +81,15 @@ storage/document_files/
 /.deploy_tmp/
 /.release_tmp/
 /output/
+
+# 本机 PI-Desktop 执行/规划空间——不入库
+.pi/
+.claude/skills/
+
+# 临时目录与工作产物
+.tmp-*/
+/outputs/
+/sample-files/
+
+# 根目录临时截图
+/*.png
