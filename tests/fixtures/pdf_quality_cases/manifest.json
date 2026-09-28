@@ -1,0 +1,142 @@
+{
+  "schema_version": "pdf-quality-synthetic-fixtures-v1",
+  "created_at": "2026-09-22T00:00:00Z",
+  "generator": "tests/fixtures/pdf_quality_cases/generate_fixtures.py",
+  "samples": [
+    {
+      "id": "01_native_text",
+      "file_name": "01_native_text.pdf",
+      "sha256": "ce919f67a4ff03615a61f9bd744713b4d66eacf297f39ecb45994c4abc454b2b",
+      "bytes": 1695,
+      "category": "native_text",
+      "expected_preflight_status": "complete",
+      "expected_v1_selection": "native_or_rapidocr",
+      "expected_cascade_selection": "native_or_rapidocr",
+      "expected_inspector_verdict": {
+        "accept": false,
+        "reason": "incomplete_or_non_ocr"
+      },
+      "description": "原生矢量文字单页文档，不走单页扫描后验门控，直接走原生本地解析"
+    },
+    {
+      "id": "02_clean_bilingual_scan",
+      "file_name": "02_clean_bilingual_scan.pdf",
+      "sha256": "e6908a471117695916456fb52bc2fc7798a2e16ba1d3faf8c86f8b37379502ef",
+      "bytes": 98805,
+      "category": "clean_bilingual_scan",
+      "expected_preflight_status": "complete",
+      "expected_v1_selection": "mineru",
+      "expected_cascade_selection": "native_or_rapidocr",
+      "expected_inspector_verdict": {
+        "accept": true,
+        "reason": "accepted"
+      },
+      "description": "清晰中英文扫描件，单栏且无数字/表格/公式，级联门控开启时被质检接受直通本地"
+    },
+    {
+      "id": "03_table_scan",
+      "file_name": "03_table_scan.pdf",
+      "sha256": "12a15528d6399314042338c94311ef64c81d2188c565def53172f3aade0cad88",
+      "bytes": 49713,
+      "category": "table_scan",
+      "expected_preflight_status": "complete",
+      "expected_v1_selection": "mineru",
+      "expected_cascade_selection": "mineru",
+      "expected_inspector_verdict": {
+        "accept": false,
+        "reason": "structured_content_risk"
+      },
+      "description": "表格与数字金额扫描件，含阿拉伯数字和 $ % 符号，质检拦截并升档 MinerU"
+    },
+    {
+      "id": "04_three_column_scan",
+      "file_name": "04_three_column_scan.pdf",
+      "sha256": "111854de1bc2ef74d1af8ae7ba62ba7889c9427e3211af2920eab65d944b3bdf",
+      "bytes": 109270,
+      "category": "three_column_scan",
+      "expected_preflight_status": "complete",
+      "expected_v1_selection": "mineru",
+      "expected_cascade_selection": "mineru",
+      "expected_inspector_verdict": {
+        "accept": false,
+        "reason": "layout_risk"
+      },
+      "description": "三栏横向分离扫描件，存在同行水平间隙较大的文本块对，质检判定版面风险并升档"
+    },
+    {
+      "id": "05_low_confidence_scan",
+      "file_name": "05_low_confidence_scan.pdf",
+      "sha256": "7204696407e961cd2299ae253550dc0bf98cf3c66e51f8d5f62f3708ef367d30",
+      "bytes": 39472,
+      "category": "low_confidence_scan",
+      "expected_preflight_status": "complete",
+      "expected_v1_selection": "mineru",
+      "expected_cascade_selection": "mineru",
+      "expected_inspector_verdict": {
+        "accept": false,
+        "reason": "low_confidence"
+      },
+      "description": "模糊低对比度扫描件，OCR 置信度中位数或最低值未达阈值，质检拦截并升档"
+    },
+    {
+      "id": "06_blank_scan",
+      "file_name": "06_blank_scan.pdf",
+      "sha256": "5e7a10bc9086f0711cc80b778c8fe35f6b251543081a9304dbe131690fb50b21",
+      "bytes": 31499,
+      "category": "blank_scan",
+      "expected_preflight_status": "complete",
+      "expected_v1_selection": "mineru",
+      "expected_cascade_selection": "mineru",
+      "expected_inspector_verdict": {
+        "accept": false,
+        "reason": "incomplete_or_non_ocr"
+      },
+      "description": "无文字空白扫描件，候选提取抛出空文本异常或块数不足，安全回落并升档 MinerU"
+    },
+    {
+      "id": "07_multi_page_scan",
+      "file_name": "07_multi_page_scan.pdf",
+      "sha256": "3ce30cc5f90d6ac33d6eddd64eb3c74c2d7b5ac7993522859cc2d2c354a07dd9",
+      "bytes": 161342,
+      "category": "multi_page_scan",
+      "expected_preflight_status": "complete",
+      "expected_v1_selection": "mineru",
+      "expected_cascade_selection": "mineru",
+      "expected_inspector_verdict": {
+        "accept": false,
+        "reason": "incomplete_or_non_ocr"
+      },
+      "description": "两页扫描件，预检页数 > 1 不满足单页级联资格，维持 V1 选型直接调用 MinerU"
+    },
+    {
+      "id": "08_corrupted",
+      "file_name": "08_corrupted.pdf",
+      "sha256": "aa7814cc6373160ca9a16e03a8e524c93f064718dc5e171ad076e73ad3417096",
+      "bytes": 89,
+      "category": "corrupted_pdf",
+      "expected_preflight_status": "unknown",
+      "expected_v1_selection": "native_or_rapidocr",
+      "expected_cascade_selection": "native_or_rapidocr",
+      "expected_inspector_verdict": {
+        "accept": false,
+        "reason": "incomplete_or_non_ocr"
+      },
+      "description": "损坏的 PDF 字节流，预检返回 unknown 且不触发远端 MinerU"
+    },
+    {
+      "id": "09_resource_limit",
+      "file_name": "09_resource_limit.pdf",
+      "sha256": "6ca981a165ef0d0cc441fe68fe20778eb24650ba81cf95baa999499126aea633",
+      "bytes": 108449,
+      "category": "resource_limit_scan",
+      "expected_preflight_status": "complete",
+      "expected_v1_selection": "mineru",
+      "expected_cascade_selection": "mineru",
+      "expected_inspector_verdict": {
+        "accept": false,
+        "reason": "incomplete_or_non_ocr"
+      },
+      "description": "6 页扫描件，多页直接维持 V1 MinerU 路由"
+    }
+  ]
+}

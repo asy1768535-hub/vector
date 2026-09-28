@@ -17,7 +17,8 @@ def isolate_feature_flag_defaults(monkeypatch) -> None:
         if isinstance(default, bool):
             monkeypatch.setenv(name.upper(), str(default).lower())
             monkeypatch.setattr(settings, name, default)
-
+    # 提供 Worker 基线默认合法配置，保留负向测试中的 delenv 漏配阻断能力
+    monkeypatch.setenv("WORKER_EXCLUDE_PDF", "1")
 
 @pytest.fixture
 def tmp_path(request) -> Path:

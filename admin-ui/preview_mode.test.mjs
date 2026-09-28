@@ -147,3 +147,63 @@ test('unknown and cross-origin requests delegate to the original fetch', async (
     assert.equal((await previewFetch('https://example.com/users/me')).status, 418);
     assert.equal(delegated.length, 2);
 });
+
+test('preview mock handles stored files, download and folders', async () => {
+    const previewFetch = createPreviewFetch(
+        async () => new Response('delegated', { status: 418 }),
+        PREVIEW_URL,
+    );
+
+    const rootFiles = await (await previewFetch('/me/stored-files')).json();
+    assert.ok(rootFiles.folders.length >= 2, 'should have folders');
+    assert.ok(rootFiles.files.length >= 4, 'should have root files');
+    assert.ok(rootFiles.folders.some((f) => f.name === '项目资料'));
+
+    const projectFiles = await (await previewFetch('/me/stored-files?path=%2F%E9%A1%B9%E7%9B%AE%E8%B5%84%E6%96%99')).json();
+    assert.ok(projectFiles.files.length >= 2, 'should have files in 项目资料');
+    assert.ok(projectFiles.files.some((f) => f.file_name === '项目立项报告.docx'));
+
+    const downloadRes = await (await previewFetch('/me/stored-files/res-001-doc/download')).json();
+    assert.ok(downloadRes.url.includes('/sample-files/'));
+});
+
+test('preview mock handles import tasks and summary', async () => {
+    const previewFetch = createPreviewFetch(
+        async () => new Response('delegated', { status: 418 }),
+        PREVIEW_URL,
+    );
+
+    const tasks = await (await previewFetch('/me/import-tasks')).json();
+    assert.ok(tasks.items.length >= 6);
+    assert.ok(tasks.items.some((t) => t.status === 'failed'));
+
+    const summary = await (await previewFetch('/me/import-task-summary')).json();
+    assert.ok(summary.total >= 6);
+    assert.ok(summary.failed >= 1);
+    assert.ok(summary.succeeded >= 4);
+});
+
+test('preview mock handles library search and chat stream', async () => {
+    const previewFetch = createPreviewFetch(
+        async () => new Response('delegated', { status: 418 }),
+        PREVIEW_URL,
+    );
+
+    const searchRes = await (await previewFetch('/libraries/preview-library/query', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: '知识库架构规范', top_k: 5 }),
+    })).json();
+    assert.ok(searchRes.results.length >= 1);
+    assert.ok(searchRes.results[0].text.length > 0);
+
+    const chatRes = await previewFetch('/chat/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ library_slug: 'preview-library', query: '你好' }),
+    });
+    assert.equal(chatRes.status, 200);
+    const text = await chatRes.text();
+    assert.ok(text.includes('data:'));
+    assert.ok(text.includes('delta'));
+});

@@ -817,6 +817,12 @@ class _ScalarResult:
     def scalar_one_or_none(self) -> uuid.UUID | None:
         return self.value
 
+    def scalars(self):
+        return self
+
+    def all(self):
+        return []
+
 
 def _updated_value(statement, key: str):
     params = statement.compile().params
@@ -868,7 +874,8 @@ class _CompletionDb:
 
     async def execute(self, statement):
         if getattr(statement, "is_select", False):
-            return _SelectResult(self._select_values.pop(0))
+            value = self._select_values.pop(0) if self._select_values else None
+            return _SelectResult(value)
         self.statements.append(statement)
         status = _updated_value(statement, "status")
         current_stage = _updated_value(statement, "current_stage")
@@ -933,6 +940,9 @@ class _SelectResult:
     def first(self):
         return self.value
 
+    def all(self):
+        return []
+
 
 class _DuplicateCompletionDb(_CompletionDb):
     def __init__(self, *, current_job, duplicate_row, stored_file=None, **kwargs) -> None:
@@ -941,7 +951,8 @@ class _DuplicateCompletionDb(_CompletionDb):
 
     async def execute(self, statement):
         if getattr(statement, "is_select", False):
-            return _SelectResult(self._select_values.pop(0))
+            value = self._select_values.pop(0) if self._select_values else None
+            return _SelectResult(value)
         return await super().execute(statement)
 
 
@@ -1017,6 +1028,58 @@ def _complete_claim(tmp_path: Path) -> import_uploads.UploadOperationClaim:
     )
 
 
+def test_reupload_cancellation_only_targets_matching_prior_failed_source(
+    tmp_path: Path,
+) -> None:
+    claim = _complete_claim(tmp_path)
+    embedding_job_id = uuid.uuid4()
+    document_revision_id = uuid.uuid4()
+
+    class Db:
+        def __init__(self) -> None:
+            self.statements = []
+
+        async def execute(self, statement):
+            self.statements.append(statement)
+            if getattr(statement, "is_select", False):
+                return SimpleNamespace(
+                    all=lambda: [
+                        SimpleNamespace(
+                            id=uuid.uuid4(),
+                            staging_key="obsolete.upload",
+                            embedding_job_id=embedding_job_id,
+                            document_revision_id=document_revision_id,
+                        )
+                    ]
+                )
+            return SimpleNamespace()
+
+    db = Db()
+
+    staging_keys = asyncio.run(
+        import_uploads.cancel_prior_failed_uploads_for_reupload(db, claim=claim)
+    )
+
+    assert staging_keys == ("obsolete.upload",)
+    assert len(db.statements) == 4
+    statement, import_update, embedding_update, graph_update = db.statements
+    sql = str(statement.compile()).lower()
+    assert _updated_value(import_update, "status") == "cancelled"
+    assert _updated_value(import_update, "worker_id") is None
+    assert _updated_value(import_update, "claimed_at") is None
+    assert _updated_value(embedding_update, "status") == "superseded"
+    assert _updated_value(embedding_update, "worker_id") is None
+    assert _updated_value(graph_update, "status") == "cancelled"
+    assert "document_import_jobs.id !=" in sql
+    assert "document_import_jobs.status =" in sql
+    assert "document_import_jobs.library_id =" in sql
+    assert "document_import_jobs.requested_by_user_id =" in sql
+    assert "document_import_jobs.file_name =" in sql
+    assert "document_import_jobs.relative_path =" in sql
+    assert "embedding_jobs.status" in sql
+    assert "graph_extraction_jobs.status" in sql
+
+
 def test_complete_keeps_office_processing_out_of_save_success(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1039,6 +1102,10 @@ def test_complete_keeps_office_processing_out_of_save_success(
     assert len(db.added) == 1
     assert db.added[0].storage_status == "available"
     assert any(event[0] == "update" and event[1] == "queued" for event in db.events)
+    assert not any(
+        _updated_value(statement, "status") == "cancelled"
+        for statement in db.statements
+    )
     assert path.exists() is True
 
 

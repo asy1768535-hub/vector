@@ -246,6 +246,7 @@ class _CommitFailureDb:
                 graph_extraction_requested=False,
             ),
             None,
+            None,
         ]
 
     def add(self, value) -> None:
@@ -255,6 +256,9 @@ class _CommitFailureDb:
         if getattr(_statement, "is_select", False):
             return _Result(self.select_values.pop(0))
         return _Result(self.job_id)
+
+    async def flush(self):
+        return None
 
     async def commit(self):
         self.commits += 1

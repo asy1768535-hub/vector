@@ -57,6 +57,7 @@ test('queued and processing jobs keep distinct visible states', () => {
     assert.equal(ST_LABEL[processing], '处理中');
     assert.equal(importDisplayStatus({ status: 'succeeded', result_operation: 'created' }), 'submitted');
     assert.equal(importDisplayStatus({ status: 'succeeded', result_operation: 'unchanged' }), 'skipped');
+    assert.equal(importDisplayStatus({ status: 'succeeded', result_operation: 'duplicate_source' }), 'skipped');
     assert.equal(importDisplayStatus({ status: 'failed' }), 'failed');
 });
 
@@ -64,6 +65,11 @@ test('upload inbox labels separate durable receipt from background stages', () =
     assert.equal(importStageLabel({ current_stage: 'uploading' }), '上传中');
     assert.equal(importStageLabel({ current_stage: 'queued' }), '等待上传');
     assert.equal(importStageLabel({ file_status: 'available', upload_completed_at: 'now' }), '文件已保存');
+    assert.equal(importStageLabel({
+        file_status: 'available',
+        upload_completed_at: 'now',
+        result_operation: 'duplicate_source',
+    }), '文件未变化');
     assert.equal(importStageLabel({ file_status: 'failed' }), '上传失败');
 });
 

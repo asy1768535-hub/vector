@@ -826,3 +826,230 @@ def test_adaptive_render_dpi_calls_render_with_resolved_dpi(monkeypatch):
     )
     assert rendered_dpis == [72]
     assert "recognized text" in res
+
+
+def test_structure_scanned_table_synthetic_grid():
+    import cv2
+    import numpy as np
+    from app.services.pdf_extract import _structure_scanned_table
+
+    # 1. Non-grid image returns None
+    blank = np.full((300, 300), 255, dtype=np.uint8)
+    _, blank_png = cv2.imencode(".png", blank)
+    assert _structure_scanned_table(blank_png.tobytes(), []) is None
+
+    # 2. Corrupt png returns None
+    assert _structure_scanned_table(b"corrupt", []) is None
+
+    # 3. Create a synthetic image with a clean 4x4 grid (5 rows, 4 columns of lines)
+    img = np.full((500, 600), 255, dtype=np.uint8)
+    y_lines = [50, 100, 150, 200, 250]
+    x_lines = [50, 180, 310, 440]
+    for y in y_lines:
+        cv2.line(img, (x_lines[0], y), (x_lines[-1], y), 0, 2)
+    for x in x_lines:
+        cv2.line(img, (x, y_lines[0]), (x, y_lines[-1]), 0, 2)
+
+    _, png = cv2.imencode(".png", img)
+    png_bytes = png.tobytes()
+
+    blocks = [
+        {"text": "Header A", "bbox": [60, 60, 120, 80], "confidence": 0.95},
+        {"text": "Header B", "bbox": [190, 60, 250, 80], "confidence": 0.95},
+        {"text": "Header C", "bbox": [320, 60, 380, 80], "confidence": 0.95},
+        {"text": "Row1 ValA", "bbox": [60, 110, 130, 130], "confidence": 0.92},
+        # Crossing block spanning from col 1 across boundary into col 2
+        {"text": "ABC123XYZ", "bbox": [200, 110, 370, 130], "confidence": 0.88},
+    ]
+
+    res = _structure_scanned_table(png_bytes, blocks)
+    assert res is not None
+    text, ordered_blocks = res
+    assert "Header A | Header B | Header C" in text
+    # Crossing block is kept intact with cross_column and uncertain flags, not split by heuristics
+    assert any(b.get("text") == "ABC123XYZ" and b.get("cross_column") is True and b.get("uncertain") is True for b in ordered_blocks)
+    assert len(ordered_blocks) == 5
+    assert "ABC123XYZ" in text
+
+
+def test_structure_scanned_table_variable_length_and_uncertain_crossing():
+    import cv2
+    import numpy as np
+    from app.services.pdf_extract import _structure_scanned_table
+
+    # 4 rows, 3 columns grid
+    img = np.full((500, 600), 255, dtype=np.uint8)
+    y_lines = [50, 120, 190, 260, 330]
+    x_lines = [50, 200, 380, 560]
+    for y in y_lines:
+        cv2.line(img, (x_lines[0], y), (x_lines[-1], y), 0, 2)
+    for x in x_lines:
+        cv2.line(img, (x, y_lines[0]), (x, y_lines[-1]), 0, 2)
+    _, png = cv2.imencode(".png", img)
+    png_bytes = png.tobytes()
+
+    blocks = [
+        {"text": "产权人", "bbox": [60, 60, 180, 90], "confidence": 0.95},
+        {"text": "产权证号", "bbox": [210, 60, 360, 90], "confidence": 0.95},
+        {"text": "建筑面积m", "bbox": [390, 60, 540, 90], "confidence": 0.95},
+        # Row 1: crossing certificate and area (14 chars)
+        {"text": "谢列平", "bbox": [60, 130, 180, 160], "confidence": 0.95},
+        {"text": "20140062969.59", "bbox": [210, 130, 420, 160], "confidence": 0.90},
+        # Row 2: normal length certificate (9 chars)
+        {"text": "李四", "bbox": [60, 200, 180, 230], "confidence": 0.95},
+        {"text": "201400630", "bbox": [210, 200, 350, 230], "confidence": 0.95},
+        {"text": "66.02", "bbox": [390, 200, 500, 230], "confidence": 0.95},
+        # Row 3: hyphenated variable-length certificate (11 chars) and blank owner
+        {"text": "2014-0011-2", "bbox": [210, 270, 370, 300], "confidence": 0.95},
+        {"text": "44.68", "bbox": [390, 270, 500, 300], "confidence": 0.95},
+    ]
+
+    res = _structure_scanned_table(png_bytes, blocks)
+    assert res is not None
+    table_text, ordered_blocks = res
+
+    # 1. Row 1 crossing certificate 20140062969.59 must NOT be split by median length
+    assert "20140062969.59" in table_text
+    assert "201400629 | 69.59" not in table_text
+    crossing_block = next(b for b in ordered_blocks if b.get("text") == "20140062969.59")
+    assert crossing_block.get("cross_column") is True
+    assert crossing_block.get("uncertain") is True
+
+    # 2. Adjacent area cell in Row 1 has clear reference note rather than empty or hallucinated
+    lines = [l.strip() for l in table_text.splitlines() if "|" in l]
+    row1_line = [l for l in lines if "谢列平" in l][0]
+    assert "20140062969.59 [跨列不确定归属: 跨第2列-第3列, 原图位置: [210, 130, 420, 160]]" in row1_line
+    assert "[跨列不确定: 参见第2列]" in row1_line
+    assert row1_line.count("20140062969.59") == 1
+    # 3. Row 3 has blank owner cell preserved (| 2014-0011-2 | 44.68)
+    row3_line = [l for l in lines if "2014-0011-2" in l][0]
+    assert row3_line == "| 2014-0011-2 | 44.68"
+
+
+def test_structure_scanned_table_missing_and_invalid_coordinates():
+    import cv2
+    import numpy as np
+    from app.services.pdf_extract import _structure_scanned_table
+
+    img = np.full((400, 500), 255, dtype=np.uint8)
+    for y in [40, 100, 160, 220]:
+        cv2.line(img, (40, y), (460, y), 0, 2)
+    for x in [40, 180, 320, 460]:
+        cv2.line(img, (x, 40), (x, 220), 0, 2)
+    _, png = cv2.imencode(".png", img)
+    png_bytes = png.tobytes()
+
+    blocks = [
+        {"text": "H1", "bbox": [50, 50, 120, 80]},
+        {"text": "H2", "bbox": [190, 50, 260, 80]},
+        {"text": "H3", "bbox": [330, 50, 400, 80]},
+        {"text": "NormalVal", "bbox": [50, 110, 120, 140]},
+        # Invalid coordinate types and missing boxes
+        {"text": "NoBbox"},
+        {"text": "ShortBbox", "bbox": [10, 20]},
+        {"text": "NonNumBbox", "bbox": ["a", "b", "c", "d"]},
+        {"text": "InvertedBbox", "bbox": [100, 100, 50, 50]},
+    ]
+
+    res = _structure_scanned_table(png_bytes, blocks)
+    assert res is not None
+    text, ordered_blocks = res
+
+    # Zero text loss: all unpositioned and invalid coordinate blocks MUST be preserved
+    assert "NoBbox" in text
+    assert "ShortBbox" in text
+    assert "NonNumBbox" in text
+    assert "InvertedBbox" in text
+    ordered_texts = [b.get("text") for b in ordered_blocks]
+    for expected in ["NoBbox", "ShortBbox", "NonNumBbox", "InvertedBbox"]:
+        assert expected in ordered_texts
+
+
+def test_structure_scanned_table_empty_result_fallback():
+    from app.services.pdf_extract import _structure_scanned_table
+
+    # Non-grid image
+    import cv2, numpy as np
+    blank = np.full((300, 300), 255, dtype=np.uint8)
+    _, png = cv2.imencode(".png", blank)
+    assert _structure_scanned_table(png.tobytes(), [{"text": "hello", "bbox": [10, 10, 50, 30]}]) is None
+
+    # Empty blocks
+    assert _structure_scanned_table(png.tobytes(), []) is None
+
+    # Corrupt png bytes
+    assert _structure_scanned_table(b"corrupt_data", [{"text": "hello"}]) is None
+
+
+def test_build_pdf_source_end_to_end_preserves_cross_column_uncertainty_in_chunks(monkeypatch):
+    import cv2
+    import numpy as np
+    from app.services import pdf_extract
+    from app.services.pdf_extract import build_pdf_source
+
+    # 1. Synthetic grid image: 4 rows, 3 columns
+    img = np.full((500, 600), 255, dtype=np.uint8)
+    y_lines = [50, 120, 190, 260, 330]
+    x_lines = [50, 200, 380, 560]
+    for y in y_lines:
+        cv2.line(img, (x_lines[0], y), (x_lines[-1], y), 0, 2)
+    for x in x_lines:
+        cv2.line(img, (x, y_lines[0]), (x, y_lines[-1]), 0, 2)
+    _, png = cv2.imencode(".png", img)
+    png_bytes = png.tobytes()
+
+    # 2. Mock PDF reader with single scanned page
+    page = types.SimpleNamespace(
+        extract_text=lambda: "",
+        images=[],
+    )
+    monkeypatch.setattr(
+        pdf_extract,
+        "_open_reader",
+        lambda data: types.SimpleNamespace(pages=[page]),
+    )
+    monkeypatch.setattr(
+        pdf_extract,
+        "_render_page_png",
+        lambda *args, **kwargs: png_bytes,
+    )
+
+    # 3. Mock OCR returning structured blocks with crossing certificate and area
+    mock_ocr_blocks = [
+        {"text": "产权人", "bbox": [60, 60, 180, 90], "confidence": 0.95},
+        {"text": "产权证号", "bbox": [210, 60, 360, 90], "confidence": 0.95},
+        {"text": "建筑面积m", "bbox": [390, 60, 540, 90], "confidence": 0.95},
+        {"text": "谢列平", "bbox": [60, 130, 180, 160], "confidence": 0.95},
+        {"text": "20140062969.59", "bbox": [210, 130, 420, 160], "confidence": 0.90},
+        {"text": "李四", "bbox": [60, 200, 180, 230], "confidence": 0.95},
+        {"text": "201400630", "bbox": [210, 200, 350, 230], "confidence": 0.95},
+        {"text": "66.02", "bbox": [390, 200, 500, 230], "confidence": 0.95},
+    ]
+    source = build_pdf_source(
+        b"dummy_pdf_bytes",
+        chunk_size=800,
+        chunk_overlap=80,
+        **_kw(ocr_enabled=True, ocr=lambda b: mock_ocr_blocks),
+    )
+
+    # Verify chunks: final retrievable content MUST preserve raw string, coordinates, and uncertainty
+    chunks = source["chunks"]
+    assert len(chunks) > 0
+    all_chunk_text = "\n".join(c["text"] for c in chunks)
+
+    # A. Raw string 20140062969.59 is preserved intact (not split to 201400629 | 69.59)
+    assert "20140062969.59" in all_chunk_text
+    assert "201400629 | 69.59" not in all_chunk_text
+
+    # B. Original image coordinates are explicitly preserved
+    assert "[210, 130, 420, 160]" in all_chunk_text
+
+    # C. Clear uncertainty attribution is preserved in chunk text
+    # C. Clear uncertainty attribution is preserved in chunk text and raw string appears only ONCE
+    assert "跨列不确定归属" in all_chunk_text
+    assert "跨第2列-第3列" in all_chunk_text
+    assert "[跨列不确定: 参见第2列]" in all_chunk_text
+    assert all_chunk_text.count("20140062969.59") == 1
+    assert source["normalized_text"].count("20140062969.59") == 1
+    # D. Must NOT present 20140062969.59 as a certain single-column value without notice
+    assert "谢列平 | 20140062969.59 |" not in all_chunk_text

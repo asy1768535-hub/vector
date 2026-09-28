@@ -1169,7 +1169,7 @@ def test_personal_task_projection_hides_worker_error_and_exposes_chinese_retry_s
     assert result["status"] == "failed"
     assert result["stage"] == "embedding"
     assert result["failure_message"] == "知识内容处理失败"
-    assert result["failure_action"] == "稍后重试任务"
+    assert result["failure_action"] == "点击重试；若反复失败可删除后重新上传"
     assert result["can_retry"] is True
     assert result["operation_type"] == "import"
     assert result["result_operation"] == "duplicate_source"
@@ -1197,8 +1197,82 @@ def test_personal_task_projection_explains_zip_without_importable_files():
     )
 
     assert result["failure_message"] == "压缩包内没有可导入的支持格式文件"
-    assert result["failure_action"] == "请确认包内包含支持格式的文档后重新上传"
+    assert result["failure_action"] == "请确认包内包含 PDF、Word、Excel、PPT、TXT 等格式的文档后重新上传"
     assert result["can_retry"] is False
+
+
+@pytest.mark.parametrize(
+    ("raw_error", "expected_message", "expected_action"),
+    [
+        (
+            "ForeignKeyViolationError: fk_document_import_jobs_file_resource",
+            "该任务未能关联到原文件记录",
+            "重新上传该文件，生成新的处理任务",
+        ),
+        (
+            "no_slug",
+            "该任务缺少解析所需的知识库信息",
+            "重新上传该文件，生成新的解析任务",
+        ),
+        (
+            "file_signature_unconfirmed",
+            "无法确认 Office 文件的真实格式",
+            "用对应 Office 软件打开并重新另存为正确格式后上传；若无法打开，请重新获取原文件",
+        ),
+        (
+            "file_signature_mismatch",
+            "文件扩展名与实际内容不匹配",
+            "用对应软件打开并另存为正确格式后重新上传",
+        ),
+        (
+            "File is not a zip file",
+            "Office 文件结构无效或已损坏",
+            "用对应 Office 软件打开并另存为新文件后上传；若无法打开，请重新获取原文件",
+        ),
+        (
+            "MinerU returned no importable structure",
+            "PDF 解析未得到可导入内容",
+            "扫描件先做 OCR 并上传可搜索 PDF；若已有可选文字，点击重试",
+        ),
+        (
+            "parser unit does not satisfy EvidenceLocatorV1 contract",
+            "解析结果未通过系统校验",
+            "点击重试；若没有重试按钮，请重新上传该文件",
+        ),
+    ],
+)
+def test_personal_task_projection_gives_specific_recovery_only_for_known_errors(
+    raw_error, expected_message, expected_action
+):
+    result = import_uploads.personal_task_projection(
+        _import_job(),
+        library_name="合规资料",
+        library_slug="compliance",
+        projection={
+            "status": "failed",
+            "current_stage": "parsing",
+            "retry_target_type": "import",
+            "last_error": raw_error,
+        },
+    )
+
+    assert result["failure_message"] == expected_message
+    assert result["failure_action"] == expected_action
+
+
+def test_personal_task_projection_does_not_treat_unrelated_slug_error_as_missing_configuration():
+    result = import_uploads.personal_task_projection(
+        _import_job(),
+        library_name="合规资料",
+        library_slug="compliance",
+        projection={
+            "status": "failed",
+            "current_stage": "parsing",
+            "last_error": "invalid slug in unrelated metadata",
+        },
+    )
+
+    assert result["failure_message"] != "该任务缺少解析所需的知识库信息"
 
 
 def test_personal_task_lookup_rejects_a_job_owned_by_another_user():

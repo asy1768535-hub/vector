@@ -615,6 +615,15 @@ test('CSS defines import-dropzone with dashed border and drag-over highlight', (
     assert.match(css, /\.import-dropzone\.is-dragover\s*\{/, 'is-dragover state');
 });
 
+test('CSS pins import-file-card height and isolates table scroll with fixed summary bar', () => {
+    assert.match(css, /\.import-file-card\s*\{[^}]*height:\s*calc\(100vh - 220px\);/, 'stretches file card height to bottom of viewport');
+    assert.match(css, /\.import-file-card\s*\{[^}]*min-height:\s*520px;/, 'pins minimum file card height');
+    assert.match(css, /\.import-file-table-shell\s*\{[^}]*overflow-y:\s*auto;/, 'scrolls file table internally');
+    assert.match(css, /\.import-file-table-shell\s+\.el-table__header-wrapper\s*\{[^}]*position:\s*sticky;/, 'keeps table header sticky');
+    assert.match(css, /\.import-summary-bar\s*\{[^}]*flex-shrink:\s*0;/, 'pins summary bar at bottom');
+    assert.match(css, /899px[\s\S]*\.import-file-card\s*\{[^}]*height:\s*480px;/, 'adjusts card height on mobile/tablet');
+});
+
 test('replace route query auto-selects target document and handles not-found state', () => {
     for (const token of [
         'routeReplaceDocumentId',

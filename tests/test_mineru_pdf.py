@@ -635,3 +635,250 @@ def test_remote_passes_total_pages_through(monkeypatch):
     source = _remote(total_pages=1)
     assert source["coverage"]["status"] == "complete"
     assert source["coverage"]["total_pages"] == 1
+
+
+def _mock_single_page_scan_preflight(monkeypatch, *, total_pages: int = 1):
+    monkeypatch.setattr(
+        import_parsing.pdf_preflight,
+        "preflight_pdf",
+        lambda _data, **_kwargs: {
+            "contract_version": "pdf-preflight-v1",
+            "status": "complete",
+            "total_pages": total_pages,
+            "page_count_known": True,
+            "has_mixed_content": False,
+            "page_limit_exceeded": False,
+            "image_limit_exceeded": False,
+            "pages": [
+                {
+                    "page": idx + 1,
+                    "native_text_chars": 0,
+                    "embedded_image_count": 1,
+                    "has_visual_content": True,
+                    "low_text": True,
+                }
+                for idx in range(total_pages)
+            ],
+            "unknown_reason": None,
+        },
+    )
+
+
+def test_pdf_quality_cascade_disabled_keeps_v1_mineru_selection(monkeypatch):
+    monkeypatch.setattr(settings, "mineru_pdf_base_url", "https://mineru.internal")
+    monkeypatch.setattr(settings, "mineru_pdf_library_slugs", "target")
+    monkeypatch.setattr(settings, "pdf_quality_cascade_enabled", False)
+    library = SimpleNamespace(slug="target", chunk_size=200, chunk_overlap=0, ocr_enabled=True)
+
+    _mock_single_page_scan_preflight(monkeypatch)
+
+    mineru_calls = []
+    def parse_remote(data, **kwargs):
+        mineru_calls.append((data, kwargs))
+        return _map([_item("text", "from mineru")])
+
+    monkeypatch.setattr(mineru_pdf, "parse_pdf_remote", parse_remote)
+    monkeypatch.setattr(
+        import_parsing.pdf_extract,
+        "build_pdf_source",
+        lambda *_args, **_kwargs: pytest.fail("local build_pdf_source should not be called when gate disabled"),
+    )
+
+    source = import_parsing.build_pdf_import_source(b"%PDF-test", library)
+    assert len(mineru_calls) == 1
+    assert source["normalized_text"] == "from mineru"
+    assert source["routing"]["selection"] == "mineru"
+
+
+def test_pdf_quality_cascade_enabled_accepts_good_local_candidate(monkeypatch):
+    monkeypatch.setattr(settings, "mineru_pdf_base_url", "https://mineru.internal")
+    monkeypatch.setattr(settings, "mineru_pdf_library_slugs", "target")
+    monkeypatch.setattr(settings, "pdf_quality_cascade_enabled", True)
+    library = SimpleNamespace(slug="target", chunk_size=200, chunk_overlap=0, ocr_enabled=True)
+
+    _mock_single_page_scan_preflight(monkeypatch)
+
+    local_source = _map([_item("text", "本地高质量解析正文内容")])
+    from tests.test_pdf_quality_inspector import _build_valid_ocr_blocks
+    valid_blocks = _build_valid_ocr_blocks(10)
+    page_text = "\n".join(b["text"] for b in valid_blocks)
+    local_source["normalized_text"] = page_text
+    local_source["chunks"] = [{"text": page_text, "source_start": 0, "source_end": len(page_text)}]
+    local_source["coverage"] = {"status": "complete", "total_pages": 1, "processed_pages": [1]}
+    local_source["segments"][0]["text"] = page_text
+    local_source["segments"][0]["quality"] = {
+        "extraction_mode": "ocr",
+        "visual_content_unparsed": False,
+        "ocr_blocks": valid_blocks,
+    }
+
+    monkeypatch.setattr(
+        import_parsing.pdf_extract,
+        "build_pdf_source",
+        lambda *_args, **_kwargs: local_source,
+    )
+    monkeypatch.setattr(
+        mineru_pdf,
+        "parse_pdf_remote",
+        lambda *_args, **_kwargs: pytest.fail("remote MinerU should not be called when candidate accepted"),
+    )
+
+    source = import_parsing.build_pdf_import_source(b"%PDF-scan", library)
+    assert source["routing"]["selection"] == "native_or_rapidocr"
+    assert source["routing"]["needs_review"] is False
+    assert "scan_page_detected" in source["routing"]["reasons"]
+    assert source["normalized_text"] == page_text
+
+
+def test_pdf_quality_cascade_enabled_rejects_and_escalates_to_mineru(monkeypatch):
+    monkeypatch.setattr(settings, "mineru_pdf_base_url", "https://mineru.internal")
+    monkeypatch.setattr(settings, "mineru_pdf_library_slugs", "target")
+    monkeypatch.setattr(settings, "pdf_quality_cascade_enabled", True)
+    library = SimpleNamespace(slug="target", chunk_size=200, chunk_overlap=0, ocr_enabled=True)
+
+    _mock_single_page_scan_preflight(monkeypatch)
+
+    bad_local = _map([_item("text", "短")])
+    bad_local["segments"][0]["quality"] = {
+        "extraction_mode": "ocr",
+        "visual_content_unparsed": False,
+        "ocr_blocks": [],
+    }
+
+    monkeypatch.setattr(
+        import_parsing.pdf_extract,
+        "build_pdf_source",
+        lambda *_args, **_kwargs: bad_local,
+    )
+
+    mineru_called = []
+    def parse_remote(data, **kwargs):
+        mineru_called.append(True)
+        return _map([_item("text", "来自 MinerU 的完整表格文本")])
+
+    monkeypatch.setattr(mineru_pdf, "parse_pdf_remote", parse_remote)
+
+    source = import_parsing.build_pdf_import_source(b"%PDF-scan", library)
+    assert len(mineru_called) == 1
+    assert source["routing"]["selection"] == "mineru"
+    assert "来自 MinerU" in source["normalized_text"]
+
+
+def test_pdf_quality_cascade_local_exception_escalates_to_mineru(monkeypatch):
+    monkeypatch.setattr(settings, "mineru_pdf_base_url", "https://mineru.internal")
+    monkeypatch.setattr(settings, "mineru_pdf_library_slugs", "target")
+    monkeypatch.setattr(settings, "pdf_quality_cascade_enabled", True)
+    library = SimpleNamespace(slug="target", chunk_size=200, chunk_overlap=0, ocr_enabled=True)
+
+    _mock_single_page_scan_preflight(monkeypatch)
+
+    def fail_local(*_args, **_kwargs):
+        raise import_parsing.pdf_extract.PdfExtractError("Simulated OCR failure")
+
+    monkeypatch.setattr(import_parsing.pdf_extract, "build_pdf_source", fail_local)
+
+    mineru_called = []
+    def parse_remote(data, **kwargs):
+        mineru_called.append(True)
+        return _map([_item("text", "MinerU 成功承接")])
+
+    monkeypatch.setattr(mineru_pdf, "parse_pdf_remote", parse_remote)
+
+    source = import_parsing.build_pdf_import_source(b"%PDF-scan", library)
+    assert len(mineru_called) == 1
+    assert source["routing"]["selection"] == "mineru"
+    assert "MinerU 成功承接" in source["normalized_text"]
+
+
+def test_pdf_quality_cascade_mineru_failure_raises_explicitly(monkeypatch):
+    monkeypatch.setattr(settings, "mineru_pdf_base_url", "https://mineru.internal")
+    monkeypatch.setattr(settings, "mineru_pdf_library_slugs", "target")
+    monkeypatch.setattr(settings, "pdf_quality_cascade_enabled", True)
+    library = SimpleNamespace(slug="target", chunk_size=200, chunk_overlap=0, ocr_enabled=True)
+
+    _mock_single_page_scan_preflight(monkeypatch)
+
+    bad_local = _map([_item("text", "短")])
+    bad_local["segments"][0]["quality"] = {
+        "extraction_mode": "ocr",
+        "visual_content_unparsed": False,
+        "ocr_blocks": [],
+    }
+    monkeypatch.setattr(import_parsing.pdf_extract, "build_pdf_source", lambda *_a, **_kw: bad_local)
+
+    def fail_remote(*_args, **_kwargs):
+        raise mineru_pdf.MineruPdfError("MinerU 远端服务超时")
+
+    monkeypatch.setattr(mineru_pdf, "parse_pdf_remote", fail_remote)
+
+    with pytest.raises(mineru_pdf.MineruPdfError, match="MinerU 远端服务超时"):
+        import_parsing.build_pdf_import_source(b"%PDF-scan", library)
+
+
+def test_pdf_quality_cascade_multi_page_scan_skips_candidate(monkeypatch):
+    monkeypatch.setattr(settings, "mineru_pdf_base_url", "https://mineru.internal")
+    monkeypatch.setattr(settings, "mineru_pdf_library_slugs", "target")
+    monkeypatch.setattr(settings, "pdf_quality_cascade_enabled", True)
+    library = SimpleNamespace(slug="target", chunk_size=200, chunk_overlap=0, ocr_enabled=True)
+
+    _mock_single_page_scan_preflight(monkeypatch, total_pages=2)
+
+    monkeypatch.setattr(
+        import_parsing.pdf_extract,
+        "build_pdf_source",
+        lambda *_args, **_kwargs: pytest.fail("Multi-page scan must not trigger local candidate"),
+    )
+
+    mineru_called = []
+    def parse_remote(data, **kwargs):
+        mineru_called.append(kwargs.get("total_pages"))
+        return _map([_item("text", "p1"), _item("text", "p2", page_idx=1)])
+
+    monkeypatch.setattr(mineru_pdf, "parse_pdf_remote", parse_remote)
+
+    source = import_parsing.build_pdf_import_source(b"%PDF-multi", library)
+    assert source["routing"]["selection"] == "mineru"
+
+
+def test_pdf_quality_cascade_resource_limit_raises_without_calling_mineru(monkeypatch):
+    monkeypatch.setattr(settings, "mineru_pdf_base_url", "https://mineru.internal")
+    monkeypatch.setattr(settings, "mineru_pdf_library_slugs", "target")
+    monkeypatch.setattr(settings, "pdf_quality_cascade_enabled", True)
+    library = SimpleNamespace(slug="target", chunk_size=200, chunk_overlap=0, ocr_enabled=True)
+
+    _mock_single_page_scan_preflight(monkeypatch)
+
+    def raise_resource_limit(*_args, **_kwargs):
+        raise import_parsing.pdf_extract.PdfResourceLimitError("PDF 像素超限")
+
+    monkeypatch.setattr(import_parsing.pdf_extract, "build_pdf_source", raise_resource_limit)
+    monkeypatch.setattr(
+        mineru_pdf,
+        "parse_pdf_remote",
+        lambda *_a, **_kw: pytest.fail("MinerU must not be called on resource limit error"),
+    )
+
+    with pytest.raises(import_parsing.pdf_extract.PdfResourceLimitError, match="PDF 像素超限"):
+        import_parsing.build_pdf_import_source(b"%PDF-oversized", library)
+
+
+def test_pdf_quality_cascade_unexpected_error_raises_without_calling_mineru(monkeypatch):
+    monkeypatch.setattr(settings, "mineru_pdf_base_url", "https://mineru.internal")
+    monkeypatch.setattr(settings, "mineru_pdf_library_slugs", "target")
+    monkeypatch.setattr(settings, "pdf_quality_cascade_enabled", True)
+    library = SimpleNamespace(slug="target", chunk_size=200, chunk_overlap=0, ocr_enabled=True)
+
+    _mock_single_page_scan_preflight(monkeypatch)
+
+    def raise_unexpected_bug(*_args, **_kwargs):
+        raise TypeError("Unexpected code bug in candidate pipeline")
+
+    monkeypatch.setattr(import_parsing.pdf_extract, "build_pdf_source", raise_unexpected_bug)
+    monkeypatch.setattr(
+        mineru_pdf,
+        "parse_pdf_remote",
+        lambda *_a, **_kw: pytest.fail("MinerU must not be called on unexpected code bug"),
+    )
+
+    with pytest.raises(TypeError, match="Unexpected code bug in candidate pipeline"):
+        import_parsing.build_pdf_import_source(b"%PDF-bug", library)

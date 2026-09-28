@@ -10,10 +10,15 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.auth.middleware.auth_context import get_access_token
+from mcp.server.auth.settings import AuthSettings
 from mcp.shared.memory import create_connected_server_and_client_session
+from mcp.types import LATEST_PROTOCOL_VERSION
 from pydantic import SecretStr, ValidationError
 
 from app.mcp_adapter.client import MCPAdapterError, PublicV1Client
+from app.mcp_adapter.auth import PublicAPIKeyVerifier
+from app.mcp_adapter.cli import configure_http_transport
 from app.mcp_adapter.config import MCPAdapterSettings
 from app.mcp_adapter.server import create_mcp_server
 from app.schemas.documents import ImportFileResponse
@@ -93,17 +98,256 @@ def test_mcp_settings_are_default_off_and_require_secret_when_enabled() -> None:
     assert "vkb_secret_value" not in configured.model_dump_json()
 
 
+def test_http_mcp_requires_each_request_to_supply_its_own_key() -> None:
+    settings = MCPAdapterSettings(
+        _env_file=None,
+        enabled=True,
+        base_url="http://127.0.0.1:8000",
+        transport="streamable-http",
+        api_key=SecretStr(""),
+    )
+    assert not settings.api_key.get_secret_value()
+
+    with pytest.raises(ValidationError, match="shared API key"):
+        MCPAdapterSettings(
+            _env_file=None,
+            enabled=True,
+            base_url="http://127.0.0.1:8000",
+            transport="streamable-http",
+            api_key=SecretStr("one-account-key"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_client_uses_the_request_key_instead_of_a_configured_service_key() -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers["authorization"])
+        return httpx.Response(200, json=_libraries_response().model_dump(mode="json"))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = PublicV1Client(_settings(), http_client, api_key="person-a-key")
+        await client.list_libraries()
+
+    assert seen == ["Bearer person-a-key"]
+
+
+@pytest.mark.asyncio
+async def test_http_mcp_verifies_each_users_key_without_caching_authority() -> None:
+    seen: list[str] = []
+    revoked = {"vk_alice"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers["authorization"])
+        token = request.headers["authorization"].removeprefix("Bearer ")
+        if token in revoked:
+            return httpx.Response(401)
+        return httpx.Response(200, json=[])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        verifier = PublicAPIKeyVerifier(_settings(), http_client)
+        assert await verifier.verify_token("vk_alice") is None
+        bob = await verifier.verify_token("vk_bob")
+        assert bob is not None and bob.token == "vk_bob"
+        revoked.add("vk_bob")
+        assert await verifier.verify_token("vk_bob") is None
+
+    assert seen == ["Bearer vk_alice", "Bearer vk_bob", "Bearer vk_bob"]
+
+
+@pytest.mark.asyncio
+async def test_http_mcp_verifier_rejects_missing_malformed_and_unavailable_credentials() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="unexpected response")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        verifier = PublicAPIKeyVerifier(_settings(), http_client)
+        assert await verifier.verify_token("") is None
+        assert await verifier.verify_token("a" * 257) is None
+        assert await verifier.verify_token("vk_invalid") is None
+
+
+@pytest.mark.asyncio
+async def test_http_mcp_keeps_two_users_credentials_and_libraries_separate() -> None:
+    seen: list[tuple[str, str]] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        token = request.headers["authorization"].removeprefix("Bearer ")
+        seen.append((request.url.path, token))
+        if token not in {"vk_alice", "vk_bob"}:
+            return httpx.Response(401)
+        if request.url.path == "/me/permissions":
+            return httpx.Response(200, json=[])
+        if request.url.path == "/libraries/alice-library/import-file":
+            if token != "vk_alice":
+                return httpx.Response(403)
+            return httpx.Response(201, json=_upload_response().model_dump(mode="json"))
+        payload = _libraries_response().model_dump(mode="json")
+        payload["libraries"][0]["slug"] = "alice-library" if token == "vk_alice" else "bob-library"
+        return httpx.Response(200, json=payload)
+
+    settings = _settings(transport="streamable-http", api_key=SecretStr(""))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as upstream_client:
+        verifier = PublicAPIKeyVerifier(settings, upstream_client)
+
+        def current_user_client() -> PublicV1Client:
+            access = get_access_token()
+            assert access is not None
+            return PublicV1Client(settings, upstream_client, api_key=access.token)
+
+        server = create_mcp_server(
+            client_factory=current_user_client,
+            token_verifier=verifier,
+            auth=AuthSettings(
+                issuer_url="https://knowledge.example.test",
+                resource_server_url=None,
+                required_scopes=["mcp"],
+            ),
+            upload_enabled=True,
+        )
+        app = server.streamable_http_app()
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://127.0.0.1:8001",
+            ) as caller:
+                request = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": "list_libraries", "arguments": {}},
+                }
+                headers = {
+                    "Accept": "application/json, text/event-stream",
+                    "Content-Type": "application/json",
+                    "MCP-Protocol-Version": LATEST_PROTOCOL_VERSION,
+                }
+                missing = await caller.post("/mcp", json=request, headers=headers)
+                alice = await caller.post(
+                    "/mcp", json=request, headers={**headers, "Authorization": "Bearer vk_alice"}
+                )
+                bob = await caller.post(
+                    "/mcp", json=request, headers={**headers, "Authorization": "Bearer vk_bob"}
+                )
+                invalid = await caller.post(
+                    "/mcp", json=request, headers={**headers, "Authorization": "Bearer vk_invalid"}
+                )
+                upload_request = {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "upload_file",
+                        "arguments": {
+                            "library_slug": "alice-library",
+                            "filename": "notes.txt",
+                            "content_base64": "eA==",
+                        },
+                    },
+                }
+                alice_upload = await caller.post(
+                    "/mcp", json=upload_request,
+                    headers={**headers, "Authorization": "Bearer vk_alice"},
+                )
+                bob_upload = await caller.post(
+                    "/mcp", json=upload_request,
+                    headers={**headers, "Authorization": "Bearer vk_bob"},
+                )
+
+    assert missing.status_code == 401
+    assert invalid.status_code == 401
+    assert alice.status_code == bob.status_code == 200
+    assert "alice-library" in alice.text and "bob-library" not in alice.text
+    assert "bob-library" in bob.text and "alice-library" not in bob.text
+    assert alice_upload.status_code == bob_upload.status_code == 200
+    assert alice_upload.json()["result"]["isError"] is False
+    assert bob_upload.json()["result"]["isError"] is True
+    assert ("/libraries/alice-library/import-file", "vk_alice") in seen
+    assert ("/libraries/alice-library/import-file", "vk_bob") in seen
+    assert ("/api/v1/libraries", "vk_alice") in seen
+    assert ("/api/v1/libraries", "vk_bob") in seen
+
+
 def test_mcp_settings_reject_cleartext_remote_upstream_and_public_bind() -> None:
     with pytest.raises(ValidationError, match="must use HTTPS"):
         _settings(base_url="http://knowledge.example.test")
     with pytest.raises(ValidationError, match="loopback"):
-        _settings(transport="streamable-http", http_host="0.0.0.0")
+        _settings(transport="streamable-http", http_host="0.0.0.0", api_key=SecretStr(""))
 
     local = _settings(
         base_url="http://127.0.0.1:8000",
         transport="streamable-http",
+        api_key=SecretStr(""),
     )
     assert local.http_host == "127.0.0.1"
+
+    private = _settings(
+        base_url="http://vector-kb-api-release:8200",
+        transport="streamable-http",
+        http_host="0.0.0.0",
+        private_network=True,
+        public_host="knowledge.example.test",
+        api_key=SecretStr(""),
+    )
+    assert private.private_network is True
+
+    with pytest.raises(ValidationError, match="public DNS host"):
+        _settings(
+            transport="streamable-http",
+            http_host="0.0.0.0",
+            private_network=True,
+            api_key=SecretStr(""),
+        )
+
+
+@pytest.mark.asyncio
+async def test_private_network_accepts_authenticated_proxy_host_only() -> None:
+    settings = _settings(
+        transport="streamable-http",
+        http_host="0.0.0.0",
+        private_network=True,
+        public_host="knowledge.example.test",
+        api_key=SecretStr(""),
+    )
+
+    def upstream(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as upstream_client:
+        server = create_mcp_server(
+            client_factory=lambda: PublicV1Client(settings, upstream_client, api_key="vk_alice"),
+            token_verifier=PublicAPIKeyVerifier(settings, upstream_client),
+            auth=AuthSettings(
+                issuer_url="https://knowledge.example.test",
+                resource_server_url=None,
+                required_scopes=["mcp"],
+            ),
+        )
+        configure_http_transport(server, settings)
+        app = server.streamable_http_app()
+        request = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+        headers = {
+            "Authorization": "Bearer vk_alice",
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": LATEST_PROTOCOL_VERSION,
+        }
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="https://knowledge.example.test",
+            ) as caller:
+                accepted = await caller.post("/mcp", json=request, headers=headers)
+                wrong_origin = await caller.post(
+                    "/mcp", json=request, headers={**headers, "Origin": "https://evil.test"}
+                )
+                wrong_host = await caller.post(
+                    "/mcp", json=request, headers={**headers, "Host": "evil.test"}
+                )
+    assert accepted.status_code == 200
+    assert wrong_origin.status_code == 403
+    assert wrong_host.status_code == 421
 
 
 @pytest.mark.asyncio

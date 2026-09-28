@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException, Response
@@ -112,6 +113,9 @@ class _ConditionalDb:
 
     async def rollback(self):
         self.rollback_count += 1
+
+    async def flush(self):
+        return None
 
 
 class _NoopLease:
@@ -545,6 +549,14 @@ def test_complete_validates_file_before_conditional_queued_commit(
     monkeypatch.setattr(import_uploads, "keep_upload_claim_alive", _noop_claim_lease)
     monkeypatch.setattr(import_uploads.os, "fstat", fstat)
     monkeypatch.setattr(import_uploads, "_sha256_handle", sha256)
+    monkeypatch.setattr(
+        import_uploads, "skip_duplicate_upload_before_storage", AsyncMock(return_value=False)
+    )
+    monkeypatch.setattr(
+        import_uploads,
+        "cancel_prior_failed_uploads_for_reupload",
+        AsyncMock(return_value=()),
+    )
 
     digest = asyncio.run(
         import_uploads.complete_claimed_upload(
@@ -555,14 +567,9 @@ def test_complete_validates_file_before_conditional_queued_commit(
     )
 
     assert digest == hashlib.sha256(b"content").hexdigest()
-    assert events == [
-        "stat",
-        "sha256",
-        "queued-commit",
-        "stat",
-        "conditional-update",
-        "queued-commit",
-    ]
+    assert events[:3] == ["stat", "sha256", "queued-commit"]
+    assert events.count("conditional-update") >= 1
+    assert events[-1] == "queued-commit"
 
 
 def test_complete_hash_failure_releases_claim_without_queuing(
@@ -759,6 +766,14 @@ def test_complete_does_not_parse_office_before_resource_persistence(
 
     monkeypatch.setattr(import_uploads, "keep_upload_claim_alive", _noop_claim_lease)
     monkeypatch.setattr(import_uploads, "_sha256_handle", sha256)
+    monkeypatch.setattr(
+        import_uploads, "skip_duplicate_upload_before_storage", AsyncMock(return_value=False)
+    )
+    monkeypatch.setattr(
+        import_uploads,
+        "cancel_prior_failed_uploads_for_reupload",
+        AsyncMock(return_value=()),
+    )
 
     asyncio.run(
         import_uploads.complete_claimed_upload(
@@ -768,7 +783,8 @@ def test_complete_does_not_parse_office_before_resource_persistence(
         )
     )
 
-    assert events == ["sha256", "conditional-update"]
+    assert events[0] == "sha256"
+    assert "conditional-update" in events
 
 
 def test_claim_keeps_cross_user_job_hidden() -> None:

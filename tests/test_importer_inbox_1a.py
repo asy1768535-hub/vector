@@ -88,6 +88,7 @@ def _install_worker_fakes(monkeypatch, tmp_path: Path):
     library = SimpleNamespace(
         id=library_id,
         deleted_at=None,
+        slug="pdf_routing",
         chunk_size=800,
         chunk_overlap=80,
         ocr_enabled=False,
@@ -188,11 +189,12 @@ def test_importer_parses_with_detached_immutable_library_snapshot(monkeypatch, t
         assert context.read_db.active is False
         assert parser_config is not context.library
         assert (
+            parser_config.slug,
             parser_config.chunk_size,
             parser_config.chunk_overlap,
             parser_config.ocr_enabled,
             parser_config.docx_table_aware,
-        ) == (800, 80, False, True)
+        ) == ("pdf_routing", 800, 80, False, True)
         raise _StopAfterBoundaryProof
 
     monkeypatch.setattr(importer, "parse_import_file", stop_at_parse)
@@ -293,3 +295,110 @@ def test_run_once_processes_claimed_jobs_sequentially(monkeypatch):
     assert state.started == job_ids
     mark_failed.assert_awaited_once()
     assert mark_failed.await_args.args[0] == job_ids[1]
+
+
+def test_importer_processes_single_page_pdf_with_real_parsing_pipeline(monkeypatch, tmp_path):
+    """Worker 链路经过真实 parse_import_file 与级联门控，不替身化解析函数。"""
+    from unittest.mock import patch
+    from app.services.parser_units import build_parser_unit, parser_provenance
+
+    context = _install_worker_fakes(monkeypatch, tmp_path)
+    context.library.ocr_enabled = True
+
+    pdf_source = tmp_path / "document.pdf"
+    pdf_source.write_bytes(b"%PDF-1.4 fake")
+
+    # 更新 worker 视角的 job 与 source 路径
+    monkeypatch.setattr(importer, "staging_path", lambda _key: pdf_source)
+    monkeypatch.setattr(settings, "mineru_pdf_base_url", "http://mineru.test")
+    monkeypatch.setattr(settings, "mineru_pdf_library_slugs", "pdf_routing")
+    monkeypatch.setattr(settings, "pdf_quality_cascade_enabled", True)
+    monkeypatch.setattr("app.services.ocr.is_available", lambda: True)
+
+    # 让 job.file_name 为 .pdf
+    orig_get = context.read_db.get
+    async def mock_get(model, object_id):
+        obj = await orig_get(model, object_id)
+        if model is importer.DocumentImportJob and obj is not None:
+            obj.file_name = "document.pdf"
+            obj.content_type = "application/pdf"
+            obj.size_bytes = pdf_source.stat().st_size
+        return obj
+    context.read_db.get = mock_get
+
+    blocks = [
+        {"text": "操作系统虚拟内存管理机制将物理内存抽象为离散页面", "bbox": [10.0, 10.0, 200.0, 30.0], "confidence": 0.96},
+        {"text": "通过多级页表结构有效降低了大地址空间的页表常驻开销", "bbox": [10.0, 40.0, 200.0, 60.0], "confidence": 0.95},
+        {"text": "缺页异常处理程序按需从后备交换空间将目标页置换载入", "bbox": [10.0, 70.0, 200.0, 90.0], "confidence": 0.97},
+        {"text": "页面置换策略平衡了内存命中率与磁盘读写吞吐开销", "bbox": [10.0, 100.0, 200.0, 120.0], "confidence": 0.94},
+        {"text": "硬件内存管理单元协同操作系统内核维护快表转换缓存", "bbox": [10.0, 130.0, 200.0, 150.0], "confidence": 0.95},
+        {"text": "保障了多道程序并发执行时地址空间隔离与高效地址映射", "bbox": [10.0, 160.0, 200.0, 180.0], "confidence": 0.96},
+    ]
+    full_text = "".join(b["text"] for b in blocks)
+    candidate = {
+        "normalized_text": f"【第 1 页】\\n{full_text}",
+        "chunks": [{
+            "text": f"【第 1 页】\\n{full_text}",
+            "source_start": 0,
+            "source_end": len(full_text) + 8,
+            "location": {"type": "page", "page": 1},
+        }],
+        "segments": [{
+            "kind": "prose",
+            "text": full_text,
+            "location": {"type": "page", "page": 1},
+            "quality": {
+                "extraction_mode": "ocr",
+                "visual_content_unparsed": False,
+                "ocr_blocks": blocks,
+            },
+            "parser_unit": build_parser_unit(
+                source_kind="pdf",
+                unit_kind="section",
+                ordinal=0,
+                unit_key="pdf:0:section:0",
+                parser=parser_provenance("builtin-pdf", "v1"),
+                source={"page": {"start": 1, "end": 1}},
+            ),
+            "structured_units": [],
+        }],
+        "coverage": {
+            "status": "complete",
+            "total_pages": 1,
+            "pages": [{"page": 1, "status": "complete", "visual_content_unparsed": False}],
+        },
+    }
+
+    stages_recorded = []
+    async def record_stage(job_id, stage):
+        stages_recorded.append(stage)
+        if stage == "chunking":
+            raise _StopAfterBoundaryProof
+
+    monkeypatch.setattr(importer, "_set_stage", record_stage)
+    monkeypatch.setattr(importer, "_prepare_revision_file", AsyncMock(return_value=None))
+
+    with (
+        patch("app.services.pdf_preflight.preflight_pdf") as mock_preflight,
+        patch("app.services.pdf_extract.build_pdf_source") as mock_extract,
+        patch("app.services.mineru_pdf.parse_pdf_remote") as mock_mineru,
+    ):
+        mock_preflight.return_value = {
+            "contract_version": "pdf-preflight-v1",
+            "status": "complete",
+            "total_pages": 1,
+            "page_count_known": True,
+            "page_limit_exceeded": False,
+            "image_limit_exceeded": False,
+            "has_mixed_content": False,
+            "pages": [{"page": 1, "native_text_chars": 0, "embedded_image_count": 1, "has_visual_content": True, "low_text": True}],
+            "unknown_reason": None,
+        }
+        mock_extract.return_value = candidate
+
+        with pytest.raises(_StopAfterBoundaryProof):
+            asyncio.run(importer._process_claimed_job(context.job_id))
+
+        assert stages_recorded == ["parsing", "chunking"]
+        assert mock_extract.call_count == 1
+        assert mock_mineru.call_count == 0

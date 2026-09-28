@@ -967,6 +967,213 @@ def test_import_pdf_ocr_unavailable_returns_install_hint(mock_extract, client, m
     assert resp.status_code == status.HTTP_400_BAD_REQUEST
     assert ".[ocr]" in resp.json()["detail"]
 
+def _make_api_ocr_candidate(*, with_digits: bool = False):
+    prefix = "这是关于计算机网络体系结构的基础说明文档包含了物理层数据链路层网络层传输层应用层的分层概念"
+    if with_digits:
+        prefix = "这是关于计算机网络体系结构第1部分的说明文档包含了物理层数据链路层网络层传输层应用概念"
+    blocks = [
+        {"text": prefix[:24], "bbox": [10.0, 10.0, 200.0, 30.0], "confidence": 0.96},
+        {"text": prefix[24:], "bbox": [10.0, 40.0, 200.0, 60.0], "confidence": 0.95},
+        {"text": "每一层负责不同的通信协议规范确保数据可靠传输", "bbox": [10.0, 70.0, 200.0, 90.0], "confidence": 0.97},
+        {"text": "实现高可用通信与统一标准接口协作", "bbox": [10.0, 100.0, 200.0, 120.0], "confidence": 0.94},
+        {"text": "系统内部各模块独立解耦并持续演进升级", "bbox": [10.0, 130.0, 200.0, 150.0], "confidence": 0.95},
+        {"text": "最终达成鲁棒可靠的分布式基础设施架构体系", "bbox": [10.0, 160.0, 200.0, 180.0], "confidence": 0.96},
+    ]
+    full_text = "".join(b["text"] for b in blocks)
+    return {
+        "normalized_text": f"【第 1 页】\n{full_text}",
+        "chunks": [{
+            "text": f"【第 1 页】\n{full_text}",
+            "source_start": 0,
+            "source_end": len(full_text) + 8,
+            "location": {"type": "page", "page": 1},
+        }],
+        "segments": [{
+            "kind": "prose",
+            "text": full_text,
+            "location": {"type": "page", "page": 1},
+            "quality": {
+                "extraction_mode": "ocr",
+                "visual_content_unparsed": False,
+                "ocr_blocks": blocks,
+            },
+            "parser_unit": build_parser_unit(
+                source_kind="pdf",
+                unit_kind="section",
+                ordinal=0,
+                unit_key="pdf:0:section:0",
+                parser=parser_provenance("builtin-pdf", "v1"),
+                source={"page": {"start": 1, "end": 1}},
+            ),
+            "structured_units": [],
+        }],
+        "coverage": {
+            "status": "complete",
+            "total_pages": 1,
+            "pages": [{"page": 1, "status": "complete", "visual_content_unparsed": False}],
+        },
+    }
+
+
+def _make_api_mineru_source():
+    text = "【第 1 页】\nMinerU 远端高质量解析结果正文"
+    return {
+        "normalized_text": text,
+        "chunks": [{
+            "text": text,
+            "source_start": 0,
+            "source_end": len(text),
+            "location": {"type": "page", "page": 1},
+        }],
+        "segments": [{
+            "kind": "prose",
+            "text": "MinerU 远端高质量解析结果正文",
+            "location": {"type": "page", "page": 1},
+            "quality": {"extraction_mode": "native"},
+            "parser_unit": build_parser_unit(
+                source_kind="pdf",
+                unit_kind="section",
+                ordinal=0,
+                unit_key="pdf:0:section:0",
+                parser=parser_provenance("builtin-pdf", "v1"),
+                source={"page": {"start": 1, "end": 1}},
+            ),
+            "structured_units": [],
+        }],
+        "coverage": {
+            "status": "complete",
+            "total_pages": 1,
+            "pages": [{"page": 1, "status": "complete", "visual_content_unparsed": False}],
+        },
+    }
+
+
+@patch("app.services.ingest.ingest_text", new_callable=AsyncMock)
+@patch("app.services.mineru_pdf.parse_pdf_remote")
+@patch("app.services.pdf_extract.build_pdf_source")
+@patch("app.services.pdf_preflight.preflight_pdf")
+def test_import_pdf_cascade_gate_off_defaults_to_mineru(
+    mock_preflight, mock_extract, mock_mineru, mock_ingest, client, monkeypatch
+):
+    monkeypatch.setattr(mock_library, "ocr_enabled", True)
+    monkeypatch.setattr(settings, "mineru_pdf_base_url", "http://mineru.test")
+    monkeypatch.setattr(settings, "mineru_pdf_library_slugs", "testlib")
+    monkeypatch.setattr(settings, "pdf_quality_cascade_enabled", False)
+
+    mock_preflight.return_value = {
+        "contract_version": "pdf-preflight-v1",
+        "status": "complete",
+        "total_pages": 1,
+        "page_count_known": True,
+        "page_limit_exceeded": False,
+        "image_limit_exceeded": False,
+        "has_mixed_content": False,
+        "pages": [{"page": 1, "native_text_chars": 0, "embedded_image_count": 1, "has_visual_content": True, "low_text": True}],
+        "unknown_reason": None,
+    }
+    mock_mineru.return_value = _make_api_mineru_source()
+    doc = MagicMock(id=uuid.uuid4(), status="pending")
+    mock_ingest.return_value = (doc, MagicMock(id=uuid.uuid4()), 1, False)
+
+    resp = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("scan.pdf", b"%PDF-1.4 fake", "application/pdf")},
+    )
+    assert resp.status_code == status.HTTP_201_CREATED
+    assert mock_mineru.call_count == 1
+    assert mock_extract.call_count == 0
+    kw = mock_ingest.call_args.kwargs
+    routing_units = [u for seg in kw["segments"] for u in seg.get("structured_units", []) if u.get("structure_type") == "pdf_routing"]
+    assert len(routing_units) == 1
+    assert routing_units[0]["value"]["selection"] == "mineru"
+
+
+@patch("app.services.ingest.ingest_text", new_callable=AsyncMock)
+@patch("app.services.mineru_pdf.parse_pdf_remote")
+@patch("app.services.pdf_extract.build_pdf_source")
+@patch("app.services.pdf_preflight.preflight_pdf")
+def test_import_pdf_cascade_gate_on_accepted_uses_local_candidate(
+    mock_preflight, mock_extract, mock_mineru, mock_ingest, client, monkeypatch
+):
+    monkeypatch.setattr(mock_library, "ocr_enabled", True)
+    monkeypatch.setattr(settings, "mineru_pdf_base_url", "http://mineru.test")
+    monkeypatch.setattr(settings, "mineru_pdf_library_slugs", "testlib")
+    monkeypatch.setattr(settings, "pdf_quality_cascade_enabled", True)
+    monkeypatch.setattr("app.services.ocr.is_available", lambda: True)
+
+    mock_preflight.return_value = {
+        "contract_version": "pdf-preflight-v1",
+        "status": "complete",
+        "total_pages": 1,
+        "page_count_known": True,
+        "page_limit_exceeded": False,
+        "image_limit_exceeded": False,
+        "has_mixed_content": False,
+        "pages": [{"page": 1, "native_text_chars": 0, "embedded_image_count": 1, "has_visual_content": True, "low_text": True}],
+        "unknown_reason": None,
+    }
+    candidate = _make_api_ocr_candidate(with_digits=False)
+    mock_extract.return_value = candidate
+    doc = MagicMock(id=uuid.uuid4(), status="pending")
+    mock_ingest.return_value = (doc, MagicMock(id=uuid.uuid4()), 1, False)
+
+    resp = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("scan.pdf", b"%PDF-1.4 fake", "application/pdf")},
+    )
+    assert resp.status_code == status.HTTP_201_CREATED
+    assert mock_extract.call_count == 1
+    assert mock_mineru.call_count == 0
+    kw = mock_ingest.call_args.kwargs
+    assert "计算机网络" in kw["text"]
+    routing_units = [u for seg in kw["segments"] for u in seg.get("structured_units", []) if u.get("structure_type") == "pdf_routing"]
+    assert len(routing_units) == 1
+    assert routing_units[0]["value"]["selection"] == "native_or_rapidocr"
+    assert routing_units[0]["value"]["needs_review"] is False
+    assert routing_units[0]["value"]["reasons"] == ["scan_page_detected"]
+
+
+@patch("app.services.ingest.ingest_text", new_callable=AsyncMock)
+@patch("app.services.mineru_pdf.parse_pdf_remote")
+@patch("app.services.pdf_extract.build_pdf_source")
+@patch("app.services.pdf_preflight.preflight_pdf")
+def test_import_pdf_cascade_gate_on_rejected_escalates_to_mineru(
+    mock_preflight, mock_extract, mock_mineru, mock_ingest, client, monkeypatch
+):
+    monkeypatch.setattr(mock_library, "ocr_enabled", True)
+    monkeypatch.setattr(settings, "mineru_pdf_base_url", "http://mineru.test")
+    monkeypatch.setattr(settings, "mineru_pdf_library_slugs", "testlib")
+    monkeypatch.setattr(settings, "pdf_quality_cascade_enabled", True)
+    monkeypatch.setattr("app.services.ocr.is_available", lambda: True)
+
+    mock_preflight.return_value = {
+        "contract_version": "pdf-preflight-v1",
+        "status": "complete",
+        "total_pages": 1,
+        "page_count_known": True,
+        "page_limit_exceeded": False,
+        "image_limit_exceeded": False,
+        "has_mixed_content": False,
+        "pages": [{"page": 1, "native_text_chars": 0, "embedded_image_count": 1, "has_visual_content": True, "low_text": True}],
+        "unknown_reason": None,
+    }
+    mock_extract.return_value = _make_api_ocr_candidate(with_digits=True)
+    mock_mineru.return_value = _make_api_mineru_source()
+    doc = MagicMock(id=uuid.uuid4(), status="pending")
+    mock_ingest.return_value = (doc, MagicMock(id=uuid.uuid4()), 1, False)
+
+    resp = client.post(
+        "/libraries/testlib/import-file",
+        files={"file": ("scan.pdf", b"%PDF-1.4 fake", "application/pdf")},
+    )
+    assert resp.status_code == status.HTTP_201_CREATED
+    assert mock_extract.call_count == 1
+    assert mock_mineru.call_count == 1
+    kw = mock_ingest.call_args.kwargs
+    assert "MinerU" in kw["text"]
+    routing_units = [u for seg in kw["segments"] for u in seg.get("structured_units", []) if u.get("structure_type") == "pdf_routing"]
+    assert len(routing_units) == 1
+    assert routing_units[0]["value"]["selection"] == "mineru"
 
 # ───────── 新增 / 替换上传：operation 字段 + 按 document ID 替换闭环 ─────────
 

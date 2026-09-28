@@ -385,6 +385,20 @@ def test_common_text_formats_and_gb18030_are_parsed(tmp_path):
     assert "甲 | 1" in tsv_result.normalized_text
 
 
+def test_html_parser_segments_satisfy_evidence_contract(tmp_path):
+    from app.services.parser_units import validate_parser_unit_contract
+
+    html_path = tmp_path / "page.html"
+    html_path.write_text("<h1>Visible title</h1><p>Useful body</p>", encoding="utf-8")
+
+    parsed = parse_import_file(html_path, _library())
+
+    assert parsed.segments
+    for segment in parsed.segments:
+        validate_parser_unit_contract(segment["parser_unit"])
+    assert parsed.segments[0]["parser_unit"]["source_kind"] == "html"
+
+
 def test_pptx_and_xls_route_to_document_parsers(tmp_path, monkeypatch):
     pptx_path = tmp_path / "slides.pptx"
     presentation = Presentation()
@@ -636,3 +650,216 @@ def test_prepare_managed_file_path_rejects_changed_source(tmp_path):
                 expected_sha256="0" * 64,
             )
         )
+
+def _make_pipeline_ocr_candidate(*, with_digits: bool = False):
+    prefix = "这是关于操作系统进程管理的基础说明文档包含了进程状态进程调度进程同步进程通信的各个概念"
+    if with_digits:
+        prefix = "这是关于操作系统进程管理第1部分的说明文档包含了进程状态进程调度进程同步进程通信概念"
+    blocks = [
+        {"text": prefix[:24], "bbox": [10.0, 10.0, 200.0, 30.0], "confidence": 0.96},
+        {"text": prefix[24:], "bbox": [10.0, 40.0, 200.0, 60.0], "confidence": 0.95},
+        {"text": "操作系统通过进程控制块维护每一个进程的核心上下文信息", "bbox": [10.0, 70.0, 200.0, 90.0], "confidence": 0.97},
+        {"text": "调度算法在多个就绪进程间公平分配处理器执行时间配额", "bbox": [10.0, 100.0, 200.0, 120.0], "confidence": 0.94},
+        {"text": "同步机制通过信号量与互斥锁保证临界区资源访问安全性", "bbox": [10.0, 130.0, 200.0, 150.0], "confidence": 0.95},
+        {"text": "最终实现系统吞吐量最大化与用户交互响应延迟的最小化", "bbox": [10.0, 160.0, 200.0, 180.0], "confidence": 0.96},
+    ]
+    full_text = "".join(b["text"] for b in blocks)
+    from app.services.parser_units import build_parser_unit, parser_provenance
+
+    return {
+        "normalized_text": f"【第 1 页】\n{full_text}",
+        "chunks": [{
+            "text": f"【第 1 页】\n{full_text}",
+            "source_start": 0,
+            "source_end": len(full_text) + 8,
+            "location": {"type": "page", "page": 1},
+        }],
+        "segments": [{
+            "kind": "prose",
+            "text": full_text,
+            "location": {"type": "page", "page": 1},
+            "quality": {
+                "extraction_mode": "ocr",
+                "visual_content_unparsed": False,
+                "ocr_blocks": blocks,
+            },
+            "parser_unit": build_parser_unit(
+                source_kind="pdf",
+                unit_kind="section",
+                ordinal=0,
+                unit_key="pdf:0:section:0",
+                parser=parser_provenance("builtin-pdf", "v1"),
+                source={"page": {"start": 1, "end": 1}},
+            ),
+            "structured_units": [],
+        }],
+        "coverage": {
+            "status": "complete",
+            "total_pages": 1,
+            "pages": [{"page": 1, "status": "complete", "visual_content_unparsed": False}],
+        },
+    }
+
+
+def _make_pipeline_mineru_source():
+    text = "【第 1 页】\nMinerU 远端高质量排版解析正文内容"
+    from app.services.parser_units import build_parser_unit, parser_provenance
+
+    return {
+        "normalized_text": text,
+        "chunks": [{
+            "text": text,
+            "source_start": 0,
+            "source_end": len(text),
+            "location": {"type": "page", "page": 1},
+        }],
+        "segments": [{
+            "kind": "prose",
+            "text": "MinerU 远端高质量排版解析正文内容",
+            "location": {"type": "page", "page": 1},
+            "quality": {"extraction_mode": "native"},
+            "parser_unit": build_parser_unit(
+                source_kind="pdf",
+                unit_kind="section",
+                ordinal=0,
+                unit_key="pdf:0:section:0",
+                parser=parser_provenance("builtin-pdf", "v1"),
+                source={"page": {"start": 1, "end": 1}},
+            ),
+            "structured_units": [],
+        }],
+        "coverage": {
+            "status": "complete",
+            "total_pages": 1,
+            "pages": [{"page": 1, "status": "complete", "visual_content_unparsed": False}],
+        },
+    }
+
+
+def test_parse_import_file_single_page_pdf_cascade_gate_off_uses_mineru(monkeypatch, tmp_path):
+    from unittest.mock import patch
+    from app.config import settings
+
+    pdf_path = tmp_path / "scan.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4 fake")
+    library = _library(slug="testlib", ocr_enabled=True)
+
+    monkeypatch.setattr(settings, "mineru_pdf_base_url", "http://mineru.test")
+    monkeypatch.setattr(settings, "mineru_pdf_library_slugs", "testlib")
+    monkeypatch.setattr(settings, "pdf_quality_cascade_enabled", False)
+
+    with (
+        patch("app.services.pdf_preflight.preflight_pdf") as mock_preflight,
+        patch("app.services.pdf_extract.build_pdf_source") as mock_extract,
+        patch("app.services.mineru_pdf.parse_pdf_remote") as mock_mineru,
+    ):
+        mock_preflight.return_value = {
+            "contract_version": "pdf-preflight-v1",
+            "status": "complete",
+            "total_pages": 1,
+            "page_count_known": True,
+            "page_limit_exceeded": False,
+            "image_limit_exceeded": False,
+            "has_mixed_content": False,
+            "pages": [{"page": 1, "native_text_chars": 0, "embedded_image_count": 1, "has_visual_content": True, "low_text": True}],
+            "unknown_reason": None,
+        }
+        mock_mineru.return_value = _make_pipeline_mineru_source()
+
+        parsed = parse_import_file(pdf_path, library)
+
+        assert mock_mineru.call_count == 1
+        assert mock_extract.call_count == 0
+        assert "MinerU" in parsed.normalized_text
+        assert len(parsed.chunks) == 1
+        assert parsed.chunks[0]["location"] == {"type": "page", "page": 1}
+        routing_units = [u for seg in parsed.segments for u in seg.get("structured_units", []) if u.get("structure_type") == "pdf_routing"]
+        assert len(routing_units) == 1
+        assert routing_units[0]["value"]["selection"] == "mineru"
+
+
+def test_parse_import_file_single_page_pdf_cascade_gate_on_accepted_uses_local(monkeypatch, tmp_path):
+    from unittest.mock import patch
+    from app.config import settings
+
+    pdf_path = tmp_path / "scan.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4 fake")
+    library = _library(slug="testlib", ocr_enabled=True)
+
+    monkeypatch.setattr(settings, "mineru_pdf_base_url", "http://mineru.test")
+    monkeypatch.setattr(settings, "mineru_pdf_library_slugs", "testlib")
+    monkeypatch.setattr(settings, "pdf_quality_cascade_enabled", True)
+    monkeypatch.setattr("app.services.ocr.is_available", lambda: True)
+
+    with (
+        patch("app.services.pdf_preflight.preflight_pdf") as mock_preflight,
+        patch("app.services.pdf_extract.build_pdf_source") as mock_extract,
+        patch("app.services.mineru_pdf.parse_pdf_remote") as mock_mineru,
+    ):
+        mock_preflight.return_value = {
+            "contract_version": "pdf-preflight-v1",
+            "status": "complete",
+            "total_pages": 1,
+            "page_count_known": True,
+            "page_limit_exceeded": False,
+            "image_limit_exceeded": False,
+            "has_mixed_content": False,
+            "pages": [{"page": 1, "native_text_chars": 0, "embedded_image_count": 1, "has_visual_content": True, "low_text": True}],
+            "unknown_reason": None,
+        }
+        mock_extract.return_value = _make_pipeline_ocr_candidate(with_digits=False)
+
+        parsed = parse_import_file(pdf_path, library)
+
+        assert mock_extract.call_count == 1
+        assert mock_mineru.call_count == 0
+        assert "进程管理" in parsed.normalized_text
+        assert len(parsed.chunks) == 1
+        assert parsed.chunks[0]["location"] == {"type": "page", "page": 1}
+        routing_units = [u for seg in parsed.segments for u in seg.get("structured_units", []) if u.get("structure_type") == "pdf_routing"]
+        assert len(routing_units) == 1
+        assert routing_units[0]["value"]["selection"] == "native_or_rapidocr"
+        assert routing_units[0]["value"]["needs_review"] is False
+        assert routing_units[0]["value"]["reasons"] == ["scan_page_detected"]
+
+
+def test_parse_import_file_single_page_pdf_cascade_gate_on_rejected_escalates_to_mineru(monkeypatch, tmp_path):
+    from unittest.mock import patch
+    from app.config import settings
+
+    pdf_path = tmp_path / "scan.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4 fake")
+    library = _library(slug="testlib", ocr_enabled=True)
+
+    monkeypatch.setattr(settings, "mineru_pdf_base_url", "http://mineru.test")
+    monkeypatch.setattr(settings, "mineru_pdf_library_slugs", "testlib")
+    monkeypatch.setattr(settings, "pdf_quality_cascade_enabled", True)
+    monkeypatch.setattr("app.services.ocr.is_available", lambda: True)
+
+    with (
+        patch("app.services.pdf_preflight.preflight_pdf") as mock_preflight,
+        patch("app.services.pdf_extract.build_pdf_source") as mock_extract,
+        patch("app.services.mineru_pdf.parse_pdf_remote") as mock_mineru,
+    ):
+        mock_preflight.return_value = {
+            "contract_version": "pdf-preflight-v1",
+            "status": "complete",
+            "total_pages": 1,
+            "page_count_known": True,
+            "page_limit_exceeded": False,
+            "image_limit_exceeded": False,
+            "has_mixed_content": False,
+            "pages": [{"page": 1, "native_text_chars": 0, "embedded_image_count": 1, "has_visual_content": True, "low_text": True}],
+            "unknown_reason": None,
+        }
+        mock_extract.return_value = _make_pipeline_ocr_candidate(with_digits=True)
+        mock_mineru.return_value = _make_pipeline_mineru_source()
+
+        parsed = parse_import_file(pdf_path, library)
+
+        assert mock_extract.call_count == 1
+        assert mock_mineru.call_count == 1
+        assert "MinerU" in parsed.normalized_text
+        routing_units = [u for seg in parsed.segments for u in seg.get("structured_units", []) if u.get("structure_type") == "pdf_routing"]
+        assert len(routing_units) == 1
+        assert routing_units[0]["value"]["selection"] == "mineru"
