@@ -1,0 +1,11 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+LABEL org.opencontainers.image.release-id="20260923-error-messages-ui-r2" \
+      org.opencontainers.image.description="Precise failure guidance and administrator fallback"
+
+USER root
+COPY --chown=10001:10001 app/services/import_uploads.py /app/app/services/import_uploads.py
+COPY --chown=10001:10001 admin-ui/src/views/MyTasks.js /app/admin-ui/src/views/MyTasks.js
+RUN python -m compileall -q /app/app/services/import_uploads.py
+USER 10001

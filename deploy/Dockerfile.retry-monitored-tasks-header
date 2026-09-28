@@ -1,0 +1,13 @@
+# Hotfix overlay: patch only the management-console retry request contract.
+ARG BASE_IMAGE=vector-kb-app:file-resource-link-upsert-20260920-r1
+FROM ${BASE_IMAGE}
+
+LABEL org.opencontainers.image.title="vector-knowledge" \
+      org.opencontainers.image.release-id="20260920-retry-monitored-tasks-header" \
+      org.opencontainers.image.description="Send the JSON content type for monitored task retries"
+
+USER root
+COPY patch_retry_monitored_tasks_header.py /tmp/patch_retry_monitored_tasks_header.py
+RUN python /tmp/patch_retry_monitored_tasks_header.py \
+    && test -f /app/admin-ui/src/api.js
+USER 10001

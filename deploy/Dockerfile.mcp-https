@@ -1,0 +1,5 @@
+ARG BASE_IMAGE=vector-kb-app:mcp-per-user-20260923-r1
+FROM ${BASE_IMAGE}
+
+COPY config.py /app/app/mcp_adapter/config.py
+COPY cli.py /app/app/mcp_adapter/cli.py

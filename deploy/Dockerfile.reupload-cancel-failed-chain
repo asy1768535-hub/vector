@@ -1,0 +1,13 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+LABEL org.opencontainers.image.title="vector-knowledge" \
+      org.opencontainers.image.release-id="20260922-reupload-cancel-failed-chain" \
+      org.opencontainers.image.description="Cancel failed processing chains when the same source is re-uploaded"
+
+USER root
+COPY patch_reupload_failed_chain.py /tmp/patch_reupload_failed_chain.py
+RUN python /tmp/patch_reupload_failed_chain.py \
+    && python -m compileall -q /app/app/services/import_uploads.py \
+    && python -c "import app.services.import_uploads; print('re-upload cancellation overlay: ok')"
+USER 10001

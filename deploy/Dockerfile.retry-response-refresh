@@ -1,0 +1,13 @@
+# Overlay the live accepted upload runtime with only the retry response fix.
+ARG BASE_IMAGE=vector-kb-app:upload-dedupe-failed-files-20260918-r1
+FROM ${BASE_IMAGE}
+
+LABEL org.opencontainers.image.title="vector-knowledge" \
+      org.opencontainers.image.release-id="20260918-retry-response-refresh" \
+      org.opencontainers.image.description="Refresh retried personal import task before projecting response"
+
+USER root
+COPY --chown=10001:10001 me.py /app/app/api/me.py
+RUN python -m compileall -q /app/app/api/me.py \
+    && python -c "import app.api.me; print('retry response runtime import smoke: ok')"
+USER 10001

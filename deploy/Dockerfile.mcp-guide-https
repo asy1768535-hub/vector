@@ -1,0 +1,4 @@
+ARG BASE_IMAGE=vector-kb-app:mcp-guide-20260923-r4-api
+FROM ${BASE_IMAGE}
+
+COPY ApiKeys.js /app/admin-ui/src/views/ApiKeys.js

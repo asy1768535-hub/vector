@@ -1,0 +1,28 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE} AS base
+
+FROM scratch
+COPY --from=base / /
+
+# Restore metadata that FROM scratch drops
+ENV PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    LANG=C.UTF-8 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+WORKDIR /app
+EXPOSE 8100
+
+LABEL org.opencontainers.image.title="vector-knowledge" \
+      org.opencontainers.image.release-id="20260923-error-messages-ui" \
+      org.opencontainers.image.description="Squashed + 35-rule failure messages with self-service actions + frontend display"
+
+USER root
+COPY --chown=10001:10001 app/services/import_uploads.py /app/app/services/import_uploads.py
+COPY --chown=10001:10001 admin-ui/src/views/MyTasks.js /app/admin-ui/src/views/MyTasks.js
+COPY --chown=10001:10001 admin-ui/style.css /app/admin-ui/style.css
+RUN python -m compileall -q /app/app/services/import_uploads.py \
+    && PYTHONPATH=/app python -c "from app.services.import_uploads import _PERSONAL_FAILURE_MESSAGES; print(f'error-messages overlay: {len(_PERSONAL_FAILURE_MESSAGES)} rules ok')"
+
+USER 10001
+CMD ["true"]

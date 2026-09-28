@@ -1,0 +1,15 @@
+# Hotfix overlay: start from the active server image and patch only the
+# verified-file-to-import-job linkage guard.  No local application tree is copied.
+ARG BASE_IMAGE=vector-kb-app:chat-answer-think-filter-20260920-r1
+FROM ${BASE_IMAGE}
+
+LABEL org.opencontainers.image.title="vector-knowledge" \
+      org.opencontainers.image.release-id="20260920-file-resource-link-upsert" \
+      org.opencontainers.image.description="Atomically upsert a verified file resource before linking an import task"
+
+USER root
+COPY patch_file_resource_link.py /tmp/patch_file_resource_link.py
+RUN python /tmp/patch_file_resource_link.py \
+    && python -m compileall -q /app/app/services/import_uploads.py \
+    && python -c "import app.services.import_uploads; print('file resource link hotfix: ok')"
+USER 10001

@@ -1,0 +1,7 @@
+# Frontend-only release: inherit the verified runtime and replace just the
+# navigation view, so a UI hotfix does not need network package installation.
+FROM vector-kb-app:netdisk-20260916-r2
+
+USER root
+COPY --chown=10001:10001 admin-ui/src/views/MyFiles.js /app/admin-ui/src/views/MyFiles.js
+USER 10001

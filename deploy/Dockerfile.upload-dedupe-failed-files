@@ -1,0 +1,18 @@
+# Keep the verified production runtime and ship only the two accepted changes:
+# upload-time raw-file deduplication and the personal failed-upload collection.
+ARG BASE_IMAGE=vector-kb-app:netdisk-preflight-persistence-20260918-r1
+FROM ${BASE_IMAGE}
+
+LABEL org.opencontainers.image.title="vector-knowledge" \
+      org.opencontainers.image.release-id="20260918-upload-dedupe-failed-files" \
+      org.opencontainers.image.description="Avoid duplicate raw files and expose failed personal uploads"
+
+USER root
+COPY --chown=10001:10001 app/api/me.py /app/app/api/me.py
+COPY --chown=10001:10001 app/services/import_uploads.py /app/app/services/import_uploads.py
+COPY --chown=10001:10001 admin-ui/src/api.js /app/admin-ui/src/api.js
+COPY --chown=10001:10001 admin-ui/src/views/MyFiles.js /app/admin-ui/src/views/MyFiles.js
+COPY --chown=10001:10001 admin-ui/style.css /app/admin-ui/style.css
+RUN python -m compileall -q /app/app/api/me.py /app/app/services/import_uploads.py \
+    && python -c "import app.api.me; import app.services.import_uploads; print('upload collection runtime import smoke: ok')"
+USER 10001

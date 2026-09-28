@@ -15,6 +15,8 @@
 
 维护文档时先查看 [`documentation-status.md`](./documentation-status.md)：它标明哪些页面是当前入口、哪些只能作历史/专题参考，以及何时必须重新验证。
 
+后续候选：[单页扫描 PDF 后验路由实施说明](./roadmap/pdf-cascading-quality-gating-plan-20260922.zh-CN.md)。执行步骤已固定；尚未替代当前 M2/V1 任务，也没有实施或发布结论。
+
 ## 历史时间点快照与分组索引
 
 以下段落保留 **2026-08-29** 的索引快照，不是当前运行或迁移事实：`pyproject.toml` package version 当时为 `0.1.0`；迁移 head 当时记录为 **`0062`**。部署、架构、worker、schema、测试和内部试运行的当前入口已迁至上方最小入口；下方 `v0.x`、`M*`、旧 head 和旧测试数字均仅代表历史设计/验收时点。

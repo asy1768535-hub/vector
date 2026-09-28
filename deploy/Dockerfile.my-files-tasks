@@ -1,0 +1,19 @@
+# Frontend-only release: separate personal file management from personal task monitoring.
+ARG BASE_IMAGE=vector-kb-app:retry-response-refresh-20260918-r1
+FROM ${BASE_IMAGE}
+
+LABEL org.opencontainers.image.title="vector-knowledge" \
+      org.opencontainers.image.release-id="20260918-my-files-tasks" \
+      org.opencontainers.image.description="Separate personal files from personal import task monitoring"
+
+USER root
+COPY --chown=10001:10001 admin-ui/src/domain_navigation.js /app/admin-ui/src/domain_navigation.js
+COPY --chown=10001:10001 admin-ui/src/app.js /app/admin-ui/src/app.js
+COPY --chown=10001:10001 admin-ui/src/api.js /app/admin-ui/src/api.js
+COPY --chown=10001:10001 admin-ui/src/views/MyFiles.js /app/admin-ui/src/views/MyFiles.js
+COPY --chown=10001:10001 admin-ui/src/views/MyTasks.js /app/admin-ui/src/views/MyTasks.js
+COPY --chown=10001:10001 admin-ui/style.css /app/admin-ui/style.css
+COPY --chown=10001:10001 app/api/me.py /app/app/api/me.py
+COPY --chown=10001:10001 app/services/import_uploads.py /app/app/services/import_uploads.py
+RUN python -m compileall -q /app/app/api/me.py /app/app/services/import_uploads.py
+USER 10001
