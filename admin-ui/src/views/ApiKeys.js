@@ -10,6 +10,17 @@ import {
 } from '../api_keys_ui.js';
 import { createRequestFence, readProjection } from '../read_state_ui.js';
 
+const MCP_SETUP_INSTRUCTIONS = [
+    '请帮我在支持自定义请求头的 MCP 客户端中添加知识库连接。',
+    '先确认设备已连接该服务的局域网或 VPN，且域名在内网解析。',
+    '传输方式：Streamable HTTP',
+    '服务地址：https://ashark.icu/mcp',
+    '请求头名称：Authorization',
+    '请求头内容：Bearer <我自己的完整 API Key>',
+    'API Key 由我在客户端的密钥或请求头设置中填写；不要让我把 Key 发到聊天里，也不要写进 URL 或共享文件。',
+    '连接成功后先调用 list_libraries，再使用返回的知识库 slug 调用 search_knowledge。',
+].join('\n');
+
 export default {
     setup() {
         const keys = ref([]);
@@ -27,6 +38,7 @@ export default {
         const submitting = ref(false);
         const result = reactive({ open: false, plaintext: '' });
         const docDialog = reactive({ open: false });
+        const mcpGuideOpen = ref(false);
         const page = ref(1);
         const pageSize = 10;
 
@@ -117,6 +129,15 @@ export default {
             }
         }
 
+        async function copyMcpInstructions() {
+            try {
+                await copyTextToClipboard(MCP_SETUP_INSTRUCTIONS);
+                ElMessage.success('已复制不含密钥的 MCP 接入说明');
+            } catch (error) {
+                ElMessage.error(error.message || '复制失败，请手动选择说明文字');
+            }
+        }
+
         function openApiDoc() {
             docDialog.open = true;
         }
@@ -150,9 +171,10 @@ export default {
         onMounted(load);
 
         return {
-            keys, loading, keysError, keysReadState, dialog, submitting, result, docDialog,
+            keys, loading, keysError, keysReadState, dialog, submitting, result, docDialog, mcpGuideOpen,
             page, pageSize, organizations, stats, pagination, visibleKeys, showPagination,
-            load, openCreate, submit, closeResult, copyPlain, openApiDoc, revoke,
+            load, openCreate, submit, closeResult, copyPlain, copyMcpInstructions,
+            mcpInstructions: MCP_SETUP_INSTRUCTIONS, openApiDoc, revoke,
             organizationName, dataEmpty, apiKeySecurity,
             formatKeyTime, keyStatus, STATUS_LABEL, STATUS_TAG,
         };
@@ -189,6 +211,22 @@ export default {
             </div>
             <div class="api-keys-doc-actions">
                 <el-button class="api-keys-doc-template-button" @click="openApiDoc">快速接入模板</el-button>
+            </div>
+        </section>
+
+        <section class="api-keys-doc-card" aria-labelledby="api-keys-mcp-title">
+            <div class="api-keys-doc-main">
+                <h3 id="api-keys-mcp-title">MCP 接入：让 AI 使用你的知识库</h3>
+                <p>在局域网或 VPN 内，每个账号用自己的 API Key 连接同一个 MCP 地址；AI 只能访问该账号有权限的知识库。</p>
+                <ol class="api-keys-doc-steps">
+                    <li>在本页新建并保存自己的 API Key</li>
+                    <li>在 MCP 客户端添加 Streamable HTTP 地址 <code>https://ashark.icu/mcp</code></li>
+                    <li>填写 Bearer 请求头，连接后调用 <code>list_libraries</code></li>
+                </ol>
+                <p class="api-keys-doc-note">完整 Key 只填在客户端的密钥设置中，不要发给 AI 聊天或其他人。</p>
+            </div>
+            <div class="api-keys-doc-actions">
+                <el-button type="primary" @click="mcpGuideOpen = true">查看 MCP 完整教程</el-button>
             </div>
         </section>
 
@@ -306,6 +344,49 @@ Authorization: Bearer &lt;API_KEY&gt;</pre>
                 <section>
                     <h4>4. 兼容接口</h4>
                     <p><code>POST /libraries/{slug}/query</code> 只返回检索切片。旧的 <code>POST /chat/messages</code> 可能分别返回 <code>sources</code> 或 <code>graph_evidence</code>；新接入请使用固定结构的 Public v1。</p>
+                </section>
+            </div>
+        </el-dialog>
+
+        <el-dialog v-model="mcpGuideOpen" title="MCP 使用指南"
+                   width="860px" class="api-keys-doc-dialog">
+            <div class="api-keys-doc-dialog-body">
+                <section>
+                    <h4>1. 准备账号与密钥</h4>
+                    <p>在本页点击“新建 API Key”，选择所属组织，保存仅显示一次的完整密钥。Key 属于创建它的账号；要查询某个知识库，该账号还需有该库的读取权限。</p>
+                    <p>不同账号各用自己的 Key。完整 Key 只填在 MCP 客户端的密钥设置里，不要发给 AI 聊天，也不要放进 URL 或共享配置文件。</p>
+                </section>
+                <section>
+                    <h4>2. 在 MCP 客户端填写连接参数</h4>
+                    <p>先连接可访问本服务的局域网或 VPN，并确保域名使用内网解析。然后选择支持自定义 HTTP 请求头的 Streamable HTTP 连接，逐项填写：</p>
+                    <pre class="api-keys-doc-code">连接名称：知识库（名称可自定）
+传输方式：Streamable HTTP
+服务地址：https://ashark.icu/mcp
+请求头名称：Authorization
+请求头内容：Bearer &lt;你的完整 API Key&gt;</pre>
+                    <p><code>Bearer</code> 后面有一个空格。请把完整 Key 填进占位符位置，不要保留尖括号。客户端若只提供 OAuth 登录、无法设置请求头，就不能用这种接入方式。</p>
+                </section>
+                <section>
+                    <h4>3. 让 AI 帮你配置</h4>
+                    <p>可以复制下面的非密钥说明发给 AI。真正的 Key 仍由你自己填到客户端的安全设置中。</p>
+                    <pre class="api-keys-doc-code">{{ mcpInstructions }}</pre>
+                    <el-button @click="copyMcpInstructions">复制给 AI 的说明</el-button>
+                </section>
+                <section>
+                    <h4>4. 验证连接并开始使用</h4>
+                    <p>保存连接后，让客户端调用 <code>list_libraries</code>。应看到自己有读取权限的知识库；如果列表为空，请检查本账号的知识库权限。</p>
+                    <p>找到知识库 slug 后，可对 AI 说：“用 <code>search_knowledge</code>，<code>knowledge_id</code> 填这个 slug，<code>query</code> 填我的问题。”上传文件时使用 <code>upload_file</code>，还需要该知识库的上传权限。</p>
+                </section>
+                <section>
+                    <h4>5. 连接失败时检查</h4>
+                    <ul class="api-keys-doc-list">
+                        <li><strong>401 未授权：</strong>检查是否填了完整 Key、<code>Bearer</code> 后的空格，以及 Key 是否过期或已撤销。</li>
+                        <li><strong>知识库列表为空或提示无权限：</strong>确认创建 Key 的账号属于正确组织，并已获得目标知识库权限。</li>
+                        <li><strong>连接超时、522 或连接时返回 403：</strong>确认设备已连接局域网或 VPN，且域名通过内网解析；VPN 使用独立网段时请联系管理员放行。</li>
+                        <li><strong>404 或空响应：</strong>核对地址必须是 <code>https://ashark.icu/mcp</code>；<code>8200/mcp</code> 和 <code>8301/mcp</code> 不是给远程客户端使用的地址。</li>
+                        <li><strong>无法填写请求头：</strong>换用支持自定义 HTTP 请求头的 MCP 客户端。</li>
+                    </ul>
+                    <p>按上面步骤仍失败，请联系管理员，并提供错误提示和发生时间；不要提供完整 API Key。</p>
                 </section>
             </div>
         </el-dialog>

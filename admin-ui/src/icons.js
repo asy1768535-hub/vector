@@ -4,6 +4,20 @@
 
 const ICONS = {
     // ── Material Design Icons (mdi) ──
+    'mdi:file-plus-outline':
+        '<path fill="currentColor" d="M6 2h8l6 6v4h-2V9h-5V4H6v16h7v2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Zm9 3.4V7h1.6L15 5.4ZM18 14h2v3h3v2h-3v3h-2v-3h-3v-2h3v-3Z"/>',
+    'mdi:folder-upload-outline':
+        '<path fill="currentColor" d="M4 4h6l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Zm0 2v12h16V8h-8.8l-2-2H4Zm7 11v-4H8l4-4 4 4h-3v4h-2Z"/>',
+    'mdi:cog-outline':
+        '<path fill="currentColor" fill-rule="evenodd" d="M9 2h6l.6 3 2 .9 2.8-.9 3 5.2-2.2 2 .1 2.2 2.1 2-3 5.2-2.8-.9-2 .9L15 24H9l-.6-2.4-2-.9-2.8.9-3-5.2 2.1-2 .1-2.2-2.2-2 3-5.2 2.8.9 2-.9L9 2Zm1.6 2-.5 2.5-3.8 1.7L4.5 7.6 3.2 9.8l1.6 1.5-.2 4-1.4 1.5 1.3 2.2 1.8-.6 3.8 1.7.5 1.9h2.8l.5-1.9 3.8-1.7 1.8.6 1.3-2.2-1.4-1.5-.2-4 1.6-1.5-1.3-2.2-1.8.6-3.8-1.7-.5-2.5h-2.8ZM12 9a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm0 2a2 2 0 1 1 0 4 2 2 0 0 1 0-4Z" transform="translate(1.1 .2) scale(.91)"/>',
+    'mdi:upload-outline':
+        '<path fill="currentColor" d="M11 16V7.8l-3.6 3.6L6 10l6-6 6 6-1.4 1.4L13 7.8V16h-2ZM4 14h2v5h12v-5h2v7H4v-7Z"/>',
+    'mdi:close':
+        '<path fill="currentColor" d="m6.4 5 5.6 5.6L17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5Z"/>',
+    'mdi:fullscreen':
+        '<path fill="currentColor" d="M3 3h7v2H5v5H3V3Zm11 0h7v7h-2V5h-5V3ZM3 14h2v5h5v2H3v-7Zm16 0h2v7h-7v-2h5v-5Z"/>',
+    'mdi:fullscreen-exit':
+        '<path fill="currentColor" d="M8 3h2v7H3V8h5V3Zm6 0h2v5h5v2h-7V3ZM3 14h7v7H8v-5H3v-2Zm11 0h7v2h-5v5h-2v-7Z"/>',
     'mdi:archive-arrow-down-outline':
         '<path fill="currentColor" d="M20 21H4V10h2v9h12v-9h2v11M3 3h18v6H3V3m2 2v2h14V5H5m5 8h4v-3l4 4-4 4v-3h-4v-2Z"/>',
     'mdi:trash-can-outline':
@@ -68,6 +82,10 @@ const ICONS = {
         '<g stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9.7 9.4 7.3 7"/><path d="M14.3 9.4 16.7 7"/><path d="M9.3 13.4 6.7 15"/><path d="M14.7 13.4 17.3 15"/><path d="M12 14.8V18"/><circle cx="12" cy="12" r="3"/><circle cx="5.8" cy="5.5" r="1.7"/><circle cx="18.2" cy="5.5" r="1.7"/><circle cx="5.2" cy="16" r="1.7"/><circle cx="18.8" cy="16" r="1.7"/><circle cx="12" cy="20" r="1.7"/></g>',
 
     // ── Sidebar Icons (stroke-based, viewBox 0 0 24 24) ──
+    'sidebar:ontology':
+        '<g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="5" rx="1.2"/><path d="M12 8v4M5.5 16v-4h13v4"/><rect x="3" y="16" width="5" height="5" rx="1.2"/><rect x="16" y="16" width="5" height="5" rx="1.2"/></g>',
+    'sidebar:graph':
+        '<g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m7 5.5 9 .8M5.5 8l3.4 8.6M7.4 7.2l9.2 9.3M17.3 8.7l-5.7 8.5M18.5 9l-.4 7M12.5 19H16"/><circle cx="5" cy="5.5" r="2.5"/><circle cx="18.5" cy="6.5" r="2.5"/><circle cx="10" cy="19" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></g>',
     'sidebar:chat':
         '<g stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5.5 5.5h13a2.5 2.5 0 0 1 2.5 2.5v6.6a2.5 2.5 0 0 1-2.5 2.5H11l-4.8 3.1v-3.1h-.7A2.5 2.5 0 0 1 3 14.6V8a2.5 2.5 0 0 1 2.5-2.5z"/><path d="M8 11h.01"/><path d="M12 11h.01"/><path d="M16 11h.01"/></g>',
     'sidebar:document':
@@ -115,33 +133,33 @@ const ICONS = {
 
     // ── Status Icons (stroke-based, fixed semantic colors, viewBox 0 0 24 24) ──
     'status:pending':
-        '<circle cx="12" cy="12" r="8.2" stroke="#8A98A8" stroke-width="1.9"/><path d="M12 7.8V12l3 1.9" stroke="#8A98A8" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>',
+        '<circle cx="12" cy="12" r="8.2" stroke="#71717A" stroke-width="1.9"/><path d="M12 7.8V12l3 1.9" stroke="#71717A" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>',
     'status:processing':
-        '<path d="M18.4 12A6.4 6.4 0 1 1 12 5.6" stroke="#3976C5" stroke-width="2" stroke-linecap="round"/><path d="M15.7 5.6H18.8V8.7" stroke="#3976C5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
+        '<path d="M18.4 12A6.4 6.4 0 1 1 12 5.6" stroke="#2563EB" stroke-width="2" stroke-linecap="round"/><path d="M15.7 5.6H18.8V8.7" stroke="#2563EB" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
     'status:success':
         '<circle cx="12" cy="12" r="8.2" stroke="#176B57" stroke-width="1.9"/><path d="M8.2 12.2l2.4 2.4 5.2-5.3" stroke="#176B57" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
     'status:failed':
-        '<circle cx="12" cy="12" r="8.2" stroke="#D92D20" stroke-width="1.9"/><path d="M12 7.6v5.2" stroke="#D92D20" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="16.6" r="1" fill="#D92D20"/>',
+        '<circle cx="12" cy="12" r="8.2" stroke="#BE123C" stroke-width="1.9"/><path d="M12 7.6v5.2" stroke="#BE123C" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="16.6" r="1" fill="#BE123C"/>',
     'status:skipped':
-        '<circle cx="12" cy="12" r="8.2" stroke="#8A98A8" stroke-width="1.9"/><path d="M8.7 15.3l6.6-6.6" stroke="#8A98A8" stroke-width="1.9" stroke-linecap="round"/>',
+        '<circle cx="12" cy="12" r="8.2" stroke="#A1A1AA" stroke-width="1.9"/><path d="M8.7 15.3l6.6-6.6" stroke="#A1A1AA" stroke-width="1.9" stroke-linecap="round"/>',
     'status:retry':
-        '<path d="M18.4 12A6.4 6.4 0 1 1 7.2 7.6" stroke="#C89B3C" stroke-width="2" stroke-linecap="round"/><path d="M8.3 5.5H5.2v3.1" stroke="#C89B3C" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
+        '<path d="M18.4 12A6.4 6.4 0 1 1 7.2 7.6" stroke="#D97706" stroke-width="2" stroke-linecap="round"/><path d="M8.3 5.5H5.2v3.1" stroke="#D97706" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
     'status:partial-failed':
-        '<path d="M12 4.5 20 18.5H4L12 4.5Z" stroke="#C89B3C" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 9v4.1" stroke="#C89B3C" stroke-width="1.9" stroke-linecap="round"/><circle cx="12" cy="15.6" r="1" fill="#C89B3C"/>',
+        '<path d="M12 4.5 20 18.5H4L12 4.5Z" stroke="#D97706" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 9v4.1" stroke="#D97706" stroke-width="1.9" stroke-linecap="round"/><circle cx="12" cy="15.6" r="1" fill="#D97706"/>',
 
     // ── Service Icons (stroke-based, fixed semantic colors, viewBox 0 0 24 24) ──
     'service:api':
-        '<path d="M7.2 16.5h9.6a3.2 3.2 0 0 0 .2-6.4 4.8 4.8 0 0 0-9-1.5A3.6 3.6 0 0 0 7.2 16.5Z" stroke="#8A98A8" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><text x="12" y="14.1" font-size="4.1" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" fill="#8A98A8" font-weight="700">API</text>',
+        '<path d="M7.2 16.5h9.6a3.2 3.2 0 0 0 .2-6.4 4.8 4.8 0 0 0-9-1.5A3.6 3.6 0 0 0 7.2 16.5Z" stroke="#71717A" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><text x="12" y="14.1" font-size="4.1" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" fill="#71717A" font-weight="700">API</text>',
     'service:embedding-worker':
         '<rect x="6" y="6" width="12" height="12" rx="2" stroke="#176B57" stroke-width="1.8"/><path d="M9.2 9.2h5.6v5.6H9.2z" stroke="#176B57" stroke-width="1.6"/><path d="M12 3.8v2M12 18.2v2M3.8 12h2M18.2 12h2M6.4 6.4l1.2 1.2M16.4 16.4l1.2 1.2M16.4 7.6l1.2-1.2M6.4 17.6l1.2-1.2" stroke="#176B57" stroke-width="1.6" stroke-linecap="round"/>',
     'service:cleanup-worker':
         '<path d="M8.5 7.5h7M6.9 7.5h10.2" stroke="#176B57" stroke-width="1.8" stroke-linecap="round"/><path d="M9.2 5.6h5.6" stroke="#176B57" stroke-width="1.8" stroke-linecap="round"/><path d="M7.8 7.5l.7 10a1.5 1.5 0 0 0 1.5 1.4h4a1.5 1.5 0 0 0 1.5-1.4l.7-10" stroke="#176B57" stroke-width="1.8" stroke-linejoin="round"/><path d="M10.2 10.1v5.3M13.8 10.1v5.3" stroke="#176B57" stroke-width="1.7" stroke-linecap="round"/>',
     'service:qdrant':
-        '<path d="M12 4.8 18 8.1v7.8L12 19.2 6 15.9V8.1L12 4.8Z" stroke="#3976C5" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 9.4 15.4 11.3v4l-3.4 1.9-3.4-1.9v-4L12 9.4Z" stroke="#D92D20" stroke-width="1.6" stroke-linejoin="round"/>',
+        '<path d="M12 4.8 18 8.1v7.8L12 19.2 6 15.9V8.1L12 4.8Z" stroke="#2563EB" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 9.4 15.4 11.3v4l-3.4 1.9-3.4-1.9v-4L12 9.4Z" stroke="#BE123C" stroke-width="1.6" stroke-linejoin="round"/>',
     'service:postgresql':
-        '<path d="M9.5 6.2c-1.9 0-3.3 1.3-3.3 3v5c0 1.8 1.4 3.1 3.2 3.1 1.2 0 1.8-.4 2.6-1.2.9-.9 1.7-2 2.6-2.8 1.1-1 2-1.3 3.2-1.3" stroke="#8A98A8" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M10.7 8.1c1.2 0 2.4.5 3.1 1.4.7.8 1 1.8 1 2.9v5.2" stroke="#8A98A8" stroke-width="1.8" stroke-linecap="round"/><circle cx="9.7" cy="10.1" r=".95" fill="#8A98A8"/>',
+        '<path d="M9.5 6.2c-1.9 0-3.3 1.3-3.3 3v5c0 1.8 1.4 3.1 3.2 3.1 1.2 0 1.8-.4 2.6-1.2.9-.9 1.7-2 2.6-2.8 1.1-1 2-1.3 3.2-1.3" stroke="#71717A" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M10.7 8.1c1.2 0 2.4.5 3.1 1.4.7.8 1 1.8 1 2.9v5.2" stroke="#71717A" stroke-width="1.8" stroke-linecap="round"/><circle cx="9.7" cy="10.1" r=".95" fill="#71717A"/>',
     'service:embedding-service':
-        '<circle cx="8" cy="12" r="2" stroke="#176B57" stroke-width="1.7"/><circle cx="16" cy="7.8" r="2" stroke="#3976C5" stroke-width="1.7"/><circle cx="16" cy="16.2" r="2" stroke="#176B57" stroke-width="1.7"/><path d="M9.8 11 14.1 8.8M9.8 13l4.3 2.2" stroke="#8A98A8" stroke-width="1.7" stroke-linecap="round"/>',
+        '<circle cx="8" cy="12" r="2" stroke="#176B57" stroke-width="1.7"/><circle cx="16" cy="7.8" r="2" stroke="#2563EB" stroke-width="1.7"/><circle cx="16" cy="16.2" r="2" stroke="#176B57" stroke-width="1.7"/><path d="M9.8 11 14.1 8.8M9.8 13l4.3 2.2" stroke="#71717A" stroke-width="1.7" stroke-linecap="round"/>',
 };
 
 // 备选回退图标（问号）

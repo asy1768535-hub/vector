@@ -228,13 +228,13 @@ export default {
                         <el-option label="全部任务" value="all" />
                         <el-option label="近 30 天" value="30d" />
                     </el-select>
-                    <el-button :loading="loading" @click="refreshTasks"><local-icon name="action:refresh" />刷新</el-button>
+                    <el-button :loading="loading" @click="refreshTasks"><local-icon icon="mdi:refresh" />刷新</el-button>
                 </div>
             </header>
 
             <div class="my-tasks-stats" aria-label="个人任务统计">
                 <article v-for="card in statCards" :key="card.key" class="my-tasks-stat-card" :class="'is-' + card.type">
-                    <local-icon :name="card.icon" />
+                    <local-icon :icon="card.icon" />
                     <div><strong>{{ card.value }}</strong><span>{{ card.label }}</span></div>
                 </article>
             </div>
@@ -267,8 +267,15 @@ export default {
                     <el-table-column label="提交时间" width="174">
                         <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
                     </el-table-column>
-                    <el-table-column label="失败原因" min-width="180">
-                        <template #default="{ row }"><span class="my-tasks-failure">{{ row.failure_message || '—' }}</span></template>
+                    <el-table-column label="失败原因" min-width="220">
+                        <template #default="{ row }">
+                            <div v-if="row.failure_message">
+                                <span class="my-tasks-failure">{{ row.failure_message }}</span>
+                                <div v-if="row.failure_action" class="my-tasks-failure-action">{{ row.failure_action }}</div>
+                                <div v-if="row.status === 'failed' && !String(row.failure_action || '').includes('联系')" class="my-tasks-failure-action">若仍失败，请联系管理员</div>
+                            </div>
+                            <span v-else class="my-tasks-failure">—</span>
+                        </template>
                     </el-table-column>
                     <el-table-column label="操作" width="144" fixed="right">
                         <template #default="{ row }">

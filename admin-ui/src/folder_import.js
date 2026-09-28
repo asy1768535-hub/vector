@@ -335,11 +335,11 @@ export function importDisplayStatus(job) {
     const sourceSaved = job?.file_status === 'available'
         || (job?.file_status == null && Boolean(job?.upload_completed_at));
     if (sourceSaved) {
-        return job?.result_operation === 'unchanged' ? 'skipped' : 'submitted';
+        return ['unchanged', 'duplicate_source'].includes(job?.result_operation) ? 'skipped' : 'submitted';
     }
     if (['failed', 'error'].includes(job?.file_status)) return 'failed';
     if (job?.status === 'succeeded') {
-        return job?.result_operation === 'unchanged' ? 'skipped' : 'submitted';
+        return ['unchanged', 'duplicate_source'].includes(job?.result_operation) ? 'skipped' : 'submitted';
     }
     if (['failed', 'cancelled', 'superseded'].includes(job?.status)) return 'failed';
     if (job?.status === 'uploading' || job?.current_stage === 'uploading') return 'uploading';
@@ -364,7 +364,9 @@ export const IMPORT_STAGE_LABEL = Object.freeze({
 export function importStageLabel(job) {
     if (job?.file_status === 'available'
         || (job?.file_status == null && job?.upload_completed_at)) {
-        return job?.result_operation === 'unchanged' ? IMPORT_STAGE_LABEL.skipped : IMPORT_STAGE_LABEL.submitted;
+        return ['unchanged', 'duplicate_source'].includes(job?.result_operation)
+            ? IMPORT_STAGE_LABEL.skipped
+            : IMPORT_STAGE_LABEL.submitted;
     }
     if (['failed', 'error'].includes(job?.file_status)) return IMPORT_STAGE_LABEL.failed;
     return IMPORT_STAGE_LABEL[job?.current_stage] || IMPORT_STAGE_LABEL[job?.status] || '等待上传';

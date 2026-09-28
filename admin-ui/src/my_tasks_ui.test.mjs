@@ -25,4 +25,6 @@ test('my tasks uses only the current user task APIs and provides task recovery a
     assert.match(api, /library_slug/);
     assert.match(api, /status/);
     assert.match(api, /page/);
+    assert.match(view, /<local-icon :icon="card\.icon" \/>/);
+    assert.match(view, /<local-icon icon="mdi:refresh" \/>/);
 });
