@@ -173,6 +173,18 @@ async def enqueue_delete_collection(db, library) -> None:
     )
 
 
+async def enqueue_delete_library_file_resources(db, library) -> None:
+    """Queue cleanup of all file resources belonging to a deleted library."""
+    await _enqueue(
+        db,
+        event_type=EVENT_DELETE_FILE_RESOURCES,
+        library_id=library.id,
+        collection_name=library.qdrant_collection,
+        payload={"library_id": str(library.id)},
+        idempotency_key=f"delete-library-file-resources:{library.id}",
+    )
+
+
 async def execute_event(row: CleanupOutbox, *, db: AsyncSession | None = None) -> None:
     """Execute one idempotent cleanup event."""
     from app.services import qdrant
@@ -238,9 +250,9 @@ async def execute_event(row: CleanupOutbox, *, db: AsyncSession | None = None) -
                     )
                 ).scalars().all()
             )
-        else:
+        elif payload.get("document_id") is not None:
             try:
-                document_id = uuid.UUID(str(payload.get("document_id")))
+                document_id = uuid.UUID(str(payload["document_id"]))
             except (TypeError, ValueError, AttributeError):
                 raise ValueError(f"file resource event missing document_id: {row.id}") from None
             resources = list(
@@ -261,6 +273,31 @@ async def execute_event(row: CleanupOutbox, *, db: AsyncSession | None = None) -
                 .scalars()
                 .all()
             )
+        else:
+            # Library-level bulk file resource cleanup (triggered by library deletion).
+            # Loop in batches to handle libraries with many resources without
+            # holding a single huge lock or risking the outbox event completing
+            # before all resources are processed.
+            while True:
+                batch = list(
+                    (
+                        await db.execute(
+                            select(FileResource)
+                            .where(
+                                FileResource.library_id == row.library_id,
+                                FileResource.storage_status.notin_(("deleted", "storing")),
+                            )
+                            .with_for_update(skip_locked=True)
+                            .limit(500)
+                        )
+                    ).scalars().all()
+                )
+                if not batch:
+                    break
+                for resource in batch:
+                    adapter = build_object_storage_adapter(provider=resource.storage_provider)
+                    await delete_file_resource_object(adapter=adapter, resource=resource, db=db)
+            resources = []  # already handled above; skip the shared loop
         for resource in resources:
             adapter = build_object_storage_adapter(provider=resource.storage_provider)
             await delete_file_resource_object(adapter=adapter, resource=resource, db=db)

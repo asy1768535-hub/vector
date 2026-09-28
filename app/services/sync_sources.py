@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.document import Document
+from app.models.embedding_job import EmbeddingJob
 from app.models.library import Library
 from app.models.sync_source import SyncSource
 
@@ -89,7 +91,54 @@ async def update_sync_source(db: AsyncSession, library: Library, source_key: str
 
 
 async def delete_sync_source(db: AsyncSession, library: Library, source_key: str) -> None:
+    from app.services import cleanup as cleanup_service
+
     source = await require_sync_source(db, library, source_key)
+    # Lock the source row early so concurrent upsert_sync_document calls
+    # (which also acquire the source via require_active_sync_source) serialise
+    # and cannot insert new documents after our cascade loop finishes.
+    await db.execute(
+        select(SyncSource.id)
+        .where(SyncSource.id == source.id)
+        .with_for_update()
+    )
+    now = datetime.now(timezone.utc)
+
+    # Cascade: soft-delete all active documents belonging to this sync source.
+    # Batched to avoid locking too many rows at once.
+    while True:
+        rows = await db.execute(
+            select(Document.id)
+            .where(
+                Document.library_id == library.id,
+                Document.sync_source_id == source.id,
+                Document.deleted_at.is_(None),
+            )
+            .order_by(Document.id)
+            .limit(200)
+            .with_for_update()
+        )
+        document_ids = list(rows.scalars().all())
+        if not document_ids:
+            break
+        await db.execute(
+            update(Document)
+            .where(Document.id.in_(document_ids))
+            .values(deleted_at=now, status="deleted", updated_at=now)
+        )
+        await db.execute(
+            update(EmbeddingJob)
+            .where(
+                EmbeddingJob.library_id == library.id,
+                EmbeddingJob.document_id.in_(document_ids),
+                EmbeddingJob.status.in_(("pending", "processing")),
+            )
+            .values(status="superseded", finished_at=now)
+        )
+        for document_id in document_ids:
+            await cleanup_service.enqueue_delete_document(db, library, document_id)
+        await db.flush()
+
     source.status = "deleted"
-    source.deleted_at = datetime.now(timezone.utc)
+    source.deleted_at = now
     await db.flush()

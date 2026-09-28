@@ -19,6 +19,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -183,19 +184,96 @@ def _build_payload(
     return payload
 
 
-async def _reset_stale_jobs(db: AsyncSession) -> int:
+def get_worker_target_config() -> tuple[bool, uuid.UUID | None, datetime | None]:
+    raw_exclude = os.getenv("WORKER_EXCLUDE_PDF", "").strip().lower()
+    raw_target = os.getenv("WORKER_TARGET_LIBRARY_ID", "").strip()
+    raw_min_created = os.getenv("WORKER_TASK_MIN_CREATED_AT", "").strip()
+
+    is_exclude = raw_exclude in {"1", "true", "yes", "on"}
+    is_include = raw_exclude in {"0", "false", "no", "off"}
+
+    # 1. 开关漏配或非法值检查：WORKER_EXCLUDE_PDF 必须明确设为 1 或 0（防止两开关同时漏配）
+    if not is_exclude and not is_include:
+        log.critical(
+            "FATAL: Ambiguous or missing WORKER_EXCLUDE_PDF='%s'. Must be explicitly '1' (baseline exclude) or '0' (trial target).",
+            raw_exclude,
+        )
+        sys.exit(1)
+
+    # 2. 目标库 UUID 解析
+    target_library_id: uuid.UUID | None = None
+    if raw_target:
+        try:
+            target_library_id = uuid.UUID(raw_target)
+        except (ValueError, TypeError) as exc:
+            log.critical(
+                "FATAL: WORKER_TARGET_LIBRARY_ID='%s' is not a valid UUID: %s",
+                raw_target,
+                exc,
+            )
+            sys.exit(1)
+
+    # 3. 配置冲突检查：已指定目标库但 WORKER_EXCLUDE_PDF=1
+    if is_exclude and target_library_id is not None:
+        log.critical(
+            "FATAL: Configuration conflict! WORKER_TARGET_LIBRARY_ID is set ('%s') but WORKER_EXCLUDE_PDF=1. "
+            "Trial worker cannot exclude PDF, and baseline worker cannot target a specific library.",
+            raw_target,
+        )
+        sys.exit(1)
+
+    # 4. 试用模式检查：WORKER_EXCLUDE_PDF=0 时必须配置合法目标库 UUID
+    if is_include and target_library_id is None:
+        log.critical(
+            "FATAL: WORKER_TARGET_LIBRARY_ID must be specified when WORKER_EXCLUDE_PDF=0 in trial mode."
+        )
+        sys.exit(1)
+
+    # 5. 可选历史积压隔离过滤：仅申领指定时间戳之后的新任务
+    min_created_at: datetime | None = None
+    if raw_min_created:
+        try:
+            min_created_at = datetime.fromisoformat(raw_min_created.replace("Z", "+00:00"))
+        except (ValueError, TypeError) as exc:
+            log.critical(
+                "FATAL: WORKER_TASK_MIN_CREATED_AT='%s' is not a valid ISO timestamp: %s",
+                raw_min_created,
+                exc,
+            )
+            sys.exit(1)
+
+    return is_exclude, target_library_id, min_created_at
+
+async def _reset_stale_jobs(
+    db: AsyncSession,
+    target_library_id: uuid.UUID | None = None,
+    min_created_at: datetime | None = None,
+) -> int:
     """超时仍在 processing 的任务回收；达最大次数的直接 failed，其余重置为 pending。"""
-    params = {
+    if target_library_id is None:
+        _, target_library_id, cfg_min_created = get_worker_target_config()
+        if min_created_at is None:
+            min_created_at = cfg_min_created
+    params: dict[str, Any] = {
         "secs": str(settings.embed_worker_stale_seconds),
         "max": settings.embed_worker_max_attempts,
     }
+    lib_filter = ""
+    if target_library_id is not None:
+        params["target_library_id"] = target_library_id
+        lib_filter = "AND library_id = :target_library_id"
+    if min_created_at is not None:
+        params["min_created_at"] = min_created_at
+        lib_filter += " AND created_at >= :min_created_at"
+
     failed = await db.execute(
         text(
-            """
+            f"""
             UPDATE embedding_jobs
             SET status = 'failed', worker_id = NULL, claimed_at = NULL,
                 finished_at = NOW(), last_error = COALESCE(last_error, 'stale processing at max attempts')
             WHERE status = 'processing'
+              {lib_filter}
               AND claimed_at IS NOT NULL
               AND claimed_at < NOW() - (:secs || ' seconds')::interval
               AND attempt_count >= :max
@@ -205,14 +283,15 @@ async def _reset_stale_jobs(db: AsyncSession) -> int:
     )
     reset = await db.execute(
         text(
-        """
-        UPDATE embedding_jobs
-        SET status = 'pending', worker_id = NULL, claimed_at = NULL
-        WHERE status = 'processing'
-          AND claimed_at IS NOT NULL
-          AND claimed_at < NOW() - (:secs || ' seconds')::interval
-          AND attempt_count < :max
-        """
+            f"""
+            UPDATE embedding_jobs
+            SET status = 'pending', worker_id = NULL, claimed_at = NULL
+            WHERE status = 'processing'
+              {lib_filter}
+              AND claimed_at IS NOT NULL
+              AND claimed_at < NOW() - (:secs || ' seconds')::interval
+              AND attempt_count < :max
+            """
         ),
         params,
     )
@@ -222,14 +301,27 @@ async def _reset_stale_jobs(db: AsyncSession) -> int:
 
 async def _claim_jobs(db: AsyncSession, worker_id: str, limit: int) -> list[EmbeddingJob]:
     """FOR UPDATE SKIP LOCKED 抢锁 → 标记 processing。"""
-    raw_sql = text(
+    exclude_pdf, target_library_id, min_created_at = get_worker_target_config()
+    params: dict[str, Any] = {
+        "limit": limit,
+        "worker_id": worker_id,
+        "max_attempts": settings.embed_worker_max_attempts,
+        "exclude_pdf": exclude_pdf,
+    }
+    if target_library_id is not None:
+        params["target_library_id"] = target_library_id
+        target_clause = """
+              AND j.library_id = :target_library_id
+              AND (
+                LOWER(COALESCE(d.source_path, '')) LIKE '%.pdf'
+                OR LOWER(COALESCE(d.title, '')) LIKE '%.pdf'
+              )
         """
-        WITH picked AS (
-            SELECT j.id
-            FROM embedding_jobs j
-            JOIN documents d ON d.id = j.document_id
-            WHERE j.status = 'pending'
-              AND j.attempt_count < :max_attempts
+        if min_created_at is not None:
+            params["min_created_at"] = min_created_at
+            target_clause += " AND j.created_at >= :min_created_at"
+    else:
+        target_clause = """
               AND (
                 NOT :exclude_pdf
                 OR (
@@ -237,6 +329,16 @@ async def _claim_jobs(db: AsyncSession, worker_id: str, limit: int) -> list[Embe
                     AND LOWER(COALESCE(d.title, '')) NOT LIKE '%.pdf'
                 )
               )
+        """
+    raw_sql = text(
+        f"""
+        WITH picked AS (
+            SELECT j.id
+            FROM embedding_jobs j
+            JOIN documents d ON d.id = j.document_id
+            WHERE j.status = 'pending'
+              AND j.attempt_count < :max_attempts
+              {target_clause}
             ORDER BY j.created_at
             FOR UPDATE SKIP LOCKED
             LIMIT :limit
@@ -251,16 +353,7 @@ async def _claim_jobs(db: AsyncSession, worker_id: str, limit: int) -> list[Embe
         RETURNING j.id
         """
     )
-    result = await db.execute(
-        raw_sql,
-        {
-            "limit": limit,
-            "worker_id": worker_id,
-            "max_attempts": settings.embed_worker_max_attempts,
-            "exclude_pdf": os.getenv("WORKER_EXCLUDE_PDF", "").strip().lower()
-            in {"1", "true", "yes", "on"},
-        },
-    )
+    result = await db.execute(raw_sql, params)
     ids = [row[0] for row in result.all()]
     if not ids:
         await db.commit()
@@ -691,8 +784,16 @@ async def _mark_failed(db: AsyncSession, job: EmbeddingJob, reason: str) -> None
 
 
 async def run(watch: bool) -> None:
+    exclude_pdf, target_library_id, min_created_at = get_worker_target_config()
     worker_id = _worker_id()
-    log.info("starting worker id=%s watch=%s batch_docs=%s", worker_id, watch, settings.embed_worker_batch_docs)
+    log.info(
+        "starting worker id=%s watch=%s batch_docs=%s target_library_id=%s min_created_at=%s",
+        worker_id,
+        watch,
+        settings.embed_worker_batch_docs,
+        target_library_id,
+        min_created_at,
+    )
     # 启动自检：embedding / Qdrant 用不了时立刻报（非 fatal）。
     from app.services import heartbeat, selfcheck
     degraded = not await selfcheck.run_startup_check("worker")
@@ -720,7 +821,12 @@ async def run(watch: bool) -> None:
     last_reconcile = 0.0
     while True:
         # 周期 reconcile：即使持续有任务也按间隔收口 running operation（不只在空闲时）。
-        if not degraded and (time.monotonic() - last_reconcile) >= settings.worker_reconcile_seconds:
+        # 靶向试用 worker 跳过全局 reconcile，由常驻 worker 处理
+        if (
+            target_library_id is None
+            and not degraded
+            and (time.monotonic() - last_reconcile) >= settings.worker_reconcile_seconds
+        ):
             last_reconcile = time.monotonic()
             try:
                 from app.services import rebuild as rebuild_svc
@@ -748,7 +854,9 @@ async def run(watch: bool) -> None:
                 continue
 
         async with async_session_factory() as session:
-            reset = await _reset_stale_jobs(session)
+            reset = await _reset_stale_jobs(
+                session, target_library_id=target_library_id, min_created_at=min_created_at
+            )
             if reset:
                 log.warning("reset %s stale processing jobs", reset)
             jobs = await _claim_jobs(session, worker_id, settings.embed_worker_batch_docs)
@@ -756,12 +864,14 @@ async def run(watch: bool) -> None:
         if not jobs:
             if not watch:
                 # 单次模式退出前补一次 reconcile，避免遗留 running operation 卡住
-                try:
-                    from app.services import rebuild as rebuild_svc
-                    async with async_session_factory() as rsession:
-                        await rebuild_svc.reconcile_running(rsession)
-                except Exception:  # noqa: BLE001
-                    log.exception("final reconcile failed")
+                # 靶向试用 worker 同样跳过全局 reconcile
+                if target_library_id is None:
+                    try:
+                        from app.services import rebuild as rebuild_svc
+                        async with async_session_factory() as rsession:
+                            await rebuild_svc.reconcile_running(rsession)
+                    except Exception:  # noqa: BLE001
+                        log.exception("final reconcile failed")
                 log.info("no pending jobs; exiting")
                 await _stop_heartbeat()
                 return
@@ -776,6 +886,7 @@ async def run(watch: bool) -> None:
 
 
 def main() -> None:
+    get_worker_target_config()
     parser = argparse.ArgumentParser(description="Embedding worker (DB-queue based).")
     parser.add_argument("--watch", action="store_true", help="Long-running mode; poll when idle.")
     args = parser.parse_args()

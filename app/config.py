@@ -147,7 +147,7 @@ class Settings(BaseSettings):
 
     # ---- OCR（图片/扫描件抽文字；默认关，按库 ocr_enabled 覆盖；需装 rapidocr_onnxruntime）----
     ocr_enabled: bool = False
-    ocr_intra_op_num_threads: int = Field(default=8, ge=1, le=64)
+    ocr_intra_op_num_threads: int = Field(default=4, ge=1, le=64)
     ocr_inter_op_num_threads: int = Field(default=1, ge=1, le=8)
     image_ocr_max_input_bytes: int = Field(
         default=128 * 1024 * 1024,
@@ -162,6 +162,8 @@ class Settings(BaseSettings):
     pdf_ocr_render_dpi: int = 200
     # 单份 PDF 最多 OCR 多少页（只统计真正进 OCR 的页）；超过即 400 快速失败，不继续渲染
     pdf_ocr_max_pages: int = 50
+    # Isolated recovery workers only: bounded page batches and adaptive rendering.
+    pdf_resource_recovery_enabled: bool = False
     # ---- MinerU 3.4.4 PDF 增强解析（base URL + library slug 白名单双重启用）----
     mineru_pdf_base_url: str = ""
     mineru_pdf_expected_version: str = "3.4.4"
@@ -172,6 +174,8 @@ class Settings(BaseSettings):
         le=512 * 1024 * 1024,
     )
     mineru_pdf_library_slugs: str = ""
+    # ---- 单页扫描 PDF 逐级质量门控后验路由（默认关；需机械收益指标达标后方可开启）----
+    pdf_quality_cascade_enabled: bool = False
 
     # ---- docx 表格感知切块（默认关，按库 docx_table_aware 覆盖）----
     # 关：docx 走扁平正文切分（散文为主的库实测更优）；开：每个表格单独成块带表头/章节上下文，

@@ -698,6 +698,7 @@ async def delete_library(
     if not is_external:
         from app.services import cleanup as cleanup_service
         await cleanup_service.enqueue_delete_collection(db, lib)
+        await cleanup_service.enqueue_delete_library_file_resources(db, lib)
     await db.commit()
     if is_external:
         log.info("library.delete: slug=%s 是 external，跳过 Qdrant collection 删除（%s）", slug, lib.qdrant_collection)

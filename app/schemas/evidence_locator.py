@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 Sha256Hex = str
 EVIDENCE_LOCATOR_CONTRACT_VERSION = "v1"
-SourceKind = Literal["text", "pdf", "doc", "docx", "xlsx", "xls", "csv", "json", "image"]
+SourceKind = Literal["text", "html", "pdf", "doc", "docx", "xlsx", "xls", "csv", "json", "image"]
 UnitKind = Literal[
     "section",
     "chunk",

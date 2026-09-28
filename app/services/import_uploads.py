@@ -477,6 +477,8 @@ class UploadOperationClaim:
     uploaded_by_user_id: uuid.UUID | None = None
     relative_path: str | None = None
     content_type: str | None = None
+    external_id: str | None = None
+    replace_document_id: uuid.UUID | None = None
 
 
 class UploadClaimLease:
@@ -2470,6 +2472,8 @@ async def claim_upload_operation(
             uploaded_by_user_id=job.requested_by_user_id,
             relative_path=job.relative_path,
             content_type=job.content_type,
+            external_id=getattr(job, "external_id", None),
+            replace_document_id=getattr(job, "replace_document_id", None),
         )
     if job.status != "uploading":
         raise ImportUploadError(
@@ -2557,6 +2561,8 @@ async def claim_upload_operation(
         uploaded_by_user_id=job.requested_by_user_id,
         relative_path=job.relative_path,
         content_type=job.content_type,
+        external_id=getattr(job, "external_id", None),
+        replace_document_id=getattr(job, "replace_document_id", None),
     )
 
 
@@ -2974,6 +2980,7 @@ async def complete_claimed_upload(
                 claim=claim,
                 sha256=sha256,
                 lease=lease,
+                config=config,
             ):
                 handle.close()
                 if not await remove_staging_file(claim.staging_key, config):
@@ -3170,7 +3177,13 @@ async def complete_claimed_upload(
                             upload_offset=claim.upload_offset,
                             retry_after_seconds=config.import_upload_retry_after_seconds,
                         ) from exc
+                    prior_staging_keys = await cancel_prior_failed_uploads_for_reupload(
+                        db, claim=claim
+                    )
                     await db.commit()
+                    await remove_reuploaded_failed_staging(
+                        prior_staging_keys, config=config
+                    )
                     raise
 
             await lease.stop_renewal()
@@ -3215,7 +3228,11 @@ async def complete_claimed_upload(
                     upload_offset=claim.upload_offset,
                     retry_after_seconds=config.import_upload_retry_after_seconds,
                 )
+            prior_staging_keys = await cancel_prior_failed_uploads_for_reupload(
+                db, claim=claim
+            )
             await db.commit()
+            await remove_reuploaded_failed_staging(prior_staging_keys, config=config)
     except ObjectStorageError as exc:
         if resource is not None and resource.storage_status != "available":
             resource.storage_status = "storage_failed"
@@ -3330,6 +3347,152 @@ async def remove_staging_file(
     return True
 
 
+async def cancel_prior_failed_uploads_for_reupload(
+    db: AsyncSession,
+    *,
+    claim: UploadOperationClaim,
+) -> tuple[str, ...]:
+    """Cancel a replacement upload's older failed processing chain.
+
+    The source identity is scoped to one uploader and library.  Folder uploads
+    use their normalized relative path; uploads without one use the external
+    identifier when present, otherwise their root-level filename.  A failed
+    replacement request only supersedes an earlier failure for that same
+    replacement target.  If that older import handed off to embedding or graph
+    extraction, its failed descendants are terminalized too so task monitoring
+    does not keep reporting errors for a source that the user replaced.
+    """
+    if claim.library_id is None or claim.uploaded_by_user_id is None:
+        return ()
+
+    if claim.relative_path is not None:
+        source_conditions = (
+            DocumentImportJob.relative_path == claim.relative_path,
+            DocumentImportJob.file_name == claim.file_name,
+        )
+    elif claim.external_id is not None:
+        source_conditions = (
+            DocumentImportJob.relative_path.is_(None),
+            DocumentImportJob.external_id == claim.external_id,
+        )
+    else:
+        source_conditions = (
+            DocumentImportJob.relative_path.is_(None),
+            DocumentImportJob.external_id.is_(None),
+            DocumentImportJob.file_name == claim.file_name,
+        )
+    replacement_match = (
+        DocumentImportJob.replace_document_id == claim.replace_document_id
+        if claim.replace_document_id is not None
+        else DocumentImportJob.replace_document_id.is_(None)
+    )
+    failed_embedding = exists(
+        select(EmbeddingJob.id).where(
+            EmbeddingJob.id == DocumentImportJob.embedding_job_id,
+            EmbeddingJob.status == "failed",
+        )
+    )
+    failed_graph = exists(
+        select(GraphExtractionJob.id).where(
+            GraphExtractionJob.document_revision_id
+            == DocumentImportJob.document_revision_id,
+            GraphExtractionJob.status == "failed",
+        )
+    )
+    failed_processing_chain = and_(
+        DocumentImportJob.status == "processing",
+        DocumentImportJob.current_stage.in_(("embedding", "graph")),
+        or_(failed_embedding, failed_graph),
+    )
+    source_match = (
+        DocumentImportJob.id != claim.job_id,
+        DocumentImportJob.library_id == claim.library_id,
+        DocumentImportJob.requested_by_user_id == claim.uploaded_by_user_id,
+        replacement_match,
+        *source_conditions,
+    )
+    prior_rows = (
+        await db.execute(
+            select(
+                DocumentImportJob.id,
+                DocumentImportJob.staging_key,
+                DocumentImportJob.embedding_job_id,
+                DocumentImportJob.document_revision_id,
+            ).where(
+                *source_match,
+                or_(
+                    DocumentImportJob.status == "failed",
+                    failed_processing_chain,
+                ),
+            )
+        )
+    ).all()
+    if not prior_rows:
+        return ()
+
+    prior_job_ids = tuple(row.id for row in prior_rows)
+    prior_staging_keys = tuple(row.staging_key for row in prior_rows)
+    embedding_job_ids = tuple(
+        job_id for row in prior_rows if (job_id := row.embedding_job_id) is not None
+    )
+    document_revision_ids = tuple(
+        revision_id
+        for row in prior_rows
+        if (revision_id := row.document_revision_id) is not None
+    )
+    now = datetime.now(timezone.utc)
+    await db.execute(
+        update(DocumentImportJob)
+        .where(
+            DocumentImportJob.id.in_(prior_job_ids),
+        )
+        .values(
+            status="cancelled",
+            worker_id=None,
+            claimed_at=None,
+            finished_at=now,
+        )
+    )
+    if embedding_job_ids:
+        await db.execute(
+            update(EmbeddingJob)
+            .where(
+                EmbeddingJob.id.in_(embedding_job_ids),
+                EmbeddingJob.status == "failed",
+            )
+            .values(
+                status="superseded",
+                worker_id=None,
+                claimed_at=None,
+                finished_at=now,
+            )
+        )
+    if document_revision_ids:
+        await db.execute(
+            update(GraphExtractionJob)
+            .where(
+                GraphExtractionJob.document_revision_id.in_(document_revision_ids),
+                GraphExtractionJob.status == "failed",
+            )
+            .values(status="cancelled", finished_at=now)
+        )
+    return prior_staging_keys
+
+
+async def remove_reuploaded_failed_staging(
+    staging_keys: tuple[str, ...],
+    *,
+    config: Settings = settings,
+) -> None:
+    """Release obsolete retry staging files only after their cancellation commits."""
+    for staging_key in staging_keys:
+        if not await remove_staging_file(staging_key, config):
+            log.warning(
+                "failed to remove superseded import staging file key=%s",
+                staging_key,
+            )
+
+
 async def _duplicate_upload_target(
     db: AsyncSession,
     *,
@@ -3419,6 +3582,7 @@ async def skip_duplicate_upload_before_storage(
     claim: UploadOperationClaim,
     sha256: str,
     lease: UploadClaimLease,
+    config: Settings = settings,
 ) -> bool:
     """Finish a duplicate at upload completion before persisting another raw file."""
     job = (
@@ -3477,7 +3641,11 @@ async def skip_duplicate_upload_before_storage(
                 status_code=409,
                 upload_offset=claim.upload_offset,
             )
+        prior_staging_keys = await cancel_prior_failed_uploads_for_reupload(
+            db, claim=claim
+        )
         await db.commit()
+        await remove_reuploaded_failed_staging(prior_staging_keys, config=config)
         return True
 
     target = await _duplicate_upload_target(db, job=job)
@@ -3523,7 +3691,11 @@ async def skip_duplicate_upload_before_storage(
             status_code=409,
             upload_offset=claim.upload_offset,
         )
+    prior_staging_keys = await cancel_prior_failed_uploads_for_reupload(
+        db, claim=claim
+    )
     await db.commit()
+    await remove_reuploaded_failed_staging(prior_staging_keys, config=config)
     return True
 
 
@@ -3959,10 +4131,11 @@ async def personal_task_projections(
 
 
 _PERSONAL_FAILURE_MESSAGES = (
+    # ── 压缩包 ────────────────────────────────────────────────
     (
         ("archive_has_no_supported_files", "压缩包内没有可导入的支持格式文件"),
         "压缩包内没有可导入的支持格式文件",
-        "请确认包内包含支持格式的文档后重新上传",
+        "请确认包内包含 PDF、Word、Excel、PPT、TXT 等格式的文档后重新上传",
     ),
     (
         ("invalid_archive", "压缩包损坏或不是有效 zip 文件"),
@@ -3970,18 +4143,35 @@ _PERSONAL_FAILURE_MESSAGES = (
         "请重新压缩文件后再上传",
     ),
     (
+        ("压缩包展开未完成",),
+        "压缩包处理中断",
+        "重新上传该压缩包",
+    ),
+    # ── 文件大小 / 格式 ──────────────────────────────────────
+    (
         ("file_too_large", "size exceeds", "too large"),
         "文件超过知识库允许的大小",
         "压缩或拆分后重新上传",
     ),
     (
+        ("parser resource limit", "exceeds parser resource"),
+        "文档结构过于复杂或体积过大，超出解析限制",
+        "拆分为较小的文件后重新上传",
+    ),
+    (
         ("unsupported_type", "unsupported file", "unsupported extension"),
         "暂不支持此文件格式",
-        "转换为支持的格式后上传",
+        "转换为 PDF、Word、Excel、PPT、TXT 等支持格式后上传",
     ),
+    # ── 上传问题 ─────────────────────────────────────────────
     (
         ("upload_incomplete", "staging_size_mismatch", "upload_claim_lost"),
         "文件上传不完整",
+        "检查网络连接，重新选择并上传文件",
+    ),
+    (
+        ("staging file is missing",),
+        "上传的文件在服务端未找到",
         "重新选择并上传文件",
     ),
     (
@@ -3989,21 +4179,161 @@ _PERSONAL_FAILURE_MESSAGES = (
         "该文件已经上传",
         "到知识资产中查看现有文件",
     ),
+    # ── 权限 ─────────────────────────────────────────────────
     (
         ("permission_denied", "organization_forbidden"),
         "没有向该知识库上传文件的权限",
-        "联系知识库管理员",
+        "确认选择了正确的知识库，或联系知识库管理员开通权限",
+    ),
+    # ── 文件内容识别 ─────────────────────────────────────────
+    (
+        ("encrypted_office_file",),
+        "文件有密码保护，无法解析",
+        "用 Office 打开文件 → 另存为 → 去掉密码 → 重新上传",
     ),
     (
-        (
-            "metadata_file",
-            "office_lock_file",
-            "encrypted_office_file",
-            "file_signature_mismatch",
-            "file_signature_unconfirmed",
-        ),
-        "文件无法导入",
-        "检查文件后重新选择并上传",
+        ("office_lock_file",),
+        "该文件是 Office 临时锁文件，不是文档",
+        "关闭 Office 后上传实际文档，不要上传 ~$ 开头的临时文件",
+    ),
+    (
+        ("metadata_file",),
+        "该文件是系统元数据文件（如 .DS_Store、Thumbs.db），不是文档",
+        "上传实际文档文件即可",
+    ),
+    (
+        ("file_signature_mismatch",),
+        "文件扩展名与实际内容不匹配",
+        "用对应软件打开并另存为正确格式后重新上传",
+    ),
+    (
+        ("file_signature_unconfirmed",),
+        "无法确认 Office 文件的真实格式",
+        "用对应 Office 软件打开并重新另存为正确格式后上传；若无法打开，请重新获取原文件",
+    ),
+    # ── 文件内容为空 ─────────────────────────────────────────
+    (
+        ("contains no importable text", "no importable text"),
+        "文件不含可导入的文本内容",
+        "确认文件中有实际文字内容（非纯图片）后重新上传",
+    ),
+    (
+        ("no importable structure",),
+        "PDF 解析未得到可导入内容",
+        "扫描件先做 OCR 并上传可搜索 PDF；若已有可选文字，点击重试",
+    ),
+    (
+        ("zero chunks",),
+        "文件内容过少，无法生成知识片段",
+        "确认文件有足够的文本内容后重新上传",
+    ),
+    # ── 文件损坏 ─────────────────────────────────────────────
+    (
+        ("pptx is invalid or corrupted",),
+        "PPT 文件已损坏或格式异常",
+        "用 PowerPoint 重新打开并另存为 .pptx 后上传",
+    ),
+    (
+        ("file is not a zip file",),
+        "Office 文件结构无效或已损坏",
+        "用对应 Office 软件打开并另存为新文件后上传；若无法打开，请重新获取原文件",
+    ),
+    (
+        ("text encoding is unsupported",),
+        "文件编码格式不支持",
+        "用记事本或 VS Code 打开后另存为 UTF-8 编码，再重新上传",
+    ),
+    # ── DOC 转换 ─────────────────────────────────────────────
+    (
+        ("converted docx is missing", "converted docx hash mismatch", "doc conversion is not ready"),
+        "旧版 .doc 格式转换失败",
+        "用 Word 打开后另存为 .docx 格式再上传",
+    ),
+    (
+        ("stale doc conversion at max attempts",),
+        "旧版 .doc 格式转换多次超时",
+        "用 Word 打开后另存为 .docx 格式再上传",
+    ),
+    # ── MinerU / PDF 解析 ────────────────────────────────────
+    (
+        ("mineru request timed out",),
+        "PDF 解析超时",
+        "若 PDF 页数较多，可拆分后重新上传；也可稍后点击重试",
+    ),
+    (
+        ("mineru response exceeds",),
+        "PDF 页数或内容超出解析限制",
+        "拆分为较小的 PDF 后重新上传",
+    ),
+    (
+        ("mineru request failed", "mineru service is not configured", "mineru service version"),
+        "PDF 解析服务暂时不可用",
+        "稍后点击重试；若反复失败可将 PDF 转为 Word 后上传",
+    ),
+    (
+        ("mineru response is invalid",),
+        "PDF 解析结果异常",
+        "可尝试重新上传；若仍失败，用 Word 打开后另存为 .docx 上传",
+    ),
+    # ── OCR ───────────────────────────────────────────────────
+    (
+        ("image import requires ocr",),
+        "该知识库未开启 OCR，无法导入图片文件",
+        "联系知识库管理员开启 OCR 功能后重新上传",
+    ),
+    (
+        ("image ocr dependency is unavailable",),
+        "OCR 识别服务暂时不可用",
+        "稍后重新上传该图片",
+    ),
+    # ── 存储 / 数据异常 ──────────────────────────────────────
+    (
+        ("foreignkeyviolationerror", "fk_document_import_jobs_file_resource"),
+        "该任务未能关联到原文件记录",
+        "重新上传该文件，生成新的处理任务",
+    ),
+    (
+        ("file resource is unavailable", "archive file resource is unavailable"),
+        "源文件在服务端已丢失",
+        "重新上传该文件",
+    ),
+    (
+        ("library is unavailable",),
+        "知识库暂时不可用",
+        "刷新页面后重试，若仍不可用请确认知识库未被删除",
+    ),
+    # ── 超时 / 僵尸任务 ──────────────────────────────────────
+    (
+        ("stale import at max attempts", "stale processing at max attempts"),
+        "处理超时（多次尝试后仍未完成）",
+        "重新上传该文件",
+    ),
+    (
+        ("timeout", "timed out", "read timed out"),
+        "处理超时",
+        "稍后点击重试",
+    ),
+    # ── Embedding ────────────────────────────────────────────
+    (
+        ("library or document missing",),
+        "文件记录在处理过程中丢失",
+        "重新上传该文件",
+    ),
+    (
+        ("no chunks to embed",),
+        "文件内容过少，无法生成向量",
+        "确认文件有足够的文本内容后重新上传",
+    ),
+    # ── 系统内部 ─────────────────────────────────────────────
+    (
+        ("parser unit does not satisfy evidencelocatorv1 contract",),
+        "解析结果未通过系统校验",
+        "点击重试；若没有重试按钮，请重新上传该文件",
+    ),
+    (
+        ("no_slug",),
+        "该任务缺少解析所需的知识库信息",
+        "重新上传该文件，生成新的解析任务",
     ),
 )
 
@@ -4014,6 +4344,10 @@ def _personal_failure_message(
     stage: str,
     raw_error: object,
 ) -> tuple[str | None, str | None]:
+    if status == "superseded":
+        return "该文件已重新上传，此任务自动作废", None
+    if status == "cancelled":
+        return "任务已取消", None
     if status != "failed":
         return None, None
     normalized = str(raw_error or "").casefold()
@@ -4021,12 +4355,12 @@ def _personal_failure_message(
         if any(code in normalized for code in codes):
             return message, action
     if stage in {"converting", "conversion_ready", "validating", "parsing", "chunking"}:
-        return "文件内容解析失败", "检查文件是否损坏后重试"
+        return "文件内容解析失败", "检查文件是否损坏，尝试重新上传"
     if stage == "embedding":
-        return "知识内容处理失败", "稍后重试任务"
+        return "知识内容处理失败", "点击重试；若反复失败可删除后重新上传"
     if stage == "graph":
-        return "知识图谱构建失败", "稍后重试任务"
-    return "文件处理失败", "稍后重试任务"
+        return "知识图谱构建失败", "点击重试"
+    return "文件处理失败", "尝试重新上传该文件"
 
 
 def personal_task_projection(

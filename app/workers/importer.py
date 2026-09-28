@@ -8,6 +8,7 @@ import os
 import shutil
 import socket
 import tempfile
+import sys
 import time
 import uuid
 from collections.abc import Callable
@@ -15,7 +16,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -127,19 +128,96 @@ async def _wait_for_staging_file(path: Path, expected_size: int) -> int:
     )
 
 
-async def _reset_stale_jobs(db: AsyncSession) -> int:
-    params = {
+def get_worker_target_config() -> tuple[bool, uuid.UUID | None, datetime | None]:
+    raw_exclude = os.getenv("WORKER_EXCLUDE_PDF", "").strip().lower()
+    raw_target = os.getenv("WORKER_TARGET_LIBRARY_ID", "").strip()
+    raw_min_created = os.getenv("WORKER_TASK_MIN_CREATED_AT", "").strip()
+
+    is_exclude = raw_exclude in {"1", "true", "yes", "on"}
+    is_include = raw_exclude in {"0", "false", "no", "off"}
+
+    # 1. 开关漏配或非法值检查：WORKER_EXCLUDE_PDF 必须明确设为 1 或 0（防止两开关同时漏配）
+    if not is_exclude and not is_include:
+        log.critical(
+            "FATAL: Ambiguous or missing WORKER_EXCLUDE_PDF='%s'. Must be explicitly '1' (baseline exclude) or '0' (trial target).",
+            raw_exclude,
+        )
+        sys.exit(1)
+
+    # 2. 目标库 UUID 解析
+    target_library_id: uuid.UUID | None = None
+    if raw_target:
+        try:
+            target_library_id = uuid.UUID(raw_target)
+        except (ValueError, TypeError) as exc:
+            log.critical(
+                "FATAL: WORKER_TARGET_LIBRARY_ID='%s' is not a valid UUID: %s",
+                raw_target,
+                exc,
+            )
+            sys.exit(1)
+
+    # 3. 配置冲突检查：已指定目标库但 WORKER_EXCLUDE_PDF=1
+    if is_exclude and target_library_id is not None:
+        log.critical(
+            "FATAL: Configuration conflict! WORKER_TARGET_LIBRARY_ID is set ('%s') but WORKER_EXCLUDE_PDF=1. "
+            "Trial worker cannot exclude PDF, and baseline worker cannot target a specific library.",
+            raw_target,
+        )
+        sys.exit(1)
+
+    # 4. 试用模式检查：WORKER_EXCLUDE_PDF=0 时必须配置合法目标库 UUID
+    if is_include and target_library_id is None:
+        log.critical(
+            "FATAL: WORKER_TARGET_LIBRARY_ID must be specified when WORKER_EXCLUDE_PDF=0 in trial mode."
+        )
+        sys.exit(1)
+
+    # 5. 可选历史积压隔离过滤：仅申领指定时间戳之后的新任务
+    min_created_at: datetime | None = None
+    if raw_min_created:
+        try:
+            min_created_at = datetime.fromisoformat(raw_min_created.replace("Z", "+00:00"))
+        except (ValueError, TypeError) as exc:
+            log.critical(
+                "FATAL: WORKER_TASK_MIN_CREATED_AT='%s' is not a valid ISO timestamp: %s",
+                raw_min_created,
+                exc,
+            )
+            sys.exit(1)
+
+    return is_exclude, target_library_id, min_created_at
+
+async def _reset_stale_jobs(
+    db: AsyncSession,
+    target_library_id: uuid.UUID | None = None,
+    min_created_at: datetime | None = None,
+) -> int:
+    if target_library_id is None:
+        _, target_library_id, cfg_min_created = get_worker_target_config()
+        if min_created_at is None:
+            min_created_at = cfg_min_created
+    params: dict[str, Any] = {
         "seconds": str(settings.import_worker_stale_seconds),
         "max_attempts": settings.import_worker_max_attempts,
     }
+    lib_filter = ""
+    if target_library_id is not None:
+        params["target_library_id"] = target_library_id
+        lib_filter = "AND library_id = :target_library_id"
+    if min_created_at is not None:
+        params["min_created_at"] = min_created_at
+        lib_filter += " AND created_at >= :min_created_at"
+
     failed = await db.execute(
         text(
-            """
+            f"""
             UPDATE document_import_jobs
             SET status = 'failed', worker_id = NULL, claimed_at = NULL,
                 finished_at = NOW(),
                 last_error = COALESCE(last_error, 'stale import at max attempts')
             WHERE status = 'processing'
+              {lib_filter}
               AND current_stage IN ('validating', 'parsing', 'chunking')
               AND claimed_at IS NOT NULL
               AND claimed_at < NOW() - (:seconds || ' seconds')::interval
@@ -150,11 +228,12 @@ async def _reset_stale_jobs(db: AsyncSession) -> int:
     )
     reset = await db.execute(
         text(
-            """
+            f"""
             UPDATE document_import_jobs
             SET status = 'queued', current_stage = 'queued',
                 worker_id = NULL, claimed_at = NULL
             WHERE status = 'processing'
+              {lib_filter}
               AND current_stage IN ('validating', 'parsing', 'chunking')
               AND claimed_at IS NOT NULL
               AND claimed_at < NOW() - (:seconds || ' seconds')::interval
@@ -170,9 +249,33 @@ async def _reset_stale_jobs(db: AsyncSession) -> int:
 async def _claim_jobs(
     db: AsyncSession, worker_id: str, limit: int
 ) -> list[uuid.UUID]:
+    exclude_pdf, target_library_id, min_created_at = get_worker_target_config()
+    params: dict[str, Any] = {
+        "max_attempts": settings.import_worker_max_attempts,
+        "limit": limit,
+        "worker_id": worker_id,
+        "exclude_pdf": exclude_pdf,
+    }
+    if target_library_id is not None:
+        params["target_library_id"] = target_library_id
+        target_clause = """
+                  AND library_id = :target_library_id
+                  AND LOWER(file_name) LIKE '%.pdf'
+        """
+        if min_created_at is not None:
+            params["min_created_at"] = min_created_at
+            target_clause += " AND created_at >= :min_created_at"
+    else:
+        target_clause = """
+                  AND (
+                    NOT :exclude_pdf
+                    OR LOWER(file_name) NOT LIKE '%.pdf'
+                  )
+        """
+
     result = await db.execute(
         text(
-            """
+            f"""
             WITH picked AS (
                 SELECT id
                 FROM document_import_jobs
@@ -181,10 +284,7 @@ async def _claim_jobs(
                     LOWER(file_name) NOT LIKE '%.doc'
                     OR conversion_sha256 IS NOT NULL
                   )
-                  AND (
-                    NOT :exclude_pdf
-                    OR LOWER(file_name) NOT LIKE '%.pdf'
-                  )
+                  {target_clause}
                 ORDER BY created_at
                 FOR UPDATE SKIP LOCKED
                 LIMIT :limit
@@ -198,13 +298,7 @@ async def _claim_jobs(
             RETURNING jobs.id
             """
         ),
-        {
-            "max_attempts": settings.import_worker_max_attempts,
-            "limit": limit,
-            "worker_id": worker_id,
-            "exclude_pdf": os.getenv("WORKER_EXCLUDE_PDF", "").strip().lower()
-            in {"1", "true", "yes", "on"},
-        },
+        params,
     )
     await db.commit()
     return [row.id for row in result]
@@ -783,11 +877,15 @@ async def _process_claimed_job(job_id: uuid.UUID) -> None:
 
 async def run_once() -> int:
     worker_id = _worker_id()
+    exclude_pdf, target_library_id, min_created_at = get_worker_target_config()
     async with async_session_factory() as db:
-        recovered = await _reset_stale_jobs(db)
+        recovered = await _reset_stale_jobs(
+            db, target_library_id=target_library_id, min_created_at=min_created_at
+        )
         if recovered:
             log.warning("recovered %s stale import jobs", recovered)
-        await _maybe_cleanup_staging(db)
+        if target_library_id is None:
+            await _maybe_cleanup_staging(db)
         job_ids = await _claim_jobs(
             db, worker_id, max(1, settings.import_worker_batch_size)
         )
@@ -808,11 +906,11 @@ async def run_watch() -> None:
 
 
 def main() -> None:
+    get_worker_target_config()
     parser = argparse.ArgumentParser(description="Process uploaded document imports")
     parser.add_argument("--watch", action="store_true", help="keep polling for work")
     args = parser.parse_args()
     asyncio.run(run_watch() if args.watch else run_once())
-
 
 if __name__ == "__main__":
     main()
