@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import logging
+import re
 import threading
 import warnings
 from typing import Any
@@ -26,6 +27,10 @@ OCR_MAX_IMAGE_WIDTH = 10_000
 OCR_MAX_IMAGE_HEIGHT = 10_000
 OCR_MAX_BLOCKS = 4_096
 OCR_MAX_TEXT_CHARS = 200_000
+# 仅针对独立的数字 OCR 块规整小数点后空格（如 '66. 02' -> '66.02'），不触碰包含文字的段落或编号（如 '1. 2'、'1. 2024'）
+_ISOLATED_DECIMAL_NUMBER_RE = re.compile(
+    r"^[+-]?\s*(?:\d{1,3}(?:,\d{3})+|\d{2,}|0)\.\s+\d+[%‰]?$"
+)
 
 
 class OcrResourceLimitError(ValueError):
@@ -51,10 +56,37 @@ def _get_engine():
         with _lock:
             if _engine is None:
                 from rapidocr_onnxruntime import RapidOCR
-                _engine = RapidOCR(
-                    intra_op_num_threads=settings.ocr_intra_op_num_threads,
-                    inter_op_num_threads=settings.ocr_inter_op_num_threads,
-                )
+                try:
+                    import rapidocr_onnxruntime.utils as ocr_utils
+                    has_session_options = hasattr(ocr_utils, "SessionOptions")
+                except Exception:
+                    ocr_utils = None
+                    has_session_options = False
+
+                if has_session_options and ocr_utils is not None:
+                    orig_session_options = ocr_utils.SessionOptions
+
+                    def _configured_session_options():
+                        opts = orig_session_options()
+                        if settings.ocr_intra_op_num_threads is not None:
+                            opts.intra_op_num_threads = int(settings.ocr_intra_op_num_threads)
+                        if settings.ocr_inter_op_num_threads is not None:
+                            opts.inter_op_num_threads = int(settings.ocr_inter_op_num_threads)
+                        return opts
+
+                    ocr_utils.SessionOptions = _configured_session_options
+                    try:
+                        _engine = RapidOCR(
+                            intra_op_num_threads=settings.ocr_intra_op_num_threads,
+                            inter_op_num_threads=settings.ocr_inter_op_num_threads,
+                        )
+                    finally:
+                        ocr_utils.SessionOptions = orig_session_options
+                else:
+                    _engine = RapidOCR(
+                        intra_op_num_threads=settings.ocr_intra_op_num_threads,
+                        inter_op_num_threads=settings.ocr_inter_op_num_threads,
+                    )
     return _engine
 
 
@@ -143,6 +175,8 @@ def ocr_image_blocks(data: bytes) -> list[dict[str, Any]]:
             value = str(text).strip()
             if not value:
                 continue
+            if _ISOLATED_DECIMAL_NUMBER_RE.fullmatch(value):
+                value = re.sub(r"(?<=\d)\.\s+(?=\d)", ".", value)
             text_chars += len(value)
             if text_chars > OCR_MAX_TEXT_CHARS:
                 _resource_limit("output text")

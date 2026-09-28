@@ -445,6 +445,220 @@ def _reader_page_items(reader: object) -> object:
     return indexed_items()
 
 
+def _structure_scanned_table(
+    png_bytes: bytes,
+    blocks: list[dict[str, Any]],
+) -> tuple[str, list[dict[str, Any]]] | None:
+    """Detect and structure a scanned table grid from image morphology and OCR blocks.
+
+    If the page contains a clear rectangular table grid (at least 8 cells, 3 rows, 3 cols),
+    maps OCR blocks to (row, col) cells. When a block crosses column boundaries and
+    reliable character coordinates or bounded cell re-OCR evidence is unavailable,
+    preserves original text intact and flags cross_column=True, uncertain=True.
+    Preserves unpositioned / invalid-coordinate blocks without text loss.
+    Returns (table_text, updated_blocks), or None if no reliable grid or empty.
+    """
+    if not blocks or not isinstance(blocks, list):
+        return None
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        return None
+
+    try:
+        img = cv2.imdecode(np.frombuffer(png_bytes, np.uint8), cv2.IMREAD_GRAYSCALE)
+    except Exception:  # noqa: BLE001
+        return None
+    if img is None:
+        return None
+
+    try:
+        h, w = img.shape
+        if h < 200 or w < 200:
+            return None
+
+        thresh = cv2.adaptiveThreshold(~img, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 15, -2)
+        h_len = max(w // 25, 40)
+        v_len = max(h // 30, 40)
+        h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (h_len, 1))
+        v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, v_len))
+        h_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, h_kernel)
+        v_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, v_kernel)
+        grid = cv2.add(h_lines, v_lines)
+        contours, _ = cv2.findContours(grid, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+
+        cells = []
+        for cnt in contours:
+            x, y, cw, ch = cv2.boundingRect(cnt)
+            if 20 <= ch <= 120 and 40 <= cw <= w * 0.9:
+                area = cv2.contourArea(cnt)
+                if cw * ch > 0 and area / (cw * ch) > 0.7:
+                    cells.append((x, y, cw, ch))
+
+        if len(cells) < 8:
+            return None
+
+        all_y = sorted([c[1] for c in cells] + [c[1] + c[3] for c in cells])
+        rows: list[int] = []
+        if all_y:
+            cur = [all_y[0]]
+            for y in all_y[1:]:
+                if y - cur[-1] < 10:
+                    cur.append(y)
+                else:
+                    rows.append(int(round(float(np.mean(cur)))))
+                    cur = [y]
+            rows.append(int(round(float(np.mean(cur)))))
+
+        if len(rows) < 3:
+            return None
+        num_rows = len(rows) - 1
+
+        all_x = sorted([c[0] for c in cells] + [c[0] + c[2] for c in cells])
+        x_clusters: list[list[int]] = []
+        if all_x:
+            cur_x = [all_x[0]]
+            for x in all_x[1:]:
+                if x - cur_x[-1] < 15:
+                    cur_x.append(x)
+                else:
+                    x_clusters.append(cur_x)
+                    cur_x = [x]
+            x_clusters.append(cur_x)
+
+        min_count = max(3, int(num_rows * 0.25))
+        cols = [int(round(float(np.mean(cl)))) for cl in x_clusters if len(cl) >= min_count]
+        if len(cols) < 3:
+            return None
+        num_cols = len(cols) - 1
+
+        table_top = rows[0]
+        table_bottom = rows[-1]
+
+        pre_table: list[tuple[float, float, str, dict[str, Any]]] = []
+        post_table: list[tuple[float, float, str, dict[str, Any]]] = []
+        unpositioned: list[tuple[str, dict[str, Any]]] = []
+        crossing_targets: list[tuple[int, int, str]] = []
+        table_grid_cells: list[list[list[tuple[dict[str, Any], str]]]] = [
+            [[] for _ in range(num_cols)] for _ in range(num_rows)
+        ]
+        for b in blocks:
+            if not isinstance(b, dict):
+                continue
+            text = str(b.get("text", "")).strip()
+            if not text:
+                continue
+            bbox = b.get("bbox")
+            if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+                unpositioned.append((text, b))
+                continue
+            try:
+                nums = [float(v) for v in bbox]
+            except (TypeError, ValueError):
+                unpositioned.append((text, b))
+                continue
+            if nums[2] <= nums[0] or nums[3] <= nums[1]:
+                unpositioned.append((text, b))
+                continue
+
+            cx = (nums[0] + nums[2]) / 2.0
+            cy = (nums[1] + nums[3]) / 2.0
+
+            if cy < table_top - 8:
+                pre_table.append((cy, cx, text, b))
+                continue
+            if cy > table_bottom + 8:
+                post_table.append((cy, cx, text, b))
+                continue
+
+            row_idx = None
+            for r in range(num_rows):
+                if rows[r] - 6 <= cy <= rows[r + 1] + 6:
+                    row_idx = r
+                    break
+            if row_idx is None:
+                row_idx = min(range(num_rows), key=lambda r: abs(cy - (rows[r] + rows[r + 1]) / 2.0))
+
+            crossing_col = None
+            for c in range(1, num_cols):
+                x_line = cols[c]
+                if nums[0] < x_line - 12 and nums[2] > x_line + 12:
+                    crossing_col = c
+                    break
+
+            if crossing_col is not None:
+                coords = [int(round(v)) for v in nums]
+                col_start = crossing_col
+                col_end = crossing_col + 1
+                b_cross = dict(b)
+                b_cross["cross_column"] = True
+                b_cross["uncertain"] = True
+                b_cross["crossing_cols"] = [crossing_col - 1, crossing_col]
+                b_cross["bbox_int"] = coords
+                annotated_text = (
+                    f"{text} [跨列不确定归属: 跨第{col_start}列-第{col_end}列, 原图位置: {coords}]"
+                )
+                table_grid_cells[row_idx][crossing_col - 1].append((b_cross, annotated_text))
+                ref_note = f"[跨列不确定: 参见第{col_start}列]"
+                crossing_targets.append((row_idx, crossing_col, ref_note))
+            else:
+                col_idx = None
+                for c in range(num_cols):
+                    if cols[c] - 8 <= cx <= cols[c + 1] + 8:
+                        col_idx = c
+                        break
+                if col_idx is not None:
+                    table_grid_cells[row_idx][col_idx].append((b, text))
+                else:
+                    if cy > table_bottom - 15:
+                        post_table.append((cy, cx, text, b))
+                    else:
+                        pre_table.append((cy, cx, text, b))
+
+        lines: list[str] = []
+        ordered_blocks: list[dict[str, Any]] = []
+
+        for _cy, _cx, t, b in sorted(pre_table, key=lambda x: (x[0], x[1])):
+            lines.append(t)
+            ordered_blocks.append(b)
+
+        crossing_target_map: dict[tuple[int, int], list[str]] = {}
+        for r_idx, c_idx, note in crossing_targets:
+            crossing_target_map.setdefault((r_idx, c_idx), []).append(note)
+
+        for r in range(num_rows):
+            row_cell_texts: list[str] = []
+            for c in range(num_cols):
+                cell_items = sorted(
+                    table_grid_cells[r][c],
+                    key=lambda item: (float(item[0]["bbox"][1]), float(item[0]["bbox"][0])),
+                )
+                cell_parts = [item[1] for item in cell_items]
+                if (r, c) in crossing_target_map and not cell_parts:
+                    cell_parts.extend(crossing_target_map[(r, c)])
+                c_text = " ".join(cell_parts).strip()
+                row_cell_texts.append(c_text)
+                for item in cell_items:
+                    ordered_blocks.append(item[0])
+            if any(row_cell_texts):
+                lines.append(" | ".join(row_cell_texts))
+
+        for _cy, _cx, t, b in sorted(post_table, key=lambda x: (x[0], x[1])):
+            lines.append(t)
+            ordered_blocks.append(b)
+
+        for t, b in unpositioned:
+            lines.append(t)
+            ordered_blocks.append(b)
+
+        table_text = "\n".join(lines).strip()
+        if not table_text or not ordered_blocks:
+            return None
+        return table_text, ordered_blocks
+    except Exception:  # noqa: BLE001
+        return None
+
 def _extract_pdf_parts(
     data: PdfSource,
     *,
@@ -454,6 +668,8 @@ def _extract_pdf_parts(
     render_dpi: int,
     max_ocr_pages: int,
     coverage_state: dict[str, Any] | None = None,
+    adaptive_render: bool = False,
+    allow_empty: bool = False,
 ) -> list[tuple[int, str, str, list[dict[str, Any]]]]:
     try:
         reader = _open_reader(data)
@@ -493,6 +709,15 @@ def _extract_pdf_parts(
 
         if len(text) > PDF_MAX_NORMALIZED_TEXT_CHARS - text_chars:
             _resource_limit("normalized_text")
+        if adaptive_render:
+            try:
+                text.encode("utf-8")
+            except UnicodeEncodeError:
+                if not ocr_enabled or ocr is None:
+                    raise PdfExtractError("PDF native text encoding requires OCR recovery") from None
+                # Treat invalid native decoding as a page extraction failure.
+                # Recognize the original rendered page; never drop/replace glyphs.
+                text = ""
         meaningful_chars = _meaningful_char_count(text)
         image_values = _page_images(page)
         image_texts: list[str] = []
@@ -590,9 +815,29 @@ def _extract_pdf_parts(
 
         page_dimensions = _page_dimensions_points(page)
         effective_render_dpi = _resolve_page_render_dpi(page, render_dpi)
+        if adaptive_render and page_dimensions is not None:
+            from app.services.pdf_resource_recovery import fit_render_dpi
+
+            effective_render_dpi = fit_render_dpi(page_dimensions, effective_render_dpi)
+            if coverage_state is not None:
+                coverage_state.setdefault("render_dpi_by_page", {})[idx + 1] = effective_render_dpi
         if page_dimensions is not None:
             _check_render_budget(page_dimensions, effective_render_dpi)
-        png = _render_page_png(data, idx, effective_render_dpi)
+        while True:
+            try:
+                png = _render_page_png(data, idx, effective_render_dpi)
+                break
+            except PdfResourceLimitError as exc:
+                if not adaptive_render or str(exc) != "PDF resource limit exceeded: rendered image bytes":
+                    raise
+                from app.services.pdf_resource_recovery import MIN_RENDER_DPI
+
+                if effective_render_dpi <= MIN_RENDER_DPI:
+                    raise
+                # High-entropy images can meet the pixel budget but exceed PNG bytes.
+                effective_render_dpi = max(MIN_RENDER_DPI, int(effective_render_dpi * 0.8))
+        if adaptive_render and coverage_state is not None:
+            coverage_state.setdefault("render_dpi_by_page", {})[idx + 1] = effective_render_dpi
         ocr_pages_used += 1
         try:
             raw_result = ocr(png)
@@ -607,6 +852,12 @@ def _extract_pdf_parts(
         except Exception:  # noqa: BLE001 - provider details must not enter job errors
             raise PdfExtractError("PDF OCR 识别失败") from None
         ocr_text = ocr_text.replace("\x00", "")
+        table_result = _structure_scanned_table(png, ocr_blocks)
+        if table_result is not None:
+            struct_text, struct_blocks = table_result
+            if _meaningful_char_count(struct_text) > 0 and struct_blocks:
+                ocr_text = struct_text
+                ocr_blocks = struct_blocks
         del png
         # 合并原短文字与 OCR 结果；OCR 为空也保留原文字，不让短文字页丢内容
         merged = "\n".join(
@@ -623,7 +874,7 @@ def _extract_pdf_parts(
         elif has_visual_content:
             unprocessed_visual_pages.append(idx + 1)
 
-    if not parts:
+    if not parts and not allow_empty:
         if ocr_enabled:
             raise PdfExtractError("PDF OCR 后仍无可识别文本")
         raise PdfExtractError("PDF 无可提取文本；如为扫描件，请在知识库开启图片 OCR")
@@ -672,6 +923,7 @@ def build_pdf_source(
     render_dpi: int,
     max_ocr_pages: int,
     preflight_report: Mapping[str, Any] | None = None,
+    resource_recovery: bool = False,
 ) -> dict:
     from app.services.splitter import split_structured_text
 
@@ -692,7 +944,12 @@ def build_pdf_source(
     if has_complete_preflight:
         coverage_state["preflight_complete"] = True
         coverage_state["preflight_total_pages"] = preflight_total_pages
-    parts = _extract_pdf_parts(
+    extract_parts = _extract_pdf_parts
+    if resource_recovery:
+        from app.services.pdf_resource_recovery import extract_pdf_parts_batched
+
+        extract_parts = extract_pdf_parts_batched
+    parts = extract_parts(
         data,
         ocr_enabled=ocr_enabled,
         ocr=ocr,
@@ -722,6 +979,7 @@ def build_pdf_source(
             "min_text_chars": min_text_chars,
             "render_dpi": render_dpi,
             "max_ocr_pages": max_ocr_pages,
+            **({"resource_recovery": True, "page_batch_size": min(25, max_ocr_pages)} if resource_recovery else {}),
         },
     )
     for (
@@ -741,6 +999,9 @@ def build_pdf_source(
             "visual_content_unparsed": extraction_mode == "native_visual_unparsed",
             "ocr_blocks": ocr_blocks,
         }
+        effective_dpi = coverage_state.get("render_dpi_by_page", {}).get(page_index + 1)
+        if effective_dpi is not None:
+            quality["render_dpi"] = effective_dpi
         if extraction_mode == "native_visual_unparsed":
             quality["unparsed_reason"] = "native_visual_content_without_ocr"
         location = {

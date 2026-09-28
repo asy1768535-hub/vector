@@ -4,6 +4,7 @@ import copy
 import csv
 import hashlib
 import io
+import logging
 import json
 import zipfile
 from dataclasses import dataclass, field
@@ -18,6 +19,7 @@ from app.services import (
     pdf_extract,
     pdf_preflight,
     pdf_routing,
+    pdf_quality_inspector,
     splitter,
     video_transcription,
     xlsx_extract,
@@ -32,6 +34,8 @@ from app.services.parser_units import (
     text_range,
 )
 from app.services.video_transcription import AUDIO_IMPORT_EXTENSIONS, VIDEO_IMPORT_EXTENSIONS
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -688,18 +692,53 @@ def build_pdf_import_source(
         preflight,
         mineru_authorized=mineru_authorized,
     )
-    if routing["selection"] == "mineru":
-        source = mineru_pdf.parse_pdf_remote(
-            data,
-            base_url=settings.mineru_pdf_base_url,
-            expected_version=settings.mineru_pdf_expected_version,
-            timeout_seconds=settings.mineru_pdf_timeout_seconds,
-            max_response_bytes=settings.mineru_pdf_max_response_bytes,
-            chunk_size=library.chunk_size,
-            chunk_overlap=library.chunk_overlap,
-            total_pages=preflight.get("total_pages"),
-        )
-    else:
+    if not settings.pdf_quality_cascade_enabled:
+        if routing["selection"] == "mineru":
+            source = mineru_pdf.parse_pdf_remote(
+                data,
+                base_url=settings.mineru_pdf_base_url,
+                expected_version=settings.mineru_pdf_expected_version,
+                timeout_seconds=settings.mineru_pdf_timeout_seconds,
+                max_response_bytes=settings.mineru_pdf_max_response_bytes,
+                chunk_size=library.chunk_size,
+                chunk_overlap=library.chunk_overlap,
+                total_pages=preflight.get("total_pages"),
+            )
+        else:
+            from app.services import ocr as ocr_service
+
+            ocr_enabled = (
+                library.ocr_enabled
+                if library.ocr_enabled is not None
+                else settings.ocr_enabled
+            )
+            if ocr_enabled and ocr_service.is_available():
+                ocr_callback = (
+                    ocr_service.ocr_image_blocks if structured_ocr else ocr_service.ocr_image
+                )
+            else:
+                ocr_callback = None
+            source = pdf_extract.build_pdf_source(
+                data,
+                chunk_size=library.chunk_size,
+                chunk_overlap=library.chunk_overlap,
+                ocr_enabled=bool(ocr_enabled),
+                ocr=ocr_callback,
+                min_text_chars=settings.pdf_ocr_min_text_chars,
+                render_dpi=settings.pdf_ocr_render_dpi,
+                max_ocr_pages=settings.pdf_ocr_max_pages,
+                preflight_report=preflight,
+                resource_recovery=settings.pdf_resource_recovery_enabled,
+            )
+
+        segments = source.get("segments")
+        if not isinstance(segments, list):
+            raise ValueError("PDF parser returned invalid segments")
+        source["routing"] = pdf_routing.attach_pdf_routing_unit(segments, routing)
+        return source
+
+    # ---- 逐级质量门控路径 (settings.pdf_quality_cascade_enabled == True) ----
+    if routing["selection"] != "mineru":
         from app.services import ocr as ocr_service
 
         ocr_enabled = (
@@ -723,8 +762,115 @@ def build_pdf_import_source(
             render_dpi=settings.pdf_ocr_render_dpi,
             max_ocr_pages=settings.pdf_ocr_max_pages,
             preflight_report=preflight,
+            resource_recovery=settings.pdf_resource_recovery_enabled,
+        )
+        segments = source.get("segments")
+        if not isinstance(segments, list):
+            raise ValueError("PDF parser returned invalid segments")
+        source["routing"] = pdf_routing.attach_pdf_routing_unit(segments, routing)
+        return source
+
+    # V1 路由选择了 mineru，评估单页扫描件候选资格
+    from app.services import ocr as ocr_service
+
+    ocr_enabled = (
+        library.ocr_enabled
+        if library.ocr_enabled is not None
+        else settings.ocr_enabled
+    )
+    pages = preflight.get("pages")
+    pages_list = pages if isinstance(pages, list) else []
+    first_page = pages_list[0] if pages_list and isinstance(pages_list[0], dict) else {}
+
+    is_eligible_single_page_scan = (
+        preflight.get("status") == "complete"
+        and preflight.get("total_pages") == 1
+        and not preflight.get("has_mixed_content")
+        and len(pages_list) == 1
+        and first_page.get("low_text") is True
+        and first_page.get("has_visual_content") is True
+        and bool(ocr_enabled)
+        and ocr_service.is_available()
+    )
+
+    if not is_eligible_single_page_scan:
+        source = mineru_pdf.parse_pdf_remote(
+            data,
+            base_url=settings.mineru_pdf_base_url,
+            expected_version=settings.mineru_pdf_expected_version,
+            timeout_seconds=settings.mineru_pdf_timeout_seconds,
+            max_response_bytes=settings.mineru_pdf_max_response_bytes,
+            chunk_size=library.chunk_size,
+            chunk_overlap=library.chunk_overlap,
+            total_pages=preflight.get("total_pages"),
+        )
+        segments = source.get("segments")
+        if not isinstance(segments, list):
+            raise ValueError("PDF parser returned invalid segments")
+        source["routing"] = pdf_routing.attach_pdf_routing_unit(segments, routing)
+        return source
+
+    # 运行本地候选解析
+    candidate = None
+    try:
+        candidate = pdf_extract.build_pdf_source(
+            data,
+            chunk_size=library.chunk_size,
+            chunk_overlap=library.chunk_overlap,
+            ocr_enabled=True,
+            ocr=ocr_service.ocr_image_blocks,
+            min_text_chars=settings.pdf_ocr_min_text_chars,
+            render_dpi=settings.pdf_ocr_render_dpi,
+            max_ocr_pages=settings.pdf_ocr_max_pages,
+            preflight_report=preflight,
+            resource_recovery=settings.pdf_resource_recovery_enabled,
+        )
+    except (
+        KeyboardInterrupt,
+        SystemExit,
+        MemoryError,
+        pdf_extract.PdfResourceLimitError,
+        ocr_service.OcrResourceLimitError,
+        ImportResourceLimitError,
+    ):
+        raise
+    except pdf_extract.PdfExtractError as exc:
+        logger.warning(
+            "PDF local quality candidate extraction failed with %s; escalating to MinerU",
+            type(exc).__name__,
+        )
+        candidate = None
+    if candidate is not None:
+        verdict = pdf_quality_inspector.inspect_local_pdf_candidate(candidate)
+        if verdict["accept"]:
+            final_route = pdf_routing.validate_pdf_routing_decision(
+                {
+                    **routing,
+                    "selection": "native_or_rapidocr",
+                    "needs_review": False,
+                }
+            )
+            segments = candidate.get("segments")
+            if not isinstance(segments, list):
+                raise ValueError("PDF parser returned invalid segments")
+            candidate["routing"] = pdf_routing.attach_pdf_routing_unit(segments, final_route)
+            return candidate
+        logger.info(
+            "PDF local candidate rejected by quality inspector: %s; escalating to MinerU",
+            verdict["reason"],
         )
 
+    # 质检未通过或候选提取失败：沿用 MinerU 远端解析
+    source = mineru_pdf.parse_pdf_remote(
+        data,
+        base_url=settings.mineru_pdf_base_url,
+        expected_version=settings.mineru_pdf_expected_version,
+        timeout_seconds=settings.mineru_pdf_timeout_seconds,
+        max_response_bytes=settings.mineru_pdf_max_response_bytes,
+        chunk_size=library.chunk_size,
+        chunk_overlap=library.chunk_overlap,
+        total_pages=preflight.get("total_pages"),
+    )
     segments = source.get("segments")
     if not isinstance(segments, list):
         raise ValueError("PDF parser returned invalid segments")

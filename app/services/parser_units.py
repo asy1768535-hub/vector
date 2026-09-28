@@ -23,7 +23,7 @@ from app.schemas.evidence_locator import (
 )
 
 
-ParserSourceKind = Literal["text", "pdf", "doc", "docx", "xlsx", "xls", "csv", "json", "image"]
+ParserSourceKind = Literal["text", "html", "pdf", "doc", "docx", "xlsx", "xls", "csv", "json", "image"]
 ParserUnitKind = Literal["section", "chunk", "structured_unit", "table", "row", "cell"]
 PARSER_UNIT_CONTRACT_VERSION = "v1"
 MAX_UNIT_KEY_LENGTH = 512
