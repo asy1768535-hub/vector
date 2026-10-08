@@ -336,10 +336,20 @@ export default {
         }
 
         function citationSources(message) {
-            const sources = [...(message?.sources || [])];
+            const sources = [];
             for (const evidence of message?.graph_evidence || []) {
-                const index = Number(evidence.citation_index) - 1;
-                if (index >= 0) sources[index] = evidence;
+                const n = Number(evidence.citation_index);
+                if (Number.isInteger(n) && n >= 1 && n <= 100) sources[n - 1] = evidence;
+            }
+            let next = 0;
+            for (const source of message?.sources || []) {
+                const n = Number(source.citation_index);
+                if (Number.isInteger(n) && n >= 1 && n <= 100) {
+                    if (!sources[n - 1]) sources[n - 1] = source;
+                } else {
+                    while (sources[next]) next += 1;
+                    if (next < 100) sources[next++] = source;
+                }
             }
             return sources;
         }
@@ -821,8 +831,9 @@ export default {
                                 </template>
                                 <div v-for="(s, si) in m.sources" :key="si" class="chat-source-item">
                                     <div class="chat-source-left">
-                                        <span class="chat-source-num">{{ si + 1 }}.</span>
+                                        <span class="chat-source-num">{{ s.citation_index || citationSources(m).indexOf(s) + 1 }}.</span>
                                         <span class="chat-source-title" :title="s.title || '(无标题)'">{{ s.title || '(无标题)' }}</span>
+                                        <span v-if="s.location_label">{{ s.location_label }}</span>
                                         <span class="chat-source-score">{{ fmtScore(s) }}</span>
                                         <div class="chat-source-summary">{{ s.content || '' }}</div>
                                     </div>
@@ -841,10 +852,11 @@ export default {
                 </div>
             </div>
 
-            <el-dialog v-model="recalledChunkDialog.open" title="引用片段" width="620px" class="chat-recalled-dialog">
+            <el-dialog v-model="recalledChunkDialog.open" title="引用片段" width="min(620px, calc(100vw - 24px))" class="chat-recalled-dialog">
                 <template v-if="recalledChunkDialog.source">
                     <div class="chat-source-dialog-meta">
                         <span>{{ recalledChunkDialog.source.title || '(无标题)' }}</span>
+                        <span v-if="recalledChunkDialog.source.location_label">{{ recalledChunkDialog.source.location_label }}</span>
                         <span>{{ fmtScore(recalledChunkDialog.source) }}</span>
                         <span v-if="recalledChunkDialog.source.seq !== undefined">分片 {{ recalledChunkDialog.source.seq }}</span>
                     </div>

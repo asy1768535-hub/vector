@@ -6,7 +6,11 @@ import {
     computeStats, paginateKeys,
 } from './src/api_keys_ui.js';
 
-const source = readFileSync(new URL('./src/views/ApiKeys.js', import.meta.url), 'utf8');
+const source = [
+    './src/views/ApiKeys.js',
+    './src/components/ApiAccessGuide.js',
+    './src/api_access_guide.js',
+].map(path => readFileSync(new URL(path, import.meta.url), 'utf8')).join('\n');
 const css = readFileSync(new URL('./style.css', import.meta.url), 'utf8');
 const apiUsageDoc = readFileSync(new URL('../docs/29-api-key-api-usage.md', import.meta.url), 'utf8');
 

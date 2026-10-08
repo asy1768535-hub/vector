@@ -28,7 +28,7 @@ function replaceCitations(text, sources) {
     const ranges = protectedRanges(text);
     return text.replace(/\[(\d+)\]/g, (match, rawIndex, offset) => {
         const n = Number(rawIndex);
-        if (!Number.isInteger(n) || n < 1 || n > sources.length || isProtected(offset, ranges)) {
+        if (!Number.isInteger(n) || n < 1 || n > sources.length || !sources[n - 1] || isProtected(offset, ranges)) {
             return match;
         }
         return citationBadge(n);

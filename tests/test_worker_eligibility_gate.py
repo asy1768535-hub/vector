@@ -39,17 +39,22 @@ def test_stale_revision_job_superseded_without_embedding():
 
 def test_reset_stale_jobs_marks_max_attempts_failed_before_resetting_retryable():
     db = MagicMock()
-    db.execute = AsyncMock(side_effect=[_ExecResult(1), _ExecResult(2)])
+    db.execute = AsyncMock(side_effect=[_ExecResult(1), _ExecResult(2), _ExecResult(1)])
     db.commit = AsyncMock()
 
     reset = asyncio.run(embedder._reset_stale_jobs(db))
 
     assert reset == 3
-    assert db.execute.await_count == 2
+    assert db.execute.await_count == 3
     first_sql = str(db.execute.await_args_list[0].args[0]).lower()
     second_sql = str(db.execute.await_args_list[1].args[0]).lower()
     assert "set status = 'failed'" in first_sql
     assert "attempt_count >= :max" in first_sql
     assert "set status = 'pending'" in second_sql
     assert "attempt_count < :max" in second_sql
+    sync_sql = str(db.execute.await_args_list[2].args[0]).lower()
+    assert "update document_import_jobs" in sync_sql
+    assert "set status = 'failed'" in sync_sql
+    assert "dij.embedding_job_id = ej.id" in sync_sql
+    assert "dij.status = 'processing'" in sync_sql
     db.commit.assert_awaited_once()

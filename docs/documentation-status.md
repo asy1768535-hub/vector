@@ -1,6 +1,6 @@
 # 文档状态清单
 
-> 更新日期：2026-09-20。本页解决“文档存在但不知道能否当当前真相”的问题；它不删除或改写历史记录。
+> 更新日期：2026-10-07（发布状态与仓库同步）。历史计划保留原时点，当前结论以对应新鲜核验为准。
 
 ## 状态含义
 
@@ -14,6 +14,7 @@
 
 | 文档 | 状态 | 用途 |
 | --- | --- | --- |
+| [`quality/deployment-gap-status-20261007.md`](./quality/deployment-gap-status-20261007.md) | 当前发布核验入口 | 按角色区分已上线、待发布和未验证，记录本次 Git 归档范围；不等于启用 PDF 开关。 |
 | [`../AGENTS.md`](../AGENTS.md) | 当前入口 | 会话规则、GitNexus、脏工作树和授权边界 |
 | [`AGENT_README.md`](./AGENT_README.md) | 当前入口 | 当前代码/运行基线、风险和下一安全动作 |
 | [`current-architecture.md`](./current-architecture.md) | 当前入口 | 主链路、owner 和运行边界 |

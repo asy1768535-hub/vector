@@ -373,3 +373,27 @@ def validate_projection(
     except (KeyError, TypeError, ValueError, ValidationError):
         return None
     return full_projection
+
+
+def bound_record_projection(metadata: Any) -> dict[str, Any] | None:
+    """Bind a display locator to the record's content revision, not index generation."""
+    if not isinstance(metadata, Mapping) or not all(metadata.get(key) for key in
+            ("document_id", "document_revision_id", "chunk_id")):
+        return None
+    return validate_projection(metadata.get("evidence_locator_v1_projection"), expected_identity={
+        key: metadata.get(key) for key in ("document_id", "document_revision_id", "chunk_id", "document_revision_no")
+    })
+
+
+def projection_location_label(projection: Mapping[str, Any]) -> str:
+    """Format already validated physical page or sheet/row positions."""
+    source = projection["source"]
+    if projection["source_kind"] == "pdf" and source.get("page"):
+        page = source["page"]
+        span = str(page["start"]) if page["start"] == page["end"] else f'{page["start"]}–{page["end"]}'
+        return f"PDF物理第 {span} 页"
+    if source.get("sheet") and source.get("row"):
+        row = source["row"]
+        span = str(row["start"]) if row["start"] == row["end"] else f'{row["start"]}–{row["end"]}'
+        return f'{source["sheet"]["name"]}，第 {span} 行'
+    return ""

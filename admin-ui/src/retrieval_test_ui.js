@@ -21,16 +21,19 @@ const REWRITE_LABELS = {
 };
 
 const SAFE_REASON = /^[a-z0-9_:-]{1,64}$/;
-const SAFE_LIBRARY_SLUG = /^[a-z0-9][a-z0-9-]{1,79}$/;
+// Keep selection validation aligned with the API's LIBRARY_SLUG_RE.
+const SAFE_LIBRARY_SLUG = /^[A-Za-z_]{2,80}$/;
 
-export function organizationAdminMemberships(organizations) {
+export function readableOrganizations(organizations, permissions) {
     const seen = new Set();
     const rows = [];
     for (const item of organizations || []) {
         const organizationId = typeof item?.organization_id === 'string'
             ? item.organization_id
             : String(item?.organization_id || '');
-        if (!organizationId || item?.role !== 'organization_admin' || seen.has(organizationId)) {
+        if (!organizationId || !['member', 'organization_admin'].includes(item?.role)
+            || (item.status && item.status !== 'active') || seen.has(organizationId)
+            || !librariesForOrganization(permissions, organizationId).length) {
             continue;
         }
         seen.add(organizationId);

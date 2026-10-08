@@ -60,8 +60,8 @@ test('formats reliable source scores and never percentages RRF', () => {
 });
 
 test('same-document chunks retain list order and citation indices', () => {
-    assert.match(chat, /const sources = \[\.\.\.\(message\?\.sources \|\| \[\]\)\];[\s\S]*?return sources;/);
-    assert.match(chat, /v-for="\(s, si\) in m\.sources"[\s\S]*?\{\{ si \+ 1 \}\}\./);
+    assert.match(chat, /function citationSources\(message\)[\s\S]*?source\.citation_index[\s\S]*?return sources;/);
+    assert.match(chat, /v-for="\(s, si\) in m\.sources"[\s\S]*?s\.citation_index \|\| citationSources\(m\)\.indexOf\(s\) \+ 1/);
     assert.doesNotMatch(chat, /new Set\([^\n]*document_id|document_id[^\n]*new Set/);
 
     const chunks = [

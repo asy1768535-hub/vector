@@ -146,6 +146,10 @@ export const deleteLibraryFaq = (slug, faqId) =>
 export const listUserPerms = (user_id, forceRefresh) => cachedRequest(`listUserPerms:${user_id}`, () => request(`/admin/permissions?user_id=${user_id}`), 30000, forceRefresh);
 export const grantPerms = (data) => request('/admin/permissions', jsonBody('PUT', data));
 export const revokePerms = (data) => request('/admin/permissions', jsonBody('DELETE', data));
+export const listUserOrganizationRoles = (userId) =>
+    request(`/admin/permissions/users/${encodeURIComponent(userId)}/organizations`);
+export const updateOrganizationMember = (organizationId, membershipId, data) =>
+    request(`/organizations/${encodeURIComponent(organizationId)}/members/${encodeURIComponent(membershipId)}`, jsonBody('PATCH', data));
 
 // ── Documents（library 维度） ─────────────────────────────────
 export const ingestDocument = (slug, data) =>

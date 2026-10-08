@@ -1,5 +1,7 @@
 # 文档索引
 
+2026-10-07 已按角色核对生产源码与发布清单。Office/Excel、重建、Chat、权限/API Key、指南及 PDF 人工覆盖复核已上线；自动 PDF 收尾、多库候选和本地样式仍单列。最新范围与验收缺口见[发布状态与仓库同步](./quality/deployment-gap-status-20261007.md)。本次 Git 同步不执行部署。
+
 ## 新会话最小入口
 
 后续 Codex、Pi 或维护者依次阅读：
@@ -15,7 +17,7 @@
 
 维护文档时先查看 [`documentation-status.md`](./documentation-status.md)：它标明哪些页面是当前入口、哪些只能作历史/专题参考，以及何时必须重新验证。
 
-后续候选：[单页扫描 PDF 后验路由实施说明](./roadmap/pdf-cascading-quality-gating-plan-20260922.zh-CN.md)。执行步骤已固定；尚未替代当前 M2/V1 任务，也没有实施或发布结论。
+后续效率改进见[单页扫描 PDF 后验路由实施说明](./roadmap/pdf-cascading-quality-gating-plan-20260922.zh-CN.md)：已有本地实现和合成回归，但生产开关关闭，真实质量、成本、尾延迟与持久队列仍未验证。当前 M2/V1 验收和自动质量收尾继续单列；实现、归档或文档同步均不代表生产启用。
 
 ## 历史时间点快照与分组索引
 

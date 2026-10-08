@@ -4,10 +4,12 @@ PUT /admin/permissions —— 授权/扩权
 DELETE /admin/permissions —— 撤权（actions=None 表示清空该 user-lib 全部策略）
 GET /admin/permissions?user_id= —— 反查 (库, 动作)
 GET /admin/permissions/library/{slug} —— 反查授权了该库的所有用户
+GET /admin/permissions/users/{user_id}/organizations —— 用户组织角色与管理能力
 """
 from __future__ import annotations
 
 import uuid
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
@@ -24,7 +26,9 @@ from app.schemas.admin import (
     PermissionMatrixRow,
     PermissionRevoke,
 )
+from app.schemas.organizations import AdminUserOrganizationRead
 from app.services import audit_log
+from app.services.organization_accounts import list_user_organizations
 from app.services.organization_permissions import (
     OrganizationPermissionError,
     grant_platform_library_permissions,
@@ -138,3 +142,34 @@ async def list_library_grantees(
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, list[str]]:
     return casbin_service.list_library_grantees(slug)
+
+
+@router.get("/users/{user_id}/organizations", response_model=list[AdminUserOrganizationRead])
+async def list_user_organization_roles(
+    user_id: uuid.UUID,
+    actor: Annotated[User, Depends(current_superuser)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[AdminUserOrganizationRead]:
+    user = await db.get(User, user_id)
+    if user is None or user.deleted_at is not None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "user not found")
+    if not settings.organization_authorization_enabled:
+        return []
+    memberships = await list_user_organizations(db, user_id=user_id)
+    actor_memberships = await list_user_organizations(db, user_id=actor.id)
+    manageable_organizations = {
+        row.organization.id
+        for row in actor_memberships
+        if row.membership.role == "organization_admin" and row.membership.status == "active"
+    }
+    return [
+        AdminUserOrganizationRead(
+            membership_id=row.membership.id,
+            organization_id=row.organization.id,
+            name=row.organization.name,
+            role=row.membership.role,
+            status=row.membership.status,
+            can_manage=actor.id != user_id and row.organization.id in manageable_organizations,
+        )
+        for row in memberships
+    ]

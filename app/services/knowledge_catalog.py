@@ -22,6 +22,7 @@ from app.models.document import Document
 from app.models.document_block import DocumentBlock
 from app.models.document_revision import DocumentRevision
 from app.models.document_revision_file import DocumentRevisionFile
+from app.models.audit import AuditLog
 from app.models.entity import Entity
 from app.models.entity_mention import EntityMention
 from app.models.entity_type import EntityType
@@ -76,6 +77,13 @@ from app.services.revision_files import RevisionFileAccess, revision_file_access
 from app.services.pdf_coverage import (
     PDF_COVERAGE_UNIT_KEY,
     pdf_coverage_from_document_blocks,
+    unknown_pdf_coverage_report,
+)
+from app.services.pdf_coverage_reviews import (
+    PDF_COVERAGE_REVIEW_ACTIONS,
+    PDF_COVERAGE_REVIEW_MAX_EVENTS,
+    PdfCoverageReviewError,
+    project_pdf_coverage_review_audit,
 )
 from app.services.object_storage_contracts import ObjectStorageError
 
@@ -1705,6 +1713,7 @@ async def _current_parsing_coverage(
     library_id: uuid.UUID,
     document_id: uuid.UUID,
     revision_id: uuid.UUID,
+    source_sha256: str | None = None,
 ) -> CatalogParsingCoverageRead:
     rows = (
         await db.execute(
@@ -1723,6 +1732,27 @@ async def _current_parsing_coverage(
     report = pdf_coverage_from_document_blocks(
         {"content": content} for content in rows
     ) if len(rows) <= 1 else pdf_coverage_from_document_blocks(())
+    if source_sha256 and report["status"] != "unknown":
+        events = (await db.execute(
+            select(AuditLog).where(
+                AuditLog.action.in_(PDF_COVERAGE_REVIEW_ACTIONS),
+                AuditLog.target["document_id"].astext == str(document_id),
+                AuditLog.target["revision_id"].astext == str(revision_id),
+            ).order_by(AuditLog.at, AuditLog.id).limit(PDF_COVERAGE_REVIEW_MAX_EVENTS + 1)
+        )).scalars().all()
+        if len(events) > PDF_COVERAGE_REVIEW_MAX_EVENTS:
+            report = unknown_pdf_coverage_report()
+        else:
+            try:
+                report = project_pdf_coverage_review_audit(
+                    report,
+                    events,
+                    document_id=document_id,
+                    revision_id=revision_id,
+                    source_sha256=source_sha256,
+                )
+            except PdfCoverageReviewError:
+                report = unknown_pdf_coverage_report()
     return CatalogParsingCoverageRead.model_validate(report)
 
 
@@ -1770,9 +1800,10 @@ async def get_catalog_document_detail(
     )
     if graph.counts != item.graph_counts:
         raise KnowledgeCatalogError("catalog_invariant_failed")
+    revision_file = hydration.files.get(current.revision.id)
     return CatalogDocumentDetailRead(
         **item.model_dump(),
-        file=_revision_file_read(hydration.files.get(current.revision.id)),
+        file=_revision_file_read(revision_file),
         summary=_summary_read(artifacts.get("summary")),
         outline=_outline_read(artifacts.get("outline")),
         graph=graph,
@@ -1781,6 +1812,7 @@ async def get_catalog_document_detail(
             library_id=library.id,
             document_id=document_id,
             revision_id=current.revision.id,
+            source_sha256=revision_file.sha256 if revision_file is not None else None,
         ),
     )
 

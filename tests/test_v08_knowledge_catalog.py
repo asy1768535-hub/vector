@@ -25,6 +25,7 @@ from app.schemas.knowledge_catalog import (
 from app.schemas.storage import StorageLocatorV1
 from app.services import knowledge_catalog as service
 from app.services.pdf_coverage import PDF_COVERAGE_UNIT_KEY, create_pdf_coverage_report
+from app.services.pdf_coverage_reviews import PDF_COVERAGE_REVIEW_APPLY, _canonical_sha256
 from app.services.knowledge_catalog_contracts import (
     CatalogDocumentCursor,
     CatalogDocumentQuery,
@@ -392,6 +393,56 @@ def test_current_parsing_coverage_is_revision_bounded_and_fails_closed():
     ))
     assert unknown.status == "unknown"
     assert "secret" not in unknown.model_dump_json()
+
+
+def test_current_parsing_coverage_projects_only_revision_and_source_bound_audits():
+    library = _library()
+    document, revision = _current(library)
+    report = create_pdf_coverage_report(
+        status="partial", total_pages=3, processed_pages=[1],
+        unprocessed_visual_pages=[2, 3], skipped_visual_block_count=2,
+        reasons=["visual_content_without_ocr"],
+    )
+    content = {"parser_unit": {
+        "unit_key": PDF_COVERAGE_UNIT_KEY,
+        "unit_kind": "structured_unit",
+        "source_kind": "pdf",
+        "value": report,
+    }}
+    page_reviews = [{
+        "page": 2,
+        "status": "no_effective_content",
+        "reason": "human_review_no_effective_content",
+        "render_dpi": 300,
+        "render_sha256": "b" * 64,
+        "source_images_checked": 0,
+        "checks": [],
+        "classification_source": "human_review",
+        "review_evidence_ref": "evidence:bound-source/page-2",
+    }]
+    event = SimpleNamespace(
+        action=PDF_COVERAGE_REVIEW_APPLY,
+        target={
+            "document_id": str(document.id),
+            "revision_id": str(revision.id),
+            "source_sha256": HASH,
+            "idempotency_key": str(uuid.uuid4()),
+            "review_sha256": _canonical_sha256(page_reviews),
+            "page_reviews": page_reviews,
+        },
+        id=uuid.uuid4(), at=NOW,
+    )
+    db = _DB(_Result(rows=(content,)), _Result(rows=(event,)))
+
+    projected = asyncio.run(service._current_parsing_coverage(
+        db, library_id=library.id, document_id=document.id,
+        revision_id=revision.id, source_sha256=HASH,
+    ))
+
+    assert projected.no_effective_content_pages == [2]
+    assert projected.unprocessed_visual_pages == [3]
+    assert projected.page_assessments[0].classification_source == "human_review"
+    assert len(db.statements) == 2
 
 
 def test_prepare_file_access_requires_exact_current_available_revision():

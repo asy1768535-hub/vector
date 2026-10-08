@@ -1,5 +1,5 @@
 import { onMounted, reactive, ref, watch } from "vue";
-import { ElMessage } from "element-plus";
+import { ElMessage, ElMessageBox } from "element-plus";
 import * as api from "../api.js";
 import { dataEmpty } from "../illustrations.js";
 import {
@@ -25,6 +25,7 @@ export default {
         const permissionsReady = ref(false);
         const permissionsError = ref(false);
         const saving = ref(false);
+        const organizationRoles = ref([]);
         const keyword = ref("");
         const page = ref(1);
         const pageSize = ref(10);
@@ -54,7 +55,10 @@ export default {
             permissionsReady.value = false;
             permissionsError.value = false;
             try {
-                const perms = await api.listUserPerms(userId);
+                const [perms, roles] = await Promise.all([
+                    api.listUserPerms(userId, true),
+                    api.listUserOrganizationRoles(userId),
+                ]);
                 if (seq !== fetchSeq) return;
                 const next = {};
                 for (const lib of libs.value) {
@@ -73,6 +77,7 @@ export default {
                     for (const slug of Object.keys(next)) {
                         initial[slug] = { ...next[slug] };
                     }
+                    organizationRoles.value = roles.map((row) => ({ ...row, draftRole: row.role }));
                     permissionsReady.value = true;
                 }
             } catch (e) {
@@ -90,6 +95,7 @@ export default {
             // 立即清空旧数据，防止新权限返回前短暂显示上一用户权限
             for (const slug of Object.keys(matrix)) delete matrix[slug];
             for (const slug of Object.keys(initial)) delete initial[slug];
+            organizationRoles.value = [];
             permissionsReady.value = false;
             permissionsError.value = false;
             reloadUserPerms();
@@ -117,12 +123,53 @@ export default {
             return countUnsaved(matrix, initial) > 0;
         }
 
+        function organizationRead(library) {
+            return organizationRoles.value.some((row) => row.organization_id === library?.organization_id
+                && row.status === 'active' && row.role === 'organization_admin');
+        }
+
+        async function saveOrganizationRole(row) {
+            if (!permissionsReady.value || saving.value || !row.can_manage || hasChanges()
+                || row.role === row.draftRole || !['member', 'organization_admin'].includes(row.draftRole)) return;
+            const userId = selectedUser.value;
+            const organizationId = row.organization_id;
+            const membershipId = row.membership_id;
+            const body = {
+                expected_role: row.role, expected_status: row.status,
+                role: row.draftRole, status: row.status,
+            };
+            saving.value = true;
+            try {
+                const message = body.role === 'organization_admin'
+                    ? '设为组织管理员后，该用户可读取本组织全部知识库，并管理组织成员和权限。'
+                    : '改为普通成员后，将取消组织管理员带来的读取和管理权限，保留单独授予的知识库权限。';
+                await ElMessageBox.confirm(message, '保存组织角色', {
+                    confirmButtonText: '确认保存', cancelButtonText: '取消', type: 'warning',
+                });
+                if (userId !== selectedUser.value) return;
+                await api.updateOrganizationMember(organizationId, membershipId, body);
+                ElMessage.success('组织角色已保存');
+                await reloadUserPerms();
+            } catch (error) {
+                if (error === 'cancel' || error === 'close') return;
+                const messages = {
+                    organization_last_admin: '不能取消最后一位组织管理员，请先指定其他管理员',
+                    organization_account_self_admin_change: '不能取消自己的组织管理员权限',
+                    organization_membership_state_changed: '组织角色已被其他管理员修改，请刷新后重试',
+                };
+                ElMessage.error(messages[error?.body?.detail] || error?.message || '组织角色保存失败');
+                await reloadUserPerms();
+            } finally {
+                saving.value = false;
+            }
+        }
+
         async function save() {
             if (!selectedUser.value) {
                 ElMessage.warning("请先选择用户");
                 return;
             }
-            if (saving.value) return;
+            if (!permissionsReady.value || saving.value) return;
             saving.value = true;
             const { grants, revokes } = computePermissionDiff(matrix, initial);
             const grantCount = Object.values(grants).flat().length;
@@ -152,8 +199,12 @@ export default {
             ElMessage.success("已重置为上次保存状态");
         }
 
-        function permissionRemark(perms) {
+        function permissionRemark(perms, library) {
             const p = perms || {};
+            if (organizationRead(library)) {
+                const explicit = permissionSummary(p);
+                return explicit === '—' ? '组织管理员：自动读取' : `组织管理员：自动读取；单独授权：${explicit}`;
+            }
             if (p.read && p.insert && p.delete) return "全部权限";
             if (p.read && p.insert) return "允许补充文档";
             if (p.read && p.delete) return "可查看与删除";
@@ -171,6 +222,7 @@ export default {
             loading, permissionsLoading, permissionsReady, permissionsError, saving,
             keyword, page, pageSize, paged, filteredLibs,
             currentUser, hasChanges, save, reset,
+            organizationRoles, organizationRead, saveOrganizationRole,
             dataEmpty, permissionSummary, permissionRemark, userMeta, countUnsaved,
         };
     },
@@ -198,7 +250,7 @@ export default {
             </el-select>
             <template v-if="currentUser">
               <span class="permissions-user-info">
-                所属角色：<el-tag :type="userMeta(currentUser).roleType" size="small">{{ userMeta(currentUser).role }}</el-tag>
+                平台角色：<el-tag :type="userMeta(currentUser).roleType" size="small">{{ userMeta(currentUser).role }}</el-tag>
               </span>
               <span class="permissions-user-info">
                 状态：<el-tag :type="userMeta(currentUser).statusType" size="small">{{ userMeta(currentUser).status }}</el-tag>
@@ -231,6 +283,21 @@ export default {
           </div>
         </el-card>
 
+        <section v-if="selectedUser && permissionsReady && organizationRoles.length" class="permissions-organization-roles">
+          <h3>组织角色</h3>
+          <p class="permissions-desc">组织管理员自动读取本组织全部知识库，并可管理组织成员及权限；普通成员按单库授权访问。组织角色与平台角色分别设置。</p>
+          <div v-for="role in organizationRoles" :key="role.membership_id" class="permissions-toolbar-row permissions-organization-role">
+            <span class="permissions-organization-name">{{ role.name }}</span>
+            <el-select v-model="role.draftRole" aria-label="组织角色" class="permissions-role-select" :disabled="saving || !role.can_manage || hasChanges()">
+              <el-option label="普通成员" value="member" />
+              <el-option label="组织管理员" value="organization_admin" />
+            </el-select>
+            <el-button type="primary" @click="saveOrganizationRole(role)" :disabled="saving || !role.can_manage || hasChanges() || role.role === role.draftRole" :loading="saving">保存组织角色</el-button>
+            <span v-if="!role.can_manage" class="permissions-desc">需由本组织的其他组织管理员修改</span>
+            <span v-else-if="hasChanges()" class="permissions-desc">请先保存或重置下方单库权限</span>
+          </div>
+        </section>
+
         <section class="permissions-matrix-tools" v-if="selectedUser">
           <div class="permissions-search-wrap">
             <el-input v-model="keyword" placeholder="搜索知识库名称"
@@ -260,7 +327,9 @@ export default {
               </el-table-column>
               <el-table-column label="读取权限" width="150" align="center">
                 <template #default="{ row }">
-                  <el-checkbox v-model="matrix[row.slug].read" :disabled="saving" />
+                  <el-checkbox :model-value="matrix[row.slug].read || organizationRead(row)"
+                    @update:model-value="matrix[row.slug].read = $event"
+                    :disabled="saving || organizationRead(row)" :aria-label="row.name + '读取权限'" />
                 </template>
               </el-table-column>
               <el-table-column label="写入权限" width="150" align="center">
@@ -275,8 +344,8 @@ export default {
               </el-table-column>
               <el-table-column label="备注" aria-label="权限摘要" width="190">
                 <template #default="{ row }">
-                  <span class="permissions-remark" :title="permissionSummary(matrix[row.slug] || {})">
-                    {{ permissionRemark(matrix[row.slug] || {}) }}
+                  <span class="permissions-remark" :title="permissionRemark(matrix[row.slug] || {}, row)">
+                    {{ permissionRemark(matrix[row.slug] || {}, row) }}
                   </span>
                 </template>
               </el-table-column>

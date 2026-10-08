@@ -79,7 +79,33 @@ def eligibility(job, document, library, operation, revision=None) -> bool:
         return False
     if document.deleted_at is not None:
         return False
-    if settings.enable_revision_id_worker:
+    if job.document_revision != document.current_revision:
+        return False
+    if job.rebuild_operation_id is not None:
+        revision_id = getattr(job, "document_revision_id", None)
+        if revision_id is not None:
+            if (revision is None or getattr(document, "current_revision_id", None) != revision_id
+                    or revision.id != revision_id or revision.status != "ready"
+                    or revision.document_id != job.document_id or revision.library_id != job.library_id
+                    or revision.revision_no != job.document_revision_no):
+                return False
+        elif (settings.enable_revision_id_worker or getattr(document, "current_revision_id", None) is not None
+              or getattr(document, "latest_revision_id", None) is not None):
+            return False
+        if getattr(library, "lifecycle_mode", None) == "external":
+            return False
+        if hasattr(library, "id") and library.id != getattr(job, "library_id", None):
+            return False
+        if operation is not None and getattr(operation, "id", job.rebuild_operation_id) != job.rebuild_operation_id:
+            return False
+        if (getattr(document, "library_id", None) is not None
+                and document.library_id != job.library_id):
+            return False
+        if (operation is not None and getattr(operation, "library_id", None) is not None
+                and (operation.library_id != job.library_id
+                     or operation.collection_name != library.qdrant_collection)):
+            return False
+    elif settings.enable_revision_id_worker:
         if getattr(job, "document_revision_id", None) is None or revision is None:
             return False
         if getattr(revision, "id", None) != job.document_revision_id:
@@ -88,8 +114,6 @@ def eligibility(job, document, library, operation, revision=None) -> bool:
             return False
         if getattr(document, "latest_revision_id", None) != job.document_revision_id:
             return False
-    elif job.document_revision != document.current_revision:
-        return False
     if library.index_state == "ready":
         # ready 时只放行普通 job；带 rebuild_operation_id 的（含失败 operation 遗留）一律拒绝
         return job.rebuild_operation_id is None
@@ -105,15 +129,19 @@ def eligibility(job, document, library, operation, revision=None) -> bool:
 
 
 async def _chunks_for_job(db: AsyncSession, job: EmbeddingJob, doc: Document) -> list[Chunk]:
-    if settings.enable_revision_id_worker and job.document_revision_id is not None:
+    if (settings.enable_revision_id_worker or job.rebuild_operation_id is not None) and job.document_revision_id is not None:
         rows = await db.execute(
             select(Chunk)
-            .where(Chunk.document_revision_id == job.document_revision_id)
+            .where(Chunk.document_revision_id == job.document_revision_id,
+                   Chunk.document_id == job.document_id, Chunk.library_id == job.library_id)
             .order_by(Chunk.seq)
         )
     else:
+        stmt = select(Chunk).where(Chunk.document_id == doc.id)
+        if job.rebuild_operation_id is not None:
+            stmt = stmt.where(Chunk.library_id == job.library_id, Chunk.document_revision_id.is_(None))
         rows = await db.execute(
-            select(Chunk).where(Chunk.document_id == doc.id).order_by(Chunk.seq)
+            stmt.order_by(Chunk.seq)
         )
     return list(rows.scalars().all())
 
@@ -132,7 +160,8 @@ def _build_payload(
     保证 document_id/chunk_id/text/title/library_id 等系统字段恒胜，
     用户无法通过 metadata 覆盖它们（否则会破坏删除/检索完整性、伪造文档归属）。
     """
-    payload = dict(doc.doc_metadata or {})
+    is_rebuild = job is not None and job.rebuild_operation_id is not None
+    payload = dict((revision.document_metadata if is_rebuild and revision is not None else doc.doc_metadata) or {})
     document_revision_id = (
         getattr(job, "document_revision_id", None)
         or getattr(chunk, "document_revision_id", None)
@@ -151,9 +180,9 @@ def _build_payload(
             "chunk_id": str(chunk.id),
             "seq": chunk.seq,
             "text": chunk.text,
-            "title": doc.title,
+            "title": revision.title if is_rebuild and revision is not None else doc.title,
             "external_id": doc.external_id,
-            "document_revision": document_revision_no,  # #6：检索按它过滤陈旧 point
+            "document_revision": getattr(job, "document_revision", None) or doc.current_revision,
             "document_revision_no": document_revision_no,
             "document_revision_id": str(document_revision_id) if document_revision_id else None,
             "block_id": str(chunk.block_id) if chunk.block_id else None,
@@ -185,9 +214,53 @@ def _build_payload(
 
 
 def get_worker_target_config() -> tuple[bool, uuid.UUID | None, datetime | None]:
+    raw_scope_mode = os.getenv("WORKER_SCOPE_MODE", "").strip().lower()
     raw_exclude = os.getenv("WORKER_EXCLUDE_PDF", "").strip().lower()
     raw_target = os.getenv("WORKER_TARGET_LIBRARY_ID", "").strip()
     raw_min_created = os.getenv("WORKER_TASK_MIN_CREATED_AT", "").strip()
+
+    is_all_libraries = raw_scope_mode in {"all", "all_libraries", "all-libraries"}
+    is_single_library = raw_scope_mode in {"", "single", "single_library", "single-library", "targeted"}
+
+    if not is_all_libraries and not is_single_library:
+        log.critical(
+            "FATAL: Invalid WORKER_SCOPE_MODE='%s'. Must be 'all_libraries' (production full-library mode) or 'single_library' (targeted mode).",
+            raw_scope_mode,
+        )
+        sys.exit(1)
+
+    if is_all_libraries:
+        if raw_target:
+            log.critical(
+                "FATAL: Configuration conflict! WORKER_TARGET_LIBRARY_ID is set ('%s') but WORKER_SCOPE_MODE='%s'. "
+                "Full-library production mode must not be constrained by a single target library. Remove WORKER_TARGET_LIBRARY_ID.",
+                raw_target,
+                raw_scope_mode,
+            )
+            sys.exit(1)
+        if raw_min_created:
+            log.critical(
+                "FATAL: Configuration conflict! WORKER_TASK_MIN_CREATED_AT is set ('%s') but WORKER_SCOPE_MODE='%s'. "
+                "Full-library production mode must not be constrained by trial min created at timestamp. Remove WORKER_TASK_MIN_CREATED_AT.",
+                raw_min_created,
+                raw_scope_mode,
+            )
+            sys.exit(1)
+        if raw_exclude in {"1", "true", "yes", "on"}:
+            log.critical(
+                "FATAL: Configuration conflict! WORKER_EXCLUDE_PDF='%s' conflicts with WORKER_SCOPE_MODE='%s'. "
+                "Full-library production mode must consume all documents including PDF.",
+                raw_exclude,
+                raw_scope_mode,
+            )
+            sys.exit(1)
+        if raw_exclude and raw_exclude not in {"0", "false", "no", "off"}:
+            log.critical(
+                "FATAL: Ambiguous WORKER_EXCLUDE_PDF='%s'. In all_libraries mode it must be '0' or unset.",
+                raw_exclude,
+            )
+            sys.exit(1)
+        return False, None, None
 
     is_exclude = raw_exclude in {"1", "true", "yes", "on"}
     is_include = raw_exclude in {"0", "false", "no", "off"}
@@ -295,6 +368,23 @@ async def _reset_stale_jobs(
         ),
         params,
     )
+    if (failed.rowcount or 0) > 0:
+        await db.execute(
+            text(
+                """
+                UPDATE document_import_jobs dij
+                SET status = 'failed', worker_id = NULL, claimed_at = NULL,
+                    finished_at = NOW(),
+                    last_error = COALESCE(dij.last_error, 'stale embedding at max attempts')
+                FROM embedding_jobs ej
+                WHERE dij.embedding_job_id = ej.id
+                  AND dij.status = 'processing'
+                  AND ej.status = 'failed'
+                  AND ej.last_error = 'stale processing at max attempts'
+                  AND ej.finished_at >= NOW() - interval '10 seconds'
+                """
+            )
+        )
     await db.commit()
     return (failed.rowcount or 0) + (reset.rowcount or 0)
 
@@ -336,11 +426,22 @@ async def _claim_jobs(db: AsyncSession, worker_id: str, limit: int) -> list[Embe
             SELECT j.id
             FROM embedding_jobs j
             JOIN documents d ON d.id = j.document_id
+            JOIN sys_libraries l ON l.id = j.library_id
             WHERE j.status = 'pending'
               AND j.attempt_count < :max_attempts
+              AND (j.rebuild_operation_id IS NULL OR (
+                l.index_state = 'rebuilding'
+                AND l.active_rebuild_operation_id = j.rebuild_operation_id
+                AND EXISTS (
+                  SELECT 1 FROM rebuild_operations ro
+                  WHERE ro.id = j.rebuild_operation_id AND ro.status = 'running'
+                    AND ro.library_id = j.library_id
+                    AND ro.collection_name = l.qdrant_collection
+                )
+              ))
               {target_clause}
             ORDER BY j.created_at
-            FOR UPDATE SKIP LOCKED
+            FOR UPDATE OF j SKIP LOCKED
             LIMIT :limit
         )
         UPDATE embedding_jobs j
@@ -366,12 +467,29 @@ async def _claim_jobs(db: AsyncSession, worker_id: str, limit: int) -> list[Embe
 
 async def _mark_superseded(db: AsyncSession, job: EmbeddingJob) -> None:
     """资格条件不满足（旧 revision / 库重建中 / 已删等）→ 正常终止，不计失败、不重试。"""
+    now = datetime.now(timezone.utc)
     await db.execute(
         update(EmbeddingJob).where(EmbeddingJob.id == job.id).values(
-            status="superseded", finished_at=datetime.now(timezone.utc)
+            status="superseded", finished_at=now
+        )
+    )
+    await db.execute(
+        update(DocumentImportJob)
+        .where(
+            DocumentImportJob.embedding_job_id == job.id,
+            DocumentImportJob.status == "processing",
+        )
+        .values(
+            status="superseded",
+            current_stage="embedding",
+            worker_id=None,
+            claimed_at=None,
+            finished_at=now,
+            last_error="superseded",
         )
     )
     await db.commit()
+    await _finalize_rebuild_job(db, job.rebuild_operation_id)
 
 
 async def _publish_revision_after_qdrant(
@@ -382,6 +500,10 @@ async def _publish_revision_after_qdrant(
     now: datetime | None = None,
 ) -> bool:
     """Publish a revision only after Qdrant upsert has succeeded."""
+    if job.rebuild_operation_id is not None:
+        raise ValueError("rebuild must not publish or clean up content revisions")
+    if isinstance(db, AsyncSession) and job in db:
+        db.expunge(job)
     now = now or datetime.now(timezone.utc)
     library_id = library.id
     library_snapshot = _LibraryPublicationSnapshot(
@@ -397,11 +519,22 @@ async def _publish_revision_after_qdrant(
     await db.rollback()
     from app.services import cleanup as cleanup_service
 
+    current_library = (await db.execute(
+        select(Library).where(Library.id == library_id)
+        .with_for_update(read=True, key_share=True)
+        .execution_options(populate_existing=True)
+    )).scalar_one_or_none()
+    if (current_library is None or current_library.deleted_at is not None
+            or current_library.index_state != "ready"):
+        await _mark_superseded(db, job)
+        return False
+
     doc = (
         await db.execute(
             select(Document)
             .where(Document.id == document_id)
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
     revision = (
@@ -409,8 +542,16 @@ async def _publish_revision_after_qdrant(
             select(DocumentRevision)
             .where(DocumentRevision.id == revision_id)
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
+
+    if (doc is not None and doc.current_revision != job.document_revision
+            or revision is not None and revision.status not in ("pending", "processing")):
+        # An old indexing task must not publish, supersede or delete a content
+        # revision already retained by a newer generation/rebuild.
+        await _mark_superseded(db, job)
+        return False
 
     if (
         doc is None
@@ -604,6 +745,8 @@ async def _publish_revision_after_qdrant(
 
 async def _process_job(db: AsyncSession, job: EmbeddingJob) -> None:
     """处理单个 job：资格检查 → 拉 chunks → embed → 按锁序复核 → upsert → 标 done（#6 §5）。"""
+    if isinstance(db, AsyncSession) and job in db:
+        db.expunge(job)
     lib = await db.get(Library, job.library_id)
     doc = await db.get(Document, job.document_id)
     if lib is None or doc is None:
@@ -612,7 +755,8 @@ async def _process_job(db: AsyncSession, job: EmbeddingJob) -> None:
     op = await db.get(RebuildOperation, job.rebuild_operation_id) if job.rebuild_operation_id else None
     revision = (
         await db.get(DocumentRevision, job.document_revision_id)
-        if settings.enable_revision_id_worker and job.document_revision_id is not None
+        if (settings.enable_revision_id_worker or job.rebuild_operation_id is not None)
+        and job.document_revision_id is not None
         else None
     )
 
@@ -626,6 +770,11 @@ async def _process_job(db: AsyncSession, job: EmbeddingJob) -> None:
     if not chunks:
         await _mark_failed(db, job, "no chunks to embed")
         return
+
+    if isinstance(db, AsyncSession):
+        for chunk in chunks:
+            if chunk in db:
+                db.expunge(chunk)
 
     texts = [c.text for c in chunks]
     try:
@@ -645,11 +794,25 @@ async def _process_job(db: AsyncSession, job: EmbeddingJob) -> None:
             raise RuntimeError(f"dim mismatch: expected {lib.embedding_dim}")
 
         # 资格检查 #2（写 Qdrant 前，§5.4）：按锁序 library FOR KEY SHARE → document FOR UPDATE 复核
-        if settings.enable_revision_id_worker and job.document_revision_id is not None:
-            lib_l = await db.get(Library, job.library_id)
-            doc_l = await db.get(Document, job.document_id)
-            revision_l = await db.get(DocumentRevision, job.document_revision_id)
-            op_l = await db.get(RebuildOperation, job.rebuild_operation_id) if job.rebuild_operation_id else None
+        if (settings.enable_revision_id_worker or job.rebuild_operation_id is not None) and job.document_revision_id is not None:
+            await db.rollback()
+            lib_l = (await db.execute(
+                select(Library).where(Library.id == job.library_id)
+                .with_for_update(read=True, key_share=True)
+                .execution_options(populate_existing=True)
+            )).scalar_one_or_none()
+            doc_l = (await db.execute(
+                select(Document).where(Document.id == job.document_id).with_for_update()
+                .execution_options(populate_existing=True)
+            )).scalar_one_or_none()
+            op_l = (await db.execute(
+                select(RebuildOperation).where(RebuildOperation.id == job.rebuild_operation_id)
+                .execution_options(populate_existing=True)
+            )).scalar_one_or_none() if job.rebuild_operation_id else None
+            revision_l = (await db.execute(
+                select(DocumentRevision).where(DocumentRevision.id == job.document_revision_id)
+                .with_for_update().execution_options(populate_existing=True)
+            )).scalar_one_or_none()
             if lib_l is None or doc_l is None or not eligibility(job, doc_l, lib_l, op_l, revision_l):
                 await _mark_superseded(db, job)
                 log.info(
@@ -670,6 +833,22 @@ async def _process_job(db: AsyncSession, job: EmbeddingJob) -> None:
             await qdrant.upsert_points(
                 lib_l.qdrant_collection, points, timeout=settings.qdrant_upsert_timeout_seconds
             )
+            if job.rebuild_operation_id is not None:
+                now = datetime.now(timezone.utc)
+                await db.execute(
+                    update(EmbeddingJob).where(EmbeddingJob.id == job.id)
+                    .values(status="done", finished_at=now, last_error=None)
+                )
+                await db.execute(
+                    update(Document).where(
+                        Document.id == job.document_id,
+                        Document.current_revision == job.document_revision,
+                        Document.current_revision_id == job.document_revision_id,
+                    ).values(status="ready", last_error=None, updated_at=now)
+                )
+                await db.commit()
+                await _finalize_rebuild_job(db, job.rebuild_operation_id)
+                return
             published_slug = lib_l.slug
             published_document_id = doc_l.id
             published_revision_id = job.document_revision_id
@@ -686,12 +865,15 @@ async def _process_job(db: AsyncSession, job: EmbeddingJob) -> None:
 
         lib_l = (await db.execute(
             select(Library).where(Library.id == job.library_id).with_for_update(read=True, key_share=True)
+            .execution_options(populate_existing=True)
         )).scalar_one_or_none()
         doc_l = (await db.execute(
             select(Document).where(Document.id == job.document_id).with_for_update()
+            .execution_options(populate_existing=True)
         )).scalar_one_or_none()
         op_l = (await db.execute(
             select(RebuildOperation).where(RebuildOperation.id == job.rebuild_operation_id)
+            .execution_options(populate_existing=True)
         )).scalar_one_or_none() if job.rebuild_operation_id else None
         if lib_l is None or doc_l is None or not eligibility(job, doc_l, lib_l, op_l):
             await db.rollback()  # 释放行锁
@@ -728,16 +910,22 @@ async def _process_job(db: AsyncSession, job: EmbeddingJob) -> None:
 
     # 即时 finalize：rebuild job 转终态（done 或 failed）后立刻尝试收口（新 session，锁序 library→operation）。
     # 失败/崩溃由主循环周期 reconcile 兜底。
-    if job.rebuild_operation_id is not None:
+    await _finalize_rebuild_job(db, job.rebuild_operation_id)
+
+
+async def _finalize_rebuild_job(db: AsyncSession, operation_id) -> None:
+    if operation_id is not None:
         try:
             from app.services import rebuild as rebuild_svc
-            async with async_session_factory() as fsession:
-                await rebuild_svc.try_finalize(fsession, job.rebuild_operation_id)
-        except Exception:  # noqa: BLE001
-            log.exception("immediate finalize failed for op=%s (reconcile 兜底)", job.rebuild_operation_id)
+            async with AsyncSession(bind=db.bind, expire_on_commit=False) as fsession:
+                await rebuild_svc.try_finalize(fsession, operation_id)
+        except Exception:
+            log.exception("immediate finalize failed for op=%s (reconcile 兜底)", operation_id)
 
 
 async def _mark_failed(db: AsyncSession, job: EmbeddingJob, reason: str) -> None:
+    if isinstance(db, AsyncSession) and job in db:
+        db.expunge(job)
     now = datetime.now(timezone.utc)
     # revision 守卫（#6）：embedding 期间文档可能被另一事务更新/删除。**必须读新鲜行**——
     # 先 rollback 清掉本 session 的 identity-map 缓存与可能的未决事务，再按锁序
@@ -748,14 +936,46 @@ async def _mark_failed(db: AsyncSession, job: EmbeddingJob, reason: str) -> None
     )
     doc = (await db.execute(
         select(Document).where(Document.id == job.document_id).with_for_update()
+        .execution_options(populate_existing=True)
     )).scalar_one_or_none()
-    if doc is None or doc.deleted_at is not None or job.document_revision != doc.current_revision:
+    stale = doc is None or doc.deleted_at is not None or job.document_revision != doc.current_revision
+    if not stale and job.rebuild_operation_id is not None:
+        library = (await db.execute(
+            select(Library).where(Library.id == job.library_id)
+            .execution_options(populate_existing=True)
+        )).scalar_one_or_none()
+        operation = (await db.execute(
+            select(RebuildOperation).where(RebuildOperation.id == job.rebuild_operation_id)
+            .execution_options(populate_existing=True)
+        )).scalar_one_or_none()
+        revision = (await db.execute(
+            select(DocumentRevision).where(DocumentRevision.id == job.document_revision_id)
+            .execution_options(populate_existing=True)
+        )).scalar_one_or_none() if job.document_revision_id is not None else None
+        stale = not eligibility(job, doc, library, operation, revision)
+    if stale:
         await db.execute(
             update(EmbeddingJob).where(EmbeddingJob.id == job.id).values(
                 status="superseded", finished_at=now
             )
         )
+        await db.execute(
+            update(DocumentImportJob)
+            .where(
+                DocumentImportJob.embedding_job_id == job.id,
+                DocumentImportJob.status == "processing",
+            )
+            .values(
+                status="superseded",
+                current_stage="embedding",
+                worker_id=None,
+                claimed_at=None,
+                finished_at=now,
+                last_error="superseded by newer revision or deleted document",
+            )
+        )
         await db.commit()
+        await _finalize_rebuild_job(db, job.rebuild_operation_id)
         return
 
     # 仍是当前 revision：超 max_attempts → final failed；否则回 pending 重试
@@ -780,7 +1000,24 @@ async def _mark_failed(db: AsyncSession, job: EmbeddingJob, reason: str) -> None
                 status="failed", last_error=reason, updated_at=now
             )
         )
+        # 同步更新对应父导入任务为 failed（精确关联当前 embedding_job_id 且仍为 processing）
+        await db.execute(
+            update(DocumentImportJob)
+            .where(
+                DocumentImportJob.embedding_job_id == job.id,
+                DocumentImportJob.status == "processing",
+            )
+            .values(
+                status="failed",
+                current_stage="embedding",
+                worker_id=None,
+                claimed_at=None,
+                finished_at=now,
+                last_error=reason[:4000] if reason else "embedding failed at max attempts",
+            )
+        )
     await db.commit()
+    await _finalize_rebuild_job(db, job.rebuild_operation_id)
 
 
 async def run(watch: bool) -> None:

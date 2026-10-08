@@ -10,18 +10,16 @@ import {
 } from '../api_keys_ui.js';
 import { createRequestFence, readProjection } from '../read_state_ui.js';
 
-const MCP_SETUP_INSTRUCTIONS = [
-    '请帮我在支持自定义请求头的 MCP 客户端中添加知识库连接。',
-    '先确认设备已连接该服务的局域网或 VPN，且域名在内网解析。',
-    '传输方式：Streamable HTTP',
-    '服务地址：https://ashark.icu/mcp',
-    '请求头名称：Authorization',
-    '请求头内容：Bearer <我自己的完整 API Key>',
-    'API Key 由我在客户端的密钥或请求头设置中填写；不要让我把 Key 发到聊天里，也不要写进 URL 或共享文件。',
-    '连接成功后先调用 list_libraries，再使用返回的知识库 slug 调用 search_knowledge。',
-].join('\n');
+import ApiAccessGuide from '../components/ApiAccessGuide.js';
+import { createAccessGuide, accessGuideText } from '../api_access_guide.js';
+
+const guideBaseUrl = globalThis.location?.origin;
+const httpGuide = createAccessGuide('http', guideBaseUrl);
+const mcpGuide = createAccessGuide('mcp', guideBaseUrl);
+const MCP_SETUP_INSTRUCTIONS = accessGuideText(mcpGuide);
 
 export default {
+    components: { ApiAccessGuide },
     setup() {
         const keys = ref([]);
         const loading = ref(false);
@@ -36,7 +34,9 @@ export default {
             expiresAt: '',
         });
         const submitting = ref(false);
-        const result = reactive({ open: false, plaintext: '' });
+        const result = reactive({ open: false, plaintext: '', keyId: '' });
+        const maskedPlaintext = computed(() => result.plaintext
+            ? `${result.plaintext.slice(0, 8)}…${result.plaintext.slice(-4)}` : '');
         const docDialog = reactive({ open: false });
         const mcpGuideOpen = ref(false);
         const page = ref(1);
@@ -56,7 +56,8 @@ export default {
             try {
                 const response = await api.listApiKeys(forceRefresh);
                 if (!keysRequestFence.isCurrent(requestToken)) return;
-                keys.value = response;
+                if (response.some(row => row.id === result.keyId && row.revoked_at)) closeResult();
+                keys.value = response.filter(row => !row.revoked_at);
                 keysResolved.value = true;
                 if (pagination.value.page !== page.value) page.value = pagination.value.page;
             } catch (error) {
@@ -103,6 +104,7 @@ export default {
                 );
                 dialog.open = false;
                 result.plaintext = response.plaintext_key;
+                result.keyId = response.id;
                 result.open = true;
                 page.value = 1;
                 await load();
@@ -116,6 +118,16 @@ export default {
         function closeResult() {
             result.open = false;
             result.plaintext = '';
+            result.keyId = '';
+        }
+
+        function canCopyKey(row) {
+            return Boolean(result.plaintext && row.id === result.keyId && keyStatus(row) === 'active');
+        }
+
+        function displayKey(row) {
+            return row.id === result.keyId && result.plaintext
+                ? maskedPlaintext.value : `${row.key_prefix}…`;
         }
 
         async function copyPlain() {
@@ -125,16 +137,25 @@ export default {
                 await copyTextToClipboard(value);
                 ElMessage.success('已复制到剪贴板');
             } catch (error) {
-                ElMessage.error(error.message || '复制失败，请手动选择内容');
+                ElMessage.error('复制失败，请重试复制');
             }
         }
 
         async function copyMcpInstructions() {
             try {
                 await copyTextToClipboard(MCP_SETUP_INSTRUCTIONS);
-                ElMessage.success('已复制不含密钥的 MCP 接入说明');
+                ElMessage.success('已复制不含密钥的完整 MCP 接入说明');
             } catch (error) {
                 ElMessage.error(error.message || '复制失败，请手动选择说明文字');
+            }
+        }
+
+        async function copyApiInstructions() {
+            try {
+                await copyTextToClipboard(accessGuideText(httpGuide));
+                ElMessage.success('已复制不含密钥的完整 HTTP API 接入说明');
+            } catch (error) {
+                ElMessage.error('复制失败，请手动选择说明文字');
             }
         }
 
@@ -154,8 +175,11 @@ export default {
             }
             try {
                 await api.revokeApiKey(row.id);
+                keys.value = keys.value.filter(key => key.id !== row.id);
+                page.value = pagination.value.page;
+                if (row.id === result.keyId) closeResult();
                 ElMessage.success('已撤销');
-                await load();
+                await load(true);
             } catch (error) {
                 ElMessage.error(error.message || String(error));
             }
@@ -174,7 +198,8 @@ export default {
             keys, loading, keysError, keysReadState, dialog, submitting, result, docDialog, mcpGuideOpen,
             page, pageSize, organizations, stats, pagination, visibleKeys, showPagination,
             load, openCreate, submit, closeResult, copyPlain, copyMcpInstructions,
-            mcpInstructions: MCP_SETUP_INSTRUCTIONS, openApiDoc, revoke,
+            maskedPlaintext, canCopyKey, displayKey,
+            httpGuide, mcpGuide, copyApiInstructions, openApiDoc, revoke,
             organizationName, dataEmpty, apiKeySecurity,
             formatKeyTime, keyStatus, STATUS_LABEL, STATUS_TAG,
         };
@@ -196,7 +221,7 @@ export default {
 
         <el-alert type="warning" :closable="false" show-icon
                   title="安全提示"
-                  description="完整密钥仅在创建时显示一次。请按接入系统分别创建，并在停用后及时撤销。" />
+                  description="完整密钥仅在创建后可复制，请立即保存。页面刷新或关闭创建结果后无法再次复制；已撤销的密钥不再显示。" />
 
         <section class="api-keys-doc-card">
             <div class="api-keys-doc-main">
@@ -206,21 +231,21 @@ export default {
                 <ol class="api-keys-doc-steps">
                     <li>选择所属组织，创建并保存 API Key</li>
                     <li>配置 <code>VECTOR_KB_BASE_URL</code>、<code>VECTOR_KB_LIBRARY_ID</code>、<code>VECTOR_KB_API_KEY</code></li>
-                    <li>调用问答接口，并展示答案、普通来源和图谱证据</li>
+                    <li>按指南发现知识库、检索或问答，并追溯图谱 evidence_id</li>
                 </ol>
             </div>
             <div class="api-keys-doc-actions">
-                <el-button class="api-keys-doc-template-button" @click="openApiDoc">快速接入模板</el-button>
+                <el-button class="api-keys-doc-template-button" @click="openApiDoc">查看 API 完整指南</el-button>
             </div>
         </section>
 
         <section class="api-keys-doc-card" aria-labelledby="api-keys-mcp-title">
             <div class="api-keys-doc-main">
                 <h3 id="api-keys-mcp-title">MCP 接入：让 AI 使用你的知识库</h3>
-                <p>在局域网或 VPN 内，每个账号用自己的 API Key 连接同一个 MCP 地址；AI 只能访问该账号有权限的知识库。</p>
+                <p>每个账号用自己的 API Key 连接同一个 MCP 地址；AI 只能访问该账号有权限的知识库。</p>
                 <ol class="api-keys-doc-steps">
                     <li>在本页新建并保存自己的 API Key</li>
-                    <li>在 MCP 客户端添加 Streamable HTTP 地址 <code>https://ashark.icu/mcp</code></li>
+                    <li>在 MCP 客户端添加 Streamable HTTP 地址 <code>https://vkb.gshbzw.com/mcp</code></li>
                     <li>填写 Bearer 请求头，连接后调用 <code>list_libraries</code></li>
                 </ol>
                 <p class="api-keys-doc-note">完整 Key 只填在客户端的密钥设置中，不要发给 AI 聊天或其他人。</p>
@@ -254,10 +279,6 @@ export default {
                     <div class="api-keys-stat-num">{{ stats.active }}</div>
                     <div class="api-keys-stat-label">启用</div>
                 </div>
-                <div class="api-keys-stat-card api-keys-stat-card--revoked">
-                    <div class="api-keys-stat-num">{{ stats.revoked }}</div>
-                    <div class="api-keys-stat-label">已撤销</div>
-                </div>
                 <div class="api-keys-stat-card api-keys-stat-card--expired">
                     <div class="api-keys-stat-num">{{ stats.expired }}</div>
                     <div class="api-keys-stat-label">已过期</div>
@@ -277,8 +298,17 @@ export default {
                         <el-table-column label="所属组织" min-width="140">
                             <template #default="{row}">{{ organizationName(row.organization_id) }}</template>
                         </el-table-column>
-                        <el-table-column label="Key 前缀" min-width="160">
-                            <template #default="{row}"><span class="api-keys-prefix">{{ row.key_prefix }}</span></template>
+                        <el-table-column label="API 密钥" min-width="200">
+                            <template #default="{row}">
+                                <span class="api-keys-prefix">{{ displayKey(row) }}</span>
+                                <el-tooltip :content="canCopyKey(row) ? '复制完整密钥' : '完整密钥仅在创建后可复制，请使用已保存的密钥'">
+                                    <span>
+                                        <el-button link :disabled="!canCopyKey(row)" aria-label="复制完整密钥" @click="copyPlain">
+                                            <local-icon icon="mdi:content-copy" aria-hidden="true"></local-icon>
+                                        </el-button>
+                                    </span>
+                                </el-tooltip>
+                            </template>
                         </el-table-column>
                         <el-table-column label="创建时间" width="170">
                             <template #default="{row}">{{ formatKeyTime(row.created_at) }}</template>
@@ -308,87 +338,30 @@ export default {
             </section>
         </template>
 
-        <el-dialog v-model="docDialog.open" title="完整接入模板"
+        <el-dialog v-model="docDialog.open" title="HTTP API 完整接入模板与指南"
                    width="860px" class="api-keys-doc-dialog">
             <div class="api-keys-doc-dialog-body">
-                <section>
-                    <h4>1. 环境变量</h4>
-                    <pre class="api-keys-doc-code">VECTOR_KB_BASE_URL=https://your-vector-kb.example.com
-VECTOR_KB_LIBRARY_ID=your_library_slug
-VECTOR_KB_API_KEY=你的完整API_KEY</pre>
-                </section>
-                <section>
-                    <h4>2. 同步智能问答</h4>
-                    <pre class="api-keys-doc-code">curl -X POST "$VECTOR_KB_BASE_URL/api/v1/answers" \\
-  -H "Authorization: Bearer $VECTOR_KB_API_KEY" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "scope": {"library_slugs": ["your_library_slug"]},
-    "query": "你的问题",
-    "top_k": 5,
-    "candidate_k": 20
-  }'</pre>
-                    <p>流式问答使用 <code>POST /api/v1/answers/stream</code>，请求体相同，并设置 <code>Accept: text/event-stream</code>。</p>
-                </section>
-                <section>
-                    <h4>3. 返回结果与证据</h4>
-                    <ul class="api-keys-doc-list">
-                        <li><code>answer</code>：最终自然语言回答。</li>
-                        <li><code>sources</code>：文档、修订、切片、页码、标题路径和分数等引用位置。</li>
-                        <li><code>chunks</code>：与 <code>sources</code> 同排名的证据正文。</li>
-                        <li><code>graph.entities</code> / <code>graph.relations</code>：发布后的图谱事实；每条事实的 <code>evidence[].evidence_id</code> 可继续读取证据详情。</li>
-                    </ul>
-                    <pre class="api-keys-doc-code">GET /api/v1/libraries/{slug}/evidence/{evidence_id}
-Authorization: Bearer &lt;API_KEY&gt;</pre>
-                </section>
-                <section>
-                    <h4>4. 兼容接口</h4>
-                    <p><code>POST /libraries/{slug}/query</code> 只返回检索切片。旧的 <code>POST /chat/messages</code> 可能分别返回 <code>sources</code> 或 <code>graph_evidence</code>；新接入请使用固定结构的 Public v1。</p>
-                </section>
+                <api-access-guide :guide="httpGuide" />
             </div>
+            <template #footer>
+                <div class="api-access-guide-footer">
+                    <span>复制内容包含完整说明与示例，不含实际密钥。</span>
+                    <el-button type="primary" @click="copyApiInstructions">复制完整 API 说明给智能体</el-button>
+                </div>
+            </template>
         </el-dialog>
 
-        <el-dialog v-model="mcpGuideOpen" title="MCP 使用指南"
+        <el-dialog v-model="mcpGuideOpen" title="MCP 完整接入指南"
                    width="860px" class="api-keys-doc-dialog">
             <div class="api-keys-doc-dialog-body">
-                <section>
-                    <h4>1. 准备账号与密钥</h4>
-                    <p>在本页点击“新建 API Key”，选择所属组织，保存仅显示一次的完整密钥。Key 属于创建它的账号；要查询某个知识库，该账号还需有该库的读取权限。</p>
-                    <p>不同账号各用自己的 Key。完整 Key 只填在 MCP 客户端的密钥设置里，不要发给 AI 聊天，也不要放进 URL 或共享配置文件。</p>
-                </section>
-                <section>
-                    <h4>2. 在 MCP 客户端填写连接参数</h4>
-                    <p>先连接可访问本服务的局域网或 VPN，并确保域名使用内网解析。然后选择支持自定义 HTTP 请求头的 Streamable HTTP 连接，逐项填写：</p>
-                    <pre class="api-keys-doc-code">连接名称：知识库（名称可自定）
-传输方式：Streamable HTTP
-服务地址：https://ashark.icu/mcp
-请求头名称：Authorization
-请求头内容：Bearer &lt;你的完整 API Key&gt;</pre>
-                    <p><code>Bearer</code> 后面有一个空格。请把完整 Key 填进占位符位置，不要保留尖括号。客户端若只提供 OAuth 登录、无法设置请求头，就不能用这种接入方式。</p>
-                </section>
-                <section>
-                    <h4>3. 让 AI 帮你配置</h4>
-                    <p>可以复制下面的非密钥说明发给 AI。真正的 Key 仍由你自己填到客户端的安全设置中。</p>
-                    <pre class="api-keys-doc-code">{{ mcpInstructions }}</pre>
-                    <el-button @click="copyMcpInstructions">复制给 AI 的说明</el-button>
-                </section>
-                <section>
-                    <h4>4. 验证连接并开始使用</h4>
-                    <p>保存连接后，让客户端调用 <code>list_libraries</code>。应看到自己有读取权限的知识库；如果列表为空，请检查本账号的知识库权限。</p>
-                    <p>找到知识库 slug 后，可对 AI 说：“用 <code>search_knowledge</code>，<code>knowledge_id</code> 填这个 slug，<code>query</code> 填我的问题。”上传文件时使用 <code>upload_file</code>，还需要该知识库的上传权限。</p>
-                </section>
-                <section>
-                    <h4>5. 连接失败时检查</h4>
-                    <ul class="api-keys-doc-list">
-                        <li><strong>401 未授权：</strong>检查是否填了完整 Key、<code>Bearer</code> 后的空格，以及 Key 是否过期或已撤销。</li>
-                        <li><strong>知识库列表为空或提示无权限：</strong>确认创建 Key 的账号属于正确组织，并已获得目标知识库权限。</li>
-                        <li><strong>连接超时、522 或连接时返回 403：</strong>确认设备已连接局域网或 VPN，且域名通过内网解析；VPN 使用独立网段时请联系管理员放行。</li>
-                        <li><strong>404 或空响应：</strong>核对地址必须是 <code>https://ashark.icu/mcp</code>；<code>8200/mcp</code> 和 <code>8301/mcp</code> 不是给远程客户端使用的地址。</li>
-                        <li><strong>无法填写请求头：</strong>换用支持自定义 HTTP 请求头的 MCP 客户端。</li>
-                    </ul>
-                    <p>按上面步骤仍失败，请联系管理员，并提供错误提示和发生时间；不要提供完整 API Key。</p>
-                </section>
+                <api-access-guide :guide="mcpGuide" />
             </div>
+            <template #footer>
+                <div class="api-access-guide-footer">
+                    <span>复制内容包含完整说明与示例，不含实际密钥。</span>
+                    <el-button type="primary" @click="copyMcpInstructions">复制完整 MCP 说明给智能体</el-button>
+                </div>
+            </template>
         </el-dialog>
 
         <el-dialog v-model="dialog.open" title="新建 API Key" width="440px" :close-on-click-modal="false">
@@ -421,10 +394,10 @@ Authorization: Bearer &lt;API_KEY&gt;</pre>
                     <local-icon icon="mdi:key-variant" class="api-keys-result-icon"></local-icon>
                     <span class="api-keys-result-title">API Key 创建成功</span>
                 </div>
-                <p class="api-keys-result-warn">以下完整密钥仅显示一次，请立即复制并妥善保存。</p>
-                <div class="api-keys-plaintext">{{ result.plaintext }}</div>
+                <p class="api-keys-result-warn">密钥已隐藏部分字符，复制时会获得完整值。请立即保存，页面刷新或关闭后无法再次复制。</p>
+                <div class="api-keys-plaintext">{{ maskedPlaintext }}</div>
                 <div class="api-keys-result-actions">
-                    <el-button type="primary" @click="copyPlain">复制到剪贴板</el-button>
+                    <el-button type="primary" @click="copyPlain">复制完整密钥</el-button>
                     <el-button @click="closeResult">我已复制并保存</el-button>
                 </div>
             </div>

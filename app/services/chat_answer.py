@@ -12,9 +12,12 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+from copy import copy
 from dataclasses import dataclass
 
 import httpx
+from app.services.evidence_locator_projection import bound_record_projection, projection_location_label
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +29,9 @@ _SYSTEM_PROMPT = (
     "使用简体中文，简洁、准确。"
     "前面可能有历史对话，仅用于理解当前问题的指代/省略；不得把历史对话当作事实依据，"
     "事实必须来自本轮【资料】。"
+    "指定文件的对照应先分别列出各文件的记载，再比较同名字段、对象和单位；不得把一种编号替换为另一种编号。"
+    "保留资料中的时间和可能性措辞；历史记载不等于当前状态，不同对象的限制条件不能混用。"
+    "证据充分的部分应直接回答；缺失、歧义、覆盖不完整仅限定对应事项，不能据一次未检索到推断不存在。"
 )
 
 
@@ -93,6 +99,167 @@ def _without_thinking_blocks(value: str) -> str:
     return (filter_.feed(value) + filter_.finish()).strip()
 
 
+def _balanced_end(value: str, opening: str, closing: str) -> int | None:
+    depth = 0
+    escaped = False
+    for index, char in enumerate(value):
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == opening:
+            depth += 1
+        elif char == closing:
+            depth -= 1
+            if depth == 0:
+                return index + 1
+    return None
+
+
+class _CitationGuard:
+    """Check numeric citations before emission; leave code and Markdown links intact."""
+
+    def __init__(self, source_count: int):
+        self._source_count = source_count
+        self._pending = ""
+        self._code = ""
+        self._code_scan = 0
+        self._fence = ""
+        self._line_prefix: str | None = ""
+        self._url = False
+
+    def _emit(self, output: list[str], value: str) -> None:
+        output.append(value)
+        if "\n" in value:
+            prefix = value.rsplit("\n", 1)[1]
+        elif self._line_prefix is not None:
+            prefix = self._line_prefix + value
+        else:
+            return
+        self._line_prefix = prefix if len(prefix) <= 3 and not prefix.strip(" ") else None
+
+    def feed(self, value: str, *, final: bool = False) -> str:
+        self._pending += value
+        output = []
+        while self._pending:
+            if self._fence:
+                newline = self._pending.find("\n")
+                if newline < 0 and not final:
+                    break
+                size = newline + 1 if newline >= 0 else len(self._pending)
+                line = self._pending[:size]
+                pattern = r" {0,3}" + re.escape(self._fence[0]) + "{" + str(len(self._fence)) + r",}[ \t]*\r?\n?"
+                if re.fullmatch(pattern, line):
+                    self._fence = ""
+                self._emit(output, line)
+                self._pending = self._pending[size:]
+                continue
+            if self._code:
+                closing = None
+                for run in re.finditer(r"`+", self._pending[self._code_scan:]):
+                    start, end = self._code_scan + run.start(), self._code_scan + run.end()
+                    if end == len(self._pending) and not final:
+                        self._code_scan = start
+                        break
+                    if len(run.group()) == len(self._code):
+                        closing = end
+                        break
+                else:
+                    self._code_scan = len(self._pending)
+                if closing is None and not final:
+                    break
+                self._code = ""
+                self._code_scan = 0
+                if closing is not None:
+                    self._emit(output, self._pending[:closing])
+                    self._pending = self._pending[closing:]
+                # An unmatched inline delimiter is literal Markdown: examine its body.
+                continue
+            if self._url:
+                boundary = re.search(r"[\s)]", self._pending)
+                if boundary is None:
+                    self._emit(output, self._pending)
+                    self._pending = ""
+                    break
+                self._emit(output, self._pending[:boundary.start()])
+                self._pending = self._pending[boundary.start():]
+                self._url = False
+                continue
+            special = re.search(r"`|~|\[|\\|https?://", self._pending)
+            if special is None:
+                suffix = "" if final else max((_tag_prefix_suffix(self._pending, tag) for tag in ("http://", "https://")), key=len)
+                self._emit(output, self._pending[:-len(suffix)] if suffix else self._pending)
+                self._pending = suffix
+                break
+            if special.start():
+                self._emit(output, self._pending[:special.start()])
+                self._pending = self._pending[special.start():]
+            if self._pending.startswith("\\"):
+                if len(self._pending) == 1 and not final:
+                    break
+                self._emit(output, self._pending[:2])
+                self._pending = self._pending[2:]
+            elif self._pending.startswith(("`", "~")):
+                delimiter = re.match(r"`+|~+", self._pending).group()
+                if len(delimiter) == len(self._pending) and not final:
+                    break
+                if len(delimiter) >= 3 and self._line_prefix is not None:
+                    newline = self._pending.find("\n")
+                    if newline < 0 and not final:
+                        break
+                    size = newline + 1 if newline >= 0 else len(self._pending)
+                    line = self._pending[:size]
+                    if delimiter[0] == "~" or "`" not in line[len(delimiter):]:
+                        self._fence = delimiter
+                        self._emit(output, line)
+                        self._pending = self._pending[size:]
+                        continue
+                self._emit(output, delimiter)
+                self._pending = self._pending[len(delimiter):]
+                if delimiter[0] == "`":
+                    self._code = delimiter
+            elif self._pending.startswith(("http://", "https://")):
+                scheme = "https://" if self._pending.startswith("https://") else "http://"
+                self._emit(output, scheme)
+                self._pending = self._pending[len(scheme):]
+                self._url = True
+            else:
+                end = _balanced_end(self._pending, "[", "]")
+                if end is None:
+                    if final:
+                        self._emit(output, "[")
+                        self._pending = self._pending[1:]
+                        continue
+                    break
+                if end == len(self._pending) and not final:
+                    break
+                if self._pending[end:end + 1] == "(":
+                    link_end = _balanced_end(self._pending[end:], "(", ")")
+                    if link_end is None and not final:
+                        break
+                    if link_end is not None:
+                        end += link_end
+                        self._emit(output, self._pending[:end])
+                        self._pending = self._pending[end:]
+                        continue
+                token = self._pending[:end]
+                citation = re.fullmatch(r"\[([0-9]+)\]", token)
+                if citation is None:
+                    self._emit(output, "[")
+                    self._pending = self._pending[1:]
+                    continue
+                else:
+                    number = citation.group(1).lstrip("0")
+                    if not number or len(number) > 3 or int(number) > self._source_count:
+                        raise ChatError("chat_invalid_citation")
+                self._emit(output, token)
+                self._pending = self._pending[end:]
+        return "".join(output)
+
+    def finish(self) -> str:
+        return self.feed("", final=True)
+
+
 def _endpoint(base_url: str) -> str:
     """归一到 chat/completions：支持传 .../v1，也支持传完整端点。"""
     url = base_url.rstrip("/")
@@ -119,27 +286,39 @@ def build_context(records, max_context_chars: int) -> tuple[str, list]:
     parts: list[str] = []
     used: list = []
     total = 0
-    for i, r in enumerate(records, 1):
+    for r in records:
         title = (str(_rec_field(r, "title", "") or "")).strip()
         content = (str(_rec_field(r, "content", "") or "")).strip()
-        head = f"[{i}] {title}".rstrip()
-        block = f"{head}\n{content}"
-        if total + len(block) <= max_context_chars:
-            parts.append(block)
-            used.append(r)
-            total += len(block)
+        if not content:
             continue
-        # 放不下整块：尝试截断正文塞进剩余预算
-        remaining = max_context_chars - total - len(head) - 1   # -1 给 head 与正文之间的换行
+        i = len(used) + 1
+        head = f"[{i}] {title}".rstrip()
+        projection = bound_record_projection(_rec_field(r, "metadata", {}))
+        location = projection_location_label(projection) if projection else ""
+        if location:
+            head += f"（{location}）"
+        separator = 2 if parts else 0
+        remaining = max_context_chars - total - separator - len(head) - 1
         if remaining <= 0:
             break
-        parts.append(f"{head}\n{content[:remaining]}")
-        used.append(r)
-        break
+        visible = content[:remaining]
+        if isinstance(r, dict):
+            record = {**r, "content": visible}
+        elif hasattr(r, "model_copy"):
+            record = r.model_copy(update={"content": visible})
+        else:
+            record = copy(r)
+            record.content = visible
+        block = f"{head}\n{visible}"
+        parts.append(block)
+        used.append(record)
+        total += separator + len(block)
+        if len(visible) < len(content):
+            break
     return "\n\n".join(parts), used
 
 
-def _messages(query: str, context: str, history: list[dict] | None = None) -> list[dict]:
+def _messages(query: str, context: str, history: list[dict] | None = None, *, evidence_notice: str = "") -> list[dict]:
     user_content = (
         f"用户问题：{query}\n\n"
         f"【资料】\n{context}\n\n"
@@ -147,6 +326,8 @@ def _messages(query: str, context: str, history: list[dict] | None = None) -> li
         "资料不足时回答「资料中未找到明确依据」。"
     )
     msgs: list[dict] = [{"role": "system", "content": _SYSTEM_PROMPT}]
+    if evidence_notice:
+        msgs[0]["content"] += "\n本轮服务端取证范围说明（不是原文事实）：\n" + evidence_notice
     # 历史对话（仅理解追问，不作事实依据）；只接受 user/assistant 文本
     for h in history or []:
         role = h.get("role")
@@ -172,12 +353,14 @@ async def generate_answer(
     temperature: float = 0.2,
     max_context_chars: int = 12000,
     history: list[dict] | None = None,
+    evidence_notice: str = "",
+    validate_citations: bool = False,
 ) -> ChatAnswer:
     """调 chat 模型生成答案（非流式）。失败/超时/响应异常一律抛 ChatError（不打印 key）。"""
     context, used = build_context(records, max_context_chars)
     payload = {
         "model": model,
-        "messages": _messages(query, context, history),
+        "messages": _messages(query, context, history, evidence_notice=evidence_notice),
         "temperature": temperature,
         "stream": False,
     }
@@ -199,6 +382,9 @@ async def generate_answer(
     if not isinstance(answer, str):
         raise ChatError("chat 模型返回空答案")
     answer = _without_thinking_blocks(answer)
+    if validate_citations:
+        guard = _CitationGuard(len(used))
+        answer = guard.feed(answer) + guard.finish()
     if not answer:
         raise ChatError("chat 模型返回空答案")
     log.info("chat_answer: model=%s ctx=%dchars sources=%d -> %dchars",
@@ -217,6 +403,8 @@ async def stream_answer(
     temperature: float = 0.2,
     max_context_chars: int = 12000,
     history: list[dict] | None = None,
+    evidence_notice: str = "",
+    validate_citations: bool = False,
 ):
     """流式生成答案：逐段 yield 文本增量（OpenAI SSE delta.content）。
 
@@ -226,7 +414,7 @@ async def stream_answer(
     context, _used = build_context(records, max_context_chars)
     payload = {
         "model": model,
-        "messages": _messages(query, context, history),
+        "messages": _messages(query, context, history, evidence_notice=evidence_notice),
         "temperature": temperature,
         "stream": True,
     }
@@ -235,6 +423,7 @@ async def stream_answer(
     headers = _headers(api_key)
     output_length = 0
     thinking_filter = _ThinkingBlockFilter()
+    citation_guard = _CitationGuard(len(_used)) if validate_citations else None
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
             async with client.stream(
@@ -262,9 +451,13 @@ async def stream_answer(
                         if output_length > CHAT_OUTPUT_MAX_CHARS:
                             raise ChatError(CHAT_OUTPUT_LIMIT_EXCEEDED)
                         visible = thinking_filter.feed(delta)
+                        if citation_guard:
+                            visible = citation_guard.feed(visible)
                         if visible:
                             yield visible
         visible = thinking_filter.finish()
+        if citation_guard:
+            visible = citation_guard.feed(visible) + citation_guard.finish()
         if visible:
             yield visible
     except httpx.TimeoutException as exc:

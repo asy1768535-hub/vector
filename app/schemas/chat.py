@@ -36,6 +36,7 @@ class ChatMessageRequest(BaseModel):
 
 
 class ChatSource(BaseModel):
+    citation_index: Optional[int] = Field(default=None, ge=1, le=100)
     title: str = ""
     document_id: Optional[str] = None
     chunk_id: Optional[str] = None
@@ -44,6 +45,10 @@ class ChatSource(BaseModel):
     score_type: Literal["rerank", "vector", "rrf", "legacy"] = "rrf"
     display_score: Optional[float] = None
     content: str = ""
+    document_revision_id: Optional[str] = None
+    revision_no: Optional[int] = Field(default=None, ge=1)
+    location: Optional[dict[str, Any]] = None
+    location_label: Optional[str] = None
 
 
 class ChatGraphEvidence(BaseModel):

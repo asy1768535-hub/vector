@@ -21,6 +21,10 @@ from app.schemas.document_processing import (
     DocumentProcessingRetryRequest,
 )
 from app.schemas.knowledge_catalog import (
+    CatalogParsingCoverageRead,
+    CatalogPdfCoverageReviewApplyRequest,
+    CatalogPdfCoverageReviewMutationRead,
+    CatalogPdfCoverageReviewRollbackRequest,
     CatalogDocumentDetailRead,
     CatalogDocumentPageRead,
     CatalogEvidenceDetailRead,
@@ -37,6 +41,11 @@ from app.services.knowledge_catalog import (
 from app.services.knowledge_catalog_contracts import (
     CatalogDocumentQuery,
     KnowledgeCatalogError,
+)
+from app.services.pdf_coverage_reviews import (
+    PdfCoverageReviewError,
+    apply_pdf_coverage_review_audit,
+    rollback_pdf_coverage_review_audit,
 )
 from app.services.document_processing_contracts import (
     DocumentProcessingError,
@@ -105,6 +114,23 @@ def _processing_http_error(exc: DocumentProcessingError) -> HTTPException:
     if exc.code == "processing_invariant_failed":
         return HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, exc.code)
     return HTTPException(status.HTTP_409_CONFLICT, exc.code)
+
+
+def _coverage_review_http_error(exc: PdfCoverageReviewError) -> HTTPException:
+    if exc.code == "coverage_review_document_not_found":
+        return HTTPException(status.HTTP_404_NOT_FOUND, "not found")
+    if exc.code in {
+        "coverage_review_stale_revision", "coverage_review_revision_unavailable",
+        "coverage_review_source_mismatch", "coverage_review_source_binding_mismatch",
+        "coverage_review_page_conflict", "coverage_review_page_not_unprocessed",
+        "coverage_review_idempotency_conflict", "coverage_review_apply_event_not_found",
+        "coverage_review_batch_invalid", "coverage_review_duplicate_page",
+        "coverage_review_evidence_invalid",
+    }:
+        return HTTPException(status.HTTP_409_CONFLICT, exc.code)
+    if exc.code in {"coverage_review_report_unavailable", "coverage_review_history_limit"}:
+        return HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, exc.code)
+    return HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, exc.code)
 
 
 async def _catalog_viewer_permissions(
@@ -286,6 +312,72 @@ async def retry_catalog_document_processing(
     except DocumentProcessingError as exc:
         await db.rollback()
         raise _processing_http_error(exc) from exc
+
+
+@router.post(
+    "/documents/{document_id}/parsing-coverage/reviews",
+    response_model=CatalogPdfCoverageReviewMutationRead,
+)
+async def apply_catalog_pdf_coverage_reviews(
+    document_id: uuid.UUID,
+    body: CatalogPdfCoverageReviewApplyRequest,
+    _: None = Depends(require_knowledge_catalog_enabled),
+    context: CatalogManagementContext = Depends(require_catalog_management),
+    db: AsyncSession = Depends(get_db),
+) -> CatalogPdfCoverageReviewMutationRead:
+    try:
+        changed, report = await apply_pdf_coverage_review_audit(
+            db,
+            library=context.library,
+            document_id=document_id,
+            revision_id=body.revision_id,
+            source_sha256=body.source_sha256,
+            idempotency_key=body.idempotency_key,
+            reviews=[item.model_dump() for item in body.reviews],
+            actor_user_id=context.user.id,
+        )
+        await db.commit()
+        return CatalogPdfCoverageReviewMutationRead(
+            operation_key=body.idempotency_key,
+            changed=changed,
+            parsing_coverage=CatalogParsingCoverageRead.model_validate(report),
+        )
+    except PdfCoverageReviewError as exc:
+        await db.rollback()
+        raise _coverage_review_http_error(exc) from exc
+
+
+@router.post(
+    "/documents/{document_id}/parsing-coverage/reviews/rollback",
+    response_model=CatalogPdfCoverageReviewMutationRead,
+)
+async def rollback_catalog_pdf_coverage_reviews(
+    document_id: uuid.UUID,
+    body: CatalogPdfCoverageReviewRollbackRequest,
+    _: None = Depends(require_knowledge_catalog_enabled),
+    context: CatalogManagementContext = Depends(require_catalog_management),
+    db: AsyncSession = Depends(get_db),
+) -> CatalogPdfCoverageReviewMutationRead:
+    try:
+        changed, report = await rollback_pdf_coverage_review_audit(
+            db,
+            library=context.library,
+            document_id=document_id,
+            revision_id=body.revision_id,
+            source_sha256=body.source_sha256,
+            idempotency_key=body.idempotency_key,
+            apply_idempotency_key=body.apply_idempotency_key,
+            actor_user_id=context.user.id,
+        )
+        await db.commit()
+        return CatalogPdfCoverageReviewMutationRead(
+            operation_key=body.idempotency_key,
+            changed=changed,
+            parsing_coverage=CatalogParsingCoverageRead.model_validate(report),
+        )
+    except PdfCoverageReviewError as exc:
+        await db.rollback()
+        raise _coverage_review_http_error(exc) from exc
 
 
 @router.get(

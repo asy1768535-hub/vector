@@ -111,7 +111,7 @@ const routes = [
                             domain: 'knowledgeUse',
                             domainTitle: '知识使用',
                             title: '多库检索',
-                            organizationAdmin: true,
+                            effectivePerm: 'read',
                         },
                     },
                 ],

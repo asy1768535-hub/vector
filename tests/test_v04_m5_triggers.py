@@ -463,6 +463,8 @@ def test_publication_commit_survives_auto_trigger_failure(monkeypatch):
 
     class ExpiringJob:
         expired = False
+        rebuild_operation_id = None
+        document_revision = 1
 
         def __init__(self):
             self._id = uuid.uuid4()
@@ -490,6 +492,7 @@ def test_publication_commit_survives_auto_trigger_failure(monkeypatch):
         id=DOC_ID,
         library_id=LIB_ID,
         content_hash="hash",
+        current_revision=1,
         current_revision_id=None,
         latest_revision_id=REV_ID,
         status="pending",
@@ -512,6 +515,8 @@ def test_publication_commit_survives_auto_trigger_failure(monkeypatch):
 
     async def execute(statement, *_args, **_kwargs):
         sql = str(statement).lower()
+        if "from sys_libraries" in sql:
+            return _ScalarResult(SimpleNamespace(id=LIB_ID, deleted_at=None, index_state="ready"))
         if "from documents" in sql:
             return _ScalarResult(document)
         if "from document_revisions" in sql:

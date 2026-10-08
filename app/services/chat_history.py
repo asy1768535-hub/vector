@@ -214,6 +214,20 @@ def graph_evidence_to_schema(rows: list[dict] | None) -> list[ChatGraphEvidence]
     return [ChatGraphEvidence.model_validate(row) for row in rows] if isinstance(rows, list) else []
 
 
+def historical_sources_to_schema(
+    sources: list[ChatMessageSource], graph_rows: list[dict] | None,
+) -> list[ChatSource]:
+    """Restore saved citation order without projecting current revision locations onto history."""
+    occupied = {
+        row["citation_index"] for row in graph_rows or []
+        if isinstance(row, dict) and type(row.get("citation_index")) is int
+        and 1 <= row["citation_index"] <= 100
+    }
+    indexes = iter(index for index in range(1, 101) if index not in occupied)
+    return [src_to_schema(source).model_copy(update={"citation_index": next(indexes, None)})
+            for source in sources]
+
+
 async def list_logs(
     db: AsyncSession,
     *,
@@ -262,7 +276,7 @@ async def list_logs(
             question=questions.get(m.parent_message_id, "") if m.parent_message_id else "",
             answer=m.content, rewritten_query=m.rewritten_query, status=m.status,
             error_message=m.error_message, latency_ms=m.latency_ms, created_at=m.created_at,
-            sources=[src_to_schema(s) for s in src_map.get(m.id, [])],
+            sources=historical_sources_to_schema(src_map.get(m.id, []), m.graph_evidence),
             graph_augmented=m.graph_augmented is True,
             graph_evidence=graph_evidence_to_schema(m.graph_evidence),
         ))

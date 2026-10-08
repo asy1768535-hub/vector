@@ -138,22 +138,67 @@ export function parsingCoverageTag(value) {
 }
 
 export function parsingCoverageMessage(coverage) {
+    const blankPages = Array.isArray(coverage?.confirmed_blank_pages)
+        ? coverage.confirmed_blank_pages : [];
+    const noEffectivePages = Array.isArray(coverage?.no_effective_content_pages)
+        ? coverage.no_effective_content_pages : [];
+    const assessments = Array.isArray(coverage?.page_assessments) ? coverage.page_assessments : [];
+    const hasConfirmedBlanks = blankPages.length > 0;
+    const blankDetail = hasConfirmedBlanks
+        ? `确认空白页：${blankPages.join('、')}（${blankPages.length}页）`
+        : '';
+    const noEffectiveBySource = new Map(assessments
+        .filter((item) => item?.status === 'no_effective_content' && Number.isInteger(item.page))
+        .map((item) => [item.page, item.classification_source]));
+    const reviewedNoEffective = noEffectivePages.filter((page) => noEffectiveBySource.get(page) === 'human_review');
+    const automaticNoEffective = noEffectivePages.filter((page) => noEffectiveBySource.get(page) === 'automatic');
+    const unmarkedNoEffective = noEffectivePages.filter((page) => !noEffectiveBySource.has(page));
+    const noEffectiveDetails = [];
+    if (reviewedNoEffective.length) {
+        noEffectiveDetails.push(`人工复核无有效可提取内容页：${reviewedNoEffective.join('、')}`);
+    }
+    if (automaticNoEffective.length) {
+        noEffectiveDetails.push(`自动判定无有效可提取内容页：${automaticNoEffective.join('、')}`);
+    }
+    if (unmarkedNoEffective.length) {
+        noEffectiveDetails.push(`来源未记录的无有效可提取内容页：${unmarkedNoEffective.join('、')}`);
+    }
     const status = coverage?.status;
-    if (!coverage || !Object.hasOwn(PARSING_COVERAGE_LABELS, status) || status === 'unknown') {
+    if (!coverage || status === 'unknown') {
         const pages = Array.isArray(coverage?.processed_pages) ? coverage.processed_pages : [];
-        return status === 'unknown' && pages.length
-            ? `已处理页：${pages.join('、')}；其余范围无法确认`
-            : '当前版本没有可核验的解析覆盖记录';
+        const details = [];
+        if (blankDetail) details.push(blankDetail);
+        details.push(...noEffectiveDetails);
+        if (status === 'unknown' && pages.length) details.push(`已处理页：${pages.join('、')}；其余范围无法确认`);
+        else if (!details.length) return '当前版本没有可核验的解析覆盖记录';
+        return details.join('；');
     }
     if (coverage.status === 'complete') {
+        if (hasConfirmedBlanks || noEffectiveDetails.length) {
+            const total = Number.isInteger(coverage.total_pages) ? `共${coverage.total_pages}页，` : '';
+            const details = [blankDetail, ...noEffectiveDetails].filter(Boolean).join('；');
+            return `${total}${details}；页面覆盖完整，不代表文字识别准确`;
+        }
         return Number.isInteger(coverage.total_pages)
             ? `已处理全部 ${coverage.total_pages} 页`
             : '已处理全部可确认内容';
     }
     const details = [];
+    if (blankDetail) details.push(blankDetail);
+    details.push(...noEffectiveDetails);
     const pages = Array.isArray(coverage.unprocessed_visual_pages)
         ? coverage.unprocessed_visual_pages : [];
-    if (pages.length) details.push(`视觉未覆盖页：${pages.join('、')}`);
+    if (!assessments.length) {
+        if (pages.length) details.push(`视觉未覆盖页：${pages.join('、')}`);
+    } else {
+        const failedPages = new Set(assessments
+            .filter((item) => item?.status === 'failed' && Number.isInteger(item.page))
+            .map((item) => item.page));
+        const failed = pages.filter((page) => failedPages.has(page));
+        const uncertain = pages.filter((page) => !failedPages.has(page));
+        if (uncertain.length) details.push(`待确认视觉内容页：${uncertain.join('、')}`);
+        if (failed.length) details.push(`处理异常页：${failed.join('、')}`);
+    }
     const skipped = Number(coverage.skipped_visual_block_count);
     if (Number.isInteger(skipped) && skipped > 0) details.push(`跳过视觉块：${skipped}`);
     for (const reason of coverage.reasons || []) {

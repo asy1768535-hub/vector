@@ -35,7 +35,7 @@ export function menuAccess(user, permissions, organizations = []) {
         myFiles: can('insert'),
         import: can('insert'),
         organizationAdmin,
-        retrievalTest: organizationAdmin,
+        retrievalTest: acts.has('read'),
         schemaLifecycle: libraryManagement,
         libraryConfiguration: isSuper,
         apiKeys: true,            // 始终显示

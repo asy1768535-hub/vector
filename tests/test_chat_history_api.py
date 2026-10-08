@@ -19,6 +19,7 @@ from app.models.user import User
 from app.schemas.chat import ChatLogRow, ChatSource
 from app.schemas.dify import DifyRecord, DifyRetrievalResponse
 from app.services.chat_answer import ChatAnswer, ChatError
+from tests.test_chat_api import _unit_evidence
 
 USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 OTHER_ID = uuid.UUID("00000000-0000-0000-0000-0000000000ff")
@@ -72,7 +73,8 @@ def _rec(content="片段", *, doc="d1", chunk="c1", md=None):
 
 
 @pytest.fixture(autouse=True)
-def _clean():
+def _clean(monkeypatch):
+    monkeypatch.setattr(chat_api.chat_evidence, "collect_chat_evidence", _unit_evidence)
     mock_user.is_superuser = False
     yield
     app.dependency_overrides.clear()
@@ -355,3 +357,24 @@ def test_admin_chat_logs_unauthenticated_401():
     app.dependency_overrides.clear()
     r = TestClient(app).get("/admin/chat-logs")
     assert r.status_code in (401, 403)
+
+
+def test_history_restores_mixed_citation_numbers_without_current_location():
+    from types import SimpleNamespace
+    from app.services import chat_history
+    sources = [SimpleNamespace(seq=i, title="saved", document_id="doc", chunk_id=f"chunk-{i}",
+                               score=1, score_type="legacy", display_score=None, content="saved body")
+               for i in range(2)]
+    # The persisted graph indexes occupy the gaps in the ordinary source order.
+    restored = chat_history.historical_sources_to_schema(sources, [{"citation_index": 2}])
+    assert [source.citation_index for source in restored] == [1, 3]
+    assert all(source.location is None and source.document_revision_id is None for source in restored)
+    assert [source.content for source in restored] == ["saved body", "saved body"]
+
+
+def test_history_legacy_sources_without_graph_keep_contiguous_numbers():
+    from types import SimpleNamespace
+    from app.services import chat_history
+    source = SimpleNamespace(seq=0, title="saved", document_id="doc", chunk_id="chunk",
+                             score=1, score_type="legacy", display_score=None, content="saved body")
+    assert chat_history.historical_sources_to_schema([source], None)[0].citation_index == 1

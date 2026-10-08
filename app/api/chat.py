@@ -45,19 +45,14 @@ from app.schemas.chat import (
     ChatMessageResponse,
     ChatSource,
 )
-from app.schemas.dify import (
-    DifyRetrievalRequest,
-    MetadataConditionGroup,
-    MetadataConditionItem,
-    RetrievalSetting,
-)
-from app.services import chat_answer, chat_graph_augmentation, chat_history
+from app.services import chat_answer, chat_evidence, chat_graph_augmentation, chat_history
 from app.services.organization_authorization import (
     OrganizationAuthorizationError,
     authorize_library,
     list_accessible_libraries,
 )
 from app.services.retrieval import run_retrieval
+from app.services.evidence_locator_projection import bound_record_projection, projection_location_label
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -96,6 +91,7 @@ async def chat_libraries(
 
 def _to_source(record) -> ChatSource:
     md = record.metadata or {}
+    projection = bound_record_projection(md)
 
     def _s(v):
         return None if v is None else str(v)
@@ -130,6 +126,10 @@ def _to_source(record) -> ChatSource:
         score_type=score_type,
         display_score=display_score,
         content=record.content or "",
+        document_revision_id=projection["document_revision_id"] if projection else None,
+        revision_no=projection["revision_no"] if projection else None,
+        location=projection["source"] if projection else None,
+        location_label=projection_location_label(projection) or None if projection else None,
     )
 
 
@@ -186,7 +186,7 @@ async def _retrieve_for_chat(body: ChatMessageRequest, user: User, db: AsyncSess
             raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden")
     if lib.index_state in ("rebuilding", "failed"):
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "library index rebuilding")
-    metadata_condition = None
+    document_ids = None
     if body.folder_id is not None:
         folder = await db.get(Folder, body.folder_id)
         if folder is None or folder.library_id != lib.id or folder.deleted_at is not None:
@@ -212,33 +212,52 @@ async def _retrieve_for_chat(body: ChatMessageRequest, user: User, db: AsyncSess
         document_ids = [str(value) for value in document_rows.scalars().all()]
         if not document_ids:
             return lib, [], None
-        metadata_condition = MetadataConditionGroup(
-            conditions=[MetadataConditionItem(
-                name=["document_id"],
-                comparison_operator="in",
-                value=document_ids,
-            )]
-        )
     try:
-        retr = await run_retrieval(
-            collection=lib.qdrant_collection,
-            embedding_model=lib.embedding_model,
-            embedding_base_url=lib.embedding_base_url,
-            request=DifyRetrievalRequest(
-                knowledge_id=lib.slug, query=_retrieval_query(body.query),
-                retrieval_setting=RetrievalSetting(top_k=body.top_k),
-                metadata_condition=metadata_condition,
-            ),
-            source_config=lib.source_config,
-            rerank_enabled=lib.rerank_enabled,
-            retrieval_mode=lib.retrieval_mode,
-            db=db,
-            library=lib,
+        async def retrieve(request):
+            return await run_retrieval(
+                collection=lib.qdrant_collection,
+                embedding_model=lib.embedding_model,
+                embedding_base_url=lib.embedding_base_url,
+                request=request,
+                source_config=lib.source_config,
+                rerank_enabled=lib.rerank_enabled,
+                retrieval_mode=lib.retrieval_mode,
+                db=db,
+                library=lib,
+            )
+        records, retrieval_debug = await chat_evidence.collect_chat_evidence(
+            db, lib, _retrieval_query(body.query), top_k=body.top_k,
+            max_context_chars=settings.chat_max_context_chars, retrieve=retrieve,
+            allowed_document_ids=document_ids,
         )
     except Exception as exc:
         log.exception("chat retrieval failed: slug=%s", lib.slug)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "retrieval failed") from exc
-    return lib, retr.records, retr.retrieval_debug
+    return lib, records, retrieval_debug
+
+
+def _evidence_scope(retrieval_debug) -> tuple[str, bool, bool, bool]:
+    scope = (retrieval_debug or {}).get("chat_evidence") or {}
+    notice = "\n".join([*(scope.get("notices") or []), *([scope["calculation_context"]] if scope.get("calculation_context") else [])])
+    return notice, bool(scope.get("clarification_required")), bool(scope), bool(scope.get("specified_files"))
+
+
+def _answer_context_chars(retrieval_debug, augmentation_chars):
+    scope = (retrieval_debug or {}).get("chat_evidence") or {}
+    if not scope:
+        return settings.chat_max_context_chars + augmentation_chars
+    limit = min(settings.chat_max_context_chars, chat_evidence.MAX_CONTEXT_CHARS)
+    reserved = scope.get("context_chars", limit)
+    return max(0, min(limit, reserved)) if type(reserved) is int else limit
+
+
+def _scoped_answer_records(records, graph_records, scoped: bool, *, document_scoped: bool = False):
+    if not scoped:
+        return [*records, *graph_records]
+    document_ids = {record.metadata.get("document_id") for record in records}
+    graph = [record for record in graph_records if not document_scoped or
+             (record.metadata.get("chat_graph_evidence") or {}).get("document_id") in document_ids]
+    return [*records, *graph[:max(0, chat_evidence.MAX_SOURCES - len(records))]]
 
 
 async def _resolve_conversation(db: AsyncSession, user: User, body: ChatMessageRequest) -> ChatConversation:
@@ -264,11 +283,12 @@ async def chat_messages(
     """非流式问答 + 落库。无 conversation_id 自动建会话，有则校验后续聊。"""
     conv = await _resolve_conversation(db, user, body) if body.conversation_id is not None else None
     lib, records, retrieval_debug = await _retrieve_for_chat(body, user, db)
+    evidence_notice, clarification, scoped, document_scoped = _evidence_scope(retrieval_debug)
     augmentation = await chat_graph_augmentation.prepare_chat_graph_augmentation(
-        db, lib, body.query, records, request_enabled=body.use_graph, config=settings,
+        db, lib, body.query, records, request_enabled=body.use_graph and not clarification, config=settings,
     )
-    answer_records = [*records, *augmentation.records]
-    context_chars = settings.chat_max_context_chars + augmentation.context_chars
+    answer_records = _scoped_answer_records(records, augmentation.records, scoped, document_scoped=document_scoped)
+    context_chars = _answer_context_chars(retrieval_debug, augmentation.context_chars)
     if conv is None:
         conv = await _resolve_conversation(db, user, body)
     history = await chat_history.recent_turns(db, conv.id, settings.chat_history_max_turns)
@@ -278,8 +298,8 @@ async def chat_messages(
     rewritten = _rewritten_query(records, body.query)
     t0 = time.monotonic()
     status_val, err, used = "success", None, []
-    if not answer_records:
-        answer_text = "资料中未找到明确依据。"
+    if clarification or not answer_records:
+        answer_text = evidence_notice or "资料中未找到明确依据。"
     else:
         try:
             result = await chat_answer.generate_answer(
@@ -288,6 +308,8 @@ async def chat_messages(
                 api_key=settings.chat_api_key, timeout=settings.chat_timeout_seconds,
                 temperature=settings.chat_temperature, max_context_chars=context_chars,
                 history=history,
+                evidence_notice=evidence_notice,
+                validate_citations=True,
             )
             answer_text, used = result.answer, result.used_records
         except chat_answer.ChatError as exc:
@@ -323,10 +345,10 @@ def _split_used_records(records) -> tuple[list[ChatSource], list[ChatGraphEviden
         payload = (record.metadata or {}).get("chat_graph_evidence")
         if payload:
             graph_evidence.append(
-                ChatGraphEvidence.model_validate({**payload, "citation_index": citation_index})
+                ChatGraphEvidence.model_validate({**payload, "citation_index": citation_index, "content": record.content})
             )
         else:
-            sources.append(_to_source(record))
+            sources.append(_to_source(record).model_copy(update={"citation_index": citation_index}))
     return sources, graph_evidence
 
 
@@ -357,11 +379,12 @@ async def chat_stream(
     """
     conv = await _resolve_conversation(db, user, body) if body.conversation_id is not None else None
     lib, records, retrieval_debug = await _retrieve_for_chat(body, user, db)
+    evidence_notice, clarification, scoped, document_scoped = _evidence_scope(retrieval_debug)
     augmentation = await chat_graph_augmentation.prepare_chat_graph_augmentation(
-        db, lib, body.query, records, request_enabled=body.use_graph, config=settings,
+        db, lib, body.query, records, request_enabled=body.use_graph and not clarification, config=settings,
     )
-    answer_records = [*records, *augmentation.records]
-    context_chars = settings.chat_max_context_chars + augmentation.context_chars
+    answer_records = _scoped_answer_records(records, augmentation.records, scoped, document_scoped=document_scoped)
+    context_chars = _answer_context_chars(retrieval_debug, augmentation.context_chars)
     if conv is None:
         conv = await _resolve_conversation(db, user, body)
     history = await chat_history.recent_turns(db, conv.id, settings.chat_history_max_turns)
@@ -414,8 +437,8 @@ async def chat_stream(
                 "graph_evidence": [row.model_dump(mode="json") for row in graph_evidence],
                 "debug": debug,
             })
-            if not answer_records:
-                answer_text = "资料中未找到明确依据。"
+            if clarification or not answer_records:
+                answer_text = evidence_notice or "资料中未找到明确依据。"
                 acc.append(answer_text)
                 yield _sse({"type": "delta", "text": answer_text})
             else:
@@ -426,6 +449,8 @@ async def chat_stream(
                         api_key=settings.chat_api_key, timeout=settings.chat_timeout_seconds,
                         temperature=settings.chat_temperature, max_context_chars=context_chars,
                         history=history,
+                        evidence_notice=evidence_notice,
+                        validate_citations=True,
                     )
                     async for delta in provider:
                         answer_length += len(delta)
@@ -530,7 +555,7 @@ async def conversation_messages(
         out.append(ChatHistoryMessage(
             id=m.id, role=m.role, content=m.content, status=m.status,
             error_message=m.error_message, created_at=m.created_at,
-            sources=[chat_history.src_to_schema(s) for s in srcs],
+            sources=chat_history.historical_sources_to_schema(srcs, m.graph_evidence),
             graph_augmented=m.graph_augmented is True,
             graph_evidence=chat_history.graph_evidence_to_schema(m.graph_evidence),
         ))

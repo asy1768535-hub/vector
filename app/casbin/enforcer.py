@@ -1,13 +1,12 @@
-"""Casbin enforcer 单例 + SQLAlchemy adapter。
+"""Casbin 操作级策略快照 + 每进程复用的 SQLAlchemy adapter。
 
 策略持久化在 casbin_rule 表（adapter 自动建表）。
-启动时 load_policy 把全部策略读入内存，enforce() 是纯内存匹配。
+每次操作从数据库读取已提交策略，避免不同 API 进程长期使用旧权限。
 """
 from __future__ import annotations
 
 import threading
 from pathlib import Path
-from typing import Optional
 
 import casbin
 from casbin_sqlalchemy_adapter import Adapter
@@ -16,26 +15,25 @@ from app.config import settings
 
 _MODEL_PATH = Path(__file__).resolve().parent / "model.conf"
 
-_enforcer: Optional[casbin.Enforcer] = None
+_adapter: Adapter | None = None
 _lock = threading.Lock()
 
 
 def get_enforcer() -> casbin.Enforcer:
-    """惰性初始化的全局 enforcer。线程安全。"""
-    global _enforcer
-    if _enforcer is None:
+    """返回独立的最新策略快照；仅 adapter 和连接池跨操作复用。"""
+    global _adapter
+    if _adapter is None:
         with _lock:
-            if _enforcer is None:
-                adapter = Adapter(settings.db_dsn_sync)
-                _enforcer = casbin.Enforcer(str(_MODEL_PATH), adapter)
-                _enforcer.load_policy()
-    return _enforcer
+            if _adapter is None:
+                _adapter = Adapter(settings.db_dsn_sync)
+    # Enforcer 构造时已经 load_policy。快照不共享，避免刷新修改在途模型。
+    return casbin.Enforcer(str(_MODEL_PATH), _adapter)
 
 
 def reload_policy() -> None:
-    """多副本场景下，外部触发刷新策略缓存。"""
-    if _enforcer is not None:
-        _enforcer.load_policy()
+    """保留显式刷新入口；后续操作总会自行读取最新策略。"""
+    if _adapter is not None:
+        get_enforcer()
 
 
 def has_permission(user_id: str, library_slug: str, action: str) -> bool:

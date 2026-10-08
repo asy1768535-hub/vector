@@ -1,17 +1,22 @@
 """Collection 三阶段重建 + finalize（#6 设计 §9）。
 
-prepare（短事务，库 FOR UPDATE）→ qdrant（事务外，删/建 collection）→ activate（短事务，建 job）。
+prepare（短事务，锁库并保存 jobs 快照）→ qdrant（事务外，删/建 collection）→ activate（短事务，开放 jobs）。
 绝不在 DB 事务里调 Qdrant。finalize 即时 + 周期 reconcile 收口；锁序 library → rebuild_operation。
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select, update as sa_update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import func, select, text
+from sqlalchemy import update as sa_update
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession
 
+from app.config import settings
+from app.models.chunk import Chunk
 from app.models.document import Document
+from app.models.document_revision import DocumentRevision
 from app.models.embedding_job import EmbeddingJob
 from app.models.library import Library
 from app.models.rebuild_operation import RebuildOperation
@@ -26,6 +31,10 @@ class ExternalLibraryError(RuntimeError):
 
 class ConcurrentRebuildError(RuntimeError):
     """库已有进行中的 rebuild operation（锁内复核发现）→ 明确业务冲突，而非靠唯一索引兜底。"""
+
+
+class RebuildTargetError(RuntimeError):
+    """Published rebuild targets cannot be established safely."""
 
 
 async def _active_operation(db: AsyncSession, library_id):
@@ -43,7 +52,7 @@ def _now() -> datetime:
 
 
 async def _prepare(db: AsyncSession, library_id):
-    """阶段1：库 FOR UPDATE → 建 preparing operation → 设 rebuilding → 各活动文档 +revision、supersede 旧 job。"""
+    """Lock the library, validate published targets and persist pending rebuild jobs."""
     # populate_existing=True：强制读锁定后的新鲜行，避免本 session 之前缓存的 lifecycle/状态被复用
     lib = (await db.execute(
         select(Library).where(Library.id == library_id)
@@ -52,10 +61,64 @@ async def _prepare(db: AsyncSession, library_id):
     # Service 层 external 防护（锁内权威判断，fresh 读）：external 库不得重建
     if lib.lifecycle_mode == "external":
         raise ExternalLibraryError(f"library {library_id} is external; rebuild not allowed")
+    if lib.deleted_at is not None:
+        raise RebuildTargetError("deleted library cannot be rebuilt")
     # 并发首次 rebuild：锁内复核已有进行中 operation → 明确冲突，不靠 uq_rebuild_op_active_per_lib 兜底
     if await _active_operation(db, library_id) is not None:
         await db.rollback()
         raise ConcurrentRebuildError(f"library {library_id} already has an active rebuild operation")
+    docs = (await db.execute(
+        select(Document).where(
+            Document.library_id == lib.id, Document.deleted_at.is_(None)
+        ).with_for_update().execution_options(populate_existing=True)
+    )).scalars().all()
+    completed_ids = set((await db.execute(
+        select(EmbeddingJob.document_id).where(
+            EmbeddingJob.library_id == lib.id, EmbeddingJob.status == "done",
+        ).distinct()
+    )).scalars().all())
+    current_ids = {d.current_revision_id for d in docs if d.current_revision_id is not None}
+    revisions = {
+        revision.id: revision for revision in (await db.execute(
+            select(DocumentRevision).where(DocumentRevision.id.in_(current_ids))
+            .with_for_update().execution_options(populate_existing=True)
+        )).scalars().all()
+    } if current_ids else {}
+    targets = []
+    for d in docs:
+        if d.current_revision_id is not None:
+            revision = revisions.get(d.current_revision_id)
+            if (revision is None or revision.status != "ready"
+                    or revision.document_id != d.id or revision.library_id != lib.id
+                    or not revision.revision_no or revision.revision_no < 1):
+                await db.rollback()
+                raise RebuildTargetError("current published revision is missing or invalid")
+            targets.append((d, revision.id, revision.revision_no))
+        elif d.status == "ready" or d.id in completed_ids:
+            # The legacy integer worker can publish without filling revision IDs.
+            # Never confuse merely parsed chunks/pending latest with publication.
+            if settings.enable_revision_id_worker or d.latest_revision_id is not None:
+                await db.rollback()
+                raise RebuildTargetError("published legacy document has no safe current revision ID")
+            chunk_count = (await db.execute(
+                select(func.count()).select_from(Chunk).where(
+                    Chunk.document_id == d.id, Chunk.library_id == lib.id,
+                )
+            )).scalar_one()
+            if not chunk_count:
+                await db.rollback()
+                raise RebuildTargetError("published legacy document has no chunks")
+            revision_chunks = (await db.execute(
+                select(func.count()).select_from(Chunk).where(
+                    Chunk.document_id == d.id, Chunk.library_id == lib.id,
+                    Chunk.document_revision_id.is_not(None),
+                )
+            )).scalar_one()
+            if revision_chunks:
+                await db.rollback()
+                raise RebuildTargetError("legacy document contains unbound revision chunks")
+            targets.append((d, None, None))
+
     op = RebuildOperation(
         library_id=lib.id, collection_name=lib.qdrant_collection,
         status="preparing", expected_job_count=0,
@@ -64,44 +127,73 @@ async def _prepare(db: AsyncSession, library_id):
     await db.flush()
     lib.index_state = "rebuilding"
     lib.active_rebuild_operation_id = op.id
-
-    docs = (await db.execute(
-        select(Document).where(
-            Document.library_id == lib.id, Document.deleted_at.is_(None)
-        ).with_for_update()
-    )).scalars().all()
-    for d in docs:
+    snapshot = []
+    for d, revision_id, revision_no in targets:
         d.current_revision = (d.current_revision or 0) + 1
         d.status = "pending"
         d.last_error = None
         await _supersede_active_jobs(db, d.id)
-
-    snapshot = [(d.id, d.current_revision) for d in docs]
+        db.add(EmbeddingJob(
+            library_id=lib.id, document_id=d.id, status="pending",
+            document_revision=d.current_revision, document_revision_id=revision_id,
+            document_revision_no=revision_no, rebuild_operation_id=op.id,
+        ))
+        snapshot.append((d.id, d.current_revision, revision_id, revision_no))
     await db.commit()
     return op.id, lib.qdrant_collection, lib.embedding_dim, lib.vector_distance, snapshot
 
 
 async def _activate(db: AsyncSession, library_id, op_id, doc_revs) -> None:
-    """阶段3：为每篇活动文档建一条带 rebuild_operation_id 的 job，写 expected_job_count，operation→running。
+    """阶段3：开放已持久化的 jobs 快照，写 expected_job_count，operation→running。
 
     锁序 library → rebuild_operation（§5.2）。
     """
-    await db.execute(
-        select(Library.id).where(Library.id == library_id).with_for_update()
-    )
+    lib = (await db.execute(
+        select(Library).where(Library.id == library_id).with_for_update()
+        .execution_options(populate_existing=True)
+    )).scalar_one()
     op = (await db.execute(
         select(RebuildOperation).where(RebuildOperation.id == op_id).with_for_update()
+        .execution_options(populate_existing=True)
     )).scalar_one()
+    if (op.library_id != library_id
+            or lib.active_rebuild_operation_id != op_id
+            or lib.qdrant_collection != op.collection_name
+            or lib.lifecycle_mode == "external" or lib.deleted_at is not None):
+        await db.rollback()
+        raise RebuildTargetError("rebuild operation no longer owns its target")
     if op.status == "running":
-        await db.rollback()      # 已 activate（恢复时幂等）
+        await db.rollback()      # Already activated: no duplicate jobs.
         return
-    for doc_id, rev in doc_revs:
-        db.add(EmbeddingJob(
-            library_id=op.library_id,
-            document_id=doc_id, status="pending",
-            document_revision=rev, rebuild_operation_id=op_id,
-        ))
-    op.expected_job_count = len(doc_revs)
+    if op.status != "preparing":
+        await db.rollback()
+        raise RebuildTargetError("rebuild operation is not preparing")
+    jobs = (await db.execute(
+        select(EmbeddingJob).where(EmbeddingJob.rebuild_operation_id == op_id)
+    )).scalars().all()
+    if not jobs and doc_revs:
+        # Compatibility for old internal callers; never infer a content ID/no.
+        for item in doc_revs:
+            if len(item) != 2 or settings.enable_revision_id_worker:
+                await db.rollback()
+                raise RebuildTargetError("rebuild target snapshot is missing")
+            doc_id, generation = item
+            doc = await db.get(Document, doc_id)
+            if (doc is None or doc.library_id != library_id or doc.deleted_at is not None
+                    or doc.current_revision != generation or doc.current_revision_id is not None
+                    or getattr(doc, "latest_revision_id", None) is not None):
+                await db.rollback()
+                raise RebuildTargetError("legacy rebuild target no longer matches")
+            job = EmbeddingJob(
+                library_id=library_id, document_id=doc_id, status="pending",
+                document_revision=generation, rebuild_operation_id=op_id,
+            )
+            db.add(job)
+            jobs.append(job)
+    if any(job.library_id != library_id or job.status != "pending" for job in jobs):
+        await db.rollback()
+        raise RebuildTargetError("rebuild target snapshot is invalid")
+    op.expected_job_count = len(jobs)
     op.status = "running"
     await db.commit()
 
@@ -128,20 +220,73 @@ async def _mark_op_failed(db: AsyncSession, op_id, reason: str) -> None:
 
 
 async def _resume_state(db: AsyncSession, library_id, op):
-    """恢复一个未 activate 的 operation：从已 +revision 的活动文档重建 doc_revs（不再 +1）。"""
+    """Recover the persisted operation snapshot without changing its content revision."""
     lib = (await db.execute(select(Library).where(Library.id == library_id))).scalar_one()
-    docs = (await db.execute(
-        select(Document.id, Document.current_revision).where(
-            Document.library_id == library_id, Document.deleted_at.is_(None)
-        )
-    )).all()
-    return op.collection_name, lib.embedding_dim, lib.vector_distance, [(d, r) for d, r in docs]
+    if lib.qdrant_collection != op.collection_name or op.library_id != library_id:
+        await db.rollback()
+        raise RebuildTargetError("rebuild collection target changed")
+    jobs = (await db.execute(
+        select(EmbeddingJob).where(EmbeddingJob.rebuild_operation_id == op.id)
+    )).scalars().all()
+    if not jobs:
+        published = (await db.execute(
+            select(func.count()).select_from(Document).where(
+                Document.library_id == library_id, Document.deleted_at.is_(None),
+                (Document.current_revision_id.is_not(None) | (Document.status == "ready")
+                 | select(EmbeddingJob.id).where(
+                     EmbeddingJob.document_id == Document.id, EmbeddingJob.status == "done",
+                 ).exists()),
+            )
+        )).scalar_one()
+        if published:
+            await db.rollback()
+            raise RebuildTargetError("historical rebuild has no persisted target snapshot")
+    if any(job.library_id != library_id for job in jobs):
+        await db.rollback()
+        raise RebuildTargetError("rebuild job belongs to another library")
+    await _validate_rebuild_snapshot(db, library_id, jobs)
+    snapshot = [(j.document_id, j.document_revision, j.document_revision_id, j.document_revision_no) for j in jobs]
+    collection, dim, distance = op.collection_name, lib.embedding_dim, lib.vector_distance
+    await db.commit()  # Qdrant is always outside this read transaction.
+    return (
+        collection, dim, distance, snapshot,
+    )
+
+
+async def _validate_rebuild_snapshot(db: AsyncSession, library_id, jobs) -> None:
+    """Validate immutable targets before destructive recovery, without committing."""
+    if not jobs:
+        return
+    documents = {d.id: d for d in (await db.execute(
+        select(Document).where(Document.id.in_({j.document_id for j in jobs}))
+        .with_for_update().execution_options(populate_existing=True)
+    )).scalars().all()}
+    revision_ids = {j.document_revision_id for j in jobs if j.document_revision_id is not None}
+    revisions = {r.id: r for r in (await db.execute(
+        select(DocumentRevision).where(DocumentRevision.id.in_(revision_ids))
+        .with_for_update().execution_options(populate_existing=True)
+    )).scalars().all()} if revision_ids else {}
+    for job in jobs:
+        doc = documents.get(job.document_id)
+        if (doc is None or doc.deleted_at is not None or doc.library_id != library_id
+                or job.library_id != library_id or doc.current_revision != job.document_revision):
+            raise RebuildTargetError("persisted rebuild target is obsolete")
+        if job.document_revision_id is not None:
+            revision = revisions.get(job.document_revision_id)
+            if (doc.current_revision_id != job.document_revision_id or revision is None
+                    or revision.status != "ready" or revision.document_id != doc.id
+                    or revision.library_id != library_id
+                    or revision.revision_no != job.document_revision_no):
+                raise RebuildTargetError("persisted published content revision changed")
+        elif (settings.enable_revision_id_worker or doc.current_revision_id is not None
+              or doc.latest_revision_id is not None):
+            raise RebuildTargetError("persisted legacy rebuild target is unsafe")
 
 
 async def _set_rebuilding(db: AsyncSession, library_id, op_id) -> bool:
     """恢复未 activate 阶段前：把库置回 rebuilding、operation 置回 preparing（锁序 library→op）。
 
-    锁内复核 op 状态：仅当仍为 preparing/failed 才推进（并发恢复只一个生效）；否则 no-op 返回 False。
+    编排由同库 session lock 串行；锁内复核 preparing/failed，否则 no-op 返回 False。
     """
     lib = (await db.execute(
         select(Library).where(Library.id == library_id)
@@ -157,6 +302,14 @@ async def _set_rebuilding(db: AsyncSession, library_id, op_id) -> bool:
     if op.status not in ("preparing", "failed"):
         await db.rollback()
         return False
+    if (op.library_id != library_id or lib.active_rebuild_operation_id != op_id
+            or op.collection_name != lib.qdrant_collection or lib.deleted_at is not None):
+        await db.rollback()
+        raise RebuildTargetError("rebuild operation no longer owns its target")
+    jobs = (await db.execute(
+        select(EmbeddingJob).where(EmbeddingJob.rebuild_operation_id == op_id)
+    )).scalars().all()
+    await _validate_rebuild_snapshot(db, library_id, jobs)
     lib.index_state = "rebuilding"
     lib.active_rebuild_operation_id = op_id
     op.status = "preparing"
@@ -187,6 +340,10 @@ async def _retry_jobs(db: AsyncSession, library_id, op_id) -> bool:
     if op.status != "failed":
         await db.rollback()
         return False
+    if (op.library_id != library_id or lib.active_rebuild_operation_id != op_id
+            or op.collection_name != lib.qdrant_collection or lib.deleted_at is not None):
+        await db.rollback()
+        raise RebuildTargetError("rebuild operation no longer owns its target")
     await db.execute(
         sa_update(EmbeddingJob)
         .where(EmbeddingJob.rebuild_operation_id == op_id,
@@ -204,13 +361,59 @@ async def _retry_jobs(db: AsyncSession, library_id, op_id) -> bool:
 
 
 async def run_rebuild(db: AsyncSession, library_id) -> str:
+    """Serialize the entire three-stage operation without a DB transaction over Qdrant."""
+    lib = (await db.execute(
+        select(Library).where(Library.id == library_id)
+        .execution_options(populate_existing=True)
+    )).scalar_one()
+    if lib.lifecycle_mode == "external":
+        raise ExternalLibraryError("external library cannot be rebuilt")
+    await db.rollback()
+    bind = db.bind
+    engine = bind.engine if isinstance(bind, AsyncConnection) else bind
+    if not isinstance(engine, AsyncEngine) or engine.dialect.name != "postgresql":
+        raise RebuildTargetError("rebuild requires its session's PostgreSQL engine")
+    lock_key = int.from_bytes(
+        hashlib.blake2b(f"rebuild:{library_id}".encode(), digest_size=8).digest(),
+        "big", signed=True,
+    )
+    async with engine.connect() as connection:
+        try:
+            acquired = (await connection.execute(
+                text("SELECT pg_try_advisory_lock(:key)"), {"key": lock_key}
+            )).scalar_one()
+            await connection.commit()
+        except BaseException:
+            await connection.invalidate()
+            raise
+        if not acquired:
+            raise ConcurrentRebuildError("library rebuild is already being orchestrated")
+        try:
+            return await _run_rebuild_locked(db, library_id)
+        finally:
+            try:
+                released = (await connection.execute(
+                    text("SELECT pg_advisory_unlock(:key)"), {"key": lock_key}
+                )).scalar_one()
+                await connection.commit()
+                if not released:
+                    raise RuntimeError("rebuild advisory lock was not held")
+            except BaseException:
+                await connection.invalidate()
+                raise
+
+
+async def _run_rebuild_locked(db: AsyncSession, library_id) -> str:
     """编排三阶段，支持**恢复/重试**当前 operation（preparing 续跑、running 收口、failed 重试），
     全程复用 revision、不新建 operation；只有无活动 operation 时才新建（+revision）。
     qdrant 失败 → operation/库 failed 并抛出。"""
     from app.services import qdrant
 
     # 恢复锚点：sys_libraries.active_rebuild_operation_id（失败时不清空，见 §9）
-    lib0 = (await db.execute(select(Library).where(Library.id == library_id))).scalar_one()
+    lib0 = (await db.execute(
+        select(Library).where(Library.id == library_id)
+        .execution_options(populate_existing=True)
+    )).scalar_one()
     # Service 层 external 防护（前置，确保对 external 库绝不进入任何 Qdrant 删/建）
     if lib0.lifecycle_mode == "external":
         raise ExternalLibraryError(f"library {library_id} is external; rebuild not allowed")
@@ -218,6 +421,7 @@ async def run_rebuild(db: AsyncSession, library_id) -> str:
     if lib0.active_rebuild_operation_id is not None:
         active = (await db.execute(
             select(RebuildOperation).where(RebuildOperation.id == lib0.active_rebuild_operation_id)
+            .execution_options(populate_existing=True)
         )).scalar_one_or_none()
 
     if active is not None and active.status == "running":
@@ -228,11 +432,7 @@ async def run_rebuild(db: AsyncSession, library_id) -> str:
 
     if active is not None and active.status in ("preparing", "failed"):
         op_id = active.id
-        njobs = (await db.execute(
-            select(func.count()).select_from(EmbeddingJob).where(
-                EmbeddingJob.rebuild_operation_id == op_id)
-        )).scalar_one()
-        if njobs > 0:
+        if active.status == "failed" and active.expected_job_count > 0:
             # 已 activate（finalize 阶段失败）→ 只重置失败/未完 job，复用 revision，保留 done
             await _retry_jobs(db, library_id, op_id)   # 并发下只一个生效（锁内复核 status）
             await try_finalize(db, op_id)
@@ -274,12 +474,16 @@ async def try_finalize(db: AsyncSession, op_id) -> bool:
     # 锁序 library → operation；populate_existing 保证读到锁内最新状态（并发 finalize 只成一次）
     lib = (await db.execute(
         select(Library).where(Library.id == lib_id).with_for_update()
+        .execution_options(populate_existing=True)
     )).scalar_one_or_none()
     op = (await db.execute(
         select(RebuildOperation).where(RebuildOperation.id == op_id)
         .with_for_update().execution_options(populate_existing=True)
     )).scalar_one_or_none()
-    if lib is None or op is None or op.status != "running":
+    if (lib is None or op is None or op.status != "running"
+            or op.library_id != lib.id or lib.active_rebuild_operation_id != op.id
+            or op.collection_name != lib.qdrant_collection or lib.deleted_at is not None
+            or lib.lifecycle_mode == "external"):
         await db.rollback()
         return False
 

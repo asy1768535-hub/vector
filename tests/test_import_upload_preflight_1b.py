@@ -339,6 +339,29 @@ def test_office_container_disguised_as_another_allowed_type_is_rejected(
     assert rejection.suggested_extension == ".xlsx"
 
 
+@pytest.mark.parametrize(
+    ("actual_kind", "claimed_extension", "suggested_extension"),
+    [("docx", ".doc", ".docx"), ("doc", ".docx", ".doc")],
+)
+def test_word_container_mismatch_requires_correct_extension(
+    actual_kind: str,
+    claimed_extension: str,
+    suggested_extension: str,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / f"wrong{claimed_extension}"
+    if actual_kind == "docx":
+        _write_ooxml(path, "[Content_Types].xml", "word/document.xml")
+    else:
+        _write_cfb(path, "WordDocument")
+
+    with pytest.raises(import_uploads.ImportUploadError) as exc_info:
+        _preflight(path, path.name)
+
+    assert exc_info.value.code == "file_signature_mismatch"
+    assert _suggested_extension(exc_info.value) == suggested_extension
+
+
 def test_utf16_ooxml_doctype_is_rejected_before_entity_expansion(
     tmp_path: Path,
 ) -> None:

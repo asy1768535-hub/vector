@@ -118,10 +118,23 @@ def _db_with_libs(libs):
 
 
 @pytest.fixture(autouse=True)
-def _clean():
+def _clean(monkeypatch):
+    # API contract tests use opaque synthetic IDs; actual ownership SQL and
+    # both HTTP entrypoints are exercised separately in test_chat_evidence_pg.
+    monkeypatch.setattr(chat_api.chat_evidence, "collect_chat_evidence", _unit_evidence)
     mock_user.is_superuser = True
     yield
     app.dependency_overrides.clear()
+
+
+async def _unit_evidence(db, library, query, *, top_k, max_context_chars, retrieve, allowed_document_ids=None):
+    from app.schemas.dify import DifyRetrievalRequest
+    metadata_condition = None if allowed_document_ids is None else {"conditions": [{
+        "name": ["document_id"], "comparison_operator": "in", "value": allowed_document_ids,
+    }]}
+    response = await retrieve(DifyRetrievalRequest.model_validate({"knowledge_id": library.slug, "query": query,
+        "retrieval_setting": {"top_k": top_k}, "metadata_condition": metadata_condition}))
+    return response.records, response.retrieval_debug
 
 
 # ── /chat/libraries ─────────────────────────────────────────────────────────

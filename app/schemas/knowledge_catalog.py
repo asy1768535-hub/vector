@@ -3,8 +3,11 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from typing import Literal
+from pydantic import (
+    BaseModel, ConfigDict, Field, StrictInt, StrictStr, field_validator,
+    model_validator,
+)
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.schemas.knowledge_artifact import OutlineItemV1
 
@@ -188,16 +191,38 @@ class CatalogGraphRead(StrictBaseModel):
         return self
 
 
+class CatalogPdfPageAssessmentRead(StrictBaseModel):
+    page: StrictInt = Field(ge=1, le=1_000_000)
+    status: Literal["blank", "no_effective_content", "uncertain", "failed"]
+    reason: Literal[
+        "uniform_source_and_render", "visible_marks", "inspection_unavailable",
+        "native_text_failed", "render_failed", "ocr_failed", "resource_limit",
+        "human_review_no_effective_content",
+    ]
+    render_dpi: StrictInt = Field(ge=1, le=10_000)
+    render_sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
+    source_images_checked: StrictInt = Field(ge=0, le=32)
+    checks: list[Literal[
+        "native_text_empty", "ocr_empty", "full_page_uniform",
+        "source_images_uniform", "paint_operations_safe",
+    ]] = Field(max_length=5)
+    classification_source: Literal["automatic", "human_review"] = "automatic"
+    review_evidence_ref: str | None = Field(default=None, max_length=256)
+
+
 class CatalogParsingCoverageRead(StrictBaseModel):
     contract_version: Literal["pdf-coverage-v1"] = "pdf-coverage-v1"
     status: Literal["complete", "partial", "unknown"] = "unknown"
-    total_pages: int | None = Field(default=None, strict=True, ge=1, le=1_000_000)
-    processed_pages: list[int] = Field(default_factory=list, max_length=5000)
-    unprocessed_visual_pages: list[int] = Field(default_factory=list, max_length=5000)
-    skipped_visual_block_count: int = Field(default=0, strict=True, ge=0, le=5000)
+    total_pages: StrictInt | None = Field(default=None, ge=1, le=1_000_000)
+    processed_pages: list[StrictInt] = Field(default_factory=list, max_length=5000)
+    unprocessed_visual_pages: list[StrictInt] = Field(default_factory=list, max_length=5000)
+    skipped_visual_block_count: StrictInt = Field(default=0, ge=0, le=5000)
     reasons: list[Literal["visual_content_without_ocr", "visual_content_not_ingested"]] = Field(
         default_factory=list, max_length=8
     )
+    confirmed_blank_pages: list[StrictInt] = Field(default_factory=list, max_length=5000)
+    no_effective_content_pages: list[StrictInt] = Field(default_factory=list, max_length=5000)
+    page_assessments: list[CatalogPdfPageAssessmentRead] = Field(default_factory=list, max_length=5000)
 
     @model_validator(mode="after")
     def validate_coverage(self):
@@ -205,6 +230,60 @@ class CatalogParsingCoverageRead(StrictBaseModel):
 
         validate_pdf_coverage_report(self.model_dump())
         return self
+
+
+class CatalogPdfPageReviewInput(StrictBaseModel):
+    page: StrictInt = Field(ge=1, le=1_000_000)
+    render_dpi: StrictInt = Field(ge=1, le=10_000)
+    render_sha256: StrictStr = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    review_evidence_ref: StrictStr = Field(min_length=1, max_length=256)
+
+    @field_validator("review_evidence_ref")
+    @classmethod
+    def validate_evidence_reference(cls, value: str) -> str:
+        if not value.strip() or any(ord(char) < 32 for char in value):
+            raise ValueError("page review evidence reference is invalid")
+        return value
+
+    @model_validator(mode="after")
+    def validate_page_binding(self):
+        reference = self.review_evidence_ref
+        parts = reference.split("/")
+        if (
+            not reference.startswith(("evidence:", "review:"))
+            or "\\" in reference
+            or ".." in parts
+            or not reference.endswith(f"/page-{self.page}")
+        ):
+            raise ValueError("page review evidence reference must identify this page")
+        return self
+
+
+class CatalogPdfCoverageReviewApplyRequest(StrictBaseModel):
+    revision_id: uuid.UUID
+    source_sha256: StrictStr = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    idempotency_key: uuid.UUID
+    reviews: list[CatalogPdfPageReviewInput] = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def validate_unique_pages(self):
+        pages = [item.page for item in self.reviews]
+        if len(pages) != len(set(pages)):
+            raise ValueError("PDF page reviews must not repeat a page")
+        return self
+
+
+class CatalogPdfCoverageReviewRollbackRequest(StrictBaseModel):
+    revision_id: uuid.UUID
+    source_sha256: StrictStr = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    idempotency_key: uuid.UUID
+    apply_idempotency_key: uuid.UUID
+
+
+class CatalogPdfCoverageReviewMutationRead(StrictBaseModel):
+    operation_key: uuid.UUID
+    changed: bool
+    parsing_coverage: CatalogParsingCoverageRead
 
 
 class CatalogDocumentDetailRead(CatalogDocumentListItemRead):

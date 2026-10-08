@@ -19,6 +19,15 @@ class UserOrganizationRead(BaseModel):
     role: str
 
 
+class AdminUserOrganizationRead(BaseModel):
+    membership_id: uuid.UUID
+    organization_id: uuid.UUID
+    name: str
+    role: str
+    status: str
+    can_manage: bool
+
+
 class OrganizationMemberCreate(StrictBaseModel):
     email: EmailStr
     password: str = Field(..., min_length=8, max_length=128)

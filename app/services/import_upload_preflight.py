@@ -21,7 +21,7 @@ OfficePreflightCode = Literal[
 
 OFFICE_EXTENSIONS = frozenset({".doc", ".docx", ".xls", ".xlsx", ".pptx"})
 
-_READ_BUDGET_BYTES = 256 * 1024
+_READ_BUDGET_BYTES = 4 * 1024 * 1024
 _CONTENT_TYPES_LIMIT_BYTES = 64 * 1024
 _MAX_ZIP_ENTRIES = 2_048
 _MAX_ZIP_NAME_BYTES = 1_024
@@ -170,7 +170,14 @@ def inspect_office_upload(
             if claimed_as_office
             else None
         )
-    if actual_extension != claimed_extension:
+    _COMPAT_MAP = {
+        ".et": {".xls", ".xlsx"},
+        ".wps": {".doc", ".docx"},
+        "": {".doc", ".docx", ".xls", ".xlsx"},
+        ".xls": {".xlsx"},
+        ".xlsx": {".xls"},
+    }
+    if actual_extension != claimed_extension and actual_extension not in _COMPAT_MAP.get(claimed_extension, set()):
         return OfficeUploadRejection(
             "file_signature_mismatch",
             suggested_extension=actual_extension,
@@ -325,7 +332,7 @@ def _classify_cfb(
         raise _UnconfirmedContainer("invalid CFB header")
 
     sector_size = 1 << sector_shift
-    if file_size < sector_size * 2 or file_size % sector_size:
+    if file_size < sector_size * 2:
         raise _UnconfirmedContainer("invalid CFB file size")
     sector_count = file_size // sector_size - 1
     if sector_count <= 0 or sector_count >= _MAXREGSECT:

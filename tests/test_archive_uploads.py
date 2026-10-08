@@ -36,6 +36,10 @@ class _Result:
     def first(self):
         return None
 
+    def all(self):
+        # This fixture stores only the current upload, with no prior failed chain.
+        return []
+
 class _ArchiveDb:
     def __init__(self, parent, library):
         self.execute_calls = []
@@ -346,7 +350,11 @@ def test_zip_completion_only_saves_and_queues_parent(
 
     asyncio.run(import_uploads.complete_claimed_upload(db, claim=claim, config=config))
 
-    values = db.execute_calls[-1].compile().params
+    values = next(
+        statement.compile().params
+        for statement in db.execute_calls
+        if statement.compile().params.get("status") == "queued"
+    )
     assert values["status"] == "queued"
     assert values["current_stage"] == "queued"
     assert "result_operation" not in values

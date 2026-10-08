@@ -80,9 +80,13 @@ def test_finalize_fails_operation_when_rebuild_job_was_superseded():
     """A terminal superseded rebuild job must not leave the library rebuilding forever."""
     library_id = uuid.uuid4()
     operation_id = uuid.uuid4()
-    library = SimpleNamespace(index_state="rebuilding")
+    library = SimpleNamespace(id=library_id, index_state="rebuilding",
+                              active_rebuild_operation_id=operation_id,
+                              qdrant_collection="test_col", deleted_at=None, lifecycle_mode="managed")
     operation = SimpleNamespace(
         id=operation_id,
+        library_id=library_id,
+        collection_name="test_col",
         status="running",
         expected_job_count=1,
         last_error=None,
@@ -110,3 +114,95 @@ def test_finalize_fails_operation_when_rebuild_job_was_superseded():
     assert library.index_state == "failed"
     db.commit.assert_awaited_once()
     db.rollback.assert_not_awaited()
+
+
+def test_activate_binds_document_revision_id_and_int_revision():
+    library_id = uuid.uuid4()
+    op_id = uuid.uuid4()
+    doc_id = uuid.uuid4()
+    rev_id = uuid.uuid4()
+    operation = SimpleNamespace(
+        id=op_id,
+        library_id=library_id,
+        status="preparing",
+        expected_job_count=0,
+        collection_name="test_col",
+    )
+
+    db = MagicMock()
+    lib_res = MagicMock()
+    lib_res.scalar_one.return_value = SimpleNamespace(
+        active_rebuild_operation_id=op_id, qdrant_collection="test_col",
+        lifecycle_mode="managed", deleted_at=None,
+    )
+    op_res = MagicMock()
+    op_res.scalar_one.return_value = operation
+    from app.models.embedding_job import EmbeddingJob
+    job = EmbeddingJob(library_id=library_id, document_id=doc_id, status="pending",
+                       document_revision=8, document_revision_id=rev_id,
+                       document_revision_no=2, rebuild_operation_id=op_id)
+    jobs_res = MagicMock()
+    jobs_res.scalars.return_value.all.return_value = [job]
+    db.execute = AsyncMock(side_effect=[lib_res, op_res, jobs_res])
+    added_jobs = []
+    db.add = MagicMock(side_effect=lambda job: added_jobs.append(job))
+    db.commit = AsyncMock()
+
+    doc_revs = [(doc_id, 8, rev_id, 2)]
+    asyncio.run(rebuild_svc._activate(db, library_id, op_id, doc_revs))
+
+    assert added_jobs == []
+    assert job.library_id == library_id
+    assert job.document_id == doc_id
+    assert job.document_revision == 8
+    assert isinstance(job.document_revision, int)
+    assert job.document_revision_id == rev_id
+    assert isinstance(job.document_revision_id, uuid.UUID)
+    assert job.document_revision_no == 2
+    assert job.rebuild_operation_id == op_id
+    assert operation.expected_job_count == 1
+    assert operation.status == "running"
+    db.commit.assert_awaited_once()
+
+
+def test_activate_backward_compatibility_with_2_tuple(monkeypatch):
+    monkeypatch.setattr(rebuild_svc.settings, "enable_revision_id_worker", False)
+    library_id = uuid.uuid4()
+    op_id = uuid.uuid4()
+    doc_id = uuid.uuid4()
+    operation = SimpleNamespace(
+        id=op_id,
+        library_id=library_id,
+        status="preparing",
+        expected_job_count=0,
+        collection_name="test_col",
+    )
+
+    db = MagicMock()
+    lib_res = MagicMock()
+    lib_res.scalar_one.return_value = SimpleNamespace(
+        active_rebuild_operation_id=op_id, qdrant_collection="test_col",
+        lifecycle_mode="managed", deleted_at=None,
+    )
+    op_res = MagicMock()
+    op_res.scalar_one.return_value = operation
+    jobs_res = MagicMock()
+    jobs_res.scalars.return_value.all.return_value = []
+    db.execute = AsyncMock(side_effect=[lib_res, op_res, jobs_res])
+    db.get = AsyncMock(return_value=SimpleNamespace(
+        library_id=library_id, deleted_at=None, current_revision=3, current_revision_id=None,
+    ))
+    added_jobs = []
+    db.add = MagicMock(side_effect=lambda job: added_jobs.append(job))
+    db.commit = AsyncMock()
+
+    doc_revs = [(doc_id, 3)]
+    asyncio.run(rebuild_svc._activate(db, library_id, op_id, doc_revs))
+
+    assert len(added_jobs) == 1
+    job = added_jobs[0]
+    assert job.document_id == doc_id
+    assert job.document_revision == 3
+    assert job.document_revision_id is None
+    assert job.document_revision_no is None
+    assert job.rebuild_operation_id == op_id

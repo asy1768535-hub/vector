@@ -208,6 +208,8 @@ def _exec_for_publish(doc, revision):
     async def execute(stmt, *args, **kwargs):
         calls.append(str(stmt))
         stmt_text = str(stmt).lower()
+        if "from sys_libraries" in stmt_text:
+            return _ScalarResult(_lib())
         if "from documents" in stmt_text:
             return _ScalarResult(doc)
         if "from document_revisions" in stmt_text:
@@ -320,7 +322,9 @@ def test_revision_worker_upserts_revision_scoped_points_before_publish(monkeypat
 
     db = MagicMock()
     db.get = AsyncMock(side_effect=fake_get)
-    db.execute = AsyncMock()
+    execute, _ = _exec_for_publish(doc, revision)
+    db.execute = AsyncMock(side_effect=execute)
+    db.rollback = AsyncMock()
     db.commit = AsyncMock()
 
     async def publish_and_expire_orm_fields(*_args, **_kwargs):

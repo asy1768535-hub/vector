@@ -1,10 +1,12 @@
 # Vector Knowledge Base
 
-> **智能体/维护续接入口**：请先阅读 [`docs/AGENT_README.md`](./docs/AGENT_README.md)。它记录了 2026-09-17 基于本地代码、迁移、规划与测试的核对结果；若本 README 的历史“当前”描述与代码冲突，以该说明及实时命令输出为准。
+> **最近发布核对：2026-10-07**：已上线范围、剩余候选和本次 Git 归档见[发布状态与仓库同步](./docs/quality/deployment-gap-status-20261007.md)。
+
+> **智能体/维护续接入口**：请先阅读 [`docs/AGENT_README.md`](./docs/AGENT_README.md)。它保留历史审计及后续有日期的状态同步；若文档与代码冲突，以实时命令输出为准。
 
 面向公司内部的**向量知识检索底座**：可靠地摄入文档、做权限受控的检索，并以 **Dify 外部知识库兼容**的统一接口供上层系统（Dify / FastGPT / 办公系统 / Agent）调用。
 
-> **当前真相（核对日期：2026-08-29）**：`pyproject.toml` 的 package version 是 `0.1.0`；代码迁移 head 是 **`0062`**。参考部署数据库在 2026-08-12 的 `alembic current` 为 `0060`，不能代表当前目标环境。文档中的 `v0.x`、`M*` 等是阶段/设计标签，不是 package version。部署到目标数据库时仍应执行 `alembic heads` 与 `alembic current`，以目标环境输出为准。
+> **本地版本基线（核对日期：2026-09-27）**：`pyproject.toml` 的 package version 是 `0.1.0`；本次 `alembic heads` 输出 **`0076 (head)`**。历史记录中 2026-08-29 的代码 head `0062`、2026-08-12 参考部署的 `alembic current=0060` 均不能代表当前目标环境。文档中的 `v0.x`、`M*` 等是阶段/设计标签，不是 package version；目标环境迁移状态需另行只读核验。
 > 当前代码范围已经超出早期的“只有向量检索”试运行：向量摄入/检索仍是核心，并包含按 feature gate 或 rollout 控制的图谱、分类、知识产物、Evidence/claim shadow、公开 API/MCP 与组织能力。未启用的能力不应仅因代码或迁移存在就被视为已上线。
 > 它仍不是 Dify/RAGFlow 的编排/应用层——上层负责工作流与答案生成，本服务负责把**对的片段**和受治理的知识产物可靠地交出去。
 
@@ -15,7 +17,7 @@
 ## 1. 项目定位与当前版本
 
 - **是什么**：多知识库、库级权限隔离的向量检索服务。每个「库」物理隔离（独立 Qdrant collection），按 `(用户, 库, 动作)` 三元组授权。（尚无正式的 tenant/部门模型，隔离粒度是「库 + 库级权限」。）
-- **当前版本**：package version 为 `0.1.0`（见 `pyproject.toml`），数据库迁移 head 为 **`0062`**。测试基线不在这里固定数字；带日期和命令的最近验证见 [docs/16 测试](./docs/16-testing.md)。
+- **版本与验证**：package version 为 `0.1.0`（见 `pyproject.toml`）；本地迁移 head 见上方有日期的版本基线。测试基线不在这里固定数字；本次验收要求见[验证矩阵](./docs/quality/verification-matrix.md)，历史测试说明见 [docs/16 测试](./docs/16-testing.md)。
 - **技术栈**：FastAPI + SQLAlchemy 2.0 (async) + Alembic ｜ Qdrant ｜ PostgreSQL 队列（`FOR UPDATE SKIP LOCKED`）｜ Embedding 走 OpenAI 兼容 `/v1/embeddings`（默认本地 **bge-m3**）｜ 认证 fastapi-users（JWT cookie + API Key 双通道）｜ 权限 Casbin。
 
 ## 2. 从初始版到当前版增加了什么
@@ -130,7 +132,7 @@ pip install -e ".[dev]"
 # 2. 配置（从模板复制，按需填写；切勿提交真实 .env）
 cp .env.example .env
 
-# 3. 建库 + 迁移（当前代码 head=0062；以目标环境 alembic heads/current 为准）
+# 3. 建库 + 迁移（先核对代码 alembic heads 与目标环境 alembic current）
 createdb -h <host> -p <port> -U postgres vector_kb
 alembic upgrade head
 
@@ -169,7 +171,7 @@ objects or rows; physical cleanup remains a separately gated executor.
 
 ## 10. 数据库迁移与首次管理员
 
-- `alembic upgrade head` → 当前代码 **head = `0062`**；截至 2026-08-29，`alembic/versions/` 有 61 个 revision 文件。revision 编号不是产品版本，也不能用旧的“10 个迁移”描述当前部署。
+- 先用 `alembic heads` 核对代码迁移目标，再用目标环境的 `alembic current` 核对已应用版本；经该环境的迁移授权后执行 `alembic upgrade head`。本地版本基线见页首，不以旧 head 或历史 revision 文件数推断当前部署。
 - 当前 schema 已超出初始库表：除文档/分片/队列/审计/Casbin 外，还包含 revision/file/import、Evidence、图谱与 publication、知识产物、分类、组织/授权、公开 API operations，以及 claim shadow / canonical mapping 等迁移产物。完整当前结构以迁移和 ORM 为准，见 [docs/14](./docs/14-database-schema.md)。
 - 首管：`scripts/bootstrap_admin.py`（输出 `superuser created: ...`）。
 - 升级注意：0009 活动唯一索引创建前需先清理历史违规活动行（见 docs/20 §11.1）。
